@@ -10,5 +10,9 @@ clap.workspace = true
 media-contract = { path = "../media-contract" }
 media-core = { path = "../media-core" }
 
+[dev-dependencies]
+assert_cmd.workspace = true
+cargo_metadata.workspace = true
+
 [lints]
 workspace = true
