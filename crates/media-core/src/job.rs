@@ -1,3 +1,79 @@
+use crate::{ClientId, JobId, LeaseId, NeedsActionReason, UserId};
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum Provider {
+    Rezka,
+    Prowlarr,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum NotifyScope {
+    Initiator,
+    Family,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct Job {
+    pub id: JobId,
+    pub owner_id: UserId,
+    pub provider: Provider,
+    pub result_ref: String,
+    pub state: JobState,
+    pub needs_action_reason: Option<NeedsActionReason>,
+    pub notify_scope: NotifyScope,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct NewJob {
+    pub id: JobId,
+    pub owner_id: UserId,
+    pub provider: Provider,
+    pub result_ref: String,
+    pub notify_scope: NotifyScope,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
+pub enum JobValidationError {
+    #[error("result reference cannot be empty")]
+    EmptyResultReference,
+}
+
+impl NewJob {
+    pub fn new(
+        id: JobId,
+        owner_id: UserId,
+        provider: Provider,
+        result_ref: String,
+        notify_scope: NotifyScope,
+    ) -> Result<Self, JobValidationError> {
+        if result_ref.trim().is_empty() {
+            return Err(JobValidationError::EmptyResultReference);
+        }
+
+        Ok(Self {
+            id,
+            owner_id,
+            provider,
+            result_ref,
+            notify_scope,
+        })
+    }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct QueueStatus {
+    pub queued: u64,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct JobLease {
+    pub lease_id: LeaseId,
+    pub job: Job,
+    pub runner_client_id: ClientId,
+    pub expires_at: time::OffsetDateTime,
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum JobState {
     Queued,
@@ -62,7 +138,8 @@ impl JobState {
 
 #[cfg(test)]
 mod tests {
-    use super::JobState;
+    use super::{JobState, JobValidationError, NewJob, NotifyScope, Provider};
+    use crate::{PRIMARY_USER_ID, JobId};
 
     const STATES: [JobState; 12] = [
         JobState::Queued,
@@ -153,5 +230,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn new_job_rejects_an_empty_result_reference() {
+        let error = NewJob::new(
+            JobId::new(),
+            PRIMARY_USER_ID,
+            Provider::Rezka,
+            " \t\n".to_owned(),
+            NotifyScope::Initiator,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, JobValidationError::EmptyResultReference);
+    }
+
+    #[test]
+    fn new_job_preserves_valid_selection_details() {
+        let id = JobId::new();
+        let job = NewJob::new(
+            id,
+            PRIMARY_USER_ID,
+            Provider::Prowlarr,
+            "result-42".to_owned(),
+            NotifyScope::Family,
+        )
+        .unwrap();
+
+        assert_eq!(job.id, id);
+        assert_eq!(job.owner_id, PRIMARY_USER_ID);
+        assert_eq!(job.provider, Provider::Prowlarr);
+        assert_eq!(job.result_ref, "result-42");
+        assert_eq!(job.notify_scope, NotifyScope::Family);
     }
 }

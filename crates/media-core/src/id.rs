@@ -48,17 +48,31 @@ macro_rules! define_id {
 }
 
 define_id!(UserId);
+define_id!(ClientId);
 define_id!(MediaId);
 define_id!(SeasonId);
 define_id!(EpisodeId);
 define_id!(JobId);
+define_id!(LeaseId);
 define_id!(TaskId);
+
+pub const PRIMARY_USER_ID: UserId = UserId::from_uuid(uuid::Uuid::from_u128(1));
+pub const SECONDARY_USER_ID: UserId = UserId::from_uuid(uuid::Uuid::from_u128(2));
+pub const PRIMARY_CLIENT_ID: ClientId =
+    ClientId::from_uuid(uuid::Uuid::from_u128(0x00000000000000000001000000000001));
+pub const SECONDARY_CLIENT_ID: ClientId =
+    ClientId::from_uuid(uuid::Uuid::from_u128(0x00000000000000000001000000000002));
+pub const RUNNER_CLIENT_ID: ClientId =
+    ClientId::from_uuid(uuid::Uuid::from_u128(0x00000000000000000002000000000001));
 
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
 
-    use super::MediaId;
+    use super::{
+        PRIMARY_CLIENT_ID, PRIMARY_USER_ID, MediaId, RUNNER_CLIENT_ID, SECONDARY_CLIENT_ID,
+        SECONDARY_USER_ID,
+    };
 
     #[test]
     fn media_id_round_trips_through_text() {
@@ -73,5 +87,29 @@ mod tests {
 
         assert_eq!(id.as_uuid(), &raw);
         assert_eq!(id.into_uuid(), raw);
+    }
+
+    #[test]
+    fn fixed_identity_ids_match_the_bootstrap_contract() {
+        assert_eq!(
+            PRIMARY_USER_ID.to_string(),
+            "00000000-0000-0000-0000-000000000001",
+        );
+        assert_eq!(
+            SECONDARY_USER_ID.to_string(),
+            "00000000-0000-0000-0000-000000000002",
+        );
+        assert_eq!(
+            PRIMARY_CLIENT_ID.to_string(),
+            "00000000-0000-0000-0001-000000000001",
+        );
+        assert_eq!(
+            SECONDARY_CLIENT_ID.to_string(),
+            "00000000-0000-0000-0001-000000000002",
+        );
+        assert_eq!(
+            RUNNER_CLIENT_ID.to_string(),
+            "00000000-0000-0000-0002-000000000001",
+        );
     }
 }
