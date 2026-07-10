@@ -1,7 +1,9 @@
 # Personal Media System Design
 
-**Status:** Proposed for review  
-**Date:** 2026-07-10  
+**Status:** Proposed for review
+
+**Date:** 2026-07-10
+
 **Repositories:** `media-orchestrator`, `hermes-home`, existing `homelab`
 
 ## 1. Purpose
