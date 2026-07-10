@@ -13,12 +13,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db # v3
+      - uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # v2.83.0
         with:
-          install: true
-          cache: true
-      - run: mise run format
-      - run: mise run check
-      - run: mise run lint
-      - run: mise run test
-      - run: mise run audit
+          tool: rust@1.97.0 + rustfmt + clippy, cargo-nextest@0.9.140, cargo-deny@0.20.2, cargo-audit@0.22.2
+          fallback: none
+      - run: cargo fmt --all --check
+      - run: cargo check --workspace --all-targets --all-features --locked
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo nextest run --workspace --all-features
+      - run: cargo deny check && cargo audit
