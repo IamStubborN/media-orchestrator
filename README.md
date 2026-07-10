@@ -7,6 +7,10 @@ Project documentation:
 - `docs/superpowers/specs/2026-07-10-media-orchestrator-mvp-design.md`
   is the canonical product design.
 - `docs/ARCHITECTURE.md` defines Rust boundaries and dependency direction.
+- `docs/superpowers/plans/2026-07-10-media-orchestrator-mvp-roadmap.md`
+  defines the MVP delivery sequence.
+- `docs/superpowers/plans/2026-07-10-rust-domain-foundation.md`
+  is the first executable implementation plan.
 
 This repository will contain:
 
