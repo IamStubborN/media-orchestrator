@@ -1,6 +1,6 @@
 # Personal Media System Design
 
-**Status:** Proposed for review
+**Status:** Draft for written review
 
 **Date:** 2026-07-10
 
@@ -133,6 +133,9 @@ Proposed layout:
 media-orchestrator/
   docs/
     ARCHITECTURE.md
+    superpowers/
+      specs/
+        2026-07-10-media-orchestrator-mvp-design.md
   crates/
     media-core/
     rezka-client/
@@ -249,6 +252,33 @@ The repository must not depend on the machine's default nightly toolchain.
 - Runner leases have an expiry, heartbeat, and idempotent event reporting.
 - Provider-specific payload snapshots may be retained as JSONB for diagnostics.
 
+### 9.1 Ownership and visibility
+
+Every user-owned record stores an internal `owner_id`. The authenticated client
+credential, not a request field supplied by Hermes or the LLM, determines that
+owner:
+
+```text
+hermes-primary    -> primary
+hermes-secondary -> secondary
+```
+
+MVP visibility and control rules are domain-specific instead of a generic ACL:
+
+```text
+search sessions   visible only to the initiating user
+job queue          high-level availability visible to both users
+job details        visible only to the initiating user
+job control        cancel, resume, and restart belong to the initiating user
+personal tracking visible and managed by its owner
+family tracking   visible and managed by both users
+published media   shared through the common Plex libraries
+notifications     initiator by default, both users for explicit family scope
+```
+
+Administrative diagnostics remain a separate service capability and do not
+change user ownership.
+
 ## 10. Search
 
 Rezka and Prowlarr results are always presented separately. The user explicitly chooses a source and a concrete result before a job is created.
@@ -263,6 +293,28 @@ Rules:
 - There is no automatic cross-provider fallback.
 
 Prowlarr ranking considers title and season match, quality, language, seeders, size, codec, and release group. Nothing is sent to qBittorrent until the user selects a result.
+
+### 10.1 Canonical media identity and numbering
+
+The system assigns stable internal `MediaId`, `SeasonId`, and `EpisodeId`
+values. External identities are stored as mappings rather than used as primary
+keys. Supported mapping namespaces include TMDb, TVDB, IMDb, AniList, Rezka,
+Prowlarr result references, and Plex GUIDs.
+
+Each series records the ordering expected by Plex:
+
+```text
+tmdb_aired
+tvdb_aired
+tvdb_dvd
+tvdb_absolute
+```
+
+Provider episode numbers are mapped explicitly to canonical episodes. The
+system never guesses when two mappings are plausible or no reliable mapping is
+available. It changes the operation to `needs_action`, presents the ambiguity
+to the initiating user, and persists the selected mapping so subsequent jobs
+reuse the decision.
 
 ## 11. Rezka Client
 
@@ -291,7 +343,15 @@ Anubis and DLE authentication are separate layers:
 6. Perform DLE login or reuse a valid DLE session.
 7. Continue with title, translation, episode, stream, and subtitle requests.
 
-Rezka credentials enter the runner through Docker secrets. Session cookies remain in runner memory for MVP and are never written to PostgreSQL or logs. A runner restart performs a new challenge and login.
+Rezka uses one shared service account that is independent from the two Hermes
+users. Credentials enter the runner through Docker secrets. The client uses one
+cookie jar for the complete job and persists it encrypted in a dedicated runner
+volume. The encryption key is supplied through a separate Docker secret.
+
+On runner startup and after a VPN IP change, the client validates the persisted
+session. It re-runs Anubis and DLE login only when the session is invalid. Raw
+cookies are never written to PostgreSQL, job payloads, notifications, or logs.
+There is no browser or manually imported cookie fallback.
 
 ### 11.2 Errors
 
@@ -350,6 +410,11 @@ track series     -> monitor future episode availability
 
 If a title is ongoing, Hermes explains that not all episodes are available and asks whether to create `personal` or `family` tracking. Tracking does not automatically download a future episode. When an episode appears, Hermes notifies the appropriate user and asks them to choose Rezka or Prowlarr.
 
+The parent job, each episode task, and every artifact record retain the initiating
+`owner_id`. Personal tracking belongs to one user; family tracking can be viewed
+and changed by either user. Tracking scope does not change the default rule that
+download notifications go to the user who created the job.
+
 ## 14. Prowlarr and qBittorrent
 
 `media-service` searches Prowlarr and submits only the explicitly selected result to qBittorrent with an existing category.
@@ -361,7 +426,13 @@ qBittorrent remains the sole owner of:
 - Seeding and retention.
 - Torrent data lifecycle.
 
-The runner does not transcode, move, hardlink, rename, or delete torrent files. The media system monitors qBittorrent state, records errors, notifies the initiating user, and may request a Plex refresh after completion.
+The runner does not transcode, move, hardlink, rename, or delete torrent files.
+The media system monitors qBittorrent state, records errors, and notifies the
+initiating user. After qBittorrent reports completion, `media-service` obtains
+the content paths from qBittorrent, requests a targeted Plex scan, and applies
+the same exact path and canonical identity verification used for Rezka. The job
+remains `plex_pending` until that verification succeeds, without changing the
+torrent or its seeding lifecycle.
 
 ## 15. VPN and Networking
 
@@ -376,12 +447,23 @@ The runner does not transcode, move, hardlink, rename, or delete torrent files. 
 
 ## 16. Storage and Plex
 
-- Rezka staging is outside Plex library roots.
-- Before starting, compute expected peak usage from download, transcode, and publication requirements.
+- Rezka staging is outside Plex library roots at
+  `/mnt/internal/media-orchestrator/staging/rezka/{job_id}`.
+- Finished Rezka TV and movie files are published to dedicated roots at
+  `/mnt/internal/media/rezka/tv` and `/mnt/internal/media/rezka/movies`.
+- The existing Plex TV and movie libraries include those Rezka roots in
+  addition to the qBittorrent-managed roots.
+- Staging and finished Rezka roots live on the same filesystem so publication
+  uses an atomic rename. There is no second move after publication.
+- The runner has write access to Rezka staging and finished roots. The service
+  has no write access to media files.
+- Before each episode, compute expected peak usage from download, transcode,
+  and publication requirements.
 - Preserve at least 20 GiB of free space after the expected operation.
 - Insufficient space changes the job to `blocked_storage` and notifies the initiator.
 - Nothing published to Plex is automatically deleted.
-- Incomplete working files are eligible for cleanup after seven days.
+- Incomplete working files are eligible for cleanup after seven days only when
+  no active lease references them.
 - qBittorrent category targets remain authoritative for torrents.
 
 Recommended Plex naming:
@@ -393,6 +475,22 @@ TV/Title (Year) {tmdb-ID}/Season 01/Title (Year) - S01E01 - Episode Title.ext
 
 Provider, translation, and source-quality details belong in PostgreSQL rather than the primary Plex filename.
 
+Publication is successful only after all of these steps complete:
+
+1. The runner validates the encoded video and expected subtitle manifest.
+2. The runner atomically publishes the sidecars and final video path.
+3. `media-service` requests a targeted Plex library scan.
+4. `media-service` polls the Plex HTTP API for a bounded period.
+5. The returned Plex media part path, canonical identity, season, and episode
+   match the expected publication.
+
+Subtitle completeness is authoritative in the runner artifact manifest and
+filesystem validation; Plex subtitle discovery is an additional observation.
+Temporary Plex unavailability leaves the operation in `plex_pending` for later
+reconciliation. An incorrect match becomes
+`needs_action(reason=plex_mismatch)`; the system does not rename or delete the
+media automatically.
+
 ## 17. Job States and Retention
 
 Core terminal and operational states:
@@ -401,12 +499,42 @@ Core terminal and operational states:
 queued
 leased
 running
+cancel_requested
 blocked_storage
+publishing
+plex_pending
+needs_action
 partial
 completed
 failed
 cancelled
 ```
+
+`needs_action` carries a machine-readable reason such as
+`identity_ambiguous` or `plex_mismatch`; those reasons are not separate job
+states.
+
+The service leases work to a runner through PostgreSQL-backed atomic leasing.
+The runner sends heartbeats through the API. An expired lease makes the job
+eligible for recovery without allowing two runners to own it concurrently.
+
+Every episode and processing stage has an idempotent checkpoint. Recovery
+skips completed episodes and stages. An interrupted HTTP download resumes only
+when the server supports a compatible range request; otherwise only the current
+episode restarts. Subtitle recovery retries only missing or invalid tracks.
+Each stage receives three automatic attempts before becoming `failed`.
+
+User operations have distinct meanings:
+
+```text
+cancel   request cooperative process termination; keep published media
+resume   continue from durable checkpoints
+restart  discard unfinished temporary state and repeat the unfinished work
+remove   a separate explicit operation for published media, outside automatic recovery
+```
+
+Cancellation never rolls back episodes already published to Plex. Temporary
+artifacts remain eligible for the normal seven-day cleanup policy.
 
 Retention defaults:
 
@@ -478,6 +606,10 @@ Vaultwarden does not support Bitwarden Secrets Manager (`bws`), so `bws` is not 
 - All repositories are private.
 - No secrets, cookies, Telegram tokens, VPN credentials, or Password Manager sessions are committed.
 - Docker secrets are used for service credentials.
+- The shared Rezka account password and cookie-encryption key are separate
+  Docker secrets.
+- The encrypted Rezka cookie jar is stored only in a runner-owned persistent
+  volume with restrictive filesystem permissions.
 - Hermes has no Docker socket.
 - API tokens are scoped per client and mapped to server-side identities.
 - Internal webhook payloads are signed and replay-protected.
@@ -519,6 +651,16 @@ Vaultwarden does not support Bitwarden Secrets Manager (`bws`), so `bws` is not 
 10. An ongoing series can be downloaded without tracking, and tracking can be added separately.
 11. Storage guard prevents an operation that would violate the 20 GiB reserve.
 12. The complete stack starts through the homelab Docker deployment with no public media API exposure.
+13. Ambiguous provider numbering becomes `needs_action` and a resolved mapping
+    is reused by subsequent jobs.
+14. A killed runner loses its lease and resumes from the last durable episode
+    or stage checkpoint without duplicating published media.
+15. A Rezka publication reaches `completed` only after Plex reports the exact
+    expected media part path and canonical episode identity.
+16. Search details and job control remain private to the initiating user while
+    family tracking remains manageable by both users.
+17. A persisted Rezka session survives runner restart, remains encrypted at
+    rest, and is re-authenticated automatically when invalid after VPN rotation.
 
 ## 24. Delivery Order
 
@@ -534,4 +676,8 @@ The implementation should proceed in independently reviewable vertical slices:
 8. Hermes image, shared skill, profile isolation, and CLI integration.
 9. Homelab deployment and end-to-end verification.
 
-Implementation planning begins only after this design is reviewed and approved.
+This is an umbrella product specification spanning multiple independently
+reviewable subsystems. Detailed implementation planning must produce a sequence
+of focused plans following the delivery order above rather than one monolithic
+execution plan. Planning begins only after this written design is reviewed and
+approved.

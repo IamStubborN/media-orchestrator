@@ -2,7 +2,8 @@
 
 This document is the code map for `media-orchestrator`. It describes stable
 boundaries, dependency direction, entry points, and deliberately absent
-dependencies. Detailed product behavior belongs in `docs/DESIGN.md`.
+dependencies. Product behavior and rationale belong in
+`docs/superpowers/specs/2026-07-10-media-orchestrator-mvp-design.md`.
 
 ## Architectural Style
 
@@ -38,6 +39,7 @@ crates/
 Owns the media domain and service-side application rules:
 
 - Media identity and provider references.
+- Canonical season and episode numbering with persisted ambiguity resolution.
 - Jobs, tasks, artifacts, and state transitions.
 - Search sessions and pagination rules.
 - Tracking subscriptions and notification intent.
@@ -52,12 +54,17 @@ Owns the independent Rezka protocol implementation:
 
 - Mirror selection.
 - Cookie jar and session lifecycle.
+- Import and export of session state without filesystem ownership.
 - Anubis detection and proof-of-work.
 - DLE authentication.
 - Catalog, translation, season, episode, stream, and subtitle parsing.
 - Provider-specific retry and typed errors.
 
 Architecture invariant: `rezka-client` does not depend on any `media-*` crate. It exposes Rezka-specific models and errors; adapters map them into the media domain.
+
+The crate never reads Docker secrets or writes session files. The composition
+root supplies credentials, and a runner-side adapter encrypts and persists the
+exported cookie state.
 
 ### `media-storage`
 
@@ -67,6 +74,9 @@ Owns PostgreSQL persistence:
 - Explicit versioned migrations.
 - Repository implementations for `media-core` ports.
 - Transactional job leasing and notification outbox operations.
+- Durable stage checkpoints, ownership, provider identity mappings, and manual
+  numbering resolutions.
+- Plex publication and reconciliation state.
 - Mapping between persistence models and domain types.
 
 Architecture invariant: SeaORM models never escape this crate. Specialized PostgreSQL statements use the same SeaORM connection and transaction.
@@ -78,6 +88,7 @@ Owns external service adapters other than Rezka:
 - Prowlarr search.
 - qBittorrent submission and monitoring.
 - Plex refresh and publication integration.
+- Plex item lookup and exact path/identity verification.
 - Gluetun control.
 - Hermes notification webhooks.
 
@@ -115,9 +126,11 @@ Architecture invariant: handlers are thin. They validate transport input, call a
 Owns runner-side execution:
 
 - Job lease, heartbeat, and event client.
+- Cooperative cancellation and expired-lease recovery.
 - Sticky-job execution loop.
 - Rezka download pipeline.
-- Storage preflight and staging.
+- Encrypted Rezka session persistence in a runner-owned volume.
+- Storage preflight, dedicated Rezka staging, and atomic publication.
 - ffprobe and ffmpeg/VAAPI process adapters.
 - Subtitle validation and partial recovery.
 - Plex-compatible publication.
@@ -208,6 +221,14 @@ Secrets, cookies, signed media URLs, credentials, and raw provider bodies must n
 Configuration is loaded and validated once by `media`. Library crates receive typed configuration or constructed clients. Library crates do not read environment variables directly.
 
 Secrets are provided through Docker secret files and converted into redacted secret types at the composition boundary.
+
+Storage roots are also validated by the composition root. The runner receives
+separate typed paths for Rezka staging, Rezka TV publication, and Rezka movie
+publication. `media-service` receives no writable media root.
+
+The Rezka session-store adapter receives an encryption key separately from the
+Rezka account credentials. It persists only encrypted cookie state; plaintext
+session material exists only in runner memory.
 
 ## Testing Boundaries
 
