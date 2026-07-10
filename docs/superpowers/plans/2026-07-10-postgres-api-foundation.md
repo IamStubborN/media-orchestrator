@@ -282,15 +282,15 @@ the consuming HTTP port, and Task 8 implements that port on a composition-root
 newtype which maps to these records. This preserves both dependency direction
 and Rust's orphan rules.
 
-- [ ] Write failing PostgreSQL tests for owner-scoped job reads, queue counts, same-key replay, different-body conflict, in-progress conflict, abort/retry, and expiry replacement.
-- [ ] Implement `SeaOrmJobStore`; enforce owner filtering in SQL rather than fetching then checking.
-- [ ] Implement concrete idempotency repository methods with `INSERT ... ON CONFLICT` plus locked read in one transaction; do not add HTTP or Axum dependencies to `media-storage`.
-- [ ] Write a concurrent lease test using two independent connections and a barrier; assert exactly one `Some(JobLease)` and one `None`.
-- [ ] Implement lease acquisition in one transaction: lock or replace an expired slot, return the expired job from `leased` to `queued`, claim one queued job with `FOR UPDATE SKIP LOCKED`, insert slot `1`, and transition the claimed job to `leased`; no process-local mutex.
-- [ ] Map a concurrent unique-slot conflict to `None` after confirming another non-expired lease exists; never surface the expected race as a 500.
-- [ ] Implement heartbeat with exact lease ID and runner client ownership; another runner receives no lease.
-- [ ] Confirm entities remain private and tests assert domain return values.
-- [ ] Run integration/workspace gates; commit: `feat(storage): add durable jobs idempotency and leasing`.
+- [x] Write failing PostgreSQL tests for owner-scoped job reads, queue counts, same-key replay, different-body conflict, in-progress conflict, abort/retry, and expiry replacement.
+- [x] Implement `SeaOrmJobStore`; enforce owner filtering in SQL rather than fetching then checking.
+- [x] Implement concrete idempotency repository methods with `INSERT ... ON CONFLICT` plus locked read in one transaction; do not add HTTP or Axum dependencies to `media-storage`.
+- [x] Write a concurrent lease test using two independent connections and a barrier; assert exactly one `Some(JobLease)` and one `None`.
+- [x] Implement lease acquisition in one transaction: lock or replace an expired slot, return the expired job from `leased` to `queued`, claim one queued job with `FOR UPDATE SKIP LOCKED`, insert slot `1`, and transition the claimed job to `leased`; no process-local mutex.
+- [x] Map a concurrent unique-slot conflict to `None` after confirming another non-expired lease exists; never surface the expected race as a 500.
+- [x] Implement heartbeat with exact lease ID and runner client ownership; another runner receives no lease.
+- [x] Confirm entities remain private and tests assert domain return values.
+- [x] Run integration/workspace gates; commit: `feat(storage): add durable jobs idempotency and leasing`.
 
 ## Task 6: Build Axum State, Authentication, and Request IDs
 
