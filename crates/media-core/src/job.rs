@@ -1,5 +1,7 @@
 use crate::{ClientId, JobId, LeaseId, NeedsActionReason, UserId};
 
+pub const MAX_RESULT_REF_BYTES: usize = 64 * 1024;
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum Provider {
     Rezka,
@@ -36,6 +38,8 @@ pub struct NewJob {
 pub enum JobValidationError {
     #[error("result reference cannot be empty")]
     EmptyResultReference,
+    #[error("result reference is {actual} bytes; maximum is {maximum}")]
+    ResultReferenceTooLong { actual: usize, maximum: usize },
     #[error("NeedsAction jobs require an action reason")]
     NeedsActionReasonRequired,
     #[error("job state {state:?} cannot have a NeedsAction reason")]
@@ -225,10 +229,15 @@ impl Job {
 
 fn validate_result_ref(result_ref: &str) -> Result<(), JobValidationError> {
     if result_ref.trim().is_empty() {
-        Err(JobValidationError::EmptyResultReference)
-    } else {
-        Ok(())
+        return Err(JobValidationError::EmptyResultReference);
     }
+    if result_ref.len() > MAX_RESULT_REF_BYTES {
+        return Err(JobValidationError::ResultReferenceTooLong {
+            actual: result_ref.len(),
+            maximum: MAX_RESULT_REF_BYTES,
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
@@ -283,7 +292,10 @@ impl JobState {
 
 #[cfg(test)]
 mod tests {
-    use super::{Job, JobLease, JobState, JobValidationError, NewJob, NotifyScope, Provider};
+    use super::{
+        Job, JobLease, JobState, JobValidationError, MAX_RESULT_REF_BYTES, NewJob, NotifyScope,
+        Provider,
+    };
     use crate::{PRIMARY_USER_ID, JobId, LeaseId, NeedsActionReason, RUNNER_CLIENT_ID};
 
     const STATES: [JobState; 12] = [
@@ -424,6 +436,34 @@ mod tests {
     }
 
     #[test]
+    fn new_job_enforces_result_reference_byte_boundary() {
+        assert!(
+            NewJob::new(
+                JobId::new(),
+                PRIMARY_USER_ID,
+                Provider::Rezka,
+                "x".repeat(MAX_RESULT_REF_BYTES),
+                NotifyScope::Initiator,
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            NewJob::new(
+                JobId::new(),
+                PRIMARY_USER_ID,
+                Provider::Rezka,
+                "x".repeat(MAX_RESULT_REF_BYTES + 1),
+                NotifyScope::Initiator,
+            )
+            .unwrap_err(),
+            JobValidationError::ResultReferenceTooLong {
+                actual: MAX_RESULT_REF_BYTES + 1,
+                maximum: MAX_RESULT_REF_BYTES,
+            },
+        );
+    }
+
+    #[test]
     fn rehydrated_job_rejects_an_empty_result_reference() {
         let error = Job::rehydrate(
             JobId::new(),
@@ -437,6 +477,38 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error, JobValidationError::EmptyResultReference);
+    }
+
+    #[test]
+    fn rehydrated_job_enforces_result_reference_byte_boundary() {
+        assert!(
+            Job::rehydrate(
+                JobId::new(),
+                PRIMARY_USER_ID,
+                Provider::Rezka,
+                "x".repeat(MAX_RESULT_REF_BYTES),
+                JobState::Queued,
+                None,
+                NotifyScope::Initiator,
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            Job::rehydrate(
+                JobId::new(),
+                PRIMARY_USER_ID,
+                Provider::Rezka,
+                "é".repeat(MAX_RESULT_REF_BYTES / 2 + 1),
+                JobState::Queued,
+                None,
+                NotifyScope::Initiator,
+            )
+            .unwrap_err(),
+            JobValidationError::ResultReferenceTooLong {
+                actual: MAX_RESULT_REF_BYTES + 2,
+                maximum: MAX_RESULT_REF_BYTES,
+            },
+        );
     }
 
     #[test]

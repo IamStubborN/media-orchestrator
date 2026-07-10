@@ -27,7 +27,7 @@ pub use identity::{
     MediaExternalReference, MediaKind, SeriesOrdering, resolve_episode_candidates,
 };
 pub use job::{
-    Job, JobLease, JobState, JobTransitionError, JobValidationError, NewJob, NotifyScope, Provider,
-    QueueStatus,
+    Job, JobLease, JobState, JobTransitionError, JobValidationError, MAX_RESULT_REF_BYTES, NewJob,
+    NotifyScope, Provider, QueueStatus,
 };
 pub use port::{ClientStore, IdentityStore, JobStore, LeaseStore, PortError, ReadinessPort};

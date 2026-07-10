@@ -363,6 +363,19 @@ async fn postgres_enforces_domain_and_concurrency_invariants() {
     )
     .await;
 
+    assert_rejected(
+        db,
+        &format!(
+            "INSERT INTO jobs
+               (id, owner_id, provider, result_ref, state, notify_scope)
+             VALUES
+               ('00000000-0000-0020-0000-000000000006', '{PRIMARY_ID}', 'rezka',
+                repeat('x', 65537), 'queued', 'initiator')"
+        ),
+        "jobs_result_ref_length_check",
+    )
+    .await;
+
     execute(
         db,
         &format!(
@@ -447,11 +460,13 @@ async fn postgres_enforces_domain_and_concurrency_invariants() {
     assert_rejected(
         db,
         "INSERT INTO idempotency_records
-           (id, client_id, idempotency_key, request_hash, status, expires_at)
+           (id, client_id, idempotency_key, request_hash, generation, status, expires_at)
          VALUES
            ('00000000-0000-0023-0000-000000000001',
             '00000000-0000-0000-0002-000000000001', 'bad-status',
-            decode(repeat('03', 32), 'hex'), 'unknown', now() + interval '1 day')",
+            decode(repeat('03', 32), 'hex'),
+            '00000000-0000-0030-0000-000000000001', 'unknown',
+            now() + interval '1 day')",
         "idempotency_records_status_check",
     )
     .await;
@@ -460,11 +475,12 @@ async fn postgres_enforces_domain_and_concurrency_invariants() {
         db,
         "INSERT INTO idempotency_records
            (id, client_id, idempotency_key, request_hash, status,
-            response_status, response_content_type, response_body, expires_at)
+            generation, response_status, response_content_type, response_body, expires_at)
          VALUES
            ('00000000-0000-0023-0000-000000000002',
             '00000000-0000-0000-0002-000000000001', 'empty-204',
-            decode(repeat('04', 32), 'hex'), 'completed', 204, '', ''::bytea,
+            decode(repeat('04', 32), 'hex'), 'completed',
+            '00000000-0000-0030-0000-000000000002', 204, '', ''::bytea,
             now() + interval '1 day')",
     )
     .await

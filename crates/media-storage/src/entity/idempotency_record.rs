@@ -8,6 +8,7 @@ pub struct Model {
     pub client_id: Uuid,
     pub idempotency_key: String,
     pub request_hash: Vec<u8>,
+    pub generation: Uuid,
     pub status: String,
     pub response_status: Option<i16>,
     pub response_content_type: Option<String>,

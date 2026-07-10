@@ -393,3 +393,86 @@ async fn failed_queued_to_leased_update_rolls_back_the_inserted_lease() {
     );
     assert_eq!(jobs.queue_status().await.unwrap().queued, 1);
 }
+
+#[tokio::test]
+async fn oversized_persisted_job_is_rejected_before_lease_mutations_commit() {
+    let (test_db, jobs, leases) = setup().await;
+    test_db
+        .connection()
+        .execute_unprepared(
+            "ALTER TABLE jobs DROP CONSTRAINT jobs_result_ref_length_check; \
+             INSERT INTO jobs (id, owner_id, provider, result_ref, state, notify_scope) \
+             VALUES ('00000000-0000-0040-0000-000000000001', \
+             '00000000-0000-0000-0000-000000000001', 'rezka', repeat('x', 65537), \
+             'queued', 'initiator')",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        leases
+            .lease_next(RUNNER_CLIENT_ID, time::Duration::seconds(60))
+            .await,
+        Err(PortError::Infrastructure),
+    );
+    assert!(
+        query(test_db.connection(), "SELECT id FROM job_leases")
+            .await
+            .is_empty()
+    );
+    let row = query(
+        test_db.connection(),
+        "SELECT state, attempt_count FROM jobs \
+         WHERE id = '00000000-0000-0040-0000-000000000001'",
+    )
+    .await;
+    assert_eq!(row[0].try_get::<String>("", "state").unwrap(), "queued");
+    assert_eq!(row[0].try_get::<i32>("", "attempt_count").unwrap(), 0);
+    assert_eq!(jobs.queue_status().await.unwrap().queued, 1);
+}
+
+#[tokio::test]
+async fn oversized_persisted_job_rolls_back_heartbeat_extension() {
+    let (test_db, jobs, leases) = setup().await;
+    jobs.create(new_job("oversized-heartbeat")).await.unwrap();
+    let lease = leases
+        .lease_next(RUNNER_CLIENT_ID, time::Duration::seconds(60))
+        .await
+        .unwrap()
+        .unwrap();
+    test_db
+        .connection()
+        .execute_unprepared(
+            "ALTER TABLE jobs DROP CONSTRAINT jobs_result_ref_length_check; \
+             UPDATE jobs SET result_ref = repeat('x', 65537) \
+             WHERE result_ref = 'oversized-heartbeat'",
+        )
+        .await
+        .unwrap();
+    let before = query(
+        test_db.connection(),
+        "SELECT expires_at FROM job_leases WHERE slot = 1",
+    )
+    .await[0]
+        .try_get::<time::OffsetDateTime>("", "expires_at")
+        .unwrap();
+
+    assert_eq!(
+        leases
+            .heartbeat(
+                lease.lease_id(),
+                RUNNER_CLIENT_ID,
+                time::Duration::seconds(300),
+            )
+            .await,
+        Err(PortError::Infrastructure),
+    );
+    let after = query(
+        test_db.connection(),
+        "SELECT expires_at FROM job_leases WHERE slot = 1",
+    )
+    .await[0]
+        .try_get::<time::OffsetDateTime>("", "expires_at")
+        .unwrap();
+    assert_eq!(after, before);
+}

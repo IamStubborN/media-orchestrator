@@ -7,7 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use media_contract::ApiError as ErrorBody;
-use media_core::{Actor, ClientId};
+use media_core::{Actor, ClientId, MAX_RESULT_REF_BYTES};
 use sha2::{Digest, Sha256};
 
 use crate::{ApiError, ApiState, MAX_REQUEST_BODY_BYTES, RequestId, request_id::REQUEST_ID_HEADER};
@@ -17,8 +17,9 @@ const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
 // Current POST responses echo at most one request-bounded result_ref and add
 // fixed IDs, enum names, timestamps, and JSON framing. A second request-sized
 // allowance is therefore a conservative bound for every current route.
-const MAX_CURRENT_ROUTE_RESPONSE_BYTES: usize = MAX_REQUEST_BODY_BYTES + 1024;
+const MAX_CURRENT_ROUTE_RESPONSE_BYTES: usize = MAX_RESULT_REF_BYTES + 1024;
 const MAX_STORED_RESPONSE_BYTES: usize = 2 * MAX_REQUEST_BODY_BYTES;
+const _: () = assert!(MAX_REQUEST_BODY_BYTES == MAX_RESULT_REF_BYTES);
 const _: () = assert!(MAX_STORED_RESPONSE_BYTES >= MAX_CURRENT_ROUTE_RESPONSE_BYTES);
 
 /// Identity and fingerprint of one authenticated write request.
@@ -63,6 +64,84 @@ impl IdempotencyRequest {
     #[must_use]
     pub const fn fingerprint(&self) -> &[u8; 32] {
         &self.fingerprint
+    }
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, Hash)]
+pub struct IdempotencyGeneration(uuid::Uuid);
+
+impl IdempotencyGeneration {
+    #[must_use]
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+
+    #[must_use]
+    pub const fn from_uuid(value: uuid::Uuid) -> Self {
+        Self(value)
+    }
+
+    #[must_use]
+    pub const fn as_uuid(&self) -> &uuid::Uuid {
+        &self.0
+    }
+}
+
+impl Default for IdempotencyGeneration {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for IdempotencyGeneration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("IdempotencyGeneration([REDACTED])")
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct IdempotencyHandle {
+    request: IdempotencyRequest,
+    generation: IdempotencyGeneration,
+}
+
+impl IdempotencyHandle {
+    #[must_use]
+    pub const fn new(request: IdempotencyRequest, generation: IdempotencyGeneration) -> Self {
+        Self {
+            request,
+            generation,
+        }
+    }
+
+    #[must_use]
+    pub const fn client_id(&self) -> ClientId {
+        self.request.client_id()
+    }
+
+    #[must_use]
+    pub fn key(&self) -> &str {
+        self.request.key()
+    }
+
+    #[must_use]
+    pub const fn fingerprint(&self) -> &[u8; 32] {
+        self.request.fingerprint()
+    }
+
+    #[must_use]
+    pub const fn generation(&self) -> IdempotencyGeneration {
+        self.generation
+    }
+}
+
+impl std::fmt::Debug for IdempotencyHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IdempotencyHandle")
+            .field("request", &self.request)
+            .field("generation", &self.generation)
+            .finish()
     }
 }
 
@@ -119,8 +198,11 @@ impl StoredHttpResponse {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Reservation {
-    Reserved,
-    Replay(StoredHttpResponse),
+    Reserved(IdempotencyHandle),
+    Replay {
+        handle: IdempotencyHandle,
+        response: StoredHttpResponse,
+    },
     Conflict,
     InProgress,
 }
@@ -138,11 +220,13 @@ pub trait IdempotencyStore: Send + Sync {
 
     async fn complete(
         &self,
-        request: IdempotencyRequest,
+        handle: &IdempotencyHandle,
         response: StoredHttpResponse,
     ) -> Result<(), IdempotencyError>;
 
-    async fn abort(&self, request: IdempotencyRequest) -> Result<(), IdempotencyError>;
+    async fn abort_in_progress(&self, handle: &IdempotencyHandle) -> Result<(), IdempotencyError>;
+
+    async fn discard_completed(&self, handle: &IdempotencyHandle) -> Result<(), IdempotencyError>;
 }
 
 pub(crate) async fn execute<F, Fut>(
@@ -169,17 +253,13 @@ where
     let fingerprint = fingerprint(actor.client_id(), &method, &path, &body);
     let idempotency_request = IdempotencyRequest::new(actor.client_id(), key, fingerprint);
 
-    match state
-        .idempotency()
-        .reserve(idempotency_request.clone())
-        .await
-    {
-        Ok(Reservation::Reserved) => {}
-        Ok(Reservation::Replay(response)) => {
+    let handle = match state.idempotency().reserve(idempotency_request).await {
+        Ok(Reservation::Reserved(handle)) => handle,
+        Ok(Reservation::Replay { handle, response }) => {
             return match replay(response, &request_id) {
                 Some(response) => response,
                 None => {
-                    let _ = state.idempotency().abort(idempotency_request).await;
+                    let _ = state.idempotency().discard_completed(&handle).await;
                     ApiError::internal(&request_id).into_response()
                 }
             };
@@ -191,18 +271,18 @@ where
             return ApiError::idempotency_in_progress(&request_id).into_response();
         }
         Err(_) => return ApiError::internal(&request_id).into_response(),
-    }
+    };
 
     let response = operation(state.clone(), actor, request_id.clone(), body.to_vec()).await;
     let Some((stored, response)) = buffer(response, &request_id).await else {
-        let _ = state.idempotency().abort(idempotency_request).await;
+        let _ = state.idempotency().abort_in_progress(&handle).await;
         return ApiError::internal(&request_id).into_response();
     };
 
     if response.status().is_server_error() {
         if state
             .idempotency()
-            .abort(idempotency_request)
+            .abort_in_progress(&handle)
             .await
             .is_err()
         {
@@ -211,13 +291,8 @@ where
         return response;
     }
 
-    if state
-        .idempotency()
-        .complete(idempotency_request.clone(), stored)
-        .await
-        .is_err()
-    {
-        let _ = state.idempotency().abort(idempotency_request).await;
+    if state.idempotency().complete(&handle, stored).await.is_err() {
+        let _ = state.idempotency().abort_in_progress(&handle).await;
         return ApiError::internal(&request_id).into_response();
     }
 

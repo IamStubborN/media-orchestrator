@@ -14,7 +14,8 @@ use media_core::{ClientStore, JobApplication, LeaseApplication, ReadinessPort};
 
 pub use error::ApiError;
 pub use idempotency::{
-    IdempotencyError, IdempotencyRequest, IdempotencyStore, Reservation, StoredHttpResponse,
+    IdempotencyError, IdempotencyGeneration, IdempotencyHandle, IdempotencyRequest,
+    IdempotencyStore, Reservation, StoredHttpResponse,
 };
 pub use request_id::RequestId;
 

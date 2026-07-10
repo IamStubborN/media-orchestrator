@@ -35,6 +35,8 @@ impl MigrationTrait for Migration {
                 completed_at timestamptz,
                 CONSTRAINT jobs_provider_check CHECK (provider IN ('rezka', 'prowlarr')),
                 CONSTRAINT jobs_result_ref_not_blank CHECK (btrim(result_ref) <> ''),
+                CONSTRAINT jobs_result_ref_length_check
+                    CHECK (octet_length(result_ref) <= 65536),
                 CONSTRAINT jobs_state_check CHECK (
                     state IN (
                         'queued', 'leased', 'running', 'cancel_requested',

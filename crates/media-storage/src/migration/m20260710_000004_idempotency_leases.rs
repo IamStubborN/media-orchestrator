@@ -23,6 +23,7 @@ impl MigrationTrait for Migration {
                 client_id uuid NOT NULL REFERENCES api_clients(id) ON DELETE CASCADE,
                 idempotency_key text NOT NULL,
                 request_hash bytea NOT NULL,
+                generation uuid NOT NULL,
                 status text NOT NULL,
                 response_status smallint,
                 response_content_type text,

@@ -7,7 +7,8 @@ mod readiness;
 
 pub use client::SeaOrmClientStore;
 pub use idempotency::{
-    ReservationRecord, SeaOrmIdempotencyRepository, StoredResponseError, StoredResponseRecord,
+    ReservationGeneration, ReservationHandle, ReservationRecord, SeaOrmIdempotencyRepository,
+    StoredResponseError, StoredResponseRecord,
 };
 pub use identity::SeaOrmIdentityStore;
 pub use job::SeaOrmJobStore;

@@ -8,17 +8,104 @@ use crate::repository::map_database_error;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ReservationRecord {
-    Reserved,
-    Replay(StoredResponseRecord),
+    Reserved(ReservationHandle),
+    Replay {
+        handle: ReservationHandle,
+        response: StoredResponseRecord,
+    },
     Conflict,
     InProgress,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash)]
+pub struct ReservationGeneration(Uuid);
+
+impl ReservationGeneration {
+    #[must_use]
+    pub const fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    #[must_use]
+    pub const fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ReservationGeneration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ReservationGeneration([REDACTED])")
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct ReservationHandle {
+    client_id: ClientId,
+    key: String,
+    request_hash: [u8; 32],
+    generation: ReservationGeneration,
+}
+
+impl ReservationHandle {
+    fn new(client_id: ClientId, key: String, request_hash: [u8; 32], generation: Uuid) -> Self {
+        Self {
+            client_id,
+            key,
+            request_hash,
+            generation: ReservationGeneration::from_uuid(generation),
+        }
+    }
+
+    #[must_use]
+    pub const fn client_id(&self) -> ClientId {
+        self.client_id
+    }
+
+    #[must_use]
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    #[must_use]
+    pub const fn request_hash(&self) -> &[u8; 32] {
+        &self.request_hash
+    }
+
+    #[must_use]
+    pub const fn generation(&self) -> ReservationGeneration {
+        self.generation
+    }
+}
+
+impl std::fmt::Debug for ReservationHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReservationHandle")
+            .field("client_id", &self.client_id)
+            .field("key", &"[REDACTED]")
+            .field("request_hash", &"[REDACTED]")
+            .field("generation", &self.generation)
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub struct StoredResponseRecord {
     pub status: u16,
     pub content_type: String,
     pub body: Vec<u8>,
+}
+
+impl std::fmt::Debug for StoredResponseRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StoredResponseRecord")
+            .field("status", &self.status)
+            .field("content_type", &"[REDACTED]")
+            .field("body", &"[REDACTED]")
+            .field("body_len", &self.body.len())
+            .finish()
+    }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -99,30 +186,37 @@ impl SeaOrmIdempotencyRepository {
     ) -> Result<ReservationRecord, PortError> {
         let transaction = self.database.begin().await.map_err(map_database_error)?;
         let result = async {
+            let fresh_generation = Uuid::new_v4();
             let inserted = transaction
                 .execute_raw(Statement::from_sql_and_values(
                     DatabaseBackend::Postgres,
                     "INSERT INTO idempotency_records \
-                     (id, client_id, idempotency_key, request_hash, status, expires_at) \
-                     VALUES ($1, $2, $3, $4, 'in_progress', $5) \
+                     (id, client_id, idempotency_key, request_hash, generation, status, expires_at) \
+                     VALUES ($1, $2, $3, $4, $5, 'in_progress', $6) \
                      ON CONFLICT (client_id, idempotency_key) DO NOTHING",
                     [
                         Uuid::new_v4().into(),
                         client.into_uuid().into(),
                         key.to_owned().into(),
                         request_hash.to_vec().into(),
+                        fresh_generation.into(),
                         expires_at.into(),
                     ],
                 ))
                 .await?;
             if inserted.rows_affected() == 1 {
-                return Ok(ReservationRecord::Reserved);
+                return Ok(ReservationRecord::Reserved(ReservationHandle::new(
+                    client,
+                    key.to_owned(),
+                    request_hash,
+                    fresh_generation,
+                )));
             }
 
             let row = transaction
                 .query_one_raw(Statement::from_sql_and_values(
                     DatabaseBackend::Postgres,
-                    "SELECT request_hash, status, response_status, response_content_type, \
+                    "SELECT request_hash, generation, status, response_status, response_content_type, \
                      response_body, expires_at <= now() AS expired \
                      FROM idempotency_records \
                      WHERE client_id = $1 AND idempotency_key = $2 FOR UPDATE",
@@ -132,22 +226,30 @@ impl SeaOrmIdempotencyRepository {
                 .ok_or_else(|| sea_orm::DbErr::Custom("reservation disappeared".to_owned()))?;
 
             if row.try_get::<bool>("", "expired")? {
+                let replacement_generation = Uuid::new_v4();
                 transaction
                     .execute_raw(Statement::from_sql_and_values(
                         DatabaseBackend::Postgres,
-                        "UPDATE idempotency_records SET request_hash = $3, status = 'in_progress', \
+                        "UPDATE idempotency_records SET request_hash = $3, generation = $4, \
+                         status = 'in_progress', \
                          response_status = NULL, response_content_type = NULL, response_body = NULL, \
-                         expires_at = $4, created_at = now(), updated_at = now() \
+                         expires_at = $5, created_at = now(), updated_at = now() \
                          WHERE client_id = $1 AND idempotency_key = $2",
                         [
                             client.into_uuid().into(),
                             key.to_owned().into(),
                             request_hash.to_vec().into(),
+                            replacement_generation.into(),
                             expires_at.into(),
                         ],
                     ))
                     .await?;
-                return Ok(ReservationRecord::Reserved);
+                return Ok(ReservationRecord::Reserved(ReservationHandle::new(
+                    client,
+                    key.to_owned(),
+                    request_hash,
+                    replacement_generation,
+                )));
             }
 
             if row.try_get::<Vec<u8>>("", "request_hash")? != request_hash {
@@ -156,6 +258,12 @@ impl SeaOrmIdempotencyRepository {
             match row.try_get::<String>("", "status")?.as_str() {
                 "in_progress" => Ok(ReservationRecord::InProgress),
                 "completed" => {
+                    let handle = ReservationHandle::new(
+                        client,
+                        key.to_owned(),
+                        request_hash,
+                        row.try_get("", "generation")?,
+                    );
                     let status = row
                         .try_get::<i16>("", "response_status")?
                         .try_into()
@@ -166,7 +274,7 @@ impl SeaOrmIdempotencyRepository {
                         row.try_get("", "response_body")?,
                     )
                     .map_err(|_| sea_orm::DbErr::Type("invalid stored response".to_owned()))?;
-                    Ok(ReservationRecord::Replay(response))
+                    Ok(ReservationRecord::Replay { handle, response })
                 }
                 _ => Err(sea_orm::DbErr::Type(
                     "invalid idempotency status".to_owned(),
@@ -179,9 +287,7 @@ impl SeaOrmIdempotencyRepository {
 
     pub async fn complete(
         &self,
-        client: ClientId,
-        key: &str,
-        request_hash: [u8; 32],
+        handle: &ReservationHandle,
         response: StoredResponseRecord,
     ) -> Result<(), PortError> {
         let transaction = self.database.begin().await.map_err(map_database_error)?;
@@ -189,14 +295,15 @@ impl SeaOrmIdempotencyRepository {
             let updated = transaction
                 .execute_raw(Statement::from_sql_and_values(
                     DatabaseBackend::Postgres,
-                    "UPDATE idempotency_records SET status = 'completed', response_status = $4, \
-                     response_content_type = $5, response_body = $6, updated_at = now() \
+                    "UPDATE idempotency_records SET status = 'completed', response_status = $5, \
+                     response_content_type = $6, response_body = $7, updated_at = now() \
                      WHERE client_id = $1 AND idempotency_key = $2 AND request_hash = $3 \
-                     AND status = 'in_progress' AND expires_at > now()",
+                     AND generation = $4 AND status = 'in_progress' AND expires_at > now()",
                     [
-                        client.into_uuid().into(),
-                        key.to_owned().into(),
-                        request_hash.to_vec().into(),
+                        handle.client_id.into_uuid().into(),
+                        handle.key.clone().into(),
+                        handle.request_hash.to_vec().into(),
+                        handle.generation.0.into(),
                         i16::try_from(response.status)
                             .map_err(|_| sea_orm::DbErr::Type("invalid status".to_owned()))?
                             .into(),
@@ -211,11 +318,18 @@ impl SeaOrmIdempotencyRepository {
         finish_semantic_update(transaction, result).await
     }
 
-    pub async fn abort(
+    pub async fn abort_in_progress(&self, handle: &ReservationHandle) -> Result<(), PortError> {
+        self.delete_exact(handle, "in_progress").await
+    }
+
+    pub async fn discard_completed(&self, handle: &ReservationHandle) -> Result<(), PortError> {
+        self.delete_exact(handle, "completed").await
+    }
+
+    async fn delete_exact(
         &self,
-        client: ClientId,
-        key: &str,
-        request_hash: [u8; 32],
+        handle: &ReservationHandle,
+        status: &'static str,
     ) -> Result<(), PortError> {
         let transaction = self.database.begin().await.map_err(map_database_error)?;
         let result = async {
@@ -223,11 +337,14 @@ impl SeaOrmIdempotencyRepository {
                 .execute_raw(Statement::from_sql_and_values(
                     DatabaseBackend::Postgres,
                     "DELETE FROM idempotency_records WHERE client_id = $1 \
-                     AND idempotency_key = $2 AND request_hash = $3",
+                     AND idempotency_key = $2 AND request_hash = $3 \
+                     AND generation = $4 AND status = $5",
                     [
-                        client.into_uuid().into(),
-                        key.to_owned().into(),
-                        request_hash.to_vec().into(),
+                        handle.client_id.into_uuid().into(),
+                        handle.key.clone().into(),
+                        handle.request_hash.to_vec().into(),
+                        handle.generation.0.into(),
+                        status.into(),
                     ],
                 ))
                 .await?;

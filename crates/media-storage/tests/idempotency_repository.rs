@@ -5,7 +5,8 @@ use media_core::{
     PortError,
 };
 use media_storage::{
-    ReservationRecord, SeaOrmClientStore, SeaOrmIdempotencyRepository, StoredResponseRecord,
+    ReservationHandle, ReservationRecord, SeaOrmClientStore, SeaOrmIdempotencyRepository,
+    StoredResponseRecord,
 };
 use support::TestDatabase;
 
@@ -35,6 +36,34 @@ fn future_expiry() -> time::OffsetDateTime {
     time::OffsetDateTime::now_utc() + time::Duration::hours(24)
 }
 
+async fn reserve_handle(
+    repository: &SeaOrmIdempotencyRepository,
+    key: &str,
+    hash: [u8; 32],
+    expires_at: time::OffsetDateTime,
+) -> ReservationHandle {
+    match repository
+        .reserve(PRIMARY_CLIENT_ID, key, hash, expires_at)
+        .await
+        .unwrap()
+    {
+        ReservationRecord::Reserved(handle) => handle,
+        other => panic!("unexpected reservation: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn reservation_exposes_generation_scoped_lifecycle_handle() {
+    let (_test_db, repository) = repository().await;
+    let handle = reserve_handle(&repository, "generation-handle", HASH_A, future_expiry()).await;
+
+    assert_eq!(handle.client_id(), PRIMARY_CLIENT_ID);
+    assert_eq!(handle.key(), "generation-handle");
+    assert_eq!(handle.request_hash(), &HASH_A);
+    assert_ne!(handle.generation().as_uuid(), &uuid::Uuid::nil());
+    repository.abort_in_progress(&handle).await.unwrap();
+}
+
 #[test]
 fn stored_response_record_exposes_the_exact_storage_contract() {
     let response = StoredResponseRecord {
@@ -46,18 +75,15 @@ fn stored_response_record_exposes_the_exact_storage_contract() {
     assert_eq!(response.status, 202);
     assert_eq!(response.content_type, "application/json");
     assert_eq!(response.body, br#"{"accepted":true}"#);
+    let debug = format!("{response:?}");
+    assert!(!debug.contains("application/json"));
+    assert!(!debug.contains("accepted"));
 }
 
 #[tokio::test]
 async fn completed_same_hash_replays_exact_response_and_changed_hash_conflicts() {
     let (_test_db, repository) = repository().await;
-    assert_eq!(
-        repository
-            .reserve(PRIMARY_CLIENT_ID, "create-1", HASH_A, future_expiry())
-            .await
-            .unwrap(),
-        ReservationRecord::Reserved,
-    );
+    let handle = reserve_handle(&repository, "create-1", HASH_A, future_expiry()).await;
     let response = StoredResponseRecord::new(
         201,
         "application/json; charset=utf-8".to_owned(),
@@ -65,17 +91,24 @@ async fn completed_same_hash_replays_exact_response_and_changed_hash_conflicts()
     )
     .unwrap();
     repository
-        .complete(PRIMARY_CLIENT_ID, "create-1", HASH_A, response.clone())
+        .complete(&handle, response.clone())
         .await
         .unwrap();
 
-    assert_eq!(
-        repository
-            .reserve(PRIMARY_CLIENT_ID, "create-1", HASH_A, future_expiry())
-            .await
-            .unwrap(),
-        ReservationRecord::Replay(response),
-    );
+    match repository
+        .reserve(PRIMARY_CLIENT_ID, "create-1", HASH_A, future_expiry())
+        .await
+        .unwrap()
+    {
+        ReservationRecord::Replay {
+            handle: replay_handle,
+            response: replayed,
+        } => {
+            assert_eq!(replay_handle, handle);
+            assert_eq!(replayed, response);
+        }
+        other => panic!("unexpected replay: {other:?}"),
+    }
     assert_eq!(
         repository
             .reserve(PRIMARY_CLIENT_ID, "create-1", HASH_B, future_expiry())
@@ -88,73 +121,66 @@ async fn completed_same_hash_replays_exact_response_and_changed_hash_conflicts()
 #[tokio::test]
 async fn no_content_response_round_trips_with_absent_content_type_representation() {
     let (_test_db, repository) = repository().await;
-    repository
-        .reserve(PRIMARY_CLIENT_ID, "empty-204", HASH_A, future_expiry())
-        .await
-        .unwrap();
+    let handle = reserve_handle(&repository, "empty-204", HASH_A, future_expiry()).await;
     let response = StoredResponseRecord::new(204, String::new(), Vec::new()).unwrap();
 
     repository
-        .complete(PRIMARY_CLIENT_ID, "empty-204", HASH_A, response.clone())
+        .complete(&handle, response.clone())
         .await
         .unwrap();
-    assert_eq!(
+    assert!(matches!(
         repository
             .reserve(PRIMARY_CLIENT_ID, "empty-204", HASH_A, future_expiry())
             .await
             .unwrap(),
-        ReservationRecord::Replay(response),
-    );
+        ReservationRecord::Replay { response: replayed, .. } if replayed == response
+    ));
 }
 
 #[tokio::test]
-async fn abort_deletes_exact_completed_fingerprint_but_never_a_conflict() {
+async fn committed_complete_survives_error_recovery_abort_and_requires_completed_discard() {
     let (_test_db, repository) = repository().await;
     let response = StoredResponseRecord::new(201, "application/json".to_owned(), vec![]).unwrap();
+    let handle = reserve_handle(&repository, "discard", HASH_A, future_expiry()).await;
     repository
+        .complete(&handle, response.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        repository.abort_in_progress(&handle).await,
+        Err(PortError::Conflict),
+        "a lost complete acknowledgement must not let recovery delete committed replay",
+    );
+    assert_eq!(
+        repository
+            .reserve(PRIMARY_CLIENT_ID, "discard", HASH_B, future_expiry())
+            .await,
+        Ok(ReservationRecord::Conflict),
+    );
+
+    let replay_handle = match repository
         .reserve(PRIMARY_CLIENT_ID, "discard", HASH_A, future_expiry())
         .await
-        .unwrap();
-    repository
-        .complete(PRIMARY_CLIENT_ID, "discard", HASH_A, response.clone())
-        .await
-        .unwrap();
-
-    assert_eq!(
-        repository.abort(PRIMARY_CLIENT_ID, "discard", HASH_B).await,
-        Err(PortError::Conflict),
-    );
-    assert_eq!(
-        repository
-            .reserve(PRIMARY_CLIENT_ID, "discard", HASH_A, future_expiry())
-            .await
-            .unwrap(),
-        ReservationRecord::Replay(response),
-    );
-
-    repository
-        .abort(PRIMARY_CLIENT_ID, "discard", HASH_A)
-        .await
-        .unwrap();
-    assert_eq!(
-        repository
-            .reserve(PRIMARY_CLIENT_ID, "discard", HASH_A, future_expiry())
-            .await
-            .unwrap(),
-        ReservationRecord::Reserved,
-    );
+        .unwrap()
+    {
+        ReservationRecord::Replay {
+            handle,
+            response: replayed,
+        } => {
+            assert_eq!(replayed, response);
+            handle
+        }
+        other => panic!("unexpected replay: {other:?}"),
+    };
+    repository.discard_completed(&replay_handle).await.unwrap();
+    reserve_handle(&repository, "discard", HASH_A, future_expiry()).await;
 }
 
 #[tokio::test]
 async fn live_reservation_is_in_progress_abort_retries_and_expiry_replaces() {
     let (_test_db, repository) = repository().await;
-    assert_eq!(
-        repository
-            .reserve(PRIMARY_CLIENT_ID, "live", HASH_A, future_expiry())
-            .await
-            .unwrap(),
-        ReservationRecord::Reserved,
-    );
+    let live = reserve_handle(&repository, "live", HASH_A, future_expiry()).await;
     assert_eq!(
         repository
             .reserve(PRIMARY_CLIENT_ID, "live", HASH_A, future_expiry())
@@ -170,38 +196,40 @@ async fn live_reservation_is_in_progress_abort_retries_and_expiry_replaces() {
         ReservationRecord::Conflict,
         "a changed request cannot take over a live in-progress reservation",
     );
+    repository.abort_in_progress(&live).await.unwrap();
+    reserve_handle(&repository, "live", HASH_B, future_expiry()).await;
+
+    let expired = reserve_handle(
+        &repository,
+        "expired",
+        HASH_A,
+        time::OffsetDateTime::now_utc() - time::Duration::seconds(1),
+    )
+    .await;
+    let replacement = reserve_handle(&repository, "expired", HASH_A, future_expiry()).await;
+    assert_ne!(expired.generation(), replacement.generation());
+    assert_eq!(
+        repository.abort_in_progress(&expired).await,
+        Err(PortError::Conflict),
+        "a stale delayed abort must not delete a replacement generation",
+    );
+    let response = StoredResponseRecord::new(204, String::new(), Vec::new()).unwrap();
     repository
-        .abort(PRIMARY_CLIENT_ID, "live", HASH_A)
+        .complete(&replacement, response.clone())
         .await
         .unwrap();
     assert_eq!(
+        repository.discard_completed(&expired).await,
+        Err(PortError::Conflict),
+        "a stale delayed discard must not delete a completed replacement generation",
+    );
+    assert!(matches!(
         repository
-            .reserve(PRIMARY_CLIENT_ID, "live", HASH_B, future_expiry())
+            .reserve(PRIMARY_CLIENT_ID, "expired", HASH_A, future_expiry())
             .await
             .unwrap(),
-        ReservationRecord::Reserved,
-    );
-
-    assert_eq!(
-        repository
-            .reserve(
-                PRIMARY_CLIENT_ID,
-                "expired",
-                HASH_A,
-                time::OffsetDateTime::now_utc() - time::Duration::seconds(1),
-            )
-            .await
-            .unwrap(),
-        ReservationRecord::Reserved,
-    );
-    assert_eq!(
-        repository
-            .reserve(PRIMARY_CLIENT_ID, "expired", HASH_B, future_expiry())
-            .await
-            .unwrap(),
-        ReservationRecord::Reserved,
-        "an expired key may be atomically reused with a different request",
-    );
+        ReservationRecord::Replay { response: replayed, .. } if replayed == response
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -224,8 +252,13 @@ async fn concurrent_reservations_have_one_winner() {
     assert!(
         matches!(
             (left, right),
-            (ReservationRecord::Reserved, ReservationRecord::InProgress)
-                | (ReservationRecord::InProgress, ReservationRecord::Reserved)
+            (
+                ReservationRecord::Reserved(_),
+                ReservationRecord::InProgress
+            ) | (
+                ReservationRecord::InProgress,
+                ReservationRecord::Reserved(_)
+            )
         ),
         "exactly one request must own the reservation",
     );
@@ -235,15 +268,19 @@ async fn concurrent_reservations_have_one_winner() {
 async fn semantic_misses_are_conflicts_but_database_failures_remain_infrastructure_errors() {
     let (test_db, repository) = repository().await;
     let response = StoredResponseRecord::new(201, "application/json".to_owned(), vec![]).unwrap();
+    let stale = reserve_handle(&repository, "missing", HASH_A, future_expiry()).await;
+    repository.abort_in_progress(&stale).await.unwrap();
 
     assert_eq!(
-        repository
-            .complete(PRIMARY_CLIENT_ID, "missing", HASH_A, response.clone(),)
-            .await,
+        repository.complete(&stale, response.clone()).await,
         Err(PortError::Conflict),
     );
     assert_eq!(
-        repository.abort(PRIMARY_CLIENT_ID, "missing", HASH_A).await,
+        repository.abort_in_progress(&stale).await,
+        Err(PortError::Conflict),
+    );
+    assert_eq!(
+        repository.discard_completed(&stale).await,
         Err(PortError::Conflict),
     );
 
@@ -254,13 +291,15 @@ async fn semantic_misses_are_conflicts_but_database_failures_remain_infrastructu
     .await
     .unwrap();
     assert_eq!(
-        repository
-            .complete(PRIMARY_CLIENT_ID, "missing", HASH_A, response)
-            .await,
+        repository.complete(&stale, response).await,
         Err(PortError::Infrastructure),
     );
     assert_eq!(
-        repository.abort(PRIMARY_CLIENT_ID, "missing", HASH_A).await,
+        repository.abort_in_progress(&stale).await,
+        Err(PortError::Infrastructure),
+    );
+    assert_eq!(
+        repository.discard_completed(&stale).await,
         Err(PortError::Infrastructure),
     );
 }

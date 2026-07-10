@@ -12,8 +12,9 @@ use media_core::{PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole, LeaseId,
 use tower::ServiceExt;
 
 use support::{
-    ControlledIdempotencyStore, FakeClientStore, FakeJobStore, FakeLeaseStore,
-    MemoryIdempotencyStore, RUNNER_TOKEN, VALID_TOKEN, state_with_stores,
+    CommitThenErrorIdempotencyStore, ControlledIdempotencyStore, ControlledReservation,
+    FakeClientStore, FakeJobStore, FakeLeaseStore, MemoryIdempotencyStore, RUNNER_TOKEN,
+    VALID_TOKEN, state_with_stores,
 };
 
 const BODY: &str = r#"{"provider":"rezka","result_ref":"selection-1","notify_scope":"initiator"}"#;
@@ -260,12 +261,12 @@ async fn maximum_sized_create_response_is_persisted_and_replayed_before_mutating
 async fn malformed_replay_is_discarded_before_the_next_retry_executes() {
     let jobs = FakeJobStore::default();
     let idempotency = ControlledIdempotencyStore::new([
-        media_api::Reservation::Replay(media_api::StoredHttpResponse::new(
+        ControlledReservation::Replay(media_api::StoredHttpResponse::new(
             200,
             "invalid\ncontent-type".to_owned(),
             b"malformed".to_vec(),
         )),
-        media_api::Reservation::Reserved,
+        ControlledReservation::Reserved,
     ]);
     let app = app_with_idempotency(jobs.clone(), Arc::new(idempotency.clone()));
 
@@ -276,7 +277,8 @@ async fn malformed_replay_is_discarded_before_the_next_retry_executes() {
         .unwrap();
     assert_eq!(malformed.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(error(malformed).await.request_id, "malformed-first");
-    assert_eq!(idempotency.abort_calls(), 1);
+    assert_eq!(idempotency.discard_calls(), 1);
+    assert_eq!(idempotency.abort_calls(), 0);
     assert_eq!(jobs.create_calls(), 0);
 
     let retry = app
@@ -289,7 +291,7 @@ async fn malformed_replay_is_discarded_before_the_next_retry_executes() {
 
 #[tokio::test]
 async fn conflict_never_discards_a_different_fingerprint() {
-    let idempotency = ControlledIdempotencyStore::new([media_api::Reservation::Conflict]);
+    let idempotency = ControlledIdempotencyStore::new([ControlledReservation::Conflict]);
     let response = app_with_idempotency(FakeJobStore::default(), Arc::new(idempotency.clone()))
         .oneshot(request("conflict", BODY, "conflict-request"))
         .await
@@ -302,7 +304,7 @@ async fn conflict_never_discards_a_different_fingerprint() {
 #[tokio::test]
 async fn complete_and_abort_storage_failures_return_sanitized_500() {
     let complete_failure =
-        ControlledIdempotencyStore::new([media_api::Reservation::Reserved]).failing_complete();
+        ControlledIdempotencyStore::new([ControlledReservation::Reserved]).failing_complete();
     let response =
         app_with_idempotency(FakeJobStore::default(), Arc::new(complete_failure.clone()))
             .oneshot(request("complete-failure", BODY, "complete-failure"))
@@ -316,7 +318,7 @@ async fn complete_and_abort_storage_failures_return_sanitized_500() {
     let jobs = FakeJobStore::default();
     jobs.fail_creates(1);
     let abort_failure =
-        ControlledIdempotencyStore::new([media_api::Reservation::Reserved]).failing_abort();
+        ControlledIdempotencyStore::new([ControlledReservation::Reserved]).failing_abort();
     let response = app_with_idempotency(jobs, Arc::new(abort_failure.clone()))
         .oneshot(request("abort-failure", BODY, "abort-failure"))
         .await
@@ -324,6 +326,29 @@ async fn complete_and_abort_storage_failures_return_sanitized_500() {
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(error(response).await.request_id, "abort-failure");
     assert_eq!(abort_failure.abort_calls(), 1);
+}
+
+#[tokio::test]
+async fn committed_complete_error_cannot_be_aborted_and_retries_as_replay() {
+    let jobs = FakeJobStore::default();
+    let idempotency = CommitThenErrorIdempotencyStore::default();
+    let app = app_with_idempotency(jobs.clone(), Arc::new(idempotency.clone()));
+
+    let uncertain = app
+        .clone()
+        .oneshot(request("commit-uncertain", BODY, "commit-uncertain"))
+        .await
+        .unwrap();
+    assert_eq!(uncertain.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(idempotency.abort_calls(), 1);
+    assert_eq!(jobs.create_calls(), 1);
+
+    let replay = app
+        .oneshot(request("commit-uncertain", BODY, "commit-retry"))
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::CREATED);
+    assert_eq!(jobs.create_calls(), 1);
 }
 
 #[tokio::test]

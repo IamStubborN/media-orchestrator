@@ -10,8 +10,8 @@ use std::{
 };
 
 use media_api::{
-    ApiState, IdempotencyError, IdempotencyRequest, IdempotencyStore, Reservation,
-    StoredHttpResponse,
+    ApiState, IdempotencyError, IdempotencyGeneration, IdempotencyHandle, IdempotencyRequest,
+    IdempotencyStore, Reservation, StoredHttpResponse,
 };
 use media_core::{
     Actor, ClientId, ClientStore, CredentialDigest, Job, JobApplication, JobId, JobLease, JobState,
@@ -266,21 +266,31 @@ impl LeaseStore for FakeLeaseStore {
 
 #[derive(Clone)]
 pub struct ControlledIdempotencyStore {
-    reservations: Arc<Mutex<VecDeque<Reservation>>>,
+    reservations: Arc<Mutex<VecDeque<ControlledReservation>>>,
     fail_complete: bool,
     fail_abort: bool,
     complete_calls: Arc<AtomicUsize>,
     abort_calls: Arc<AtomicUsize>,
+    discard_calls: Arc<AtomicUsize>,
+}
+
+#[derive(Clone)]
+pub enum ControlledReservation {
+    Reserved,
+    Replay(StoredHttpResponse),
+    Conflict,
+    InProgress,
 }
 
 impl ControlledIdempotencyStore {
-    pub fn new(reservations: impl IntoIterator<Item = Reservation>) -> Self {
+    pub fn new(reservations: impl IntoIterator<Item = ControlledReservation>) -> Self {
         Self {
             reservations: Arc::new(Mutex::new(reservations.into_iter().collect())),
             fail_complete: false,
             fail_abort: false,
             complete_calls: Arc::new(AtomicUsize::new(0)),
             abort_calls: Arc::new(AtomicUsize::new(0)),
+            discard_calls: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -301,21 +311,33 @@ impl ControlledIdempotencyStore {
     pub fn abort_calls(&self) -> usize {
         self.abort_calls.load(Ordering::SeqCst)
     }
+
+    pub fn discard_calls(&self) -> usize {
+        self.discard_calls.load(Ordering::SeqCst)
+    }
 }
 
 #[async_trait::async_trait]
 impl IdempotencyStore for ControlledIdempotencyStore {
-    async fn reserve(&self, _: IdempotencyRequest) -> Result<Reservation, IdempotencyError> {
-        self.reservations
+    async fn reserve(&self, request: IdempotencyRequest) -> Result<Reservation, IdempotencyError> {
+        let reservation = self
+            .reservations
             .lock()
             .unwrap()
             .pop_front()
-            .ok_or(IdempotencyError::Infrastructure)
+            .ok_or(IdempotencyError::Infrastructure)?;
+        let handle = IdempotencyHandle::new(request, IdempotencyGeneration::new());
+        Ok(match reservation {
+            ControlledReservation::Reserved => Reservation::Reserved(handle),
+            ControlledReservation::Replay(response) => Reservation::Replay { handle, response },
+            ControlledReservation::Conflict => Reservation::Conflict,
+            ControlledReservation::InProgress => Reservation::InProgress,
+        })
     }
 
     async fn complete(
         &self,
-        _: IdempotencyRequest,
+        _: &IdempotencyHandle,
         _: StoredHttpResponse,
     ) -> Result<(), IdempotencyError> {
         self.complete_calls.fetch_add(1, Ordering::SeqCst);
@@ -326,8 +348,17 @@ impl IdempotencyStore for ControlledIdempotencyStore {
         }
     }
 
-    async fn abort(&self, _: IdempotencyRequest) -> Result<(), IdempotencyError> {
+    async fn abort_in_progress(&self, _: &IdempotencyHandle) -> Result<(), IdempotencyError> {
         self.abort_calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_abort {
+            Err(IdempotencyError::Infrastructure)
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn discard_completed(&self, _: &IdempotencyHandle) -> Result<(), IdempotencyError> {
+        self.discard_calls.fetch_add(1, Ordering::SeqCst);
         if self.fail_abort {
             Err(IdempotencyError::Infrastructure)
         } else {
@@ -340,19 +371,26 @@ struct NoopIdempotencyStore;
 
 #[async_trait::async_trait]
 impl IdempotencyStore for NoopIdempotencyStore {
-    async fn reserve(&self, _: IdempotencyRequest) -> Result<Reservation, IdempotencyError> {
-        Ok(Reservation::Reserved)
+    async fn reserve(&self, request: IdempotencyRequest) -> Result<Reservation, IdempotencyError> {
+        Ok(Reservation::Reserved(IdempotencyHandle::new(
+            request,
+            IdempotencyGeneration::new(),
+        )))
     }
 
     async fn complete(
         &self,
-        _: IdempotencyRequest,
+        _: &IdempotencyHandle,
         _: StoredHttpResponse,
     ) -> Result<(), IdempotencyError> {
         Ok(())
     }
 
-    async fn abort(&self, _: IdempotencyRequest) -> Result<(), IdempotencyError> {
+    async fn abort_in_progress(&self, _: &IdempotencyHandle) -> Result<(), IdempotencyError> {
+        Ok(())
+    }
+
+    async fn discard_completed(&self, _: &IdempotencyHandle) -> Result<(), IdempotencyError> {
         Ok(())
     }
 }
@@ -362,9 +400,97 @@ pub struct MemoryIdempotencyStore {
     entries: Arc<Mutex<HashMap<(ClientId, String), MemoryIdempotencyEntry>>>,
 }
 
+#[derive(Clone, Default)]
+pub struct CommitThenErrorIdempotencyStore {
+    entry: Arc<Mutex<Option<CommitThenErrorEntry>>>,
+    abort_calls: Arc<AtomicUsize>,
+}
+
+#[derive(Clone)]
+enum CommitThenErrorEntry {
+    InProgress(IdempotencyHandle),
+    Completed(IdempotencyHandle, StoredHttpResponse),
+}
+
+impl CommitThenErrorIdempotencyStore {
+    pub fn abort_calls(&self) -> usize {
+        self.abort_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl IdempotencyStore for CommitThenErrorIdempotencyStore {
+    async fn reserve(&self, request: IdempotencyRequest) -> Result<Reservation, IdempotencyError> {
+        let mut entry = self.entry.lock().unwrap();
+        match entry.as_ref() {
+            None => {
+                let handle = IdempotencyHandle::new(request, IdempotencyGeneration::new());
+                *entry = Some(CommitThenErrorEntry::InProgress(handle.clone()));
+                Ok(Reservation::Reserved(handle))
+            }
+            Some(CommitThenErrorEntry::InProgress(handle)) => {
+                if handle.fingerprint() == request.fingerprint() {
+                    Ok(Reservation::InProgress)
+                } else {
+                    Ok(Reservation::Conflict)
+                }
+            }
+            Some(CommitThenErrorEntry::Completed(handle, response)) => {
+                if handle.fingerprint() == request.fingerprint() {
+                    Ok(Reservation::Replay {
+                        handle: handle.clone(),
+                        response: response.clone(),
+                    })
+                } else {
+                    Ok(Reservation::Conflict)
+                }
+            }
+        }
+    }
+
+    async fn complete(
+        &self,
+        handle: &IdempotencyHandle,
+        response: StoredHttpResponse,
+    ) -> Result<(), IdempotencyError> {
+        let mut entry = self.entry.lock().unwrap();
+        match entry.as_ref() {
+            Some(CommitThenErrorEntry::InProgress(current)) if current == handle => {
+                *entry = Some(CommitThenErrorEntry::Completed(handle.clone(), response));
+                Err(IdempotencyError::Infrastructure)
+            }
+            _ => Err(IdempotencyError::Infrastructure),
+        }
+    }
+
+    async fn abort_in_progress(&self, handle: &IdempotencyHandle) -> Result<(), IdempotencyError> {
+        self.abort_calls.fetch_add(1, Ordering::SeqCst);
+        let mut entry = self.entry.lock().unwrap();
+        match entry.as_ref() {
+            Some(CommitThenErrorEntry::InProgress(current)) if current == handle => {
+                *entry = None;
+                Ok(())
+            }
+            _ => Err(IdempotencyError::Infrastructure),
+        }
+    }
+
+    async fn discard_completed(&self, handle: &IdempotencyHandle) -> Result<(), IdempotencyError> {
+        let mut entry = self.entry.lock().unwrap();
+        match entry.as_ref() {
+            Some(CommitThenErrorEntry::Completed(current, _)) if current == handle => {
+                *entry = None;
+                Ok(())
+            }
+            _ => Err(IdempotencyError::Infrastructure),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct MemoryIdempotencyEntry {
     fingerprint: [u8; 32],
+    generation: IdempotencyGeneration,
     response: Option<StoredHttpResponse>,
 }
 
@@ -374,14 +500,18 @@ impl IdempotencyStore for MemoryIdempotencyStore {
         let key = (request.client_id(), request.key().to_owned());
         let mut entries = self.entries.lock().unwrap();
         let Some(entry) = entries.get(&key) else {
+            let generation = IdempotencyGeneration::new();
             entries.insert(
                 key,
                 MemoryIdempotencyEntry {
                     fingerprint: *request.fingerprint(),
+                    generation,
                     response: None,
                 },
             );
-            return Ok(Reservation::Reserved);
+            return Ok(Reservation::Reserved(IdempotencyHandle::new(
+                request, generation,
+            )));
         };
         if entry.fingerprint != *request.fingerprint() {
             return Ok(Reservation::Conflict);
@@ -390,36 +520,58 @@ impl IdempotencyStore for MemoryIdempotencyStore {
         Ok(entry
             .response
             .clone()
-            .map_or(Reservation::InProgress, Reservation::Replay))
+            .map_or(Reservation::InProgress, |response| Reservation::Replay {
+                handle: IdempotencyHandle::new(request, entry.generation),
+                response,
+            }))
     }
 
     async fn complete(
         &self,
-        request: IdempotencyRequest,
+        handle: &IdempotencyHandle,
         response: StoredHttpResponse,
     ) -> Result<(), IdempotencyError> {
-        let key = (request.client_id(), request.key().to_owned());
+        let key = (handle.client_id(), handle.key().to_owned());
         let mut entries = self.entries.lock().unwrap();
         let entry = entries
             .get_mut(&key)
             .ok_or(IdempotencyError::Infrastructure)?;
-        if entry.fingerprint != *request.fingerprint() {
+        if entry.fingerprint != *handle.fingerprint()
+            || entry.generation != handle.generation()
+            || entry.response.is_some()
+        {
             return Err(IdempotencyError::Infrastructure);
         }
         entry.response = Some(response);
         Ok(())
     }
 
-    async fn abort(&self, request: IdempotencyRequest) -> Result<(), IdempotencyError> {
-        let key = (request.client_id(), request.key().to_owned());
+    async fn abort_in_progress(&self, handle: &IdempotencyHandle) -> Result<(), IdempotencyError> {
+        let key = (handle.client_id(), handle.key().to_owned());
         let mut entries = self.entries.lock().unwrap();
-        if entries
-            .get(&key)
-            .is_some_and(|entry| entry.fingerprint == *request.fingerprint())
-        {
+        if entries.get(&key).is_some_and(|entry| {
+            entry.fingerprint == *handle.fingerprint()
+                && entry.generation == handle.generation()
+                && entry.response.is_none()
+        }) {
             entries.remove(&key);
+            return Ok(());
         }
-        Ok(())
+        Err(IdempotencyError::Infrastructure)
+    }
+
+    async fn discard_completed(&self, handle: &IdempotencyHandle) -> Result<(), IdempotencyError> {
+        let key = (handle.client_id(), handle.key().to_owned());
+        let mut entries = self.entries.lock().unwrap();
+        if entries.get(&key).is_some_and(|entry| {
+            entry.fingerprint == *handle.fingerprint()
+                && entry.generation == handle.generation()
+                && entry.response.is_some()
+        }) {
+            entries.remove(&key);
+            return Ok(());
+        }
+        Err(IdempotencyError::Infrastructure)
     }
 }
 
@@ -436,21 +588,29 @@ impl RecordingIdempotencyStore {
 
 #[async_trait::async_trait]
 impl IdempotencyStore for RecordingIdempotencyStore {
-    async fn reserve(&self, _: IdempotencyRequest) -> Result<Reservation, IdempotencyError> {
+    async fn reserve(&self, request: IdempotencyRequest) -> Result<Reservation, IdempotencyError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(Reservation::Reserved)
+        Ok(Reservation::Reserved(IdempotencyHandle::new(
+            request,
+            IdempotencyGeneration::new(),
+        )))
     }
 
     async fn complete(
         &self,
-        _: IdempotencyRequest,
+        _: &IdempotencyHandle,
         _: StoredHttpResponse,
     ) -> Result<(), IdempotencyError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    async fn abort(&self, _: IdempotencyRequest) -> Result<(), IdempotencyError> {
+    async fn abort_in_progress(&self, _: &IdempotencyHandle) -> Result<(), IdempotencyError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn discard_completed(&self, _: &IdempotencyHandle) -> Result<(), IdempotencyError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
