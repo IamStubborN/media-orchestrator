@@ -183,13 +183,17 @@ async fn runner_identity_is_inserted_and_user_route_forbids_it() {
         .oneshot(
             Request::get("/test/users-only")
                 .header(header::AUTHORIZATION, format!("Bearer {RUNNER_TOKEN}"))
+                .header("x-request-id", "runner-forbidden")
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
-    assert_eq!(error_body(forbidden).await.code, ApiErrorCode::Forbidden);
+    assert_eq!(forbidden.headers()["x-request-id"], "runner-forbidden");
+    let body = error_body(forbidden).await;
+    assert_eq!(body.code, ApiErrorCode::Forbidden);
+    assert_eq!(body.request_id, "runner-forbidden");
 }
 
 #[test]

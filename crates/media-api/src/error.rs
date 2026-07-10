@@ -1,13 +1,18 @@
+use std::error::Error as _;
+
 use axum::{
     Json,
+    body::{Body, to_bytes},
     extract::Request,
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use media_contract::{ApiError as ErrorBody, ApiErrorCode};
 
-use crate::{MAX_REQUEST_BODY_BYTES, RequestId};
+use crate::{
+    MAX_REQUEST_BODY_BYTES, MAX_REQUEST_HEADER_BYTES, MAX_REQUEST_HEADER_COUNT, RequestId,
+};
 
 pub struct ApiError {
     status: StatusCode,
@@ -77,6 +82,24 @@ impl ApiError {
         )
     }
 
+    pub(crate) fn request_headers_too_large(request_id: &RequestId) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidRequest,
+            "request headers are too large",
+            request_id,
+        )
+    }
+
+    pub(crate) fn invalid_body(request_id: &RequestId) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidRequest,
+            "request body could not be read",
+            request_id,
+        )
+    }
+
     pub(crate) fn not_ready(request_id: &RequestId) -> Self {
         Self::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -108,12 +131,11 @@ pub(crate) async fn enforce_request_limits(request: Request, next: Next) -> Resp
         .get::<RequestId>()
         .expect("request-ID middleware must run outside request limits")
         .clone();
-    if let Some(content_length) = request.headers().get(header::CONTENT_LENGTH) {
-        let Some(content_length) = content_length
-            .to_str()
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-        else {
+    if !headers_within_budget(request.headers()) {
+        return ApiError::request_headers_too_large(&request_id).into_response();
+    }
+    if let Some(content_length) = content_length(request.headers()) {
+        let Ok(content_length) = content_length else {
             return ApiError::invalid_content_length(&request_id).into_response();
         };
         if content_length > MAX_REQUEST_BODY_BYTES as u64 {
@@ -121,9 +143,53 @@ pub(crate) async fn enforce_request_limits(request: Request, next: Next) -> Resp
         }
     }
 
-    let response = next.run(request).await;
-    if response.status() == StatusCode::PAYLOAD_TOO_LARGE {
-        return ApiError::payload_too_large(&request_id).into_response();
+    // This is the sole bounded collection point: unknown-length streams are
+    // validated before auth and downstream code never sees an unchecked body.
+    let (parts, body) = request.into_parts();
+    let body = match to_bytes(body, MAX_REQUEST_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(error)
+            if error
+                .source()
+                .is_some_and(|source| source.is::<http_body_util::LengthLimitError>()) =>
+        {
+            return ApiError::payload_too_large(&request_id).into_response();
+        }
+        Err(_) => return ApiError::invalid_body(&request_id).into_response(),
+    };
+
+    next.run(Request::from_parts(parts, Body::from(body))).await
+}
+
+fn headers_within_budget(headers: &HeaderMap) -> bool {
+    if headers.len() > MAX_REQUEST_HEADER_COUNT {
+        return false;
     }
-    response
+
+    headers
+        .iter()
+        .try_fold(0_usize, |total, (name, value)| {
+            // `: ` and CRLF approximate each serialized HTTP header line.
+            total
+                .checked_add(name.as_str().len())?
+                .checked_add(value.as_bytes().len())?
+                .checked_add(4)
+        })
+        .is_some_and(|total| total <= MAX_REQUEST_HEADER_BYTES)
+}
+
+fn content_length(headers: &HeaderMap) -> Option<Result<u64, ()>> {
+    let mut values = headers.get_all(header::CONTENT_LENGTH).iter();
+    let value = values.next()?;
+    if values.next().is_some() {
+        return Some(Err(()));
+    }
+
+    Some(
+        value
+            .to_str()
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .ok_or(()),
+    )
 }

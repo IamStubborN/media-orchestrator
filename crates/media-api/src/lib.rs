@@ -18,6 +18,9 @@ pub use idempotency::{
 pub use request_id::RequestId;
 
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
+// Conservative application-level budgets, independent of proxy/server defaults.
+const MAX_REQUEST_HEADER_COUNT: usize = 64;
+const MAX_REQUEST_HEADER_BYTES: usize = 16 * 1024;
 
 /// Dependencies required by HTTP delivery. Concrete adapters are composed outside this crate.
 #[derive(Clone)]

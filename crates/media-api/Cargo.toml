@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 async-trait.workspace = true
 axum.workspace = true
+http-body-util.workspace = true
 media-contract = { path = "../media-contract", version = "=0.1.0" }
 media-core = { path = "../media-core", version = "=0.1.0" }
 serde.workspace = true
@@ -16,6 +17,7 @@ thiserror.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+futures-util.workspace = true
 serde_json.workspace = true
 time.workspace = true
 tokio.workspace = true

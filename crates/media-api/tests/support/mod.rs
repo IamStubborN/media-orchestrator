@@ -1,6 +1,12 @@
 #![allow(dead_code)]
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use media_api::{
     ApiState, IdempotencyError, IdempotencyRequest, IdempotencyStore, Reservation,
@@ -123,6 +129,39 @@ impl IdempotencyStore for NoopIdempotencyStore {
     }
 }
 
+#[derive(Clone, Default)]
+pub struct RecordingIdempotencyStore {
+    calls: Arc<AtomicUsize>,
+}
+
+impl RecordingIdempotencyStore {
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl IdempotencyStore for RecordingIdempotencyStore {
+    async fn reserve(&self, _: IdempotencyRequest) -> Result<Reservation, IdempotencyError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Reservation::Reserved)
+    }
+
+    async fn complete(
+        &self,
+        _: IdempotencyRequest,
+        _: StoredHttpResponse,
+    ) -> Result<(), IdempotencyError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn abort(&self, _: IdempotencyRequest) -> Result<(), IdempotencyError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 pub struct FakeReadiness {
     result: Result<bool, PortError>,
 }
@@ -151,13 +190,21 @@ impl ReadinessPort for FakeReadiness {
 }
 
 pub fn state(clients: FakeClientStore, readiness: FakeReadiness) -> ApiState {
+    state_with_idempotency(clients, readiness, Arc::new(NoopIdempotencyStore))
+}
+
+pub fn state_with_idempotency(
+    clients: FakeClientStore,
+    readiness: FakeReadiness,
+    idempotency: Arc<dyn IdempotencyStore>,
+) -> ApiState {
     ApiState::new(
         Arc::new(JobApplication::new(Arc::new(NoopJobStore))),
         Arc::new(
             LeaseApplication::new(Arc::new(NoopLeaseStore), time::Duration::seconds(60)).unwrap(),
         ),
         Arc::new(clients),
-        Arc::new(NoopIdempotencyStore),
+        idempotency,
         Arc::new(readiness),
     )
 }

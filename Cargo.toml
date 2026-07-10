@@ -20,6 +20,8 @@ async-trait = "=0.1.89"
 axum = { version = "=0.8.9", features = ["json"] }
 cargo_metadata = "=0.23.1"
 clap = { version = "=4.6.1", features = ["derive"] }
+futures-util = "=0.3.32"
+http-body-util = "=0.1.3"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
 sha2 = "=0.11.0"

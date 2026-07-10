@@ -1940,6 +1940,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "futures-util",
+ "http-body-util",
  "media-contract",
  "media-core",
  "serde",
