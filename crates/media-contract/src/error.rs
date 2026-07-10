@@ -8,6 +8,11 @@ pub enum ApiErrorCode {
     Conflict,
     IdentityAmbiguous,
     PlexMismatch,
+    MissingIdempotencyKey,
+    IdempotencyConflict,
+    IdempotencyInProgress,
+    InvalidToken,
+    LeaseNotFound,
     Internal,
 }
 
@@ -40,5 +45,36 @@ mod tests {
             }),
         );
         assert_eq!(serde_json::from_value::<ApiError>(value).unwrap(), error);
+    }
+
+    #[test]
+    fn api_error_codes_have_fixed_public_names() {
+        let cases = [
+            (ApiErrorCode::InvalidRequest, "invalid_request"),
+            (ApiErrorCode::Unauthorized, "unauthorized"),
+            (ApiErrorCode::Forbidden, "forbidden"),
+            (ApiErrorCode::NotFound, "not_found"),
+            (ApiErrorCode::Conflict, "conflict"),
+            (ApiErrorCode::IdentityAmbiguous, "identity_ambiguous"),
+            (ApiErrorCode::PlexMismatch, "plex_mismatch"),
+            (
+                ApiErrorCode::MissingIdempotencyKey,
+                "missing_idempotency_key",
+            ),
+            (ApiErrorCode::IdempotencyConflict, "idempotency_conflict"),
+            (
+                ApiErrorCode::IdempotencyInProgress,
+                "idempotency_in_progress",
+            ),
+            (ApiErrorCode::InvalidToken, "invalid_token"),
+            (ApiErrorCode::LeaseNotFound, "lease_not_found"),
+            (ApiErrorCode::Internal, "internal"),
+        ];
+
+        for (code, name) in cases {
+            let json = format!("\"{name}\"");
+            assert_eq!(serde_json::to_string(&code).unwrap(), json);
+            assert_eq!(serde_json::from_str::<ApiErrorCode>(&json).unwrap(), code);
+        }
     }
 }
