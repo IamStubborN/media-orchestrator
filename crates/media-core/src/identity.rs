@@ -54,6 +54,8 @@ pub enum IdentityValidationError {
     EmptyExternalReference,
     #[error("provider media reference cannot be empty")]
     EmptyProviderMediaReference,
+    #[error("media number exceeds the supported persistence range")]
+    NumberOutOfRange,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -137,6 +139,7 @@ impl CanonicalSeason {
         season_number: u32,
         title: Option<String>,
     ) -> Result<Self, IdentityValidationError> {
+        validate_number(season_number)?;
         Ok(Self {
             id,
             media_id,
@@ -183,6 +186,10 @@ impl CanonicalEpisode {
         absolute_number: Option<u32>,
         title: Option<String>,
     ) -> Result<Self, IdentityValidationError> {
+        validate_number(episode_number)?;
+        if let Some(number) = absolute_number {
+            validate_number(number)?;
+        }
         Ok(Self {
             id,
             season_id,
@@ -292,6 +299,8 @@ impl EpisodeProviderMapping {
         provider_episode_number: u32,
         source: MappingSource,
     ) -> Result<Self, IdentityValidationError> {
+        validate_number(provider_season_number)?;
+        validate_number(provider_episode_number)?;
         Ok(Self {
             episode_id,
             provider,
@@ -352,6 +361,12 @@ fn normalized_optional(value: Option<String>) -> Result<Option<String>, Identity
     value
         .map(|value| normalized_required(value, IdentityValidationError::EmptyTitle))
         .transpose()
+}
+
+fn validate_number(value: u32) -> Result<(), IdentityValidationError> {
+    i32::try_from(value)
+        .map(|_| ())
+        .map_err(|_| IdentityValidationError::NumberOutOfRange)
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -440,6 +455,33 @@ mod tests {
             )
             .unwrap_err(),
             IdentityValidationError::EmptyTitle,
+        );
+    }
+
+    #[test]
+    fn canonical_numbers_must_fit_the_persistence_contract() {
+        let too_large = (i32::MAX as u32) + 1;
+
+        assert_eq!(
+            CanonicalSeason::new(SeasonId::new(), MediaId::new(), too_large, None).unwrap_err(),
+            IdentityValidationError::NumberOutOfRange,
+        );
+        assert_eq!(
+            CanonicalEpisode::new(EpisodeId::new(), SeasonId::new(), 1, Some(too_large), None,)
+                .unwrap_err(),
+            IdentityValidationError::NumberOutOfRange,
+        );
+        assert_eq!(
+            EpisodeProviderMapping::new(
+                EpisodeId::new(),
+                Provider::Rezka,
+                "provider-ref".to_owned(),
+                too_large,
+                1,
+                MappingSource::Discovered,
+            )
+            .unwrap_err(),
+            IdentityValidationError::NumberOutOfRange,
         );
     }
 

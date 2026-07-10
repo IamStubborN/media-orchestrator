@@ -52,8 +52,6 @@ impl ClientStore for SeaOrmClientStore {
                 OnConflict::column(api_client::Column::Id)
                     .update_columns([
                         api_client::Column::Name,
-                        api_client::Column::Role,
-                        api_client::Column::UserId,
                         api_client::Column::CredentialDigest,
                         api_client::Column::Enabled,
                         api_client::Column::UpdatedAt,

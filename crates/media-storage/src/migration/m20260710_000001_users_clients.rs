@@ -49,6 +49,23 @@ impl MigrationTrait for Migration {
                 CONSTRAINT api_clients_role_user_check CHECK (
                     (role = 'hermes' AND user_id IS NOT NULL)
                     OR (role = 'runner' AND user_id IS NULL)
+                ),
+                CONSTRAINT api_clients_fixed_identity_check CHECK (
+                    (
+                        id = '00000000-0000-0000-0001-000000000001'
+                        AND role = 'hermes'
+                        AND user_id = '00000000-0000-0000-0000-000000000001'
+                    )
+                    OR (
+                        id = '00000000-0000-0000-0001-000000000002'
+                        AND role = 'hermes'
+                        AND user_id = '00000000-0000-0000-0000-000000000002'
+                    )
+                    OR (
+                        id = '00000000-0000-0000-0002-000000000001'
+                        AND role = 'runner'
+                        AND user_id IS NULL
+                    )
                 )
             )
             "#,

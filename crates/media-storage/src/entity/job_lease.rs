@@ -19,7 +19,7 @@ pub enum Relation {
         belongs_to = "super::job::Entity",
         from = "Column::JobId",
         to = "super::job::Column::Id",
-        on_delete = "Cascade"
+        on_delete = "Restrict"
     )]
     Job,
     #[sea_orm(

@@ -67,7 +67,7 @@ impl MigrationTrait for Migration {
             CREATE TABLE job_leases (
                 id uuid PRIMARY KEY,
                 slot smallint NOT NULL,
-                job_id uuid NOT NULL UNIQUE REFERENCES jobs(id) ON DELETE CASCADE,
+                job_id uuid NOT NULL UNIQUE REFERENCES jobs(id) ON DELETE RESTRICT,
                 runner_client_id uuid NOT NULL REFERENCES api_clients(id) ON DELETE RESTRICT,
                 expires_at timestamptz NOT NULL,
                 created_at timestamptz NOT NULL DEFAULT now(),

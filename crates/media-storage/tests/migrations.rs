@@ -151,6 +151,7 @@ async fn migrations_apply_seed_fixed_users_and_reverse_cleanly() {
              'episode_provider_mappings_episode_id_idx',
              'jobs_owner_created_at_idx',
              'jobs_state_created_at_idx',
+             'job_tasks_episode_id_idx',
              'idempotency_records_expires_at_idx',
              'job_leases_expires_at_idx'
            ])
@@ -169,6 +170,7 @@ async fn migrations_apply_seed_fixed_users_and_reverse_cleanly() {
         ("episode_provider_mappings_episode_id_idx", "(episode_id)"),
         ("idempotency_records_expires_at_idx", "(expires_at)"),
         ("job_leases_expires_at_idx", "(expires_at)"),
+        ("job_tasks_episode_id_idx", "(episode_id)"),
         ("jobs_owner_created_at_idx", "(owner_id, created_at)"),
         ("jobs_state_created_at_idx", "(state, created_at)"),
         ("media_external_refs_media_id_idx", "(media_id)"),
@@ -270,7 +272,29 @@ async fn postgres_enforces_domain_and_concurrency_invariants() {
          VALUES
            ('00000000-0000-0001-0000-000000000001', 'ownerless-hermes',
             'hermes', NULL, decode(repeat('01', 32), 'hex'))",
-        "api_clients_role_user_check",
+        "api_clients_fixed_identity_check",
+    )
+    .await;
+
+    assert_rejected(
+        db,
+        "INSERT INTO api_clients
+           (id, name, role, user_id, credential_digest)
+         VALUES
+           ('00000000-0000-0000-0001-000000000001', 'swapped-hermes',
+            'hermes', '00000000-0000-0000-0000-000000000002',
+            decode(repeat('04', 32), 'hex'))",
+        "api_clients_fixed_identity_check",
+    )
+    .await;
+    assert_rejected(
+        db,
+        "INSERT INTO api_clients
+           (id, name, role, user_id, credential_digest)
+         VALUES
+           ('00000000-0000-0002-0000-000000000099', 'unknown-runner',
+            'runner', NULL, decode(repeat('05', 32), 'hex'))",
+        "api_clients_fixed_identity_check",
     )
     .await;
 
@@ -345,7 +369,7 @@ async fn postgres_enforces_domain_and_concurrency_invariants() {
             "INSERT INTO api_clients
                (id, name, role, user_id, credential_digest)
              VALUES
-               ('00000000-0000-0002-0000-000000000001', 'runner', 'runner', NULL,
+               ('00000000-0000-0000-0002-000000000001', 'runner', 'runner', NULL,
                 decode(repeat('02', 32), 'hex'));
              INSERT INTO jobs
                (id, owner_id, provider, result_ref, state, notify_scope)
@@ -361,7 +385,7 @@ async fn postgres_enforces_domain_and_concurrency_invariants() {
              VALUES
                ('00000000-0000-0021-0000-000000000001', 1,
                 '00000000-0000-0020-0000-000000000002',
-                '00000000-0000-0002-0000-000000000001', now() + interval '1 minute')"
+                '00000000-0000-0000-0002-000000000001', now() + interval '1 minute')"
         ),
     )
     .await
@@ -374,8 +398,16 @@ async fn postgres_enforces_domain_and_concurrency_invariants() {
          VALUES
            ('00000000-0000-0021-0000-000000000002', 1,
             '00000000-0000-0020-0000-000000000003',
-            '00000000-0000-0002-0000-000000000001', now() + interval '1 minute')",
+            '00000000-0000-0000-0002-000000000001', now() + interval '1 minute')",
         "job_leases_slot_key",
+    )
+    .await;
+
+    assert_rejected(
+        db,
+        "DELETE FROM jobs
+         WHERE id = '00000000-0000-0020-0000-000000000002'",
+        "job_leases_job_id_fkey",
     )
     .await;
     assert_rejected(
@@ -385,7 +417,7 @@ async fn postgres_enforces_domain_and_concurrency_invariants() {
          VALUES
            ('00000000-0000-0021-0000-000000000003', 2,
             '00000000-0000-0020-0000-000000000004',
-            '00000000-0000-0002-0000-000000000001', now() + interval '1 minute')",
+            '00000000-0000-0000-0002-000000000001', now() + interval '1 minute')",
         "job_leases_slot_check",
     )
     .await;
@@ -418,7 +450,7 @@ async fn postgres_enforces_domain_and_concurrency_invariants() {
            (id, client_id, idempotency_key, request_hash, status, expires_at)
          VALUES
            ('00000000-0000-0023-0000-000000000001',
-            '00000000-0000-0002-0000-000000000001', 'bad-status',
+            '00000000-0000-0000-0002-000000000001', 'bad-status',
             decode(repeat('03', 32), 'hex'), 'unknown', now() + interval '1 day')",
         "idempotency_records_status_check",
     )

@@ -136,6 +136,11 @@ impl MigrationTrait for Migration {
                 "CREATE INDEX jobs_state_created_at_idx ON jobs (state, created_at)",
             )
             .await?;
+            db.execute_unprepared(
+                "CREATE INDEX job_tasks_episode_id_idx ON job_tasks (episode_id) \
+                 WHERE episode_id IS NOT NULL",
+            )
+            .await?;
 
             Ok::<(), DbErr>(())
         }

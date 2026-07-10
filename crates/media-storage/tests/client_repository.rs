@@ -4,8 +4,7 @@ use media_core::{
     PRIMARY_CLIENT_ID, PRIMARY_USER_ID, BootstrapClient, ClientRole, ClientStore, CredentialDigest,
     PortError, RUNNER_CLIENT_ID, SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
 };
-use media_storage::{Migrator, SeaOrmClientStore};
-use sea_orm_migration::MigratorTrait;
+use media_storage::SeaOrmClientStore;
 use support::{TestDatabase, execute};
 
 fn digest(byte: u8) -> CredentialDigest {
@@ -169,21 +168,4 @@ async fn digest_collisions_are_atomic_and_errors_never_reveal_credentials() {
         store.find_by_digest(primary_digest).await.unwrap().is_some(),
         "a failed rotation must preserve the prior credential",
     );
-}
-
-#[tokio::test]
-async fn clients_outside_the_fixed_bootstrap_set_are_rejected() {
-    let test_db = TestDatabase::start().await;
-    Migrator::up(test_db.connection(), None).await.unwrap();
-    let store = SeaOrmClientStore::new(test_db.connection().clone());
-    let unknown = BootstrapClient::new(
-        media_core::ClientId::new(),
-        "unknown".to_owned(),
-        ClientRole::Runner,
-        None,
-        digest(0x51),
-    )
-    .unwrap();
-
-    assert_eq!(store.upsert_client(unknown).await, Err(PortError::Conflict));
 }

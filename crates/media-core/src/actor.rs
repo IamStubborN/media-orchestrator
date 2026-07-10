@@ -1,4 +1,7 @@
-use crate::{ClientId, UserId};
+use crate::{
+    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, ClientId, RUNNER_CLIENT_ID, UserId, SECONDARY_CLIENT_ID,
+    SECONDARY_USER_ID,
+};
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum ClientRole {
@@ -111,6 +114,8 @@ pub enum BootstrapClientError {
     EmptyName,
     #[error("invalid client identity: {0}")]
     InvalidIdentity(#[source] ActorError),
+    #[error("client identity is not part of the fixed bootstrap set")]
+    UnsupportedFixedIdentity,
 }
 
 impl BootstrapClient {
@@ -123,6 +128,9 @@ impl BootstrapClient {
     ) -> Result<Self, BootstrapClientError> {
         let actor =
             Actor::new(client_id, user_id, role).map_err(BootstrapClientError::InvalidIdentity)?;
+        if !is_fixed_bootstrap_identity(&actor) {
+            return Err(BootstrapClientError::UnsupportedFixedIdentity);
+        }
         let name = name.trim().to_owned();
         if name.is_empty() {
             return Err(BootstrapClientError::EmptyName);
@@ -163,12 +171,25 @@ impl BootstrapClient {
     }
 }
 
+fn is_fixed_bootstrap_identity(actor: &Actor) -> bool {
+    matches!(
+        (actor.client_id(), actor.role(), actor.user_id()),
+        (PRIMARY_CLIENT_ID, ClientRole::Hermes, Some(PRIMARY_USER_ID))
+            | (
+                SECONDARY_CLIENT_ID,
+                ClientRole::Hermes,
+                Some(SECONDARY_USER_ID)
+            )
+            | (RUNNER_CLIENT_ID, ClientRole::Runner, None)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         Actor, ActorError, BootstrapClient, BootstrapClientError, ClientRole, CredentialDigest,
     };
-    use crate::{PRIMARY_CLIENT_ID, PRIMARY_USER_ID, RUNNER_CLIENT_ID};
+    use crate::{PRIMARY_CLIENT_ID, PRIMARY_USER_ID, ClientId, RUNNER_CLIENT_ID, SECONDARY_USER_ID};
 
     #[test]
     fn hermes_actor_requires_a_user() {
@@ -245,6 +266,34 @@ mod tests {
             )
             .unwrap_err(),
             BootstrapClientError::InvalidIdentity(ActorError::RunnerCannotHaveUser),
+        );
+    }
+
+    #[test]
+    fn bootstrap_client_rejects_swapped_and_unknown_fixed_identities() {
+        let digest = CredentialDigest::from([0x2a; 32]);
+
+        assert_eq!(
+            BootstrapClient::new(
+                PRIMARY_CLIENT_ID,
+                "swapped".to_owned(),
+                ClientRole::Hermes,
+                Some(SECONDARY_USER_ID),
+                digest,
+            )
+            .unwrap_err(),
+            BootstrapClientError::UnsupportedFixedIdentity,
+        );
+        assert_eq!(
+            BootstrapClient::new(
+                ClientId::new(),
+                "unknown".to_owned(),
+                ClientRole::Runner,
+                None,
+                digest,
+            )
+            .unwrap_err(),
+            BootstrapClientError::UnsupportedFixedIdentity,
         );
     }
 
