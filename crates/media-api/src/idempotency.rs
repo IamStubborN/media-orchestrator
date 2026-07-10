@@ -10,11 +10,16 @@ use media_contract::ApiError as ErrorBody;
 use media_core::{Actor, ClientId};
 use sha2::{Digest, Sha256};
 
-use crate::{ApiError, ApiState, RequestId, request_id::REQUEST_ID_HEADER};
+use crate::{ApiError, ApiState, MAX_REQUEST_BODY_BYTES, RequestId, request_id::REQUEST_ID_HEADER};
 
 const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
-const MAX_STORED_RESPONSE_BYTES: usize = 64 * 1024;
+// Current POST responses echo at most one request-bounded result_ref and add
+// fixed IDs, enum names, timestamps, and JSON framing. A second request-sized
+// allowance is therefore a conservative bound for every current route.
+const MAX_CURRENT_ROUTE_RESPONSE_BYTES: usize = MAX_REQUEST_BODY_BYTES + 1024;
+const MAX_STORED_RESPONSE_BYTES: usize = 2 * MAX_REQUEST_BODY_BYTES;
+const _: () = assert!(MAX_STORED_RESPONSE_BYTES >= MAX_CURRENT_ROUTE_RESPONSE_BYTES);
 
 /// Identity and fingerprint of one authenticated write request.
 #[derive(Clone, Eq, PartialEq)]
@@ -157,7 +162,7 @@ where
     };
     let method = request.method().as_str().as_bytes().to_vec();
     let path = request.uri().path().as_bytes().to_vec();
-    let body = match to_bytes(request.into_body(), MAX_STORED_RESPONSE_BYTES).await {
+    let body = match to_bytes(request.into_body(), MAX_REQUEST_BODY_BYTES).await {
         Ok(body) => body,
         Err(_) => return ApiError::invalid_body(&request_id).into_response(),
     };
@@ -171,8 +176,13 @@ where
     {
         Ok(Reservation::Reserved) => {}
         Ok(Reservation::Replay(response)) => {
-            return replay(response, &request_id)
-                .unwrap_or_else(|| ApiError::internal(&request_id).into_response());
+            return match replay(response, &request_id) {
+                Some(response) => response,
+                None => {
+                    let _ = state.idempotency().abort(idempotency_request).await;
+                    ApiError::internal(&request_id).into_response()
+                }
+            };
         }
         Ok(Reservation::Conflict) => {
             return ApiError::idempotency_conflict(&request_id).into_response();
@@ -297,9 +307,9 @@ fn replay(stored: StoredHttpResponse, fallback_request_id: &RequestId) -> Option
 
 #[cfg(test)]
 mod tests {
-    use media_core::PRIMARY_CLIENT_ID;
+    use media_core::{PRIMARY_CLIENT_ID, ClientId};
 
-    use super::{IdempotencyRequest, IdempotencyStore, StoredHttpResponse};
+    use super::{IdempotencyRequest, IdempotencyStore, StoredHttpResponse, fingerprint};
 
     #[test]
     fn port_is_object_safe() {
@@ -328,5 +338,33 @@ mod tests {
         let response_debug = format!("{response:?}");
         assert!(!response_debug.contains("private/content-type"));
         assert!(!response_debug.contains("private-response-body"));
+    }
+
+    #[test]
+    fn fingerprint_separates_client_method_path_and_exact_body_bytes() {
+        let other_client = ClientId::new();
+        let base = fingerprint(PRIMARY_CLIENT_ID, b"POST", b"/v1/jobs", b"{\"a\":1}");
+
+        assert_ne!(
+            base,
+            fingerprint(other_client, b"POST", b"/v1/jobs", b"{\"a\":1}")
+        );
+        assert_ne!(
+            base,
+            fingerprint(PRIMARY_CLIENT_ID, b"PUT", b"/v1/jobs", b"{\"a\":1}")
+        );
+        assert_ne!(
+            base,
+            fingerprint(PRIMARY_CLIENT_ID, b"POST", b"/v1/job", b"{\"a\":1}")
+        );
+        assert_ne!(
+            base,
+            fingerprint(PRIMARY_CLIENT_ID, b"POST", b"/v1/jobs", b"{ \"a\":1}")
+        );
+        assert_ne!(
+            fingerprint(PRIMARY_CLIENT_ID, b"PO", b"ST/v1/jobs", b"body"),
+            fingerprint(PRIMARY_CLIENT_ID, b"POST", b"/v1/jobs", b"body"),
+            "length-prefixing must make field boundaries unambiguous",
+        );
     }
 }

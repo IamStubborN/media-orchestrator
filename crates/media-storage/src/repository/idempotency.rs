@@ -47,7 +47,7 @@ impl StoredResponseRecord {
         if !(100..=599).contains(&status) {
             return Err(StoredResponseError::InvalidStatus);
         }
-        if content_type.trim().is_empty() {
+        if !content_type.is_empty() && content_type.trim().is_empty() {
             return Err(StoredResponseError::EmptyContentType);
         }
         Ok(Self {
@@ -223,7 +223,7 @@ impl SeaOrmIdempotencyRepository {
                 .execute_raw(Statement::from_sql_and_values(
                     DatabaseBackend::Postgres,
                     "DELETE FROM idempotency_records WHERE client_id = $1 \
-                     AND idempotency_key = $2 AND request_hash = $3 AND status = 'in_progress'",
+                     AND idempotency_key = $2 AND request_hash = $3",
                     [
                         client.into_uuid().into(),
                         key.to_owned().into(),

@@ -51,7 +51,10 @@ impl MigrationTrait for Migration {
                         status = 'completed'
                         AND response_status IS NOT NULL
                         AND response_content_type IS NOT NULL
-                        AND btrim(response_content_type) <> ''
+                        AND (
+                            response_content_type = ''
+                            OR btrim(response_content_type) <> ''
+                        )
                         AND response_body IS NOT NULL
                     )
                 ),

@@ -86,6 +86,66 @@ async fn completed_same_hash_replays_exact_response_and_changed_hash_conflicts()
 }
 
 #[tokio::test]
+async fn no_content_response_round_trips_with_absent_content_type_representation() {
+    let (_test_db, repository) = repository().await;
+    repository
+        .reserve(PRIMARY_CLIENT_ID, "empty-204", HASH_A, future_expiry())
+        .await
+        .unwrap();
+    let response = StoredResponseRecord::new(204, String::new(), Vec::new()).unwrap();
+
+    repository
+        .complete(PRIMARY_CLIENT_ID, "empty-204", HASH_A, response.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        repository
+            .reserve(PRIMARY_CLIENT_ID, "empty-204", HASH_A, future_expiry())
+            .await
+            .unwrap(),
+        ReservationRecord::Replay(response),
+    );
+}
+
+#[tokio::test]
+async fn abort_deletes_exact_completed_fingerprint_but_never_a_conflict() {
+    let (_test_db, repository) = repository().await;
+    let response = StoredResponseRecord::new(201, "application/json".to_owned(), vec![]).unwrap();
+    repository
+        .reserve(PRIMARY_CLIENT_ID, "discard", HASH_A, future_expiry())
+        .await
+        .unwrap();
+    repository
+        .complete(PRIMARY_CLIENT_ID, "discard", HASH_A, response.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        repository.abort(PRIMARY_CLIENT_ID, "discard", HASH_B).await,
+        Err(PortError::Conflict),
+    );
+    assert_eq!(
+        repository
+            .reserve(PRIMARY_CLIENT_ID, "discard", HASH_A, future_expiry())
+            .await
+            .unwrap(),
+        ReservationRecord::Replay(response),
+    );
+
+    repository
+        .abort(PRIMARY_CLIENT_ID, "discard", HASH_A)
+        .await
+        .unwrap();
+    assert_eq!(
+        repository
+            .reserve(PRIMARY_CLIENT_ID, "discard", HASH_A, future_expiry())
+            .await
+            .unwrap(),
+        ReservationRecord::Reserved,
+    );
+}
+
+#[tokio::test]
 async fn live_reservation_is_in_progress_abort_retries_and_expiry_replaces() {
     let (_test_db, repository) = repository().await;
     assert_eq!(

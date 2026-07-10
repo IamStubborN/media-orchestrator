@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex,
         atomic::AtomicBool,
@@ -215,13 +215,19 @@ impl LeaseStore for NoopLeaseStore {
 #[derive(Clone, Default)]
 pub struct FakeLeaseStore {
     lease: Arc<Mutex<Option<JobLease>>>,
+    lease_calls: Arc<AtomicUsize>,
 }
 
 impl FakeLeaseStore {
     pub fn with_lease(lease: JobLease) -> Self {
         Self {
             lease: Arc::new(Mutex::new(Some(lease))),
+            lease_calls: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    pub fn lease_calls(&self) -> usize {
+        self.lease_calls.load(Ordering::SeqCst)
     }
 }
 
@@ -232,6 +238,7 @@ impl LeaseStore for FakeLeaseStore {
         runner: ClientId,
         _: time::Duration,
     ) -> Result<Option<JobLease>, PortError> {
+        self.lease_calls.fetch_add(1, Ordering::SeqCst);
         Ok(self
             .lease
             .lock()
@@ -254,6 +261,78 @@ impl LeaseStore for FakeLeaseStore {
             .as_ref()
             .filter(|lease| lease.lease_id() == lease_id && lease.runner_client_id() == runner)
             .cloned())
+    }
+}
+
+#[derive(Clone)]
+pub struct ControlledIdempotencyStore {
+    reservations: Arc<Mutex<VecDeque<Reservation>>>,
+    fail_complete: bool,
+    fail_abort: bool,
+    complete_calls: Arc<AtomicUsize>,
+    abort_calls: Arc<AtomicUsize>,
+}
+
+impl ControlledIdempotencyStore {
+    pub fn new(reservations: impl IntoIterator<Item = Reservation>) -> Self {
+        Self {
+            reservations: Arc::new(Mutex::new(reservations.into_iter().collect())),
+            fail_complete: false,
+            fail_abort: false,
+            complete_calls: Arc::new(AtomicUsize::new(0)),
+            abort_calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    pub fn failing_complete(mut self) -> Self {
+        self.fail_complete = true;
+        self
+    }
+
+    pub fn failing_abort(mut self) -> Self {
+        self.fail_abort = true;
+        self
+    }
+
+    pub fn complete_calls(&self) -> usize {
+        self.complete_calls.load(Ordering::SeqCst)
+    }
+
+    pub fn abort_calls(&self) -> usize {
+        self.abort_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl IdempotencyStore for ControlledIdempotencyStore {
+    async fn reserve(&self, _: IdempotencyRequest) -> Result<Reservation, IdempotencyError> {
+        self.reservations
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or(IdempotencyError::Infrastructure)
+    }
+
+    async fn complete(
+        &self,
+        _: IdempotencyRequest,
+        _: StoredHttpResponse,
+    ) -> Result<(), IdempotencyError> {
+        self.complete_calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_complete {
+            Err(IdempotencyError::Infrastructure)
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn abort(&self, _: IdempotencyRequest) -> Result<(), IdempotencyError> {
+        self.abort_calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_abort {
+            Err(IdempotencyError::Infrastructure)
+        } else {
+            Ok(())
+        }
     }
 }
 

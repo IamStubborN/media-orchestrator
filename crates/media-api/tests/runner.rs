@@ -118,7 +118,10 @@ async fn runner_can_lease_and_heartbeat_with_exact_request_ids() {
 
 #[tokio::test]
 async fn empty_queue_returns_no_content() {
-    let response = app(FakeLeaseStore::default(), ClientId::new())
+    let leases = FakeLeaseStore::default();
+    let app = app(leases.clone(), ClientId::new());
+    let first = app
+        .clone()
         .oneshot(post(
             "/v1/runner/leases",
             RUNNER_TOKEN,
@@ -129,13 +132,28 @@ async fn empty_queue_returns_no_content() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(first.status(), StatusCode::NO_CONTENT);
+    assert!(first.headers().get(header::CONTENT_TYPE).is_none());
     assert!(
-        to_bytes(response.into_body(), usize::MAX)
+        to_bytes(first.into_body(), usize::MAX)
             .await
             .unwrap()
             .is_empty()
     );
+
+    let replay = app
+        .oneshot(post(
+            "/v1/runner/leases",
+            RUNNER_TOKEN,
+            "empty-lease",
+            "empty-lease-replay",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::NO_CONTENT);
+    assert!(replay.headers().get(header::CONTENT_TYPE).is_none());
+    assert_eq!(leases.lease_calls(), 1);
 }
 
 #[tokio::test]
@@ -189,4 +207,38 @@ async fn user_cannot_use_runner_routes_and_ttl_override_is_unknown_json() {
         .unwrap();
     assert_eq!(ttl_response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(error(ttl_response).await.code, ApiErrorCode::InvalidRequest);
+}
+
+#[tokio::test]
+async fn heartbeat_rejects_ttl_override_and_missing_lease_is_distinct_not_found() {
+    let expected = lease();
+    let other_runner = ClientId::new();
+    let app = app(FakeLeaseStore::with_lease(expected), other_runner);
+    let missing_id = LeaseId::new();
+    let missing = app
+        .clone()
+        .oneshot(post(
+            &format!("/v1/runner/leases/{missing_id}/heartbeat"),
+            RUNNER_TOKEN,
+            "missing-heartbeat",
+            "missing-heartbeat-request",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    assert_eq!(error(missing).await.code, ApiErrorCode::LeaseNotFound);
+
+    let ttl = app
+        .oneshot(post(
+            &format!("/v1/runner/leases/{missing_id}/heartbeat"),
+            RUNNER_TOKEN,
+            "heartbeat-ttl",
+            "heartbeat-ttl-request",
+            Body::from(r#"{"ttl":300}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(ttl.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(error(ttl).await.code, ApiErrorCode::InvalidRequest);
 }

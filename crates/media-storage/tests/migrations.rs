@@ -456,6 +456,20 @@ async fn postgres_enforces_domain_and_concurrency_invariants() {
     )
     .await;
 
+    execute(
+        db,
+        "INSERT INTO idempotency_records
+           (id, client_id, idempotency_key, request_hash, status,
+            response_status, response_content_type, response_body, expires_at)
+         VALUES
+           ('00000000-0000-0023-0000-000000000002',
+            '00000000-0000-0000-0002-000000000001', 'empty-204',
+            decode(repeat('04', 32), 'hex'), 'completed', 204, '', ''::bytea,
+            now() + interval '1 day')",
+    )
+    .await
+    .unwrap();
+
     let database_backend = db.get_database_backend();
     assert_eq!(database_backend, sea_orm::DbBackend::Postgres);
 }
