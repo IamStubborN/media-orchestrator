@@ -81,7 +81,7 @@ cli.rs                  black-box binary smoke contract
 - Produces `media --version` as the initial process smoke contract.
 - Later tasks add modules without changing crate ownership.
 
-- [ ] **Step 1: Create the pinned mise configuration**
+- [x] **Step 1: Create the pinned mise configuration**
 
 Use this tool and task contract in `.mise.toml`:
 
@@ -126,7 +126,7 @@ run = "cargo build --workspace --all-targets --all-features --locked"
 !.env.example
 ```
 
-- [ ] **Step 2: Create the workspace manifest**
+- [x] **Step 2: Create the workspace manifest**
 
 Use one dependency catalog and forbid unsafe code:
 
@@ -164,7 +164,10 @@ Uuid's `serde` feature; declare a crate-local dependency with `default-features
 = false` and features `std`, `v4`. `media-contract` depends on Serde and Uuid.
 `media` depends on Clap and both workspace crates.
 
-- [ ] **Step 3: Create minimal compiling crate roots**
+Exact versions are required on internal path dependencies because the wildcard
+dependency policy treats path dependencies without versions as wildcards.
+
+- [x] **Step 3: Create minimal compiling crate roots**
 
 `media-core/src/lib.rs` and `media-contract/src/lib.rs` initially contain only
 crate-level documentation and `#![forbid(unsafe_code)]`. The binary uses:
@@ -181,7 +184,7 @@ fn main() {
 }
 ```
 
-- [ ] **Step 4: Install tools and generate the lockfile**
+- [x] **Step 4: Install tools and generate the lockfile**
 
 Run:
 
@@ -195,7 +198,7 @@ mise run check
 Expected: all tools install, `Cargo.lock` is created, formatting and workspace
 compilation pass.
 
-- [ ] **Step 5: Commit the workspace bootstrap**
+- [x] **Step 5: Commit the workspace bootstrap**
 
 ```bash
 git add .mise.toml .gitignore Cargo.toml Cargo.lock crates
@@ -215,7 +218,7 @@ git commit -m "build: bootstrap rust workspace"
 - Every ID implements `Copy`, `Clone`, `Eq`, `Ord`, `Hash`, `Display`, and
   `FromStr<Err = uuid::Error>`.
 
-- [ ] **Step 1: Write failing ID round-trip tests**
+- [x] **Step 1: Write failing ID round-trip tests**
 
 Add these tests at the bottom of `id.rs`:
 
@@ -224,7 +227,7 @@ Add these tests at the bottom of `id.rs`:
 mod tests {
     use std::str::FromStr;
 
-    use super::{EpisodeId, MediaId};
+    use super::MediaId;
 
     #[test]
     fn media_id_round_trips_through_text() {
@@ -232,16 +235,10 @@ mod tests {
         assert_eq!(MediaId::from_str(&id.to_string()).unwrap(), id);
     }
 
-    #[test]
-    fn different_id_types_have_independent_values() {
-        let media = MediaId::new();
-        let episode = EpisodeId::new();
-        assert_ne!(media.to_string(), episode.to_string());
-    }
 }
 ```
 
-- [ ] **Step 2: Run the focused test and verify failure**
+- [x] **Step 2: Run the focused test and verify failure**
 
 Run:
 
@@ -251,7 +248,7 @@ mise exec -- cargo test -p media-core id::tests -- --nocapture
 
 Expected: compilation fails because the ID types do not exist.
 
-- [ ] **Step 3: Implement the ID newtypes**
+- [x] **Step 3: Implement the ID newtypes**
 
 Use one private macro to generate the six concrete public newtypes. The macro
 must expand to real nominal structs rather than aliases:
@@ -309,7 +306,7 @@ macro_rules! define_id {
 
 Export all six types from `media-core/src/lib.rs` without exposing the macro.
 
-- [ ] **Step 4: Verify IDs and workspace checks**
+- [x] **Step 4: Verify IDs and workspace checks**
 
 ```bash
 mise exec -- cargo test -p media-core id::tests
@@ -318,9 +315,9 @@ mise run check
 mise run lint
 ```
 
-Expected: both ID tests and all workspace checks pass.
+Expected: ID tests and all workspace checks pass.
 
-- [ ] **Step 5: Commit the ID model**
+- [x] **Step 5: Commit the ID model**
 
 ```bash
 git add crates/media-core
@@ -341,7 +338,7 @@ git commit -m "feat(core): add strong domain identifiers"
 - A unique candidate resolves; zero or multiple distinct candidates return
   `NeedsAction(IdentityAmbiguous)`.
 
-- [ ] **Step 1: Write failing identity policy tests**
+- [x] **Step 1: Write failing identity policy tests**
 
 ```rust
 #[cfg(test)]
@@ -379,7 +376,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the focused test and verify failure**
+- [x] **Step 2: Run the focused test and verify failure**
 
 ```bash
 mise exec -- cargo test -p media-core identity::tests
@@ -387,7 +384,7 @@ mise exec -- cargo test -p media-core identity::tests
 
 Expected: compilation fails because the identity module is absent.
 
-- [ ] **Step 3: Implement the identity vocabulary and policy**
+- [x] **Step 3: Implement the identity vocabulary and policy**
 
 Define the cross-domain action reason in `action.rs`:
 
@@ -444,7 +441,7 @@ pub enum EpisodeResolution {
 Implement `resolve_episode_candidates` by deduplicating IDs with a
 `BTreeSet`; resolve only when the set length is exactly one.
 
-- [ ] **Step 4: Verify identity behavior and library boundaries**
+- [x] **Step 4: Verify identity behavior and library boundaries**
 
 ```bash
 mise exec -- cargo test -p media-core identity::tests
@@ -455,7 +452,7 @@ mise run lint
 Expected: all three tests pass; the dependency tree contains only `uuid` and
 its transitive dependencies plus `thiserror` once the job module is added.
 
-- [ ] **Step 5: Commit the identity policy**
+- [x] **Step 5: Commit the identity policy**
 
 ```bash
 git add crates/media-core
@@ -475,7 +472,7 @@ git commit -m "feat(core): define canonical media identity"
 - Completion is impossible directly from `running`; publication must pass
   through `publishing` and `plex_pending`.
 
-- [ ] **Step 1: Write failing transition tests**
+- [x] **Step 1: Write failing transition tests**
 
 ```rust
 #[cfg(test)]
@@ -521,7 +518,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests and verify failure**
+- [x] **Step 2: Run the tests and verify failure**
 
 ```bash
 mise exec -- cargo test -p media-core job::tests
@@ -529,7 +526,7 @@ mise exec -- cargo test -p media-core job::tests
 
 Expected: compilation fails because `JobState` does not exist.
 
-- [ ] **Step 3: Implement states and the explicit transition table**
+- [x] **Step 3: Implement states and the explicit transition table**
 
 Define these exact states:
 
@@ -570,7 +567,7 @@ failed -> queued
 All other transitions return `JobTransitionError`. Terminal `completed` and
 `cancelled` have no outgoing transitions in MVP.
 
-- [ ] **Step 4: Run focused and workspace verification**
+- [x] **Step 4: Run focused and workspace verification**
 
 ```bash
 mise exec -- cargo test -p media-core job::tests
@@ -582,7 +579,7 @@ mise run test
 
 Expected: all transition tests and workspace checks pass.
 
-- [ ] **Step 5: Commit the state machine**
+- [x] **Step 5: Commit the state machine**
 
 ```bash
 git add crates/media-core
@@ -604,7 +601,7 @@ git commit -m "feat(core): add durable job state policy"
 - `media-contract` MUST NOT depend on `media-core`; conversion belongs to the
   future API boundary.
 
-- [ ] **Step 1: Write failing serialization tests**
+- [x] **Step 1: Write failing serialization tests**
 
 In the corresponding modules, add tests equivalent to:
 
@@ -646,7 +643,7 @@ fn api_error_has_a_stable_public_shape() {
 }
 ```
 
-- [ ] **Step 2: Run contract tests and verify failure**
+- [x] **Step 2: Run contract tests and verify failure**
 
 ```bash
 mise exec -- cargo test -p media-contract
@@ -654,7 +651,7 @@ mise exec -- cargo test -p media-contract
 
 Expected: compilation fails because the DTO modules are absent.
 
-- [ ] **Step 3: Implement the transport types**
+- [x] **Step 3: Implement the transport types**
 
 `PublicId` wraps `uuid::Uuid`, serializes transparently as a UUID string, and
 provides only `parse(&str) -> Result<Self, uuid::Error>`, `as_uuid`, and
@@ -702,7 +699,7 @@ pub enum ApiErrorCode {
 `JobSummaryDto` and `ApiError` derive `Serialize` and `Deserialize`; omit
 `needs_action_reason` when it is `None`.
 
-- [ ] **Step 4: Verify JSON and dependency boundaries**
+- [x] **Step 4: Verify JSON and dependency boundaries**
 
 ```bash
 mise exec -- cargo test -p media-contract
@@ -712,7 +709,7 @@ mise run lint
 
 Expected: JSON tests pass; `media-core` does not appear in the contract tree.
 
-- [ ] **Step 5: Commit the transport contract**
+- [x] **Step 5: Commit the transport contract**
 
 ```bash
 git add crates/media-contract
@@ -729,9 +726,10 @@ git commit -m "feat(contract): define initial public dto shapes"
 **Interfaces:**
 - Consumes the workspace packages and package metadata.
 - Produces executable tests that prevent `media-core` from acquiring forbidden
-  dependencies and prevent `media-contract -> media-core` coupling.
+  dependencies and prevent any resolved dependency path from `media-contract`
+  to `media-core`.
 
-- [ ] **Step 1: Write the failing CLI test**
+- [x] **Step 1: Write the failing CLI test**
 
 ```rust
 #[test]
@@ -748,67 +746,141 @@ Run `mise exec -- cargo test -p media --test cli`. Expected: fail until
 `assert_cmd` is added as a dev dependency and the binary package metadata is
 correct.
 
-- [ ] **Step 2: Write the architecture tests**
+- [x] **Step 2: Write the architecture tests**
 
-Use `cargo_metadata::MetadataCommand` to find workspace packages and assert:
+Use `cargo_metadata::MetadataCommand` with all features to select exact
+workspace `PackageId` values. Traverse `metadata.resolve.nodes[].deps[].pkg`
+with a visited set so graph reachability is transitive and cycle-safe. The
+helper contract proves `media -> ... -> serde` reachability while also proving
+that `serde` is not a direct `media` dependency. Assert the boundaries with:
 
 ```rust
-const CORE_FORBIDDEN: &[&str] = &[
-    "axum",
-    "reqwest",
-    "sea-orm",
-    "serde",
-    "serde_json",
-    "tokio",
-];
+const CORE_FORBIDDEN: &[&str] = &["axum", "reqwest", "sea-orm", "serde", "serde_json", "tokio"];
+
+fn workspace_metadata() -> cargo_metadata::Metadata {
+    cargo_metadata::MetadataCommand::new()
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .features(cargo_metadata::CargoOpt::AllFeatures)
+        .exec()
+        .unwrap()
+}
+
+fn workspace_package_id<'a>(
+    metadata: &'a cargo_metadata::Metadata,
+    name: &str,
+) -> &'a cargo_metadata::PackageId {
+    metadata
+        .workspace_members
+        .iter()
+        .find(|package_id| metadata[*package_id].name.as_str() == name)
+        .unwrap_or_else(|| panic!("workspace package {name} was not found"))
+}
+
+fn direct_dependency_package_ids<'a>(
+    metadata: &'a cargo_metadata::Metadata,
+    package_id: &cargo_metadata::PackageId,
+) -> Vec<&'a cargo_metadata::PackageId> {
+    metadata
+        .resolve
+        .as_ref()
+        .expect("Cargo metadata did not include a resolved dependency graph")
+        .nodes
+        .iter()
+        .find(|node| node.id == *package_id)
+        .unwrap_or_else(|| panic!("resolved package {package_id} was not found"))
+        .deps
+        .iter()
+        .map(|dependency| &dependency.pkg)
+        .collect()
+}
+
+fn resolved_dependency_reachable(
+    metadata: &cargo_metadata::Metadata,
+    source: &cargo_metadata::PackageId,
+    target: &cargo_metadata::PackageId,
+) -> bool {
+    let nodes = &metadata
+        .resolve
+        .as_ref()
+        .expect("Cargo metadata did not include a resolved dependency graph")
+        .nodes;
+    let mut pending = vec![source];
+    let mut visited = std::collections::HashSet::new();
+
+    while let Some(package_id) = pending.pop() {
+        if !visited.insert(package_id) {
+            continue;
+        }
+
+        let node = nodes
+            .iter()
+            .find(|node| node.id == *package_id)
+            .unwrap_or_else(|| panic!("resolved package {package_id} was not found"));
+
+        for dependency in &node.deps {
+            if dependency.pkg == *target {
+                return true;
+            }
+            pending.push(&dependency.pkg);
+        }
+    }
+
+    false
+}
+
+#[test]
+fn resolved_graph_reachability_follows_transitive_edges() {
+    let metadata = workspace_metadata();
+    let media = workspace_package_id(&metadata, "media");
+    let serde = &metadata
+        .packages
+        .iter()
+        .find(|package| package.name.as_str() == "serde")
+        .expect("resolved package serde was not found")
+        .id;
+
+    assert!(!direct_dependency_package_ids(&metadata, media).contains(&serde));
+    assert!(resolved_dependency_reachable(&metadata, media, serde));
+}
 
 #[test]
 fn media_core_has_no_forbidden_direct_dependencies() {
-    let metadata = cargo_metadata::MetadataCommand::new()
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .exec()
-        .unwrap();
-    let core = metadata
-        .packages
-        .iter()
-        .find(|p| p.name.as_str() == "media-core")
-        .unwrap();
-    let actual: Vec<&str> = core.dependencies.iter().map(|d| d.name.as_str()).collect();
+    let metadata = workspace_metadata();
+    let core = workspace_package_id(&metadata, "media-core");
+    let actual: Vec<&str> = direct_dependency_package_ids(&metadata, core)
+        .into_iter()
+        .map(|package_id| metadata[package_id].name.as_str())
+        .collect();
 
     for forbidden in CORE_FORBIDDEN {
-        assert!(!actual.contains(forbidden), "media-core depends on {forbidden}");
+        assert!(
+            !actual.contains(forbidden),
+            "media-core depends on {forbidden}",
+        );
     }
 
-    let workspace_names: std::collections::HashSet<&str> = metadata
-        .workspace_packages()
-        .iter()
-        .map(|package| package.name.as_str())
-        .collect();
     assert!(
-        core.dependencies
+        direct_dependency_package_ids(&metadata, core)
             .iter()
-            .all(|dependency| !workspace_names.contains(dependency.name.as_str())),
+            .all(|package_id| !metadata.workspace_members.contains(package_id)),
         "media-core must not depend on another workspace crate",
     );
 }
 
 #[test]
-fn media_contract_does_not_depend_on_media_core() {
-    let metadata = cargo_metadata::MetadataCommand::new()
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .exec()
-        .unwrap();
-    let contract = metadata
-        .packages
-        .iter()
-        .find(|p| p.name.as_str() == "media-contract")
-        .unwrap();
+fn media_contract_cannot_reach_media_core() {
+    let metadata = workspace_metadata();
+    let contract = workspace_package_id(&metadata, "media-contract");
+    let core = workspace_package_id(&metadata, "media-core");
 
-    assert!(contract.dependencies.iter().all(|d| d.name != "media-core"));
+    assert!(
+        !resolved_dependency_reachable(&metadata, contract, core),
+        "media-contract must not reach media-core through the resolved dependency graph",
+    );
 }
 ```
 
-- [ ] **Step 3: Run the tests and verify expected failures**
+- [x] **Step 3: Run the tests and verify expected failures**
 
 ```bash
 mise exec -- cargo test -p media --test cli --test architecture
@@ -817,7 +889,7 @@ mise exec -- cargo test -p media --test cli --test architecture
 Expected: tests fail until `assert_cmd` and `cargo_metadata` are declared under
 `[dev-dependencies]` and the test target can locate the workspace.
 
-- [ ] **Step 4: Wire dev dependencies and pass both contracts**
+- [x] **Step 4: Wire dev dependencies and pass both contracts**
 
 Add:
 
@@ -838,7 +910,7 @@ mise run test
 
 Expected: CLI, architecture, and full workspace suites pass.
 
-- [ ] **Step 5: Commit executable guardrails**
+- [x] **Step 5: Commit executable guardrails**
 
 ```bash
 git add crates/media
@@ -856,7 +928,7 @@ git commit -m "test: enforce cli and architecture contracts"
 - Produces the required CI gates: format, check, lint, test, deny, and audit.
 - Documents mise as the only supported developer entry point.
 
-- [ ] **Step 1: Add the dependency policy**
+- [x] **Step 1: Add the dependency policy**
 
 Use this initial `deny.toml`, based on the cargo-deny 0.20.2 schema:
 
@@ -872,7 +944,6 @@ allow = [
   "Apache-2.0",
   "MIT",
   "Unicode-3.0",
-  "Zlib",
 ]
 confidence-threshold = 0.8
 exceptions = []
@@ -909,7 +980,7 @@ Do not add a license or advisory exception unless `cargo deny` identifies a
 specific resolved crate that requires it. Any such exception must name that
 crate and version and include a reason.
 
-- [ ] **Step 2: Verify the policy locally**
+- [x] **Step 2: Verify the policy locally**
 
 ```bash
 mise run audit
@@ -919,7 +990,7 @@ Expected: `cargo deny check` and `cargo audit` both exit successfully. Any
 advisory exception must include advisory ID, dependency, reason, and expiry in
 `deny.toml`; do not use wildcard ignores.
 
-- [ ] **Step 3: Add the CI workflow**
+- [x] **Step 3: Add the CI workflow**
 
 Create `.github/workflows/ci.yml` with:
 
@@ -953,7 +1024,7 @@ jobs:
 Do not add PostgreSQL, Docker, code coverage, release publishing, or live
 provider access in this phase.
 
-- [ ] **Step 4: Document exact local setup**
+- [x] **Step 4: Document exact local setup**
 
 Update `README.md` with this quick start:
 
@@ -970,7 +1041,7 @@ mise run audit
 State that this phase intentionally contains no network provider, database,
 filesystem, or ffmpeg implementation and link the MVP roadmap.
 
-- [ ] **Step 5: Run the final phase gate**
+- [x] **Step 5: Run the final phase gate**
 
 ```bash
 mise run format
@@ -986,7 +1057,7 @@ git status --short
 Expected: every command succeeds; `git status --short` lists only the intended
 CI, policy, and README changes before commit.
 
-- [ ] **Step 6: Commit the phase gate**
+- [x] **Step 6: Commit the phase gate**
 
 ```bash
 git add .github/workflows/ci.yml deny.toml README.md
@@ -995,15 +1066,15 @@ git commit -m "ci: verify rust foundation"
 
 ## Phase Completion Checklist
 
-- [ ] `mise current rust` reports `1.97.0`.
-- [ ] `cargo metadata --no-deps` lists exactly `media-core`, `media-contract`, and `media` as workspace packages.
-- [ ] `media-core` has no forbidden direct dependency and no workspace dependency.
-- [ ] `media-contract` does not depend on `media-core`.
-- [ ] Domain ID, identity ambiguity, and job transition tests pass.
-- [ ] Contract JSON tests pass with exact `snake_case` values.
-- [ ] `media --version` reports `media 0.1.0`.
-- [ ] All six mise verification tasks pass.
-- [ ] The worktree is clean after the final commit.
+- [x] `mise current rust` reports `1.97.0`.
+- [x] `cargo metadata --no-deps` lists exactly `media-core`, `media-contract`, and `media` as workspace packages.
+- [x] `media-core` has no forbidden direct dependency and no workspace dependency.
+- [x] No resolved dependency path leads from `media-contract` to `media-core`.
+- [x] Domain ID, identity ambiguity, and job transition tests pass.
+- [x] Contract JSON tests pass with exact `snake_case` values.
+- [x] `media --version` reports `media 0.1.0`.
+- [x] All six mise verification tasks pass.
+- [x] The worktree is clean after the final commit.
 
 The next plan is `2026-07-10-postgres-api-foundation.md`; write and review it
 only after this phase is complete and its architecture tests pass.

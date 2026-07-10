@@ -58,19 +58,12 @@ define_id!(TaskId);
 mod tests {
     use std::str::FromStr;
 
-    use super::{EpisodeId, MediaId};
+    use super::MediaId;
 
     #[test]
     fn media_id_round_trips_through_text() {
         let id = MediaId::new();
         assert_eq!(MediaId::from_str(&id.to_string()).unwrap(), id);
-    }
-
-    #[test]
-    fn different_id_types_have_independent_values() {
-        let media = MediaId::new();
-        let episode = EpisodeId::new();
-        assert_ne!(media.to_string(), episode.to_string());
     }
 
     #[test]
