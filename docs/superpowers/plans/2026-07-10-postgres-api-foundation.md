@@ -113,15 +113,15 @@ tests/postgres.rs
 
 ```rust
 pub enum ClientRole { Hermes, Runner }
-pub struct Actor { pub client_id: ClientId, pub user_id: Option<UserId>, pub role: ClientRole }
+pub struct Actor { client_id: ClientId, user_id: Option<UserId>, role: ClientRole }
 pub struct CredentialDigest([u8; 32]);
-pub struct BootstrapClient { pub client_id: ClientId, pub name: String, pub role: ClientRole, pub user_id: Option<UserId>, pub digest: CredentialDigest }
+pub struct BootstrapClient { client_id: ClientId, name: String, role: ClientRole, user_id: Option<UserId>, digest: CredentialDigest }
 pub enum Provider { Rezka, Prowlarr }
 pub enum NotifyScope { Initiator, Family }
-pub struct Job { pub id: JobId, pub owner_id: UserId, pub provider: Provider, pub result_ref: String, pub state: JobState, pub needs_action_reason: Option<NeedsActionReason>, pub notify_scope: NotifyScope }
-pub struct NewJob { pub id: JobId, pub owner_id: UserId, pub provider: Provider, pub result_ref: String, pub notify_scope: NotifyScope }
+pub struct Job { /* private fields; validated rehydration and read-only accessors */ }
+pub struct NewJob { /* private fields; validated constructor and read-only accessors */ }
 pub struct QueueStatus { pub queued: u64, pub active: bool }
-pub struct JobLease { pub lease_id: LeaseId, pub job: Job, pub runner_client_id: ClientId, pub expires_at: time::OffsetDateTime }
+pub struct JobLease { /* private fields and read-only accessors */ }
 ```
 
 ```rust
@@ -150,15 +150,15 @@ pub trait ReadinessPort: Send + Sync {
 }
 ```
 
-- [ ] Write failing tests proving Hermes actors require a user, runner actors reject user job access, new jobs always use the authenticated actor's user, and empty result references are rejected.
-- [ ] Run `mise exec -- cargo test -p media-core actor application` and confirm failure from missing types/functions.
-- [ ] Add `ClientId` and `LeaseId` through the existing nominal-ID macro; define the five fixed identity constants verbatim; add `async-trait` and `time` without adding I/O dependencies.
-- [ ] Make `CredentialDigest` constructible only from `[u8; 32]`, expose bytes only by reference to adapters, and implement redacted `Debug`.
-- [ ] Implement `Actor::require_user`, `Actor::require_runner`, `NewJobCommand`, `JobApplication::create_job`, `get_job`, and `queue_status` against `Arc<dyn JobStore>`.
-- [ ] Implement `LeaseApplication` against `Arc<dyn LeaseStore>` and require a runner actor before leasing or heartbeat.
-- [ ] Use typed `ApplicationError` variants: `Forbidden`, `InvalidInput`, `NotFound`, `Conflict`, and `Infrastructure`.
-- [ ] Run focused tests, `mise run format`, `check`, `lint`, and `test`.
-- [ ] Commit: `feat(core): define application ports and actors`.
+- [x] Write failing tests proving Hermes actors require a user, runner actors reject user job access, new jobs always use the authenticated actor's user, and empty result references are rejected.
+- [x] Run `mise exec -- cargo test -p media-core actor application` and confirm failure from missing types/functions.
+- [x] Add `ClientId` and `LeaseId` through the existing nominal-ID macro; define the five fixed identity constants verbatim; add `async-trait` and `time` without adding I/O dependencies.
+- [x] Make `CredentialDigest` constructible only from `[u8; 32]`, expose bytes only by reference to adapters, and implement redacted `Debug`.
+- [x] Implement `Actor::require_user`, `Actor::require_runner`, `NewJobCommand`, `JobApplication::create_job`, `get_job`, and `queue_status` against `Arc<dyn JobStore>`.
+- [x] Implement `LeaseApplication` against `Arc<dyn LeaseStore>` and require a runner actor before leasing or heartbeat.
+- [x] Use typed `ApplicationError` variants: `Forbidden`, `InvalidInput`, `NotFound`, `Conflict`, and `Infrastructure`.
+- [x] Run focused tests, `mise run format`, `check`, `lint`, and `test`.
+- [x] Commit: `feat(core): define application ports and actors`.
 
 ## Task 2: Expand the Versioned HTTP Contract
 
@@ -178,12 +178,12 @@ pub struct QueueStatusDto { pub queued: u64, pub active: bool }
 pub struct LeaseDto { pub lease_id: PublicId, pub job: JobDto, pub expires_at: String }
 ```
 
-- [ ] Write failing JSON-shape tests for every request/response, including the invariant that `CreateJobRequest` has no owner field and rejects unknown fields.
-- [ ] Add `#[serde(deny_unknown_fields)]` to write requests and exact `snake_case` enums for provider and notification scope.
-- [ ] Add public error codes `missing_idempotency_key`, `idempotency_conflict`, `idempotency_in_progress`, `invalid_token`, and `lease_not_found`.
-- [ ] Add round-trip tests for all DTOs and golden JSON assertions for job creation and lease responses.
-- [ ] Confirm `cargo tree -p media-contract` contains no `media-core`.
-- [ ] Run workspace gates and commit: `feat(contract): add job and lease api contracts`.
+- [x] Write failing JSON-shape tests for every request/response, including the invariant that `CreateJobRequest` has no owner field and rejects unknown fields.
+- [x] Add `#[serde(deny_unknown_fields)]` to write requests and exact `snake_case` enums for provider and notification scope.
+- [x] Add public error codes `missing_idempotency_key`, `idempotency_conflict`, `idempotency_in_progress`, `invalid_token`, and `lease_not_found`.
+- [x] Add round-trip tests for all DTOs and golden JSON assertions for job creation and lease responses.
+- [x] Confirm `cargo tree -p media-contract` contains no `media-core`.
+- [x] Run workspace gates and commit: `feat(contract): add job and lease api contracts`.
 
 ## Task 3: Create Explicit PostgreSQL Migrations
 
@@ -224,14 +224,14 @@ future values can be migrated transactionally without PostgreSQL enum DDL.
 `job_leases` contains `slot smallint NOT NULL UNIQUE CHECK (slot = 1)` to make
 the one-active-lease MVP invariant database-enforced.
 
-- [ ] Write a failing Testcontainers PostgreSQL test that runs `Migrator::up`, verifies every table and fixed user row, then runs `Migrator::down` and verifies removal.
-- [ ] Add pinned SeaORM features only: `macros`, `runtime-tokio-rustls`, `sqlx-postgres`, `with-json`, `with-time`, and `with-uuid`; disable default features where possible.
-- [ ] Implement migrations with foreign keys, unique constraints, and checks for media kind/ordering, actor role/user mapping, job state/reason, non-negative ordinals/attempts, idempotency status, and lease slot.
-- [ ] Seed only `primary` and `secondary`; never seed tokens.
-- [ ] Add tests that invalid series ordering, invalid job reason/state combinations, duplicate provider mappings, and a second lease slot fail at PostgreSQL level.
-- [ ] Verify down migrations in exact reverse order and no schema synchronization API is used.
-- [ ] Add `mise run test-integration` for the PostgreSQL/Testcontainers suite and fail clearly when Docker is unavailable; pin the PostgreSQL 17 Alpine image by digest in test support.
-- [ ] Commit: `feat(storage): add explicit postgres migrations`.
+- [x] Write a failing Testcontainers PostgreSQL test that runs `Migrator::up`, verifies every table and fixed user row, then runs `Migrator::down` and verifies removal.
+- [x] Add pinned SeaORM features only: `macros`, `runtime-tokio-rustls`, `sqlx-postgres`, `with-json`, `with-time`, and `with-uuid`; disable default features where possible.
+- [x] Implement migrations with foreign keys, unique constraints, and checks for media kind/ordering, actor role/user mapping, job state/reason, non-negative ordinals/attempts, idempotency status, and lease slot.
+- [x] Seed only `primary` and `secondary`; never seed tokens.
+- [x] Add tests that invalid series ordering, invalid job reason/state combinations, duplicate provider mappings, and a second lease slot fail at PostgreSQL level.
+- [x] Verify down migrations in exact reverse order and no schema synchronization API is used.
+- [x] Add `mise run test-integration` for the PostgreSQL/Testcontainers suite and fail clearly when Docker is unavailable; pin the PostgreSQL 17 Alpine image by digest in test support.
+- [x] Commit: `feat(storage): add explicit postgres migrations`.
 
 ## Task 4: Add SeaORM Entities and Identity/Client Adapters
 
