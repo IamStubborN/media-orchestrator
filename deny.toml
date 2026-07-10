@@ -2,13 +2,20 @@
 all-features = true
 
 [advisories]
-ignore = []
+# SeaORM 2.0.0-rc.42 macros require sea-bae -> proc-macro-error2. The
+# advisory is informational (unmaintained), has no safe upgrade, and is
+# revisited whenever SeaORM is upgraded.
+ignore = ["RUSTSEC-2026-0173"]
 
 [licenses]
 allow = [
   "Apache-2.0",
+  "BSD-3-Clause",
+  "CDLA-Permissive-2.0",
+  "ISC",
   "MIT",
   "Unicode-3.0",
+  "Zlib",
 ]
 confidence-threshold = 0.8
 exceptions = []

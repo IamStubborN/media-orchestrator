@@ -1,0 +1,4 @@
+[advisories]
+# SeaORM 2.0.0-rc.42 macros require sea-bae -> proc-macro-error2. This is an
+# unmaintained advisory with no safe upgrade, not a known vulnerability.
+ignore = ["RUSTSEC-2026-0173"]
