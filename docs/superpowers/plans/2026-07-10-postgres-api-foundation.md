@@ -328,14 +328,14 @@ and Rust's orphan rules.
 - Create: `crates/media-api/tests/idempotency.rs`
 - Create: `crates/media-api/tests/runner.rs`
 
-- [ ] Write failing handler tests proving Primary cannot read Secondary's job, runner cannot create/read user jobs, request owner spoofing is rejected as unknown JSON, and queue status exposes no private job details.
-- [ ] Implement explicit DTO/domain conversions in `convert.rs`; no derive-based domain serialization.
-- [ ] Require `Idempotency-Key` on POST routes, limit it to 1-128 visible ASCII characters, and fingerprint authenticated client ID + method + path + body bytes.
-- [ ] Buffer handler responses: persist responses below 500; abort reservation on 500 so retry is possible; replay persisted status/content-type/body exactly.
-- [ ] Test duplicate same-body replay creates one job, changed-body reuse returns 409, concurrent duplicate returns `idempotency_in_progress`, and a 500 can retry.
-- [ ] Implement lease and heartbeat routes restricted to runner actors. Both operations use the server-configured TTL; neither request accepts a TTL override.
-- [ ] Test lease response, empty queue 204, wrong runner heartbeat 404, and exact request ID propagation.
-- [ ] Run router/workspace gates; commit: `feat(api): expose idempotent job and lease routes`.
+- [x] Write failing handler tests proving Primary cannot read Secondary's job, runner cannot create/read user jobs, request owner spoofing is rejected as unknown JSON, and queue status exposes no private job details.
+- [x] Implement explicit DTO/domain conversions in `convert.rs`; no derive-based domain serialization.
+- [x] Require `Idempotency-Key` on POST routes, limit it to 1-128 visible ASCII characters, and fingerprint authenticated client ID + method + path + body bytes.
+- [x] Buffer handler responses: persist responses below 500; abort reservation on 500 so retry is possible; replay persisted status/content-type/body exactly.
+- [x] Test duplicate same-body replay creates one job, changed-body reuse returns 409, concurrent duplicate returns `idempotency_in_progress`, and a 500 can retry.
+- [x] Implement lease and heartbeat routes restricted to runner actors. Both operations use the server-configured TTL; neither request accepts a TTL override.
+- [x] Test lease response, empty queue 204, wrong runner heartbeat 404, and exact request ID propagation.
+- [x] Run router/workspace gates; commit: `feat(api): expose idempotent job and lease routes`.
 
 ## Task 8: Compose Service, Migrations, and HTTP CLI
 
