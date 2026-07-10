@@ -90,10 +90,27 @@ pub struct LeaseApplication {
     ttl: time::Duration,
 }
 
+const MIN_LEASE_TTL: time::Duration = time::Duration::seconds(30);
+const MAX_LEASE_TTL: time::Duration = time::Duration::seconds(300);
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
+pub enum LeaseTtlError {
+    #[error("lease TTL {actual:?} is shorter than 30 seconds")]
+    TooShort { actual: time::Duration },
+    #[error("lease TTL {actual:?} is longer than 300 seconds")]
+    TooLong { actual: time::Duration },
+}
+
 impl LeaseApplication {
-    #[must_use]
-    pub fn new(store: Arc<dyn LeaseStore>, ttl: time::Duration) -> Self {
-        Self { store, ttl }
+    pub fn new(store: Arc<dyn LeaseStore>, ttl: time::Duration) -> Result<Self, LeaseTtlError> {
+        if ttl < MIN_LEASE_TTL {
+            return Err(LeaseTtlError::TooShort { actual: ttl });
+        }
+        if ttl > MAX_LEASE_TTL {
+            return Err(LeaseTtlError::TooLong { actual: ttl });
+        }
+
+        Ok(Self { store, ttl })
     }
 
     pub async fn lease_next(&self, actor: &Actor) -> Result<Option<JobLease>, ApplicationError> {
@@ -131,7 +148,7 @@ mod tests {
         task::{Context, Poll, Waker},
     };
 
-    use super::{ApplicationError, JobApplication, LeaseApplication, NewJobCommand};
+    use super::{ApplicationError, JobApplication, LeaseApplication, LeaseTtlError, NewJobCommand};
     use crate::{
         PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientId, ClientRole, Job, JobId, JobLease,
         JobState, JobStore, JobValidationError, LeaseId, LeaseStore, NewJob, NotifyScope,
@@ -158,16 +175,17 @@ mod tests {
         Actor::new(RUNNER_CLIENT_ID, None, ClientRole::Runner).unwrap()
     }
 
-    fn persisted_job(id: JobId, owner_id: UserId) -> Job {
-        Job {
+    fn persisted_job(id: JobId, owner_id: UserId, state: JobState) -> Job {
+        Job::rehydrate(
             id,
             owner_id,
-            provider: Provider::Rezka,
-            result_ref: "rezka-selection".to_owned(),
-            state: JobState::Queued,
-            needs_action_reason: None,
-            notify_scope: NotifyScope::Initiator,
-        }
+            Provider::Rezka,
+            "rezka-selection".to_owned(),
+            state,
+            None,
+            NotifyScope::Initiator,
+        )
+        .unwrap()
     }
 
     struct FakeJobStore {
@@ -199,15 +217,16 @@ mod tests {
             }
 
             self.created.lock().unwrap().push(job.clone());
-            Ok(Job {
-                id: job.id,
-                owner_id: job.owner_id,
-                provider: job.provider,
-                result_ref: job.result_ref,
-                state: JobState::Queued,
-                needs_action_reason: None,
-                notify_scope: job.notify_scope,
-            })
+            Job::rehydrate(
+                job.id(),
+                job.owner_id(),
+                job.provider(),
+                job.result_ref().to_owned(),
+                JobState::Queued,
+                None,
+                job.notify_scope(),
+            )
+            .map_err(|_| PortError::Infrastructure)
         }
 
         async fn find_for_owner(&self, id: JobId, owner: UserId) -> Result<Option<Job>, PortError> {
@@ -220,7 +239,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .find(|job| job.id == id && job.owner_id == owner)
+                .find(|job| job.id() == id && job.owner_id() == owner)
                 .cloned())
         }
 
@@ -297,10 +316,10 @@ mod tests {
         ))
         .unwrap();
 
-        assert_eq!(job.owner_id, PRIMARY_USER_ID);
+        assert_eq!(job.owner_id(), PRIMARY_USER_ID);
         let created = store.created.lock().unwrap();
         assert_eq!(created.len(), 1);
-        assert_eq!(created[0].owner_id, PRIMARY_USER_ID);
+        assert_eq!(created[0].owner_id(), PRIMARY_USER_ID);
     }
 
     #[test]
@@ -350,13 +369,13 @@ mod tests {
     fn get_job_is_scoped_to_the_authenticated_owner() {
         let id = JobId::new();
         let mut store = FakeJobStore::empty();
-        store.jobs = Mutex::new(vec![persisted_job(id, PRIMARY_USER_ID)]);
+        store.jobs = Mutex::new(vec![persisted_job(id, PRIMARY_USER_ID, JobState::Queued)]);
         let application = JobApplication::new(Arc::new(store));
 
         let job = block_on(application.get_job(&hermes_actor(), id)).unwrap();
 
-        assert_eq!(job.id, id);
-        assert_eq!(job.owner_id, PRIMARY_USER_ID);
+        assert_eq!(job.id(), id);
+        assert_eq!(job.owner_id(), PRIMARY_USER_ID);
     }
 
     #[test]
@@ -426,7 +445,7 @@ mod tests {
             lease: None,
             failure: None,
         });
-        let application = LeaseApplication::new(store.clone(), ttl);
+        let application = LeaseApplication::new(store.clone(), ttl).unwrap();
 
         assert!(
             block_on(application.lease_next(&runner_actor()))
@@ -443,13 +462,52 @@ mod tests {
     }
 
     #[test]
+    fn lease_ttl_accepts_inclusive_boundaries() {
+        let store = || {
+            Arc::new(FakeLeaseStore {
+                calls: Mutex::new(Vec::new()),
+                lease: None,
+                failure: None,
+            })
+        };
+
+        assert!(LeaseApplication::new(store(), time::Duration::seconds(30)).is_ok());
+        assert!(LeaseApplication::new(store(), time::Duration::seconds(300)).is_ok());
+    }
+
+    #[test]
+    fn lease_ttl_rejects_values_outside_server_boundaries() {
+        let store = || {
+            Arc::new(FakeLeaseStore {
+                calls: Mutex::new(Vec::new()),
+                lease: None,
+                failure: None,
+            })
+        };
+
+        assert_eq!(
+            LeaseApplication::new(store(), time::Duration::seconds(29)).err(),
+            Some(LeaseTtlError::TooShort {
+                actual: time::Duration::seconds(29),
+            }),
+        );
+        assert_eq!(
+            LeaseApplication::new(store(), time::Duration::seconds(301)).err(),
+            Some(LeaseTtlError::TooLong {
+                actual: time::Duration::seconds(301),
+            }),
+        );
+    }
+
+    #[test]
     fn hermes_actor_cannot_lease_jobs() {
         let store = Arc::new(FakeLeaseStore {
             calls: Mutex::new(Vec::new()),
             lease: None,
             failure: None,
         });
-        let application = LeaseApplication::new(store.clone(), time::Duration::seconds(60));
+        let application =
+            LeaseApplication::new(store.clone(), time::Duration::seconds(60)).unwrap();
 
         let error = block_on(application.lease_next(&hermes_actor())).unwrap_err();
 
@@ -461,18 +519,18 @@ mod tests {
     fn heartbeat_uses_the_runner_identity_and_server_ttl() {
         let lease_id = LeaseId::new();
         let ttl = time::Duration::seconds(90);
-        let lease = JobLease {
+        let lease = JobLease::new(
             lease_id,
-            job: persisted_job(JobId::new(), PRIMARY_USER_ID),
-            runner_client_id: RUNNER_CLIENT_ID,
-            expires_at: time::OffsetDateTime::UNIX_EPOCH + ttl,
-        };
+            persisted_job(JobId::new(), PRIMARY_USER_ID, JobState::Leased),
+            RUNNER_CLIENT_ID,
+            time::OffsetDateTime::UNIX_EPOCH + ttl,
+        );
         let store = Arc::new(FakeLeaseStore {
             calls: Mutex::new(Vec::new()),
             lease: Some(lease.clone()),
             failure: None,
         });
-        let application = LeaseApplication::new(store.clone(), ttl);
+        let application = LeaseApplication::new(store.clone(), ttl).unwrap();
 
         assert_eq!(
             block_on(application.heartbeat(&runner_actor(), lease_id)).unwrap(),
@@ -497,7 +555,8 @@ mod tests {
                 failure: None,
             }),
             time::Duration::seconds(60),
-        );
+        )
+        .unwrap();
 
         let error = block_on(application.heartbeat(&runner_actor(), LeaseId::new())).unwrap_err();
 

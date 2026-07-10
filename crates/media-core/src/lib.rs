@@ -11,8 +11,12 @@ mod job;
 mod port;
 
 pub use action::NeedsActionReason;
-pub use actor::{Actor, ActorError, BootstrapClient, ClientRole, CredentialDigest};
-pub use application::{ApplicationError, JobApplication, LeaseApplication, NewJobCommand};
+pub use actor::{
+    Actor, ActorError, BootstrapClient, BootstrapClientError, ClientRole, CredentialDigest,
+};
+pub use application::{
+    ApplicationError, JobApplication, LeaseApplication, LeaseTtlError, NewJobCommand,
+};
 pub use id::{
     PRIMARY_CLIENT_ID, PRIMARY_USER_ID, ClientId, EpisodeId, JobId, LeaseId, MediaId,
     RUNNER_CLIENT_ID, SeasonId, TaskId, UserId, SECONDARY_CLIENT_ID, SECONDARY_USER_ID,

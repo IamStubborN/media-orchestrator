@@ -8,9 +8,9 @@ pub enum ClientRole {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Actor {
-    pub client_id: ClientId,
-    pub user_id: Option<UserId>,
-    pub role: ClientRole,
+    client_id: ClientId,
+    user_id: Option<UserId>,
+    role: ClientRole,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
@@ -57,6 +57,21 @@ impl Actor {
             (ClientRole::Hermes, _) => Err(ActorError::RunnerAccessRequired),
         }
     }
+
+    #[must_use]
+    pub const fn client_id(&self) -> ClientId {
+        self.client_id
+    }
+
+    #[must_use]
+    pub const fn user_id(&self) -> Option<UserId> {
+        self.user_id
+    }
+
+    #[must_use]
+    pub const fn role(&self) -> ClientRole {
+        self.role
+    }
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
@@ -83,16 +98,76 @@ impl std::fmt::Debug for CredentialDigest {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct BootstrapClient {
-    pub client_id: ClientId,
-    pub name: String,
-    pub role: ClientRole,
-    pub user_id: Option<UserId>,
-    pub digest: CredentialDigest,
+    client_id: ClientId,
+    name: String,
+    role: ClientRole,
+    user_id: Option<UserId>,
+    digest: CredentialDigest,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
+pub enum BootstrapClientError {
+    #[error("client name cannot be empty")]
+    EmptyName,
+    #[error("invalid client identity: {0}")]
+    InvalidIdentity(#[source] ActorError),
+}
+
+impl BootstrapClient {
+    pub fn new(
+        client_id: ClientId,
+        name: String,
+        role: ClientRole,
+        user_id: Option<UserId>,
+        digest: CredentialDigest,
+    ) -> Result<Self, BootstrapClientError> {
+        let actor =
+            Actor::new(client_id, user_id, role).map_err(BootstrapClientError::InvalidIdentity)?;
+        let name = name.trim().to_owned();
+        if name.is_empty() {
+            return Err(BootstrapClientError::EmptyName);
+        }
+
+        Ok(Self {
+            client_id: actor.client_id(),
+            name,
+            role: actor.role(),
+            user_id: actor.user_id(),
+            digest,
+        })
+    }
+
+    #[must_use]
+    pub const fn client_id(&self) -> ClientId {
+        self.client_id
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn role(&self) -> ClientRole {
+        self.role
+    }
+
+    #[must_use]
+    pub const fn user_id(&self) -> Option<UserId> {
+        self.user_id
+    }
+
+    #[must_use]
+    pub const fn digest(&self) -> &CredentialDigest {
+        &self.digest
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Actor, ActorError, ClientRole, CredentialDigest};
+    use super::{
+        Actor, ActorError, BootstrapClient, BootstrapClientError, ClientRole, CredentialDigest,
+    };
     use crate::{PRIMARY_CLIENT_ID, PRIMARY_USER_ID, RUNNER_CLIENT_ID};
 
     #[test]
@@ -128,11 +203,81 @@ mod tests {
     }
 
     #[test]
+    fn actor_exposes_validated_identity_through_read_only_accessors() {
+        let actor = Actor::new(PRIMARY_CLIENT_ID, Some(PRIMARY_USER_ID), ClientRole::Hermes).unwrap();
+
+        assert_eq!(actor.client_id(), PRIMARY_CLIENT_ID);
+        assert_eq!(actor.user_id(), Some(PRIMARY_USER_ID));
+        assert_eq!(actor.role(), ClientRole::Hermes);
+    }
+
+    #[test]
     fn credential_digest_debug_output_is_redacted() {
         let digest = CredentialDigest::from([0x2a; 32]);
 
         assert_eq!(digest.as_bytes(), &[0x2a; 32]);
         assert_eq!(format!("{digest:?}"), "CredentialDigest([REDACTED])");
         assert!(!format!("{digest:?}").contains("42"));
+    }
+
+    #[test]
+    fn bootstrap_client_rejects_invalid_role_user_mappings() {
+        let digest = CredentialDigest::from([0x2a; 32]);
+
+        assert_eq!(
+            BootstrapClient::new(
+                PRIMARY_CLIENT_ID,
+                "primary".to_owned(),
+                ClientRole::Hermes,
+                None,
+                digest,
+            )
+            .unwrap_err(),
+            BootstrapClientError::InvalidIdentity(ActorError::HermesUserRequired),
+        );
+        assert_eq!(
+            BootstrapClient::new(
+                RUNNER_CLIENT_ID,
+                "runner".to_owned(),
+                ClientRole::Runner,
+                Some(PRIMARY_USER_ID),
+                digest,
+            )
+            .unwrap_err(),
+            BootstrapClientError::InvalidIdentity(ActorError::RunnerCannotHaveUser),
+        );
+    }
+
+    #[test]
+    fn bootstrap_client_rejects_a_blank_name() {
+        let error = BootstrapClient::new(
+            PRIMARY_CLIENT_ID,
+            " \t\n".to_owned(),
+            ClientRole::Hermes,
+            Some(PRIMARY_USER_ID),
+            CredentialDigest::from([0x2a; 32]),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, BootstrapClientError::EmptyName);
+    }
+
+    #[test]
+    fn bootstrap_client_exposes_only_validated_read_only_values() {
+        let digest = CredentialDigest::from([0x2a; 32]);
+        let client = BootstrapClient::new(
+            PRIMARY_CLIENT_ID,
+            "  primary  ".to_owned(),
+            ClientRole::Hermes,
+            Some(PRIMARY_USER_ID),
+            digest,
+        )
+        .unwrap();
+
+        assert_eq!(client.client_id(), PRIMARY_CLIENT_ID);
+        assert_eq!(client.name(), "primary");
+        assert_eq!(client.role(), ClientRole::Hermes);
+        assert_eq!(client.user_id(), Some(PRIMARY_USER_ID));
+        assert_eq!(client.digest(), &digest);
     }
 }
