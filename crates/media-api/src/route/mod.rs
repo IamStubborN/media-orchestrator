@@ -1,9 +1,18 @@
 mod health;
+mod jobs;
+mod queue;
+mod runner;
 
 use axum::Router;
 
 use crate::ApiState;
 
-pub(crate) fn routes() -> Router<ApiState> {
+pub(crate) fn public_routes() -> Router<ApiState> {
     health::routes()
+}
+
+pub(crate) fn protected_routes() -> Router<ApiState> {
+    jobs::routes()
+        .merge(queue::routes())
+        .merge(runner::routes())
 }

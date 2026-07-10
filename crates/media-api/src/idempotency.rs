@@ -1,4 +1,20 @@
-use media_core::ClientId;
+use std::future::Future;
+
+use axum::{
+    body::{Body, to_bytes},
+    extract::Request,
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{IntoResponse, Response},
+};
+use media_contract::ApiError as ErrorBody;
+use media_core::{Actor, ClientId};
+use sha2::{Digest, Sha256};
+
+use crate::{ApiError, ApiState, RequestId, request_id::REQUEST_ID_HEADER};
+
+const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
+const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
+const MAX_STORED_RESPONSE_BYTES: usize = 64 * 1024;
 
 /// Identity and fingerprint of one authenticated write request.
 #[derive(Clone, Eq, PartialEq)]
@@ -122,6 +138,161 @@ pub trait IdempotencyStore: Send + Sync {
     ) -> Result<(), IdempotencyError>;
 
     async fn abort(&self, request: IdempotencyRequest) -> Result<(), IdempotencyError>;
+}
+
+pub(crate) async fn execute<F, Fut>(
+    state: ApiState,
+    actor: Actor,
+    request_id: RequestId,
+    request: Request,
+    operation: F,
+) -> Response
+where
+    F: FnOnce(ApiState, Actor, RequestId, Vec<u8>) -> Fut,
+    Fut: Future<Output = Response>,
+{
+    let key = match idempotency_key(request.headers(), &request_id) {
+        Ok(key) => key,
+        Err(error) => return error.into_response(),
+    };
+    let method = request.method().as_str().as_bytes().to_vec();
+    let path = request.uri().path().as_bytes().to_vec();
+    let body = match to_bytes(request.into_body(), MAX_STORED_RESPONSE_BYTES).await {
+        Ok(body) => body,
+        Err(_) => return ApiError::invalid_body(&request_id).into_response(),
+    };
+    let fingerprint = fingerprint(actor.client_id(), &method, &path, &body);
+    let idempotency_request = IdempotencyRequest::new(actor.client_id(), key, fingerprint);
+
+    match state
+        .idempotency()
+        .reserve(idempotency_request.clone())
+        .await
+    {
+        Ok(Reservation::Reserved) => {}
+        Ok(Reservation::Replay(response)) => {
+            return replay(response, &request_id)
+                .unwrap_or_else(|| ApiError::internal(&request_id).into_response());
+        }
+        Ok(Reservation::Conflict) => {
+            return ApiError::idempotency_conflict(&request_id).into_response();
+        }
+        Ok(Reservation::InProgress) => {
+            return ApiError::idempotency_in_progress(&request_id).into_response();
+        }
+        Err(_) => return ApiError::internal(&request_id).into_response(),
+    }
+
+    let response = operation(state.clone(), actor, request_id.clone(), body.to_vec()).await;
+    let Some((stored, response)) = buffer(response, &request_id).await else {
+        let _ = state.idempotency().abort(idempotency_request).await;
+        return ApiError::internal(&request_id).into_response();
+    };
+
+    if response.status().is_server_error() {
+        if state
+            .idempotency()
+            .abort(idempotency_request)
+            .await
+            .is_err()
+        {
+            return ApiError::internal(&request_id).into_response();
+        }
+        return response;
+    }
+
+    if state
+        .idempotency()
+        .complete(idempotency_request.clone(), stored)
+        .await
+        .is_err()
+    {
+        let _ = state.idempotency().abort(idempotency_request).await;
+        return ApiError::internal(&request_id).into_response();
+    }
+
+    response
+}
+
+fn idempotency_key(headers: &HeaderMap, request_id: &RequestId) -> Result<String, ApiError> {
+    let mut values = headers.get_all(IDEMPOTENCY_KEY_HEADER).iter();
+    let Some(value) = values.next() else {
+        return Err(ApiError::missing_idempotency_key(request_id));
+    };
+    if values.next().is_some() {
+        return Err(ApiError::invalid_request(
+            request_id,
+            "idempotency-key header is invalid",
+        ));
+    }
+    let bytes = value.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > MAX_IDEMPOTENCY_KEY_BYTES
+        || !bytes.iter().all(|byte| (0x21..=0x7e).contains(byte))
+    {
+        return Err(ApiError::invalid_request(
+            request_id,
+            "idempotency-key header is invalid",
+        ));
+    }
+
+    Ok(std::str::from_utf8(bytes)
+        .expect("visible ASCII is valid UTF-8")
+        .to_owned())
+}
+
+fn fingerprint(client_id: ClientId, method: &[u8], path: &[u8], body: &[u8]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    for field in [
+        client_id.as_uuid().as_bytes().as_slice(),
+        method,
+        path,
+        body,
+    ] {
+        digest.update((field.len() as u64).to_be_bytes());
+        digest.update(field);
+    }
+    digest.finalize().into()
+}
+
+async fn buffer(
+    response: Response,
+    request_id: &RequestId,
+) -> Option<(StoredHttpResponse, Response)> {
+    let status = response.status();
+    let content_type = match response.headers().get(header::CONTENT_TYPE) {
+        Some(value) => value.to_str().ok()?.to_owned(),
+        None => String::new(),
+    };
+    let body = to_bytes(response.into_body(), MAX_STORED_RESPONSE_BYTES)
+        .await
+        .ok()?
+        .to_vec();
+    let stored = StoredHttpResponse::new(status.as_u16(), content_type, body);
+    let response = replay(stored.clone(), request_id)?;
+    Some((stored, response))
+}
+
+fn replay(stored: StoredHttpResponse, fallback_request_id: &RequestId) -> Option<Response> {
+    let status = StatusCode::from_u16(stored.status()).ok()?;
+    let mut response = Response::new(Body::from(stored.body().to_vec()));
+    *response.status_mut() = status;
+    if !stored.content_type().is_empty() {
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_str(stored.content_type()).ok()?,
+        );
+    }
+    if status.is_client_error() || status.is_server_error() {
+        let request_id = serde_json::from_slice::<ErrorBody>(stored.body())
+            .ok()
+            .map(|body| body.request_id)
+            .unwrap_or_else(|| fallback_request_id.as_str().to_owned());
+        response
+            .headers_mut()
+            .insert(REQUEST_ID_HEADER, HeaderValue::from_str(&request_id).ok()?);
+    }
+    Some(response)
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 //! Private HTTP API for the media orchestrator.
 
 mod auth;
+mod convert;
 mod error;
 mod idempotency;
 mod request_id;
@@ -71,6 +72,7 @@ impl ApiState {
 /// The request-ID layer is deliberately outermost so every downstream response,
 /// including authentication failures, carries the same correlation ID.
 pub fn build_router(state: ApiState, protected: Router<ApiState>) -> Router {
+    let protected = route::protected_routes().merge(protected);
     let protected = if protected.has_routes() {
         protected.route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -80,7 +82,7 @@ pub fn build_router(state: ApiState, protected: Router<ApiState>) -> Router {
         protected
     };
 
-    route::routes()
+    route::public_routes()
         .merge(protected)
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))

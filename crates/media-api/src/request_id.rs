@@ -31,7 +31,10 @@ pub(crate) async fn assign(mut request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
     let header = HeaderValue::from_str(request_id.as_str())
         .expect("a validated or generated request ID is always a valid header value");
-    response.headers_mut().insert(REQUEST_ID_HEADER, header);
+    response
+        .headers_mut()
+        .entry(REQUEST_ID_HEADER)
+        .or_insert(header);
     response
 }
 

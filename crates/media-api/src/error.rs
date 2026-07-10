@@ -100,6 +100,69 @@ impl ApiError {
         )
     }
 
+    pub(crate) fn invalid_request(request_id: &RequestId, message: &'static str) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidRequest,
+            message,
+            request_id,
+        )
+    }
+
+    pub(crate) fn missing_idempotency_key(request_id: &RequestId) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::MissingIdempotencyKey,
+            "idempotency-key header is required",
+            request_id,
+        )
+    }
+
+    pub(crate) fn idempotency_conflict(request_id: &RequestId) -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            ApiErrorCode::IdempotencyConflict,
+            "idempotency key was reused for a different request",
+            request_id,
+        )
+    }
+
+    pub(crate) fn idempotency_in_progress(request_id: &RequestId) -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            ApiErrorCode::IdempotencyInProgress,
+            "an identical request is already in progress",
+            request_id,
+        )
+    }
+
+    pub(crate) fn not_found(request_id: &RequestId) -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::NotFound,
+            "resource was not found",
+            request_id,
+        )
+    }
+
+    pub(crate) fn lease_not_found(request_id: &RequestId) -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::LeaseNotFound,
+            "lease was not found",
+            request_id,
+        )
+    }
+
+    pub(crate) fn conflict(request_id: &RequestId) -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            ApiErrorCode::Conflict,
+            "operation conflicts with current state",
+            request_id,
+        )
+    }
+
     pub(crate) fn not_ready(request_id: &RequestId) -> Self {
         Self::new(
             StatusCode::SERVICE_UNAVAILABLE,

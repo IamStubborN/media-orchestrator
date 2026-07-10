@@ -1,0 +1,192 @@
+mod support;
+
+use std::sync::Arc;
+
+use axum::{
+    body::{Body, to_bytes},
+    http::{Request, StatusCode, header},
+};
+use media_api::router;
+use media_contract::{ApiError, ApiErrorCode, LeaseDto};
+use media_core::{
+    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientId, ClientRole, Job, JobId, JobLease, JobState,
+    LeaseId, NotifyScope, Provider, RUNNER_CLIENT_ID,
+};
+use tower::ServiceExt;
+
+use support::{
+    FakeClientStore, FakeJobStore, FakeLeaseStore, MemoryIdempotencyStore, OTHER_RUNNER_TOKEN,
+    RUNNER_TOKEN, VALID_TOKEN, state_with_stores,
+};
+
+fn runner() -> Actor {
+    Actor::new(RUNNER_CLIENT_ID, None, ClientRole::Runner).unwrap()
+}
+
+fn app(leases: FakeLeaseStore, other_runner: ClientId) -> axum::Router {
+    let user = Actor::new(PRIMARY_CLIENT_ID, Some(PRIMARY_USER_ID), ClientRole::Hermes).unwrap();
+    let other = Actor::new(other_runner, None, ClientRole::Runner).unwrap();
+    router(state_with_stores(
+        FakeClientStore::new([
+            (VALID_TOKEN, user),
+            (RUNNER_TOKEN, runner()),
+            (OTHER_RUNNER_TOKEN, other),
+        ]),
+        Arc::new(FakeJobStore::default()),
+        Arc::new(leases),
+        Arc::new(MemoryIdempotencyStore::default()),
+    ))
+}
+
+fn post(path: &str, token: &str, key: &str, request_id: &str, body: Body) -> Request<Body> {
+    Request::post(path)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header("idempotency-key", key)
+        .header("x-request-id", request_id)
+        .header("content-type", "application/json")
+        .body(body)
+        .unwrap()
+}
+
+async fn error(response: axum::response::Response) -> ApiError {
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+fn lease() -> JobLease {
+    let job = Job::rehydrate(
+        JobId::new(),
+        PRIMARY_USER_ID,
+        Provider::Prowlarr,
+        "prowlarr:result:7".to_owned(),
+        JobState::Leased,
+        None,
+        NotifyScope::Family,
+    )
+    .unwrap();
+    JobLease::new(
+        LeaseId::new(),
+        job,
+        RUNNER_CLIENT_ID,
+        time::OffsetDateTime::from_unix_timestamp(1_783_707_660).unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn runner_can_lease_and_heartbeat_with_exact_request_ids() {
+    let expected = lease();
+    let app = app(
+        FakeLeaseStore::with_lease(expected.clone()),
+        ClientId::new(),
+    );
+    let leased = app
+        .clone()
+        .oneshot(post(
+            "/v1/runner/leases",
+            RUNNER_TOKEN,
+            "lease-next",
+            "lease-request",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(leased.status(), StatusCode::OK);
+    assert_eq!(leased.headers()["x-request-id"], "lease-request");
+    let bytes = to_bytes(leased.into_body(), usize::MAX).await.unwrap();
+    let dto: LeaseDto = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(dto.lease_id.to_string(), expected.lease_id().to_string());
+    assert_eq!(dto.job.id.to_string(), expected.job().id().to_string());
+    assert_eq!(dto.job.result_ref, "prowlarr:result:7");
+    assert_eq!(dto.expires_at, "2026-07-10T18:21:00Z");
+
+    let heartbeat = app
+        .oneshot(post(
+            &format!("/v1/runner/leases/{}/heartbeat", expected.lease_id()),
+            RUNNER_TOKEN,
+            "heartbeat",
+            "heartbeat-request",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(heartbeat.status(), StatusCode::OK);
+    assert_eq!(heartbeat.headers()["x-request-id"], "heartbeat-request");
+    let bytes = to_bytes(heartbeat.into_body(), usize::MAX).await.unwrap();
+    let dto: LeaseDto = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(dto.lease_id.to_string(), expected.lease_id().to_string());
+}
+
+#[tokio::test]
+async fn empty_queue_returns_no_content() {
+    let response = app(FakeLeaseStore::default(), ClientId::new())
+        .oneshot(post(
+            "/v1/runner/leases",
+            RUNNER_TOKEN,
+            "empty-lease",
+            "empty-lease-request",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn wrong_runner_heartbeat_looks_not_found() {
+    let expected = lease();
+    let other_runner = ClientId::new();
+    let response = app(FakeLeaseStore::with_lease(expected.clone()), other_runner)
+        .oneshot(post(
+            &format!("/v1/runner/leases/{}/heartbeat", expected.lease_id()),
+            OTHER_RUNNER_TOKEN,
+            "wrong-runner",
+            "wrong-runner-request",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.headers()["x-request-id"], "wrong-runner-request");
+    let body = error(response).await;
+    assert_eq!(body.code, ApiErrorCode::LeaseNotFound);
+    assert_eq!(body.request_id, "wrong-runner-request");
+}
+
+#[tokio::test]
+async fn user_cannot_use_runner_routes_and_ttl_override_is_unknown_json() {
+    let other_runner = ClientId::new();
+    let user_response = app(FakeLeaseStore::default(), other_runner)
+        .clone()
+        .oneshot(post(
+            "/v1/runner/leases",
+            VALID_TOKEN,
+            "user-lease",
+            "user-lease-request",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(user_response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(error(user_response).await.code, ApiErrorCode::Forbidden);
+
+    let ttl_response = app(FakeLeaseStore::default(), other_runner)
+        .oneshot(post(
+            "/v1/runner/leases",
+            RUNNER_TOKEN,
+            "ttl-override",
+            "ttl-override-request",
+            Body::from(r#"{"ttl":300}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(ttl_response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(error(ttl_response).await.code, ApiErrorCode::InvalidRequest);
+}
