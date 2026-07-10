@@ -1,9 +1,17 @@
 mod client;
+mod idempotency;
 mod identity;
+mod job;
+mod lease;
 mod readiness;
 
 pub use client::SeaOrmClientStore;
+pub use idempotency::{
+    ReservationRecord, SeaOrmIdempotencyRepository, StoredResponseError, StoredResponseRecord,
+};
 pub use identity::SeaOrmIdentityStore;
+pub use job::SeaOrmJobStore;
+pub use lease::SeaOrmLeaseStore;
 pub use readiness::SeaOrmReadiness;
 
 use media_core::PortError;

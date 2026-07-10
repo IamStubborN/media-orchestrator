@@ -19,6 +19,7 @@ const POSTGRES_PORT: u16 = 5432;
 
 pub struct TestDatabase {
     connection: DatabaseConnection,
+    url: String,
     _container: ContainerAsync<GenericImage>,
 }
 
@@ -43,18 +44,25 @@ impl TestDatabase {
             .expect("PostgreSQL test container must expose port 5432");
         let url =
             format!("postgres://media:media-test-password@127.0.0.1:{port}/media_orchestrator");
-        let connection = Database::connect(url)
+        let connection = Database::connect(&url)
             .await
             .expect("PostgreSQL test database must accept connections");
 
         Self {
             connection,
+            url,
             _container: container,
         }
     }
 
     pub fn connection(&self) -> &DatabaseConnection {
         &self.connection
+    }
+
+    pub async fn connect(&self) -> DatabaseConnection {
+        Database::connect(&self.url)
+            .await
+            .expect("an independent PostgreSQL connection pool must open")
     }
 
     pub async fn start_migrated() -> Self {

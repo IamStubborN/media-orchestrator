@@ -249,7 +249,8 @@ impl JobState {
                 )
                 | (
                     Self::Running,
-                    Self::CancelRequested
+                    Self::Queued
+                        | Self::CancelRequested
                         | Self::BlockedStorage
                         | Self::Publishing
                         | Self::NeedsAction
@@ -257,7 +258,10 @@ impl JobState {
                 )
                 | (Self::CancelRequested, Self::Cancelled)
                 | (Self::BlockedStorage, Self::Queued | Self::CancelRequested)
-                | (Self::Publishing, Self::PlexPending | Self::Failed)
+                | (
+                    Self::Publishing,
+                    Self::Queued | Self::PlexPending | Self::Failed
+                )
                 | (
                     Self::PlexPending,
                     Self::Completed | Self::Partial | Self::NeedsAction | Self::Failed
@@ -297,12 +301,13 @@ mod tests {
         JobState::Cancelled,
     ];
 
-    const ALLOWED: [(JobState, JobState); 22] = [
+    const ALLOWED: [(JobState, JobState); 24] = [
         (JobState::Queued, JobState::Leased),
         (JobState::Leased, JobState::Running),
         (JobState::Leased, JobState::Queued),
         (JobState::Leased, JobState::CancelRequested),
         (JobState::Running, JobState::CancelRequested),
+        (JobState::Running, JobState::Queued),
         (JobState::Running, JobState::BlockedStorage),
         (JobState::Running, JobState::Publishing),
         (JobState::Running, JobState::NeedsAction),
@@ -311,6 +316,7 @@ mod tests {
         (JobState::BlockedStorage, JobState::Queued),
         (JobState::BlockedStorage, JobState::CancelRequested),
         (JobState::Publishing, JobState::PlexPending),
+        (JobState::Publishing, JobState::Queued),
         (JobState::Publishing, JobState::Failed),
         (JobState::PlexPending, JobState::Completed),
         (JobState::PlexPending, JobState::Partial),
@@ -357,6 +363,17 @@ mod tests {
             JobState::Leased.transition(JobState::Queued).unwrap(),
             JobState::Queued,
         );
+    }
+
+    #[test]
+    fn expired_active_jobs_can_resume_from_durable_checkpoints() {
+        for state in [JobState::Leased, JobState::Running, JobState::Publishing] {
+            assert_eq!(
+                state.transition(JobState::Queued).unwrap(),
+                JobState::Queued,
+                "{state:?} must be recoverable after its lease expires",
+            );
+        }
     }
 
     #[test]

@@ -1,12 +1,13 @@
 use media_core::{
     Actor, CanonicalEpisode, CanonicalMedia, CanonicalSeason, ClientRole, EpisodeId,
-    EpisodeProviderMapping, ExternalNamespace, ExternalReference, MappingSource,
-    MediaExternalReference, MediaId, MediaKind, Provider, SeasonId, SeriesOrdering,
+    EpisodeProviderMapping, ExternalNamespace, ExternalReference, Job, JobState, MappingSource,
+    MediaExternalReference, MediaId, MediaKind, NeedsActionReason, NewJob, NotifyScope, Provider,
+    SeasonId, SeriesOrdering,
 };
 use sea_orm::{ActiveValue::Set, prelude::Uuid};
 
 use crate::entity::{
-    api_client, episode, episode_provider_mapping, media, media_external_ref, season,
+    api_client, episode, episode_provider_mapping, job, media, media_external_ref, season,
 };
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -234,6 +235,47 @@ pub(crate) fn episode_mapping_active_model(
     })
 }
 
+impl TryFrom<job::Model> for Job {
+    type Error = MappingError;
+
+    fn try_from(model: job::Model) -> Result<Self, Self::Error> {
+        Job::rehydrate(
+            media_core::JobId::from_uuid(model.id),
+            media_core::UserId::from_uuid(model.owner_id),
+            parse_provider(&model.provider)?,
+            model.result_ref,
+            parse_job_state(&model.state)?,
+            model
+                .needs_action_reason
+                .as_deref()
+                .map(parse_needs_action_reason)
+                .transpose()?,
+            parse_notify_scope(&model.notify_scope)?,
+        )
+        .map_err(|_| MappingError::InvalidPersistedValue)
+    }
+}
+
+pub(crate) fn job_active_model(value: &NewJob) -> job::ActiveModel {
+    let now = time::OffsetDateTime::now_utc();
+    job::ActiveModel {
+        id: Set(value.id().into_uuid()),
+        owner_id: Set(value.owner_id().into_uuid()),
+        provider: Set(provider_value(value.provider()).to_owned()),
+        result_ref: Set(value.result_ref().to_owned()),
+        state: Set(job_state_value(JobState::Queued).to_owned()),
+        needs_action_reason: Set(None),
+        notify_scope: Set(notify_scope_value(value.notify_scope()).to_owned()),
+        request_snapshot: Set(serde_json::json!({})),
+        error_snapshot: Set(None),
+        attempt_count: Set(0),
+        created_at: Set(now),
+        updated_at: Set(now),
+        started_at: Set(None),
+        completed_at: Set(None),
+    }
+}
+
 pub(crate) const fn external_namespace_value(value: ExternalNamespace) -> &'static str {
     match value {
         ExternalNamespace::Tmdb => "tmdb",
@@ -300,17 +342,75 @@ fn parse_series_ordering(value: &str) -> Result<SeriesOrdering, MappingError> {
     }
 }
 
-const fn provider_value(value: Provider) -> &'static str {
+pub(crate) const fn provider_value(value: Provider) -> &'static str {
     match value {
         Provider::Rezka => "rezka",
         Provider::Prowlarr => "prowlarr",
     }
 }
 
-fn parse_provider(value: &str) -> Result<Provider, MappingError> {
+pub(crate) fn parse_provider(value: &str) -> Result<Provider, MappingError> {
     match value {
         "rezka" => Ok(Provider::Rezka),
         "prowlarr" => Ok(Provider::Prowlarr),
+        _ => Err(MappingError::InvalidPersistedValue),
+    }
+}
+
+pub(crate) const fn job_state_value(value: JobState) -> &'static str {
+    match value {
+        JobState::Queued => "queued",
+        JobState::Leased => "leased",
+        JobState::Running => "running",
+        JobState::CancelRequested => "cancel_requested",
+        JobState::BlockedStorage => "blocked_storage",
+        JobState::Publishing => "publishing",
+        JobState::PlexPending => "plex_pending",
+        JobState::NeedsAction => "needs_action",
+        JobState::Partial => "partial",
+        JobState::Completed => "completed",
+        JobState::Failed => "failed",
+        JobState::Cancelled => "cancelled",
+    }
+}
+
+pub(crate) fn parse_job_state(value: &str) -> Result<JobState, MappingError> {
+    match value {
+        "queued" => Ok(JobState::Queued),
+        "leased" => Ok(JobState::Leased),
+        "running" => Ok(JobState::Running),
+        "cancel_requested" => Ok(JobState::CancelRequested),
+        "blocked_storage" => Ok(JobState::BlockedStorage),
+        "publishing" => Ok(JobState::Publishing),
+        "plex_pending" => Ok(JobState::PlexPending),
+        "needs_action" => Ok(JobState::NeedsAction),
+        "partial" => Ok(JobState::Partial),
+        "completed" => Ok(JobState::Completed),
+        "failed" => Ok(JobState::Failed),
+        "cancelled" => Ok(JobState::Cancelled),
+        _ => Err(MappingError::InvalidPersistedValue),
+    }
+}
+
+const fn notify_scope_value(value: NotifyScope) -> &'static str {
+    match value {
+        NotifyScope::Initiator => "initiator",
+        NotifyScope::Family => "family",
+    }
+}
+
+fn parse_notify_scope(value: &str) -> Result<NotifyScope, MappingError> {
+    match value {
+        "initiator" => Ok(NotifyScope::Initiator),
+        "family" => Ok(NotifyScope::Family),
+        _ => Err(MappingError::InvalidPersistedValue),
+    }
+}
+
+fn parse_needs_action_reason(value: &str) -> Result<NeedsActionReason, MappingError> {
+    match value {
+        "identity_ambiguous" => Ok(NeedsActionReason::IdentityAmbiguous),
+        "plex_mismatch" => Ok(NeedsActionReason::PlexMismatch),
         _ => Err(MappingError::InvalidPersistedValue),
     }
 }

@@ -6,4 +6,7 @@ mod migration;
 mod repository;
 
 pub use migration::Migrator;
-pub use repository::{SeaOrmClientStore, SeaOrmIdentityStore, SeaOrmReadiness};
+pub use repository::{
+    ReservationRecord, SeaOrmClientStore, SeaOrmIdempotencyRepository, SeaOrmIdentityStore,
+    SeaOrmJobStore, SeaOrmLeaseStore, SeaOrmReadiness, StoredResponseError, StoredResponseRecord,
+};
