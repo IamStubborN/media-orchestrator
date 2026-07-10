@@ -7,7 +7,7 @@ use media_core::{
     JobState, JobStore, LeaseStore, NewJob, NotifyScope, PortError, Provider, RUNNER_CLIENT_ID,
 };
 use media_storage::{SeaOrmClientStore, SeaOrmJobStore, SeaOrmLeaseStore};
-use sea_orm::{ConnectionTrait, Statement};
+use sea_orm::{ConnectionTrait, Statement, TransactionTrait};
 use support::{TestDatabase, query};
 use tokio::sync::Barrier;
 
@@ -71,10 +71,87 @@ async fn concurrent_connections_create_exactly_one_active_lease() {
     assert!(jobs.queue_status().await.unwrap().active);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn contender_claims_queued_job_after_advisory_lock_holder_rolls_back() {
+    const LEASE_ADVISORY_LOCK: i64 = 0x4d45_4449_414c_5345;
+
+    let (test_db, jobs, _leases) = setup().await;
+    jobs.create(new_job("rollback-race-job")).await.unwrap();
+    let holder_connection = test_db.connect().await;
+    let holder = holder_connection.begin().await.unwrap();
+    holder
+        .query_one_raw(Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            "SELECT pg_advisory_xact_lock($1)",
+            [LEASE_ADVISORY_LOCK.into()],
+        ))
+        .await
+        .unwrap();
+
+    let contender_store = SeaOrmLeaseStore::new(test_db.connect().await);
+    let contender = tokio::spawn(async move {
+        contender_store
+            .lease_next(RUNNER_CLIENT_ID, time::Duration::seconds(60))
+            .await
+            .unwrap()
+    });
+
+    let mut observed_waiter = false;
+    for _ in 0..50 {
+        if contender.is_finished() {
+            break;
+        }
+        let row = test_db
+            .connection()
+            .query_one_raw(Statement::from_string(
+                sea_orm::DatabaseBackend::Postgres,
+                "SELECT EXISTS (SELECT 1 FROM pg_locks \
+                 WHERE locktype = 'advisory' AND NOT granted) AS waiting",
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        if row.try_get::<bool>("", "waiting").unwrap() {
+            observed_waiter = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    assert!(
+        observed_waiter,
+        "the contender must wait for transaction-scoped serialization",
+    );
+    holder.rollback().await.unwrap();
+    let lease = contender.await.unwrap();
+    assert!(
+        lease.is_some(),
+        "a rolled-back lock holder must not cause a false empty-queue result",
+    );
+}
+
 #[tokio::test]
 async fn storage_rejects_ttl_outside_the_application_contract() {
     let (_test_db, jobs, leases) = setup().await;
     jobs.create(new_job("ttl-job")).await.unwrap();
+
+    let lease = leases
+        .lease_next(RUNNER_CLIENT_ID, time::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("the inclusive 30 second minimum must be accepted");
+    assert!(
+        leases
+            .heartbeat(
+                lease.lease_id(),
+                RUNNER_CLIENT_ID,
+                time::Duration::seconds(300),
+            )
+            .await
+            .unwrap()
+            .is_some(),
+        "the inclusive 300 second maximum must be accepted",
+    );
 
     assert_eq!(
         leases
@@ -97,7 +174,7 @@ async fn storage_rejects_ttl_outside_the_application_contract() {
             .await,
         Err(PortError::Conflict),
     );
-    assert_eq!(jobs.queue_status().await.unwrap().queued, 1);
+    assert_eq!(jobs.queue_status().await.unwrap().queued, 0);
 }
 
 #[tokio::test]
@@ -124,6 +201,18 @@ async fn active_lease_blocks_claim_and_heartbeat_requires_exact_live_owner() {
             .await
             .unwrap()
             .is_none()
+    );
+    assert!(
+        leases
+            .heartbeat(
+                media_core::LeaseId::new(),
+                RUNNER_CLIENT_ID,
+                time::Duration::seconds(60),
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "a valid runner cannot renew a different lease ID",
     );
     let before = time::OffsetDateTime::now_utc() + time::Duration::seconds(55);
     let renewed = leases

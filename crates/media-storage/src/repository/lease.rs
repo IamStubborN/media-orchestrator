@@ -36,17 +36,14 @@ impl LeaseStore for SeaOrmLeaseStore {
         let ttl_seconds = valid_ttl_seconds(ttl)?;
         let transaction = self.database.begin().await.map_err(map_database_error)?;
         let result = async {
-            let lock = transaction
+            transaction
                 .query_one_raw(Statement::from_sql_and_values(
                     DatabaseBackend::Postgres,
-                    "SELECT pg_try_advisory_xact_lock($1) AS acquired",
+                    "SELECT pg_advisory_xact_lock($1)",
                     [LEASE_ADVISORY_LOCK.into()],
                 ))
                 .await?
                 .ok_or_else(|| sea_orm::DbErr::Custom("advisory lock query failed".to_owned()))?;
-            if !lock.try_get::<bool>("", "acquired")? {
-                return Ok(None);
-            }
 
             if let Some(existing) = transaction
                 .query_one_raw(Statement::from_string(

@@ -16,9 +16,9 @@ pub enum ReservationRecord {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct StoredResponseRecord {
-    status: u16,
-    content_type: String,
-    body: Vec<u8>,
+    pub status: u16,
+    pub content_type: String,
+    pub body: Vec<u8>,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]

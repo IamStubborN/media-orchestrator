@@ -35,6 +35,19 @@ fn future_expiry() -> time::OffsetDateTime {
     time::OffsetDateTime::now_utc() + time::Duration::hours(24)
 }
 
+#[test]
+fn stored_response_record_exposes_the_exact_storage_contract() {
+    let response = StoredResponseRecord {
+        status: 202,
+        content_type: "application/json".to_owned(),
+        body: br#"{"accepted":true}"#.to_vec(),
+    };
+
+    assert_eq!(response.status, 202);
+    assert_eq!(response.content_type, "application/json");
+    assert_eq!(response.body, br#"{"accepted":true}"#);
+}
+
 #[tokio::test]
 async fn completed_same_hash_replays_exact_response_and_changed_hash_conflicts() {
     let (_test_db, repository) = repository().await;
@@ -88,6 +101,14 @@ async fn live_reservation_is_in_progress_abort_retries_and_expiry_replaces() {
             .await
             .unwrap(),
         ReservationRecord::InProgress,
+    );
+    assert_eq!(
+        repository
+            .reserve(PRIMARY_CLIENT_ID, "live", HASH_B, future_expiry())
+            .await
+            .unwrap(),
+        ReservationRecord::Conflict,
+        "a changed request cannot take over a live in-progress reservation",
     );
     repository
         .abort(PRIMARY_CLIENT_ID, "live", HASH_A)
