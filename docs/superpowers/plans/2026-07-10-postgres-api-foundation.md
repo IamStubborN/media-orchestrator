@@ -307,15 +307,15 @@ and Rust's orphan rules.
 - Create: `crates/media-api/tests/auth.rs`
 - Create: `crates/media-api/tests/request_id.rs`
 
-- [ ] Write failing `Router::oneshot` tests for missing bearer token, invalid token, disabled token, Hermes identity insertion, runner identity insertion, forbidden role, generated request ID, propagated valid request ID, and JSON error shape.
-- [ ] Define an API-owned, object-safe `IdempotencyStore` port using HTTP response status/content-type/body, because exact replay is a transport concern rather than a domain concern.
-- [ ] Define `ApiState` from `Arc<JobApplication>`, `Arc<LeaseApplication>`, `Arc<dyn ClientStore>`, `Arc<dyn IdempotencyStore>`, and `Arc<dyn ReadinessPort>`; no storage concrete type appears.
-- [ ] Implement bearer hashing in middleware and lookup through `ClientStore`; insert `Actor` into request extensions.
-- [ ] Layer request ID generation/propagation outside auth so authentication errors include the same `x-request-id` header and body field.
-- [ ] Apply the global body/header limits before buffering or hashing request data; oversized input returns a stable 413/400 error without an idempotency reservation.
-- [ ] Add `/v1/health` as process liveness and `/v1/ready` through a narrow readiness port; readiness failures return 503.
-- [ ] Add compile-time architecture tests that reject `media-api -> media-storage` and any resolved path from `media-storage` to `media-api` or `media-contract`.
-- [ ] Run router/workspace tests; commit: `feat(api): add authenticated axum foundation`.
+- [x] Write failing `Router::oneshot` tests for missing bearer token, invalid token, disabled token, Hermes identity insertion, runner identity insertion, forbidden role, generated request ID, propagated valid request ID, and JSON error shape.
+- [x] Define an API-owned, object-safe `IdempotencyStore` port using HTTP response status/content-type/body, because exact replay is a transport concern rather than a domain concern.
+- [x] Define `ApiState` from `Arc<JobApplication>`, `Arc<LeaseApplication>`, `Arc<dyn ClientStore>`, `Arc<dyn IdempotencyStore>`, and `Arc<dyn ReadinessPort>`; no storage concrete type appears.
+- [x] Implement bearer hashing in middleware and lookup through `ClientStore`; insert `Actor` into request extensions.
+- [x] Layer request ID generation/propagation outside auth so authentication errors include the same `x-request-id` header and body field.
+- [x] Apply the global body/header limits before buffering or hashing request data; oversized input returns a stable 413/400 error without an idempotency reservation.
+- [x] Add `/v1/health` as process liveness and `/v1/ready` through a narrow readiness port; readiness failures return 503.
+- [x] Add compile-time architecture tests that reject `media-api -> media-storage` and any resolved path from `media-storage` to `media-api` or `media-contract`.
+- [x] Run router/workspace tests; commit: `feat(api): add authenticated axum foundation`.
 
 ## Task 7: Add Idempotent Job and Runner Routes
 
