@@ -22,11 +22,12 @@ pub use id::{
     RUNNER_CLIENT_ID, SeasonId, TaskId, UserId, SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
 };
 pub use identity::{
-    EpisodeResolution, ExternalNamespace, ExternalReference, MappingSource, SeriesOrdering,
-    resolve_episode_candidates,
+    CanonicalEpisode, CanonicalMedia, CanonicalSeason, EpisodeProviderMapping, EpisodeResolution,
+    ExternalNamespace, ExternalReference, IdentityValidationError, MappingSource,
+    MediaExternalReference, MediaKind, SeriesOrdering, resolve_episode_candidates,
 };
 pub use job::{
     Job, JobLease, JobState, JobTransitionError, JobValidationError, NewJob, NotifyScope, Provider,
     QueueStatus,
 };
-pub use port::{ClientStore, JobStore, LeaseStore, PortError, ReadinessPort};
+pub use port::{ClientStore, IdentityStore, JobStore, LeaseStore, PortError, ReadinessPort};

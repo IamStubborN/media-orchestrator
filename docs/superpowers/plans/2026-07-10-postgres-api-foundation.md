@@ -236,6 +236,9 @@ the one-active-lease MVP invariant database-enforced.
 ## Task 4: Add SeaORM Entities and Identity/Client Adapters
 
 **Files:**
+- Modify: `crates/media-core/src/identity.rs`
+- Modify: `crates/media-core/src/port.rs`
+- Modify: `crates/media-core/src/lib.rs`
 - Create: `crates/media-storage/src/entity/mod.rs`
 - Create: one focused entity module per migration table
 - Create: `crates/media-storage/src/repository/client.rs`
