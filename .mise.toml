@@ -1,0 +1,28 @@
+[tools]
+rust = "1.97.0"
+"cargo:cargo-nextest" = "0.9.140"
+"cargo:cargo-deny" = "0.20.2"
+"cargo:cargo-audit" = "0.22.2"
+"cargo:cargo-chef" = "0.1.77"
+"cargo:sea-orm-cli" = "2.0.0-rc.42"
+
+[env]
+RUST_BACKTRACE = "1"
+
+[tasks.format]
+run = "cargo fmt --all --check"
+
+[tasks.check]
+run = "cargo check --workspace --all-targets --all-features --locked"
+
+[tasks.lint]
+run = "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings"
+
+[tasks.test]
+run = "cargo nextest run --workspace --all-features"
+
+[tasks.audit]
+run = "cargo deny check && cargo audit"
+
+[tasks.build]
+run = "cargo build --workspace --all-targets --all-features --locked"
