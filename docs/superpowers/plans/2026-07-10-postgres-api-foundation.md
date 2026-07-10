@@ -250,14 +250,14 @@ the one-active-lease MVP invariant database-enforced.
 - Create: `crates/media-storage/tests/identity_repository.rs`
 - Create: `crates/media-storage/tests/readiness.rs`
 
-- [ ] Write failing integration tests for fixed-user lookup, API-client upsert, token rotation, disabled-client rejection, canonical media insertion, external-reference uniqueness, and persisted confirmed episode mapping.
-- [ ] Define SeaORM models with `#[sea_orm(primary_key, auto_increment = false)]`; do not generate schema from entities.
-- [ ] Implement explicit `TryFrom<Model>` and ActiveModel builders in `mapping.rs`; repository public methods return domain types only.
-- [ ] Implement SHA-256 token digest input as `CredentialDigest`; never accept or expose plaintext tokens in storage APIs.
-- [ ] Implement `ClientStore` for `SeaOrmClientStore` and identity repository ports for canonical media/mapping operations.
-- [ ] Implement `ReadinessPort` so it returns true only when PostgreSQL is reachable and `Migrator::get_pending_migrations` is empty.
-- [ ] Add tests confirming SeaORM model/debug output and repository errors do not include token bytes.
-- [ ] Run focused integration and workspace gates; commit: `feat(storage): implement client and identity adapters`.
+- [x] Write failing integration tests for fixed-user lookup, API-client upsert, token rotation, disabled-client rejection, canonical media insertion, external-reference uniqueness, and persisted confirmed episode mapping.
+- [x] Define SeaORM models with `#[sea_orm(primary_key, auto_increment = false)]`; do not generate schema from entities.
+- [x] Implement explicit `TryFrom<Model>` and ActiveModel builders in `mapping.rs`; repository public methods return domain types only.
+- [x] Implement SHA-256 token digest input as `CredentialDigest`; never accept or expose plaintext tokens in storage APIs.
+- [x] Implement `ClientStore` for `SeaOrmClientStore` and identity repository ports for canonical media/mapping operations.
+- [x] Implement `ReadinessPort` so it returns true only when PostgreSQL is reachable and `Migrator::get_pending_migrations` is empty.
+- [x] Add tests confirming SeaORM model/debug output and repository errors do not include token bytes.
+- [x] Run focused integration and workspace gates; commit: `feat(storage): implement client and identity adapters`.
 
 ## Task 5: Implement Jobs, Idempotency Records, and Atomic Leasing
 
