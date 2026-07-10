@@ -1,9 +1,14 @@
+#![allow(dead_code)]
+
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbErr, QueryResult, Statement};
 use testcontainers::{
     ContainerAsync, GenericImage, ImageExt,
     core::{IntoContainerPort, WaitFor},
     runners::AsyncRunner,
 };
+
+use media_storage::Migrator;
+use sea_orm_migration::MigratorTrait;
 
 const POSTGRES_IMAGE: &str = "postgres";
 const POSTGRES_TAG_AND_DIGEST: &str = concat!(
@@ -50,6 +55,14 @@ impl TestDatabase {
 
     pub fn connection(&self) -> &DatabaseConnection {
         &self.connection
+    }
+
+    pub async fn start_migrated() -> Self {
+        let database = Self::start().await;
+        Migrator::up(database.connection(), None)
+            .await
+            .expect("all explicit migrations must apply");
+        database
     }
 }
 

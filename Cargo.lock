@@ -1941,9 +1941,13 @@ dependencies = [
 name = "media-storage"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "media-core",
  "sea-orm",
  "sea-orm-migration",
+ "serde_json",
  "testcontainers",
+ "time",
  "tokio",
  "uuid",
 ]
