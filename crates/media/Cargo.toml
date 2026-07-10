@@ -7,8 +7,8 @@ publish.workspace = true
 
 [dependencies]
 clap.workspace = true
-media-contract = { path = "../media-contract" }
-media-core = { path = "../media-core" }
+media-contract = { path = "../media-contract", version = "=0.1.0" }
+media-core = { path = "../media-core", version = "=0.1.0" }
 
 [dev-dependencies]
 assert_cmd.workspace = true

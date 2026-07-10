@@ -21,4 +21,22 @@ This repository will contain:
 
 Hermes profiles and skills belong in the separate private `hermes-home` repository. Homelab deployment wiring belongs in the existing `homelab` repository.
 
-Implementation must not begin until the design is reviewed and approved.
+## Development
+
+The repository uses `mise` as its only supported developer entry point:
+
+```bash
+mise trust
+mise install
+mise run format
+mise run check
+mise run lint
+mise run test
+mise run audit
+```
+
+The current Rust foundation contains pure domain types, versioned transport
+DTOs, the initial `media` composition binary, and executable architecture
+checks. Network providers, PostgreSQL, filesystem access, ffmpeg, and container
+runtime behavior are intentionally introduced by later focused plans in the
+[MVP roadmap](docs/superpowers/plans/2026-07-10-media-orchestrator-mvp-roadmap.md).
