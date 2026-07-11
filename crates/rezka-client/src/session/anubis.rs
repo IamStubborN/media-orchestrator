@@ -5,11 +5,17 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use url::Url;
 
-use crate::{RezkaError, redaction::sanitize_provider_text, transport::Transport};
+use crate::{
+    RezkaError, mirror::same_origin, redaction::sanitize_provider_text, transport::Transport,
+};
 
 const CHALLENGE_SELECTOR: &str = "#anubis_challenge";
 const PASS_CHALLENGE_PATH: &str = "/.within.website/x/cmd/anubis/api/pass-challenge";
 const MAX_DIFFICULTY: u8 = 32;
+// Provider values are short opaque tokens; generous caps bound retained state and per-nonce hashing.
+const MAX_CHALLENGE_ID_BYTES: usize = 1_024;
+const MAX_RANDOM_DATA_BYTES: usize = 4_096;
+const MAX_U64_DECIMAL_DIGITS: usize = 20;
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct AnubisChallenge {
@@ -85,6 +91,8 @@ pub fn parse_challenge(html: &str) -> Result<AnubisChallenge, RezkaError> {
 
     if parsed.challenge.id.trim().is_empty()
         || parsed.challenge.random_data.trim().is_empty()
+        || parsed.challenge.id.len() > MAX_CHALLENGE_ID_BYTES
+        || parsed.challenge.random_data.len() > MAX_RANDOM_DATA_BYTES
         || !(1..=MAX_DIFFICULTY).contains(&parsed.rules.difficulty)
     {
         return Err(invalid_challenge("challenge fields invalid"));
@@ -105,25 +113,45 @@ pub fn solve_challenge(
         return Err(challenge_failed());
     }
 
-    for nonce in 0..=max_nonce {
-        let mut hasher = Sha256::new();
-        hasher.update(challenge.random_data.as_bytes());
-        hasher.update(nonce.to_string().as_bytes());
-        let response_hex = hex::encode(hasher.finalize());
+    let mut seeded_hasher = Sha256::new();
+    seeded_hasher.update(challenge.random_data.as_bytes());
+    let mut nonce_buffer = [0_u8; MAX_U64_DECIMAL_DIGITS];
 
-        if response_hex
-            .bytes()
-            .take(usize::from(challenge.difficulty))
-            .all(|nibble| nibble == b'0')
-        {
+    for nonce in 0..=max_nonce {
+        let mut hasher = seeded_hasher.clone();
+        hasher.update(encode_decimal_nonce(nonce, &mut nonce_buffer));
+        let digest = hasher.finalize();
+
+        if has_leading_zero_nibbles(&digest, challenge.difficulty) {
             return Ok(AnubisProof {
-                response_hex,
+                response_hex: hex::encode(digest),
                 nonce,
             });
         }
     }
 
     Err(challenge_failed())
+}
+
+fn encode_decimal_nonce(mut nonce: u64, buffer: &mut [u8; MAX_U64_DECIMAL_DIGITS]) -> &[u8] {
+    let mut start = buffer.len();
+    loop {
+        start -= 1;
+        buffer[start] = b'0' + (nonce % 10) as u8;
+        nonce /= 10;
+        if nonce == 0 {
+            return &buffer[start..];
+        }
+    }
+}
+
+fn has_leading_zero_nibbles(digest: &[u8], difficulty: u8) -> bool {
+    let zero_bytes = usize::from(difficulty / 2);
+    if digest[..zero_bytes].iter().any(|byte| *byte != 0) {
+        return false;
+    }
+
+    difficulty.is_multiple_of(2) || digest[zero_bytes] & 0xf0 == 0
 }
 
 pub async fn submit_challenge(
@@ -133,6 +161,10 @@ pub async fn submit_challenge(
     redir: Url,
     elapsed_ms: u128,
 ) -> Result<(), RezkaError> {
+    if !same_origin(transport.selected_origin(), &redir) {
+        return Err(invalid_challenge("challenge redirect origin invalid"));
+    }
+
     let mut url = transport
         .selected_origin()
         .join(PASS_CHALLENGE_PATH)
@@ -146,7 +178,11 @@ pub async fn submit_challenge(
         .append_pair("redir", redir.as_str())
         .append_pair("elapsedTime", &elapsed_ms);
 
-    transport.get_first(url, Some(redir)).await?;
+    let response = transport.get_first(url, Some(redir)).await?;
+    if !response.status.is_redirection() {
+        return Err(invalid_challenge("challenge pass response invalid"));
+    }
+
     Ok(())
 }
 
