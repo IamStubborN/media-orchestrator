@@ -20,10 +20,10 @@ use media_storage::{
 };
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretBox};
 use sha2::{Digest, Sha256};
 
-use crate::config::{DatabaseConfig, ServerConfig};
+use crate::config::{DatabaseConfig, RunnerConfig, ServerConfig};
 
 const IDEMPOTENCY_TTL: time::Duration = time::Duration::hours(24);
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -46,6 +46,77 @@ pub enum ServiceError {
     Server,
     #[error("graceful shutdown timed out")]
     ShutdownTimeout,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
+pub enum RunnerCompositionError {
+    #[error("Rezka client construction failed")]
+    Client,
+    #[error("Rezka validation probe construction failed")]
+    Probe,
+    #[error("Rezka session store construction failed")]
+    Store,
+}
+
+pub struct PreparedRunnerSession {
+    pub client: rezka_client::RezkaClient,
+    pub credentials: rezka_client::RezkaCredentials,
+    pub probe: rezka_client::SessionValidationProbe,
+    pub store: media_runner::EncryptedRezkaSessionStore,
+}
+
+impl std::fmt::Debug for PreparedRunnerSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedRunnerSession")
+            .field("client", &"[REDACTED]")
+            .field("credentials", &"[REDACTED]")
+            .field("probe", &"[REDACTED]")
+            .field("store", &"[REDACTED]")
+            .finish()
+    }
+}
+
+pub fn prepare_runner_session(
+    config: &RunnerConfig,
+) -> Result<PreparedRunnerSession, RunnerCompositionError> {
+    let config = config.rezka();
+    let mirrors = rezka_client::MirrorSet::new(config.mirrors().to_vec())
+        .map_err(|_| RunnerCompositionError::Client)?;
+    let client = rezka_client::RezkaClient::new(rezka_client::RezkaClientConfig {
+        mirrors,
+        user_agent: config.user_agent().to_owned(),
+        request_timeout: time::Duration::seconds(30),
+        max_retries: 2,
+        anubis_max_nonce: 5_000_000,
+    })
+    .map_err(|_| RunnerCompositionError::Client)?;
+    let credentials = rezka_client::RezkaCredentials {
+        username: config.username().clone(),
+        password: config.password().clone(),
+    };
+    let probe = rezka_client::SessionValidationProbe::new(
+        config.session_probe_url().clone(),
+        config.session_valid_markers().to_vec(),
+        config.session_invalid_markers().to_vec(),
+    )
+    .map_err(|_| RunnerCompositionError::Probe)?;
+    let key = SecretBox::<[u8; 32]>::init_with_mut(|key| {
+        key.copy_from_slice(config.cookie_key().expose_secret());
+    });
+    let store =
+        media_runner::EncryptedRezkaSessionStore::new(media_runner::RezkaSessionStoreConfig {
+            path: config.session_store_path().to_owned(),
+            key,
+        })
+        .map_err(|_| RunnerCompositionError::Store)?;
+
+    Ok(PreparedRunnerSession {
+        client,
+        credentials,
+        probe,
+        store,
+    })
 }
 
 /// Composition-local bridge between the API's idempotency port and SeaORM storage.
