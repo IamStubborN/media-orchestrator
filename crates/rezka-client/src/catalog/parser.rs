@@ -112,6 +112,7 @@ enum JavaScriptState {
     Template,
     LineComment,
     BlockComment,
+    Regex { in_character_class: bool },
 }
 
 fn parse_script_player_initializations(
@@ -121,13 +122,23 @@ fn parse_script_player_initializations(
 ) -> Result<(), RezkaError> {
     let bytes = source.as_bytes();
     let mut state = JavaScriptState::Code;
+    let mut can_start_regex = true;
     let mut index = 0;
     while index < bytes.len() {
         match state {
             JavaScriptState::Code => match bytes[index] {
-                b'\'' => state = JavaScriptState::SingleQuoted,
-                b'"' => state = JavaScriptState::DoubleQuoted,
-                b'`' => state = JavaScriptState::Template,
+                b'\'' => {
+                    state = JavaScriptState::SingleQuoted;
+                    can_start_regex = false;
+                }
+                b'"' => {
+                    state = JavaScriptState::DoubleQuoted;
+                    can_start_regex = false;
+                }
+                b'`' => {
+                    state = JavaScriptState::Template;
+                    can_start_regex = false;
+                }
                 b'/' if bytes.get(index + 1) == Some(&b'/') => {
                     state = JavaScriptState::LineComment;
                     index += 1;
@@ -136,10 +147,17 @@ fn parse_script_player_initializations(
                     state = JavaScriptState::BlockComment;
                     index += 1;
                 }
+                b'/' if can_start_regex => {
+                    state = JavaScriptState::Regex {
+                        in_character_class: false,
+                    };
+                }
+                b'/' => can_start_regex = true,
                 _ if source.is_char_boundary(index) => {
+                    let mut matched_call = false;
                     for &(function, kind) in functions {
                         let Some(arguments_start) =
-                            exact_call_arguments_start(source, index, function)
+                            exact_player_call_arguments_start(source, index, function)
                         else {
                             continue;
                         };
@@ -157,8 +175,17 @@ fn parse_script_player_initializations(
                                 "invalid translation ID",
                             )?)?,
                         });
-                        index = arguments_start;
+                        index = arguments_start.saturating_sub(1);
+                        can_start_regex = true;
+                        matched_call = true;
                         break;
+                    }
+                    if !matched_call {
+                        update_javascript_expression_context(
+                            source,
+                            &mut index,
+                            &mut can_start_regex,
+                        );
                     }
                 }
                 _ => {}
@@ -179,7 +206,10 @@ fn parse_script_player_initializations(
                 _ => {}
             },
             JavaScriptState::LineComment => {
-                if matches!(bytes[index], b'\n' | b'\r') {
+                if matches!(bytes[index], b'\n' | b'\r')
+                    || javascript_character_at(source, index)
+                        .is_some_and(is_javascript_non_ascii_line_terminator)
+                {
                     state = JavaScriptState::Code;
                 }
             }
@@ -189,46 +219,201 @@ fn parse_script_player_initializations(
                     index += 1;
                 }
             }
+            JavaScriptState::Regex {
+                mut in_character_class,
+            } => match bytes[index] {
+                b'\\' => index += usize::from(index + 1 < bytes.len()),
+                b'[' if !in_character_class => {
+                    in_character_class = true;
+                    state = JavaScriptState::Regex { in_character_class };
+                }
+                b']' if in_character_class => {
+                    in_character_class = false;
+                    state = JavaScriptState::Regex { in_character_class };
+                }
+                b'/' if !in_character_class => {
+                    state = JavaScriptState::Code;
+                    can_start_regex = false;
+                }
+                b'\n' | b'\r' if !in_character_class => {
+                    state = JavaScriptState::Code;
+                    can_start_regex = true;
+                }
+                _ if !in_character_class
+                    && javascript_character_at(source, index)
+                        .is_some_and(is_javascript_non_ascii_line_terminator) =>
+                {
+                    state = JavaScriptState::Code;
+                    can_start_regex = true;
+                }
+                _ => {}
+            },
         }
         index += 1;
     }
     Ok(())
 }
 
-fn exact_call_arguments_start(source: &str, index: usize, function: &str) -> Option<usize> {
-    if !source[index..].starts_with(function)
+fn exact_player_call_arguments_start(source: &str, index: usize, function: &str) -> Option<usize> {
+    if source[..index]
+        .chars()
+        .next_back()
+        .is_some_and(is_javascript_identifier_continue)
         || source[..index]
             .chars()
-            .next_back()
-            .is_some_and(is_javascript_identifier_continue)
+            .rev()
+            .find(|character| !is_javascript_whitespace(*character))
+            == Some('.')
     {
         return None;
     }
 
-    let mut after_identifier = index + function.len();
-    if source[after_identifier..]
-        .chars()
-        .next()
-        .is_some_and(is_javascript_identifier_continue)
-    {
+    let after_sof = exact_identifier_end(source, index, "sof")?;
+    let first_dot = skip_javascript_whitespace(source, after_sof);
+    let after_first_dot = source[first_dot..]
+        .strip_prefix('.')
+        .map(|_| first_dot + 1)?;
+    let tv_start = skip_javascript_whitespace(source, after_first_dot);
+    let after_tv = exact_identifier_end(source, tv_start, "tv")?;
+    let second_dot = skip_javascript_whitespace(source, after_tv);
+    let after_second_dot = source[second_dot..]
+        .strip_prefix('.')
+        .map(|_| second_dot + 1)?;
+    let function_start = skip_javascript_whitespace(source, after_second_dot);
+    let after_function = exact_identifier_end(source, function_start, function)?;
+    let opening_parenthesis = skip_javascript_whitespace(source, after_function);
+    source[opening_parenthesis..]
+        .starts_with('(')
+        .then_some(opening_parenthesis + 1)
+}
+
+fn exact_identifier_end(source: &str, start: usize, expected: &str) -> Option<usize> {
+    if !source[start..].starts_with(expected) {
         return None;
     }
-    while let Some(character) = source[after_identifier..].chars().next() {
-        if !character.is_whitespace() {
+    let end = start + expected.len();
+    (!source[end..]
+        .chars()
+        .next()
+        .is_some_and(is_javascript_identifier_continue))
+    .then_some(end)
+}
+
+fn skip_javascript_whitespace(source: &str, mut index: usize) -> usize {
+    while let Some(character) = source[index..].chars().next() {
+        if !is_javascript_whitespace(character) {
             break;
         }
-        after_identifier += character.len_utf8();
+        index += character.len_utf8();
     }
-    source[after_identifier..]
-        .starts_with('(')
-        .then_some(after_identifier + 1)
+    index
+}
+
+fn update_javascript_expression_context(
+    source: &str,
+    index: &mut usize,
+    can_start_regex: &mut bool,
+) {
+    let character = source[*index..]
+        .chars()
+        .next()
+        .expect("index is a character boundary within source");
+    if is_javascript_identifier_start(character) {
+        let start = *index;
+        let mut end = start;
+        for candidate in source[start..].chars() {
+            if !is_javascript_identifier_continue(candidate) {
+                break;
+            }
+            end += candidate.len_utf8();
+        }
+        *can_start_regex = matches!(
+            &source[start..end],
+            "await"
+                | "case"
+                | "delete"
+                | "do"
+                | "else"
+                | "in"
+                | "instanceof"
+                | "new"
+                | "of"
+                | "return"
+                | "throw"
+                | "typeof"
+                | "void"
+                | "yield"
+        );
+        *index = end.saturating_sub(1);
+        return;
+    }
+
+    *can_start_regex = match character {
+        ')' | ']' | '}' | '.' => false,
+        character if character.is_ascii_digit() => false,
+        character if is_javascript_whitespace(character) => *can_start_regex,
+        _ => true,
+    };
+    *index += character.len_utf8().saturating_sub(1);
+}
+
+fn is_javascript_identifier_start(character: char) -> bool {
+    matches!(character, '$' | '_') || character.is_alphabetic()
+}
+
+fn javascript_character_at(source: &str, index: usize) -> Option<char> {
+    source
+        .is_char_boundary(index)
+        .then(|| source[index..].chars().next())
+        .flatten()
+}
+
+fn is_javascript_non_ascii_line_terminator(character: char) -> bool {
+    matches!(character, '\u{2028}' | '\u{2029}')
+}
+
+fn is_javascript_whitespace(character: char) -> bool {
+    matches!(
+        character,
+        '\u{0009}'
+            | '\u{000a}'
+            | '\u{000b}'
+            | '\u{000c}'
+            | '\u{000d}'
+            | '\u{0020}'
+            | '\u{00a0}'
+            | '\u{1680}'
+            | '\u{2000}'
+            ..='\u{200a}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202f}'
+                | '\u{205f}'
+                | '\u{3000}'
+                | '\u{feff}'
+    )
 }
 
 fn is_javascript_identifier_continue(character: char) -> bool {
-    character == '_'
-        || character == '$'
+    is_javascript_identifier_start(character)
         || character.is_alphanumeric()
-        || matches!(character, '\u{200c}' | '\u{200d}')
+        || matches!(
+            character,
+            '\u{0300}'..='\u{036f}'
+                | '\u{1ab0}'..='\u{1aff}'
+                | '\u{1dc0}'..='\u{1dff}'
+                | '\u{200c}'
+                | '\u{200d}'
+                | '\u{203f}'
+                | '\u{2040}'
+                | '\u{2054}'
+                | '\u{20d0}'..='\u{20ff}'
+                | '\u{fe20}'..='\u{fe2f}'
+                | '\u{fe33}'
+                | '\u{fe34}'
+                | '\u{fe4d}'..='\u{fe4f}'
+                | '\u{ff3f}'
+        )
 }
 
 fn split_player_argument(value: &str) -> Result<(&str, &str), RezkaError> {

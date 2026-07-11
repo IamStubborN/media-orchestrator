@@ -195,13 +195,25 @@ fn invalid_or_absent_title_ids_fail_atomically() {
 #[test]
 fn player_initialization_ignores_non_call_javascript_and_visible_text() {
     let false_positives = [
-        r#"// initCDNMoviesEvents(999, 999, {}, {});
-            /* initCDNMoviesEvents(999, 999, {}, {}); */"#,
-        r#"const quoted = "initCDNMoviesEvents(999, 999, {}, {});";"#,
-        r#"const singleQuoted = 'initCDNMoviesEvents(999, 999, {}, {});';"#,
-        r#"const template = `initCDNMoviesEvents(999, 999, {}, {})`;"#,
-        r#"initCDNMoviesEventsSuffix(999, 999, {}, {});"#,
-        r#"prefixinitCDNMoviesEvents(999, 999, {}, {});"#,
+        r#"// sof.tv.initCDNMoviesEvents(999, 999, {}, {});
+            /* sof.tv.initCDNMoviesEvents(999, 999, {}, {}); */"#,
+        r#"const quoted = "sof.tv.initCDNMoviesEvents(999, 999, {}, {});";"#,
+        r#"const singleQuoted = 'sof.tv.initCDNMoviesEvents(999, 999, {}, {});';"#,
+        r#"const template = `sof.tv.initCDNMoviesEvents(999, 999, {}, {})`;"#,
+        r#"function initCDNMoviesEvents(titleId, translationId) {}"#,
+        r#"const matcher = /[a/b]sof.tv.initCDNMoviesEvents(999, 999, payload)\/tail/gi;"#,
+        r#"other.tv.initCDNMoviesEvents(999, 999, {}, {});"#,
+        r#"sof.other.initCDNMoviesEvents(999, 999, {}, {});"#,
+        r#"sof["tv"].initCDNMoviesEvents(999, 999, {}, {});"#,
+        r#"window.sof.tv.initCDNMoviesEvents(999, 999, {}, {});"#,
+        r#"window . sof.tv.initCDNMoviesEvents(999, 999, {}, {});"#,
+        r#"sof.tv.initCDNMoviesEventsSuffix(999, 999, {}, {});"#,
+        r#"prefixsof.tv.initCDNMoviesEvents(999, 999, {}, {});"#,
+        r#"πsof.tv.initCDNMoviesEvents(999, 999, {}, {});"#,
+        r#"‿sof.tv.initCDNMoviesEvents(999, 999, {}, {});"#,
+        r#"sof.tv.initCDNMoviesEventsπ(999, 999, {}, {});"#,
+        r#"sof.tv.initCDNMoviesEvents‿(999, 999, {}, {});"#,
+        "sof\u{0085}.tv.initCDNMoviesEvents(999, 999, {}, {});",
         r#"const название = 1;"#,
     ];
     for source in false_positives {
@@ -215,7 +227,7 @@ fn player_initialization_ignores_non_call_javascript_and_visible_text() {
 
     let visible = valid_page(
         r#"<input id="post_id" value="61">
-        <div>initCDNMoviesEvents(999, 999, {}, {});</div>"#,
+        <div>sof.tv.initCDNMoviesEvents(999, 999, {}, {});</div>"#,
         "",
     );
     assert_eq!(
@@ -229,7 +241,10 @@ fn player_initialization_ignores_non_call_javascript_and_visible_text() {
 
 #[test]
 fn player_initialization_accepts_an_exact_whitespace_separated_call() {
-    let html = valid_page("", "sof.tv.initCDNMoviesEvents \n  (61, 9, {}, {});");
+    let html = valid_page(
+        "",
+        "sof \n  .\t tv \n . initCDNMoviesEvents \n  (61, 9, {}, {});",
+    );
     let title = parse(&html, "/films/no-fallback.html").unwrap();
 
     assert_eq!(title.id().get(), 61);
