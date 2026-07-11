@@ -1,0 +1,1 @@
+[720p]https://cdn.example.com/720.mp4:hls:manifest.m3u8 or https://cdn.example.com/720.mp4,[1080p Ultra]https://cdn.example.com/1080.m3u8
