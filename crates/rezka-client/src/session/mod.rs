@@ -1,4 +1,11 @@
-use std::{fmt, time::Instant};
+use std::{
+    fmt,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Instant,
+};
 
 use secrecy::SecretString;
 use time::Duration;
@@ -8,7 +15,7 @@ use crate::{
     mirror::MirrorSet,
     redaction::sanitize_provider_text,
     session::{
-        anubis::{detect_challenge, parse_challenge, solve_challenge, submit_challenge},
+        anubis::{parse_optional_challenge, solve_challenge_with_cancellation, submit_challenge},
         cookie::{SessionJar, SessionSnapshot},
     },
     transport::Transport,
@@ -74,15 +81,9 @@ impl RezkaClient {
     ) -> Result<SessionValidation, RezkaError> {
         let mut response = self.fetch_probe(probe).await?;
 
-        if detect_challenge(response.body()) {
+        if let Some(challenge) = parse_optional_challenge(response.body())? {
             let started = Instant::now();
-            let challenge = parse_challenge(response.body())?;
-            let solver_challenge = challenge.clone();
-            let max_nonce = self.anubis_max_nonce;
-            let proof =
-                tokio::task::spawn_blocking(move || solve_challenge(&solver_challenge, max_nonce))
-                    .await
-                    .map_err(|_| challenge_solver_join_failed())??;
+            let proof = solve_challenge_async(challenge.clone(), self.anubis_max_nonce).await?;
             submit_challenge(
                 &mut self.transport,
                 &challenge,
@@ -93,7 +94,7 @@ impl RezkaClient {
             .await?;
 
             response = self.fetch_probe(probe).await?;
-            if detect_challenge(response.body()) {
+            if parse_optional_challenge(response.body())?.is_some() {
                 return Err(challenge_failed());
             }
         }
@@ -106,7 +107,7 @@ impl RezkaClient {
 
         dle::login(&mut self.transport, credentials).await?;
         let response = self.fetch_probe(probe).await?;
-        if detect_challenge(response.body()) {
+        if parse_optional_challenge(response.body())?.is_some() {
             return Err(challenge_failed());
         }
 
@@ -179,8 +180,99 @@ fn challenge_solver_join_failed() -> RezkaError {
     }
 }
 
+async fn solve_challenge_async(
+    challenge: anubis::AnubisChallenge,
+    max_nonce: u64,
+) -> Result<anubis::AnubisProof, RezkaError> {
+    let permit = proof_semaphore()
+        .acquire_owned()
+        .await
+        .map_err(|_| challenge_solver_join_failed())?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancellation_guard = ProofCancellationGuard {
+        cancelled: Arc::clone(&cancelled),
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        solve_challenge_with_cancellation(&challenge, max_nonce, Some(&cancelled))
+    })
+    .await
+    .map_err(|_| challenge_solver_join_failed())?;
+    drop(cancellation_guard);
+    result
+}
+
+fn proof_semaphore() -> Arc<tokio::sync::Semaphore> {
+    static SEMAPHORE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    Arc::clone(SEMAPHORE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1))))
+}
+
+struct ProofCancellationGuard {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Drop for ProofCancellationGuard {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+}
+
 fn inconclusive_validation() -> RezkaError {
     RezkaError::ProviderResponseInvalid {
         context: sanitize_provider_text("session validation inconclusive"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{proof_semaphore, solve_challenge_async};
+    use crate::{RezkaErrorCode, session::anubis::AnubisChallenge};
+
+    static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn challenge(difficulty: u8) -> AnubisChallenge {
+        AnubisChallenge {
+            id: "test".to_owned(),
+            random_data: "deterministic-test-proof".to_owned(),
+            difficulty,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn global_proof_budget_serializes_without_timing_assumptions() {
+        let _test_guard = TEST_LOCK.lock().await;
+        let held_permit = proof_semaphore().acquire_owned().await.unwrap();
+        let proof = tokio::spawn(solve_challenge_async(challenge(33), 0));
+
+        tokio::task::yield_now().await;
+        assert!(!proof.is_finished());
+
+        drop(held_permit);
+        let error = proof.await.unwrap().unwrap_err();
+        assert_eq!(error.code(), RezkaErrorCode::ChallengeFailed);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn abort_cancels_blocking_proof_and_releases_permit_without_timers() {
+        let _test_guard = TEST_LOCK.lock().await;
+        let proof = tokio::spawn(solve_challenge_async(challenge(32), u64::MAX));
+        wait_for_available_permits(0).await;
+
+        proof.abort();
+        let _ = proof.await;
+        wait_for_available_permits(1).await;
+
+        let error = solve_challenge_async(challenge(33), 0).await.unwrap_err();
+        assert_eq!(error.code(), RezkaErrorCode::ChallengeFailed);
+    }
+
+    async fn wait_for_available_permits(expected: usize) {
+        for _ in 0..100_000 {
+            if proof_semaphore().available_permits() == expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("proof permit did not reach {expected}");
     }
 }

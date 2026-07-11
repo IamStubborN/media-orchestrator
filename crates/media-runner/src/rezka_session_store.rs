@@ -18,6 +18,7 @@ use thiserror::Error;
 const ENVELOPE_VERSION: u8 = 1;
 const NONCE_LENGTH: usize = 12;
 const MAX_ENVELOPE_BYTES: usize = 256 * 1024;
+const MAX_SESSION_SNAPSHOT_PLAINTEXT_BYTES: usize = 128 * 1024;
 const AAD: &[u8] = b"media-orchestrator:rezka-session:v1";
 
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -108,6 +109,11 @@ impl EncryptedRezkaSessionStore {
     }
 
     pub fn save(&self, snapshot: &SessionSnapshot) -> Result<(), RezkaSessionStoreError> {
+        if snapshot
+            .with_secret_bytes(|plaintext| plaintext.len() > MAX_SESSION_SNAPSHOT_PLAINTEXT_BYTES)
+        {
+            return Err(RezkaSessionStoreError::InvalidEnvelope);
+        }
         let mut nonce = [0_u8; NONCE_LENGTH];
         OsRng.fill_bytes(&mut nonce);
         let cipher = cipher(&self.config.key);

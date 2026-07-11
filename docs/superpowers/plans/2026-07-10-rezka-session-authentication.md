@@ -8,6 +8,45 @@
 
 **Tech Stack:** Rust 1.97.0, Cargo edition 2024, Reqwest 0.13.4 with rustls/form/compression, Tokio 1.52.3, cookie_store 0.22.0, scraper 0.24.0, SHA-2 0.11.0, AES-GCM 0.10.3, rand 0.8.6, secrecy 0.10.3, zeroize 1.9.0, base64 0.22.1, wiremock 0.6.5, tempfile 3.23.0, thiserror 2.0.18, tracing 0.1.44.
 
+## Post-Review Amendment (2026-07-11)
+
+This amendment is authoritative where it conflicts with the original task text below. It records
+review remediation applied before Phase 3 deployment without rewriting the historical TDD steps or
+their original evidence.
+
+1. The exact `scraper` pin is `=0.27.0`, replacing `=0.24.0`. Its `selectors 0.38.0`
+   dependency uses `rustc-hash` instead of the unmaintained `fxhash`. `tracing` is not a direct
+   dependency of `rezka-client`, and `zeroize` is not a direct dependency of `media-runner`, because
+   neither crate uses those direct APIs. MPL-2.0 is allowed for unmodified transitive Servo HTML/CSS
+   parser crates; `RUSTSEC-2025-0057` is not ignored.
+2. `SessionSnapshot` contains an exact scheme/host/effective-port origin binding around the internal
+   `cookie_store` JSON. Restore rotates the matching configured origin to index zero or fails closed.
+   Successful failover similarly promotes the selected origin by deterministic rotation. `select_next`
+   remains non-wrapping, and every cross-origin failover replaces the jar with a new empty jar bound to
+   the new origin.
+3. Provider 2xx/3xx bodies are bounded to 2 MiB with Content-Length prechecks and checked chunk reads.
+   Set-Cookie processing is atomic and bounded to 64 headers, 8 KiB per header, 64 accepted cookies,
+   and a 128 KiB serialized opaque snapshot. Candidate stores are committed only after all limits pass.
+   `media-runner` rejects snapshot plaintext above 128 KiB before AES allocation and retains the final
+   256 KiB serialized-envelope check.
+4. Async Anubis work uses one process-wide Tokio semaphore permit. The blocking solver receives a
+   cooperative cancellation token, owns the permit until it exits, and is cancelled by an RAII guard
+   when `ensure_authenticated` is dropped. Cancellation, semaphore closure, and join failure map to
+   sanitized `ChallengeFailed`. The public synchronous solver remains deterministic.
+5. DLE credentials may be submitted only over HTTPS or HTTP whose URL host is an exact IP loopback
+   address in `127.0.0.0/8` or `::1` for local protocol tests. Production `RunnerConfig` and the
+   credentialed live probe require HTTPS mirrors and probe URLs. Remote plaintext HTTP is rejected with
+   a static configuration error before form construction or network submission.
+6. `ProcessConfigSource` performs bounded regular-file reads. Unix opens use
+   `O_NOFOLLOW | O_NONBLOCK`; non-Unix uses a documented best-effort pre-check. Database URLs, service
+   tokens, Rezka credentials, and the cookie key all have pre-allocation bounds while preserving one
+   accepted final line ending.
+7. Valid UTF-8 provider bodies reuse their original allocation; lossy decoding occurs only on invalid
+   UTF-8. Session orchestration uses one optional Anubis parse per body while the public detection and
+   parsing APIs retain their original semantics.
+8. `EncryptedRezkaSessionStore` Debug continues to print only the configured path parent, as required
+   by the original plan, while hiding the key, file name, and plaintext size.
+
 ## Global Constraints
 
 - Follow `docs/superpowers/specs/2026-07-10-media-orchestrator-mvp-design.md`, especially sections 6, 11, 20, 22, and 23.

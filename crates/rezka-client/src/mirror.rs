@@ -58,8 +58,14 @@ impl MirrorSet {
         let Some(selected) = self.origins.iter().position(predicate) else {
             return false;
         };
-        self.selected = selected;
+        self.origins.rotate_left(selected);
+        self.selected = 0;
         true
+    }
+
+    pub(crate) fn promote_selected(&mut self) {
+        self.origins.rotate_left(self.selected);
+        self.selected = 0;
     }
 
     #[must_use]

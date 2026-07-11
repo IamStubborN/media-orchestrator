@@ -161,7 +161,10 @@ impl Transport {
                 .send_first(Method::GET, attempt_url, referer.clone(), None)
                 .await
             {
-                Ok(response) => return Ok(response),
+                Ok(response) => {
+                    self.mirrors.promote_selected();
+                    return Ok(response);
+                }
                 Err(failure) if failure.eligible && attempt + 1 < max_attempts => {
                     if !self.mirrors.select_next() {
                         return Err(failure.error);
@@ -272,10 +275,11 @@ impl Transport {
             .headers()
             .get_all(SET_COOKIE)
             .iter()
-            .filter_map(|value| value.to_str().ok());
+            .map(HeaderValue::as_bytes);
         let stored_cookie_names = self
             .jar
-            .store_response_cookies_with_names(cookie_headers, &url);
+            .store_response_cookies_with_names(cookie_headers, &url)
+            .map_err(AttemptFailure::terminal)?;
 
         if status == StatusCode::TOO_MANY_REQUESTS {
             return Err(AttemptFailure::terminal(RezkaError::RateLimited {
@@ -323,7 +327,7 @@ impl Transport {
             }
             body.extend_from_slice(&chunk);
         }
-        let body = String::from_utf8_lossy(&body).into_owned();
+        let body = decode_provider_body(body);
 
         Ok(TransportResponse {
             status,
@@ -342,6 +346,11 @@ impl Transport {
         }
         Ok(())
     }
+}
+
+fn decode_provider_body(body: Vec<u8>) -> String {
+    String::from_utf8(body)
+        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
 }
 
 struct AttemptFailure {
@@ -404,5 +413,25 @@ fn invalid_http_status(status: StatusCode, url: &Url) -> RezkaError {
     let url = redact_url(url.as_str());
     RezkaError::ProviderResponseInvalid {
         context: sanitize_http_status(status.as_u16(), &url),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_provider_body;
+
+    #[test]
+    fn valid_utf8_body_reuses_the_original_allocation() {
+        let body = b"valid provider body".to_vec();
+        let original_pointer = body.as_ptr();
+
+        let decoded = decode_provider_body(body);
+
+        assert_eq!(decoded.as_ptr(), original_pointer);
+    }
+
+    #[test]
+    fn invalid_utf8_body_is_decoded_lossily() {
+        assert_eq!(decode_provider_body(vec![b'a', 0xff, b'b']), "a\u{fffd}b");
     }
 }

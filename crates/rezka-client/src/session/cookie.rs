@@ -7,6 +7,11 @@ use url::Url;
 
 use crate::{RezkaError, redaction::sanitize_provider_text};
 
+pub(crate) const MAX_SESSION_SNAPSHOT_BYTES: usize = 128 * 1024;
+const MAX_SET_COOKIE_HEADERS: usize = 64;
+const MAX_SET_COOKIE_HEADER_BYTES: usize = 8 * 1024;
+const MAX_SESSION_COOKIES: usize = 64;
+
 pub struct SessionSnapshot {
     bytes: SecretBox<Vec<u8>>,
 }
@@ -55,6 +60,9 @@ impl SessionJar {
 
     pub fn import(snapshot: &SessionSnapshot) -> Result<Self, RezkaError> {
         snapshot.with_secret_bytes(|bytes| {
+            if bytes.len() > MAX_SESSION_SNAPSHOT_BYTES {
+                return Err(cookie_budget_exceeded());
+            }
             let snapshot: SnapshotDocument =
                 serde_json::from_slice(bytes).map_err(|_| invalid_snapshot())?;
             snapshot.origin.validate()?;
@@ -62,6 +70,9 @@ impl SessionJar {
                 serde_json::to_vec(&snapshot.cookies).map_err(|_| invalid_snapshot())?;
             let store = cookie_store::serde::json::load(Cursor::new(cookie_bytes))
                 .map_err(|_| invalid_snapshot())?;
+            if store.iter_any().take(MAX_SESSION_COOKIES + 1).count() > MAX_SESSION_COOKIES {
+                return Err(cookie_budget_exceeded());
+            }
             Ok(Self {
                 origin: Some(snapshot.origin),
                 store,
@@ -71,15 +82,10 @@ impl SessionJar {
 
     pub fn export(&self) -> Result<SessionSnapshot, RezkaError> {
         let origin = self.origin.clone().ok_or_else(invalid_snapshot)?;
-        let mut cookie_bytes = Vec::new();
-        cookie_store::serde::json::save_incl_expired_and_nonpersistent(
-            &self.store,
-            &mut cookie_bytes,
-        )
-        .map_err(|_| invalid_snapshot())?;
-        let cookies = serde_json::from_slice(&cookie_bytes).map_err(|_| invalid_snapshot())?;
-        let bytes = serde_json::to_vec(&SnapshotDocument { origin, cookies })
-            .map_err(|_| invalid_snapshot())?;
+        let bytes = serialize_snapshot(&origin, &self.store)?;
+        if bytes.len() > MAX_SESSION_SNAPSHOT_BYTES {
+            return Err(cookie_budget_exceeded());
+        }
         Ok(SessionSnapshot::from_secret_bytes(SecretBox::new(
             Box::new(bytes),
         )))
@@ -90,7 +96,7 @@ impl SessionJar {
         headers: impl Iterator<Item = &'a str>,
         url: &Url,
     ) {
-        let _ = self.store_response_cookies_with_names(headers, url);
+        let _ = self.store_response_cookies_with_names(headers.map(str::as_bytes), url);
     }
 
     #[must_use]
@@ -105,24 +111,47 @@ impl SessionJar {
 
     pub(crate) fn store_response_cookies_with_names<'a>(
         &mut self,
-        headers: impl Iterator<Item = &'a str>,
+        headers: impl Iterator<Item = &'a [u8]>,
         url: &Url,
-    ) -> BTreeSet<String> {
-        let mut names = BTreeSet::new();
-        if self.bind_or_matches(url).is_err() {
-            return names;
+    ) -> Result<BTreeSet<String>, RezkaError> {
+        let mut bounded_headers = Vec::with_capacity(MAX_SET_COOKIE_HEADERS);
+        for header in headers {
+            if bounded_headers.len() == MAX_SET_COOKIE_HEADERS
+                || header.len() > MAX_SET_COOKIE_HEADER_BYTES
+            {
+                return Err(cookie_budget_exceeded());
+            }
+            bounded_headers.push(header);
         }
 
-        for header in headers {
+        let mut names = BTreeSet::new();
+        let candidate_origin = match &self.origin {
+            Some(origin) if origin.matches(url) => origin.clone(),
+            Some(_) => return Ok(names),
+            None => OriginBinding::from_url(url)?,
+        };
+        let mut candidate = self.store.clone();
+
+        for header in bounded_headers {
+            let Ok(header) = std::str::from_utf8(header) else {
+                continue;
+            };
             let Ok(cookie) = RawCookie::parse(header.to_owned()) else {
                 continue;
             };
-            if self.store.insert_raw(&cookie, url).is_ok() {
+            if candidate.insert_raw(&cookie, url).is_ok() {
                 names.insert(cookie.name().to_owned());
             }
         }
+        if candidate.iter_any().take(MAX_SESSION_COOKIES + 1).count() > MAX_SESSION_COOKIES
+            || serialize_snapshot(&candidate_origin, &candidate)?.len() > MAX_SESSION_SNAPSHOT_BYTES
+        {
+            return Err(cookie_budget_exceeded());
+        }
 
-        names
+        self.origin = Some(candidate_origin);
+        self.store = candidate;
+        Ok(names)
     }
 
     pub(crate) fn request_cookie_header(&self, url: &Url) -> Option<String> {
@@ -223,5 +252,23 @@ impl OriginBinding {
 fn invalid_snapshot() -> RezkaError {
     RezkaError::ProviderResponseInvalid {
         context: sanitize_provider_text("invalid cookie snapshot"),
+    }
+}
+
+fn serialize_snapshot(origin: &OriginBinding, store: &CookieStore) -> Result<Vec<u8>, RezkaError> {
+    let mut cookie_bytes = Vec::new();
+    cookie_store::serde::json::save_incl_expired_and_nonpersistent(store, &mut cookie_bytes)
+        .map_err(|_| invalid_snapshot())?;
+    let cookies = serde_json::from_slice(&cookie_bytes).map_err(|_| invalid_snapshot())?;
+    serde_json::to_vec(&SnapshotDocument {
+        origin: origin.clone(),
+        cookies,
+    })
+    .map_err(|_| invalid_snapshot())
+}
+
+fn cookie_budget_exceeded() -> RezkaError {
+    RezkaError::ProviderResponseInvalid {
+        context: sanitize_provider_text("cookie session exceeds limits"),
     }
 }

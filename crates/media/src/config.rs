@@ -1,6 +1,6 @@
 use std::{
     ffi::OsString,
-    io,
+    io::{self, Read as _},
     net::SocketAddr,
     path::{Path, PathBuf},
 };
@@ -31,8 +31,10 @@ const DEFAULT_LEASE_TTL_SECONDS: i64 = 60;
 const MIN_LEASE_TTL_SECONDS: i64 = 30;
 const MAX_LEASE_TTL_SECONDS: i64 = 300;
 const MAX_TOKEN_BYTES: usize = 512;
+const MAX_DATABASE_URL_BYTES: usize = 8 * 1024;
 const MAX_REZKA_USERNAME_BYTES: usize = 256;
 const MAX_REZKA_PASSWORD_BYTES: usize = 1024;
+const MAX_REZKA_COOKIE_KEY_ENCODED_BYTES: usize = 44;
 const MAX_REZKA_MARKERS: usize = 64;
 const MAX_REZKA_MARKER_BYTES: usize = 256;
 const MAX_REZKA_MARKERS_JSON_BYTES: usize = 32 * 1024;
@@ -41,6 +43,17 @@ pub trait ConfigSource {
     fn var_os(&self, name: &'static str) -> Option<OsString>;
 
     fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
+
+    fn read_bounded(&self, path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
+        let contents = self.read(path)?;
+        if contents.len() > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "secret exceeds configured limit",
+            ));
+        }
+        Ok(contents)
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -52,7 +65,11 @@ impl ConfigSource for ProcessConfigSource {
     }
 
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-        std::fs::read(path)
+        read_process_secret(path, MAX_DATABASE_URL_BYTES + 2)
+    }
+
+    fn read_bounded(&self, path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
+        read_process_secret(path, max_bytes)
     }
 }
 
@@ -404,7 +421,7 @@ fn read_secret(
     name: &'static str,
     kind: SecretKind,
 ) -> Result<SecretString, ConfigError> {
-    let contents = read_secret_bytes(source, name)?;
+    let contents = read_secret_bytes(source, name, kind.max_bytes())?;
 
     let valid = match kind {
         SecretKind::DatabaseUrl => {
@@ -439,6 +456,7 @@ fn read_secret(
 fn read_secret_bytes(
     source: &impl ConfigSource,
     name: &'static str,
+    max_bytes: usize,
 ) -> Result<Vec<u8>, ConfigError> {
     let path = source
         .var_os(name)
@@ -446,19 +464,25 @@ fn read_secret_bytes(
     if path.is_empty() {
         return Err(ConfigError::InvalidEnvironment { name });
     }
-    let mut contents =
-        source
-            .read(Path::new(&path))
-            .map_err(|error| ConfigError::UnreadableSecret {
-                name,
-                kind: error.kind(),
-            })?;
+    let read_limit = max_bytes
+        .checked_add(2)
+        .ok_or(ConfigError::InvalidSecret { name })?;
+    let mut contents = source
+        .read_bounded(Path::new(&path), read_limit)
+        .map_err(|error| ConfigError::UnreadableSecret {
+            name,
+            kind: error.kind(),
+        })?;
     strip_one_final_line_ending(&mut contents);
     Ok(contents)
 }
 
 fn read_rezka_cookie_key(source: &impl ConfigSource) -> Result<SecretBox<[u8; 32]>, ConfigError> {
-    let encoded = SecretBox::new(Box::new(read_secret_bytes(source, REZKA_COOKIE_KEY_FILE)?));
+    let encoded = SecretBox::new(Box::new(read_secret_bytes(
+        source,
+        REZKA_COOKIE_KEY_FILE,
+        MAX_REZKA_COOKIE_KEY_ENCODED_BYTES,
+    )?));
     let decoded = STANDARD.decode(encoded.expose_secret()).map_err(|_| {
         ConfigError::InvalidConfiguration {
             message: "Rezka cookie key must be base64",
@@ -497,7 +521,7 @@ fn parse_rezka_mirrors(value: &str) -> Result<Vec<url::Url>, ConfigError> {
 }
 
 fn is_valid_rezka_mirror(url: &url::Url) -> bool {
-    matches!(url.scheme(), "http" | "https")
+    url.scheme() == "https"
         && url.host().is_some()
         && url.port_or_known_default().is_some()
         && url.username().is_empty()
@@ -518,7 +542,7 @@ fn parse_rezka_probe_url(value: &str) -> Result<url::Url, ConfigError> {
         return Err(invalid_rezka_probe());
     }
     let url = url::Url::parse(value).map_err(|_| invalid_rezka_probe())?;
-    if !matches!(url.scheme(), "http" | "https")
+    if url.scheme() != "https"
         || url.host().is_none()
         || url.port_or_known_default().is_none()
         || !url.username().is_empty()
@@ -613,4 +637,65 @@ fn required_path_environment(
         return Err(ConfigError::InvalidEnvironment { name });
     }
     Ok(PathBuf::from(path))
+}
+
+impl SecretKind {
+    const fn max_bytes(self) -> usize {
+        match self {
+            Self::DatabaseUrl => MAX_DATABASE_URL_BYTES,
+            Self::Token => MAX_TOKEN_BYTES,
+            Self::RezkaUsername => MAX_REZKA_USERNAME_BYTES,
+            Self::RezkaPassword => MAX_REZKA_PASSWORD_BYTES,
+        }
+    }
+}
+
+#[cfg(unix)]
+fn read_process_secret(path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    read_regular_file_bounded(file, max_bytes)
+}
+
+#[cfg(not(unix))]
+fn read_process_secret(path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
+    // Rust has no portable no-follow open. This pre-check has a residual replacement race;
+    // descriptor metadata and the bounded read still enforce regular-file type and size.
+    if !std::fs::symlink_metadata(path)?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "secret is not a regular file",
+        ));
+    }
+    read_regular_file_bounded(std::fs::File::open(path)?, max_bytes)
+}
+
+fn read_regular_file_bounded(file: std::fs::File, max_bytes: usize) -> io::Result<Vec<u8>> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > max_bytes as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "secret is not a bounded regular file",
+        ));
+    }
+    let overflow_limit = max_bytes
+        .checked_add(1)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "secret limit invalid"))?;
+    let initial_capacity = usize::try_from(metadata.len())
+        .unwrap_or(max_bytes)
+        .min(max_bytes);
+    let mut contents = Vec::with_capacity(initial_capacity);
+    file.take(overflow_limit as u64)
+        .read_to_end(&mut contents)?;
+    if contents.len() > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "secret exceeds configured limit",
+        ));
+    }
+    Ok(contents)
 }

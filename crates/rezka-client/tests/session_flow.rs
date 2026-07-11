@@ -447,6 +447,37 @@ async fn dle_http_200_success_without_session_cookie_is_rejected() {
 }
 
 #[tokio::test]
+async fn dle_credentials_are_never_posted_to_non_ip_loopback_http_origins() {
+    let server = MockServer::start().await;
+    let mut base = Url::parse(&server.uri()).unwrap();
+    base.set_host(Some("localhost")).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<input name=\"login_name\">"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/ajax/login/"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let mut client = RezkaClient::new(config(base.clone())).unwrap();
+    let error = client
+        .ensure_authenticated(&credentials(), &probe(&base))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), RezkaErrorCode::Configuration);
+    assert_eq!(
+        error.to_string(),
+        "configuration invalid: Rezka credentials require HTTPS"
+    );
+}
+
+#[tokio::test]
 async fn dle_non_200_success_json_with_current_session_cookie_is_rejected() {
     let server = MockServer::start().await;
     let base = Url::parse(&server.uri()).unwrap();

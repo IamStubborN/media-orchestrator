@@ -34,14 +34,6 @@ fn serialized_envelope_len(plaintext_len: usize) -> usize {
     JSON_WITH_EMPTY_VALUES_LEN + NONCE_B64_LEN + (plaintext_len + TAG_LEN).div_ceil(3) * 4
 }
 
-fn max_plaintext_len() -> usize {
-    const MAX_ENVELOPE_BYTES: usize = 256 * 1024;
-    (0..=MAX_ENVELOPE_BYTES)
-        .rev()
-        .find(|len| serialized_envelope_len(*len) <= MAX_ENVELOPE_BYTES)
-        .unwrap()
-}
-
 fn store(path: PathBuf, key_byte: u8) -> EncryptedRezkaSessionStore {
     EncryptedRezkaSessionStore::new(RezkaSessionStoreConfig {
         path,
@@ -108,14 +100,14 @@ fn repeated_saves_use_distinct_envelopes_and_overwrite_with_latest_snapshot() {
 }
 
 #[test]
-fn maximum_sized_envelope_round_trips_at_the_calculated_boundary() {
+fn maximum_session_snapshot_plaintext_round_trips_at_the_boundary() {
     const MAX_ENVELOPE_BYTES: usize = 256 * 1024;
+    const MAX_SNAPSHOT_BYTES: usize = 128 * 1024;
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("rezka-session.bin");
     let store = store(path.clone(), 7);
-    let plaintext_len = max_plaintext_len();
+    let plaintext_len = MAX_SNAPSHOT_BYTES;
     assert!(serialized_envelope_len(plaintext_len) <= MAX_ENVELOPE_BYTES);
-    assert!(serialized_envelope_len(plaintext_len + 1) > MAX_ENVELOPE_BYTES);
 
     let original = snapshot_with_len(0x5a, plaintext_len);
     store.save(&original).unwrap();
@@ -137,7 +129,7 @@ fn oversized_save_is_rejected_without_overwriting_previous_envelope() {
     let previous_envelope = std::fs::read(&path).unwrap();
 
     let error = store
-        .save(&snapshot_with_len(0x7f, max_plaintext_len() + 1))
+        .save(&snapshot_with_len(0x7f, 128 * 1024 + 1))
         .unwrap_err();
 
     assert_eq!(error, RezkaSessionStoreError::InvalidEnvelope);

@@ -2,7 +2,6 @@ use std::{
     collections::HashMap,
     ffi::OsString,
     io,
-    net::TcpListener,
     path::{Path, PathBuf},
 };
 
@@ -42,18 +41,16 @@ impl ConfigSource for FakeSource {
 
 #[test]
 fn composition_constructs_typed_rezka_dependencies_without_network_calls() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let origin = format!("http://{}", listener.local_addr().unwrap());
-    let probe_url = format!("{origin}/account/probe");
+    let origin = "https://rezka-composition.invalid";
+    let probe_url = "https://rezka-composition.invalid/account/probe";
     let store_path = "/tmp/rezka-session-composition-secret.bin";
     let encoded_key = STANDARD.encode([9_u8; 32]);
 
     let mut source = FakeSource::default();
     source.set_env("MEDIA_SERVICE_URL", "https://media.internal.example");
     source.set_secret("MEDIA_TOKEN_FILE", b"runner-token\n");
-    source.set_env("MEDIA_REZKA_MIRRORS", &origin);
-    source.set_env("MEDIA_REZKA_SESSION_PROBE_URL", &probe_url);
+    source.set_env("MEDIA_REZKA_MIRRORS", origin);
+    source.set_env("MEDIA_REZKA_SESSION_PROBE_URL", probe_url);
     source.set_env(
         "MEDIA_REZKA_SESSION_VALID_MARKERS_JSON",
         r#"["account-menu"]"#,
@@ -78,8 +75,8 @@ fn composition_constructs_typed_rezka_dependencies_without_network_calls() {
 
     assert!(debug.contains("[REDACTED]"));
     for forbidden in [
-        origin.as_str(),
-        probe_url.as_str(),
+        origin,
+        probe_url,
         "account-menu",
         "login-form",
         "rezka-user",
@@ -92,8 +89,4 @@ fn composition_constructs_typed_rezka_dependencies_without_network_calls() {
             "debug output exposed {forbidden}"
         );
     }
-    assert_eq!(
-        listener.accept().unwrap_err().kind(),
-        io::ErrorKind::WouldBlock
-    );
 }

@@ -1,4 +1,7 @@
-use std::fmt;
+use std::{
+    fmt,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use scraper::{Html, Selector};
 use serde::Deserialize;
@@ -78,13 +81,16 @@ pub fn detect_challenge(html: &str) -> bool {
 }
 
 pub fn parse_challenge(html: &str) -> Result<AnubisChallenge, RezkaError> {
+    parse_optional_challenge(html)?.ok_or_else(|| invalid_challenge("challenge element missing"))
+}
+
+pub(crate) fn parse_optional_challenge(html: &str) -> Result<Option<AnubisChallenge>, RezkaError> {
     let selector = Selector::parse(CHALLENGE_SELECTOR)
         .map_err(|_| invalid_challenge("challenge selector invalid"))?;
     let document = Html::parse_document(html);
-    let element = document
-        .select(&selector)
-        .next()
-        .ok_or_else(|| invalid_challenge("challenge element missing"))?;
+    let Some(element) = document.select(&selector).next() else {
+        return Ok(None);
+    };
     let payload = element.text().collect::<String>();
     let parsed: ChallengeDocument = serde_json::from_str(&payload)
         .map_err(|_| invalid_challenge("challenge payload invalid"))?;
@@ -98,16 +104,24 @@ pub fn parse_challenge(html: &str) -> Result<AnubisChallenge, RezkaError> {
         return Err(invalid_challenge("challenge fields invalid"));
     }
 
-    Ok(AnubisChallenge {
+    Ok(Some(AnubisChallenge {
         id: parsed.challenge.id,
         random_data: parsed.challenge.random_data,
         difficulty: parsed.rules.difficulty,
-    })
+    }))
 }
 
 pub fn solve_challenge(
     challenge: &AnubisChallenge,
     max_nonce: u64,
+) -> Result<AnubisProof, RezkaError> {
+    solve_challenge_with_cancellation(challenge, max_nonce, None)
+}
+
+pub(crate) fn solve_challenge_with_cancellation(
+    challenge: &AnubisChallenge,
+    max_nonce: u64,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<AnubisProof, RezkaError> {
     if !(1..=MAX_DIFFICULTY).contains(&challenge.difficulty) {
         return Err(challenge_failed());
@@ -118,6 +132,9 @@ pub fn solve_challenge(
     let mut nonce_buffer = [0_u8; MAX_U64_DECIMAL_DIGITS];
 
     for nonce in 0..=max_nonce {
+        if cancelled.is_some_and(|cancelled| cancelled.load(Ordering::Relaxed)) {
+            return Err(cancelled_challenge());
+        }
         let mut hasher = seeded_hasher.clone();
         hasher.update(encode_decimal_nonce(nonce, &mut nonce_buffer));
         let digest = hasher.finalize();
@@ -195,5 +212,11 @@ fn invalid_challenge(reason: &str) -> RezkaError {
 fn challenge_failed() -> RezkaError {
     RezkaError::ChallengeFailed {
         context: sanitize_provider_text("bounded proof of work exhausted"),
+    }
+}
+
+fn cancelled_challenge() -> RezkaError {
+    RezkaError::ChallengeFailed {
+        context: sanitize_provider_text("proof of work cancelled"),
     }
 }

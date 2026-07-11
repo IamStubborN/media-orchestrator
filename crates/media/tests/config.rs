@@ -7,7 +7,8 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use media::config::{
-    ClientConfig, ConfigError, ConfigSource, DatabaseConfig, RunnerConfig, ServerConfig,
+    ClientConfig, ConfigError, ConfigSource, DatabaseConfig, ProcessConfigSource, RunnerConfig,
+    ServerConfig,
 };
 use secrecy::ExposeSecret;
 
@@ -110,6 +111,75 @@ fn database_config_reports_an_unreadable_secret_without_exposing_contents() {
 
     assert!(rendered.contains("MEDIA_DATABASE_URL_FILE"));
     assert!(!rendered.contains("postgres://"));
+}
+
+#[cfg(unix)]
+#[test]
+fn process_config_source_rejects_secret_symlinks_without_leaking_paths_or_values() {
+    use std::os::unix::fs::symlink;
+
+    let directory = std::env::temp_dir().join(format!(
+        "media-config-source-symlink-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir(&directory).unwrap();
+    let target = directory.join("target-secret-value");
+    let link = directory.join("configured-secret-path");
+    std::fs::write(&target, b"forbidden-secret-value").unwrap();
+    symlink(&target, &link).unwrap();
+
+    let error = ProcessConfigSource.read_bounded(&link, 512).unwrap_err();
+    let rendered = format!("{error:?}: {error}");
+
+    assert!(!rendered.contains("configured-secret-path"));
+    assert!(!rendered.contains("target-secret-value"));
+    assert!(!rendered.contains("forbidden-secret-value"));
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn process_config_source_enforces_exact_bounded_read_lengths() {
+    let path = std::env::temp_dir().join(format!(
+        "media-config-source-boundary-{}",
+        std::process::id()
+    ));
+    std::fs::write(&path, [b'x'; 16]).unwrap();
+    assert_eq!(
+        ProcessConfigSource.read_bounded(&path, 16).unwrap(),
+        [b'x'; 16]
+    );
+
+    std::fs::write(&path, [b'y'; 17]).unwrap();
+    let error = ProcessConfigSource.read_bounded(&path, 16).unwrap_err();
+    let rendered = format!("{error:?}: {error}");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(!rendered.contains("media-config-source-boundary"));
+    assert!(!rendered.contains(&"y".repeat(17)));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn process_config_source_rejects_fifo_without_blocking() {
+    let path =
+        std::env::temp_dir().join(format!("media-config-source-fifo-{}", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let started = std::time::Instant::now();
+    let error = ProcessConfigSource.read_bounded(&path, 512).unwrap_err();
+
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(!format!("{error:?}: {error}").contains("media-config-source-fifo"));
+    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -382,6 +452,7 @@ fn runner_config_reads_credentials_and_key_only_from_configured_files() {
 #[test]
 fn runner_config_rejects_invalid_mirror_origins_without_echoing_them() {
     for mirror in [
+        "http://rezka.test",
         "https://user:pass@rezka.test",
         "https://rezka.test/path",
         "https://rezka.test?token=secret",
@@ -405,6 +476,7 @@ fn runner_config_rejects_invalid_mirror_origins_without_echoing_them() {
 #[test]
 fn runner_config_rejects_invalid_probe_urls_and_non_member_origins_without_echoing_them() {
     for probe in [
+        "http://rezka.test/account/probe",
         "https://user:pass@rezka.test/account/probe",
         "https://rezka.test/account/probe?token=secret",
         "https://rezka.test/account/probe#secret-fragment",
@@ -425,7 +497,6 @@ fn runner_config_rejects_invalid_probe_urls_and_non_member_origins_without_echoi
 
     for probe in [
         "https://rezka-alt.test/account/probe",
-        "http://rezka.test/account/probe",
         "https://rezka.test:444/account/probe",
     ] {
         let mut source = valid_runner_source();

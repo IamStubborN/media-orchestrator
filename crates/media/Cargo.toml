@@ -34,6 +34,9 @@ tracing-subscriber = { version = "=0.3.23", default-features = false, features =
 url.workspace = true
 uuid.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 assert_cmd.workspace = true
 axum.workspace = true

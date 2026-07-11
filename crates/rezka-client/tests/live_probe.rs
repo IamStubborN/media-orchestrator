@@ -16,9 +16,15 @@ async fn live_probe_rezka_session_authentication_contract() {
         "explicit live probe requires REZKA_LIVE_PROBE=1"
     );
 
-    let mirror = std::env::var("REZKA_LIVE_MIRROR").expect("REZKA_LIVE_MIRROR is required");
-    let probe_url = std::env::var("REZKA_LIVE_SESSION_PROBE_URL")
-        .expect("REZKA_LIVE_SESSION_PROBE_URL is required");
+    let mirror = parse_live_https_url(
+        &std::env::var("REZKA_LIVE_MIRROR").expect("REZKA_LIVE_MIRROR is required"),
+    )
+    .expect("REZKA_LIVE_MIRROR must be HTTPS");
+    let probe_url = parse_live_https_url(
+        &std::env::var("REZKA_LIVE_SESSION_PROBE_URL")
+            .expect("REZKA_LIVE_SESSION_PROBE_URL is required"),
+    )
+    .expect("REZKA_LIVE_SESSION_PROBE_URL must be HTTPS");
     let valid_markers: Vec<String> = serde_json::from_str(
         &std::env::var("REZKA_LIVE_SESSION_VALID_MARKERS_JSON")
             .expect("REZKA_LIVE_SESSION_VALID_MARKERS_JSON is required"),
@@ -40,14 +46,14 @@ async fn live_probe_rezka_session_authentication_contract() {
         .expect("password secret file is unreadable or invalid");
 
     let config = rezka_client::session::RezkaClientConfig {
-        mirrors: rezka_client::MirrorSet::new(vec![url::Url::parse(&mirror).unwrap()]).unwrap(),
+        mirrors: rezka_client::MirrorSet::new(vec![mirror]).unwrap(),
         user_agent: "media-orchestrator-live-probe".to_owned(),
         request_timeout: time::Duration::seconds(30),
         max_retries: 1,
         anubis_max_nonce: 5_000_000,
     };
     let probe = rezka_client::session::SessionValidationProbe::new(
-        url::Url::parse(&probe_url).unwrap(),
+        probe_url,
         valid_markers,
         invalid_markers,
     )
@@ -64,6 +70,18 @@ async fn live_probe_rezka_session_authentication_contract() {
         .unwrap();
 
     assert_eq!(validation, rezka_client::session::SessionValidation::Valid);
+}
+
+#[test]
+fn credentialed_live_probe_accepts_only_https_urls() {
+    assert!(parse_live_https_url("https://rezka.test/account/probe").is_some());
+    for rejected in [
+        "http://rezka.test/account/probe",
+        "http://127.0.0.1/account/probe",
+        "not-a-url",
+    ] {
+        assert!(parse_live_https_url(rejected).is_none());
+    }
 }
 
 #[tokio::test]
@@ -187,4 +205,10 @@ impl LiveSecretKind {
 enum LiveSecretError {
     Unreadable,
     Invalid,
+}
+
+fn parse_live_https_url(value: &str) -> Option<url::Url> {
+    url::Url::parse(value)
+        .ok()
+        .filter(|url| url.scheme() == "https")
 }
