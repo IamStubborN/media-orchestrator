@@ -1,7 +1,7 @@
 use crate::{
     Actor, BootstrapClient, CanonicalEpisode, CanonicalMedia, CanonicalSeason, ClientId,
-    CredentialDigest, EpisodeProviderMapping, ExternalNamespace, Job, JobId, JobLease, LeaseId,
-    MediaExternalReference, NewJob, OperationKey, QueueStatus, UserId,
+    CredentialDigest, EpisodeProviderMapping, ExternalNamespace, Job, JobEvent, JobId, JobLease,
+    LeaseId, MediaExternalReference, NewJob, OperationKey, QueueStatus, UserId,
 };
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
@@ -25,6 +25,15 @@ pub trait JobStore: Send + Sync {
 
     async fn find_for_owner(&self, id: JobId, owner: UserId) -> Result<Option<Job>, PortError>;
 
+    async fn list_for_owner(&self, owner: UserId) -> Result<Vec<Job>, PortError>;
+
+    async fn cancel(
+        &self,
+        operation: OperationKey,
+        id: JobId,
+        owner: UserId,
+    ) -> Result<Option<Job>, PortError>;
+
     async fn queue_status(&self) -> Result<QueueStatus, PortError>;
 }
 
@@ -44,6 +53,14 @@ pub trait LeaseStore: Send + Sync {
         runner: ClientId,
         ttl: time::Duration,
     ) -> Result<Option<JobLease>, PortError>;
+
+    async fn report_event(
+        &self,
+        operation: OperationKey,
+        lease: LeaseId,
+        runner: ClientId,
+        event: JobEvent,
+    ) -> Result<Option<Job>, PortError>;
 }
 
 #[async_trait::async_trait]

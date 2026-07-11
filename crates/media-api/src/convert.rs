@@ -1,9 +1,10 @@
 use media_contract::{
-    CreateJobRequest, JobDto, JobStateDto, LeaseDto, NeedsActionReasonDto, NotifyScopeDto,
-    ProviderDto, PublicId, QueueStatusDto,
+    CheckpointValueDto, CreateJobRequest, JobDto, JobStateDto, LeaseDto, NeedsActionReasonDto,
+    NotifyScopeDto, ProviderDto, PublicId, QueueStatusDto, RunnerEventDto, RunnerEventRequest,
 };
 use media_core::{
-    Job, JobLease, JobState, NeedsActionReason, NewJobCommand, NotifyScope, Provider, QueueStatus,
+    CheckpointValue, Job, JobEvent, JobEventId, JobEventValidationError, JobLease, JobState,
+    NeedsActionReason, NewJobCommand, NotifyScope, Provider, QueueStatus,
 };
 use time::format_description::well_known::Rfc3339;
 
@@ -19,6 +20,104 @@ pub(crate) fn new_job_command(request: CreateJobRequest) -> NewJobCommand {
             NotifyScopeDto::Initiator => NotifyScope::Initiator,
             NotifyScopeDto::Family => NotifyScope::Family,
         },
+    }
+}
+
+pub(crate) fn runner_event(
+    request: RunnerEventRequest,
+) -> Result<JobEvent, JobEventValidationError> {
+    let id = JobEventId::from_uuid(*request.event_id.as_uuid());
+    match request.event {
+        RunnerEventDto::Started => Ok(JobEvent::started(id)),
+        RunnerEventDto::StageStarted {
+            task_ordinal,
+            stage_name,
+            stage_ordinal,
+        } => JobEvent::stage_started(id, task_ordinal, stage_name, stage_ordinal),
+        RunnerEventDto::StageCheckpoint {
+            task_ordinal,
+            stage_name,
+            stage_ordinal,
+            checkpoint,
+        } => JobEvent::stage_checkpoint(
+            id,
+            task_ordinal,
+            stage_name,
+            stage_ordinal,
+            checkpoint
+                .into_iter()
+                .map(|(key, value)| (key, checkpoint_value(value)))
+                .collect(),
+        ),
+        RunnerEventDto::StageCompleted {
+            task_ordinal,
+            stage_name,
+            stage_ordinal,
+            checkpoint,
+        } => JobEvent::stage_completed(
+            id,
+            task_ordinal,
+            stage_name,
+            stage_ordinal,
+            checkpoint
+                .into_iter()
+                .map(|(key, value)| (key, checkpoint_value(value)))
+                .collect(),
+        ),
+        RunnerEventDto::StageFailed {
+            task_ordinal,
+            stage_name,
+            stage_ordinal,
+            retryable,
+            error_code,
+        } => JobEvent::stage_failed(
+            id,
+            task_ordinal,
+            stage_name,
+            stage_ordinal,
+            retryable,
+            error_code,
+        ),
+        RunnerEventDto::JobTransition {
+            state,
+            needs_action_reason,
+        } => JobEvent::transition(
+            id,
+            domain_job_state(state),
+            needs_action_reason.map(domain_needs_action_reason),
+        ),
+    }
+}
+
+fn checkpoint_value(value: CheckpointValueDto) -> CheckpointValue {
+    match value {
+        CheckpointValueDto::String(value) => CheckpointValue::String(value),
+        CheckpointValueDto::Unsigned(value) => CheckpointValue::Unsigned(value),
+        CheckpointValueDto::Bool(value) => CheckpointValue::Bool(value),
+    }
+}
+
+const fn domain_job_state(value: JobStateDto) -> JobState {
+    match value {
+        JobStateDto::Queued => JobState::Queued,
+        JobStateDto::Leased => JobState::Leased,
+        JobStateDto::Running => JobState::Running,
+        JobStateDto::CancelRequested => JobState::CancelRequested,
+        JobStateDto::BlockedStorage => JobState::BlockedStorage,
+        JobStateDto::Publishing => JobState::Publishing,
+        JobStateDto::PlexPending => JobState::PlexPending,
+        JobStateDto::NeedsAction => JobState::NeedsAction,
+        JobStateDto::Partial => JobState::Partial,
+        JobStateDto::Completed => JobState::Completed,
+        JobStateDto::Failed => JobState::Failed,
+        JobStateDto::Cancelled => JobState::Cancelled,
+    }
+}
+
+const fn domain_needs_action_reason(value: NeedsActionReasonDto) -> NeedsActionReason {
+    match value {
+        NeedsActionReasonDto::IdentityAmbiguous => NeedsActionReason::IdentityAmbiguous,
+        NeedsActionReasonDto::PlexMismatch => NeedsActionReason::PlexMismatch,
     }
 }
 

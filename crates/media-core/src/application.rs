@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use crate::{
-    Actor, Job, JobId, JobLease, JobStore, JobValidationError, LeaseId, LeaseStore, NewJob,
-    NotifyScope, OperationKey, PortError, Provider, QueueStatus,
+    Actor, Job, JobEvent, JobId, JobLease, JobStore, JobValidationError, LeaseId, LeaseStore,
+    NewJob, NotifyScope, OperationKey, PortError, Provider, QueueStatus,
 };
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -77,6 +77,31 @@ impl JobApplication {
             .ok_or(ApplicationError::NotFound)
     }
 
+    pub async fn list_jobs(&self, actor: &Actor) -> Result<Vec<Job>, ApplicationError> {
+        let owner_id = actor
+            .require_user()
+            .map_err(|_| ApplicationError::Forbidden)?;
+        self.store
+            .list_for_owner(owner_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn cancel_job(
+        &self,
+        actor: &Actor,
+        operation: OperationKey,
+        id: JobId,
+    ) -> Result<Job, ApplicationError> {
+        let owner_id = actor
+            .require_user()
+            .map_err(|_| ApplicationError::Forbidden)?;
+        self.store
+            .cancel(operation, id, owner_id)
+            .await?
+            .ok_or(ApplicationError::NotFound)
+    }
+
     pub async fn queue_status(&self, actor: &Actor) -> Result<QueueStatus, ApplicationError> {
         actor
             .require_user()
@@ -141,6 +166,22 @@ impl LeaseApplication {
 
         self.store
             .heartbeat(operation, lease, runner, self.ttl)
+            .await?
+            .ok_or(ApplicationError::NotFound)
+    }
+
+    pub async fn report_event(
+        &self,
+        actor: &Actor,
+        operation: OperationKey,
+        lease: LeaseId,
+        event: JobEvent,
+    ) -> Result<Job, ApplicationError> {
+        let runner = actor
+            .require_runner()
+            .map_err(|_| ApplicationError::Forbidden)?;
+        self.store
+            .report_event(operation, lease, runner, event)
             .await?
             .ok_or(ApplicationError::NotFound)
     }
@@ -253,6 +294,29 @@ mod tests {
                 .cloned())
         }
 
+        async fn list_for_owner(&self, owner: UserId) -> Result<Vec<Job>, PortError> {
+            if let Some(error) = self.failure {
+                return Err(error);
+            }
+            Ok(self
+                .jobs
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|job| job.owner_id() == owner)
+                .cloned()
+                .collect())
+        }
+
+        async fn cancel(
+            &self,
+            _: OperationKey,
+            id: JobId,
+            owner: UserId,
+        ) -> Result<Option<Job>, PortError> {
+            self.find_for_owner(id, owner).await
+        }
+
         async fn queue_status(&self) -> Result<QueueStatus, PortError> {
             self.failure.map_or(Ok(self.status), Err)
         }
@@ -315,6 +379,16 @@ mod tests {
                 ttl,
             });
             Ok(self.lease.clone())
+        }
+
+        async fn report_event(
+            &self,
+            _: OperationKey,
+            _: LeaseId,
+            _: ClientId,
+            _: crate::JobEvent,
+        ) -> Result<Option<Job>, PortError> {
+            Ok(self.lease.as_ref().map(|lease| lease.job().clone()))
         }
     }
 

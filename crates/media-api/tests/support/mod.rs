@@ -14,9 +14,9 @@ use media_api::{
     IdempotencyStore, OperationCompletionStore, Reservation, StoredHttpResponse,
 };
 use media_core::{
-    Actor, ClientId, ClientStore, CredentialDigest, Job, JobApplication, JobId, JobLease, JobState,
-    JobStore, LeaseApplication, LeaseId, LeaseStore, NewJob, OperationKey, PortError, QueueStatus,
-    ReadinessPort, UserId,
+    Actor, ClientId, ClientStore, CredentialDigest, Job, JobApplication, JobEvent, JobEventKind,
+    JobId, JobLease, JobState, JobStore, LeaseApplication, LeaseId, LeaseStore, NewJob,
+    OperationKey, PortError, QueueStatus, ReadinessPort, UserId,
 };
 
 pub const VALID_TOKEN: &str = "primary-token";
@@ -82,6 +82,14 @@ impl JobStore for NoopJobStore {
         unreachable!("foundation tests do not read jobs")
     }
 
+    async fn list_for_owner(&self, _: UserId) -> Result<Vec<Job>, PortError> {
+        Ok(Vec::new())
+    }
+
+    async fn cancel(&self, _: OperationKey, _: JobId, _: UserId) -> Result<Option<Job>, PortError> {
+        Ok(None)
+    }
+
     async fn queue_status(&self) -> Result<QueueStatus, PortError> {
         Ok(QueueStatus {
             queued: 0,
@@ -126,6 +134,12 @@ impl FakeJobStore {
     pub fn with_job(job: Job) -> Self {
         let store = Self::default();
         store.jobs.lock().unwrap().push(job);
+        store
+    }
+
+    pub fn with_jobs(jobs: impl IntoIterator<Item = Job>) -> Self {
+        let store = Self::default();
+        store.jobs.lock().unwrap().extend(jobs);
         store
     }
 
@@ -222,6 +236,50 @@ impl JobStore for FakeJobStore {
             .cloned())
     }
 
+    async fn list_for_owner(&self, owner: UserId) -> Result<Vec<Job>, PortError> {
+        Ok(self
+            .jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|job| job.owner_id() == owner)
+            .cloned()
+            .collect())
+    }
+
+    async fn cancel(
+        &self,
+        _: OperationKey,
+        id: JobId,
+        owner: UserId,
+    ) -> Result<Option<Job>, PortError> {
+        let mut jobs = self.jobs.lock().unwrap();
+        let Some(index) = jobs
+            .iter()
+            .position(|job| job.id() == id && job.owner_id() == owner)
+        else {
+            return Ok(None);
+        };
+        let current = &jobs[index];
+        let state = match current.state() {
+            JobState::Queued => JobState::Cancelled,
+            JobState::Completed | JobState::Cancelled => current.state(),
+            _ => JobState::CancelRequested,
+        };
+        let updated = Job::rehydrate(
+            current.id(),
+            current.owner_id(),
+            current.provider(),
+            current.result_ref().to_owned(),
+            state,
+            None,
+            current.notify_scope(),
+        )
+        .map_err(|_| PortError::Infrastructure)?;
+        jobs[index] = updated.clone();
+        Ok(Some(updated))
+    }
+
     async fn queue_status(&self) -> Result<QueueStatus, PortError> {
         Ok(*self.status.lock().unwrap())
     }
@@ -247,6 +305,16 @@ impl LeaseStore for NoopLeaseStore {
         _: media_core::ClientId,
         _: time::Duration,
     ) -> Result<Option<JobLease>, PortError> {
+        Ok(None)
+    }
+
+    async fn report_event(
+        &self,
+        _: OperationKey,
+        _: LeaseId,
+        _: ClientId,
+        _: JobEvent,
+    ) -> Result<Option<Job>, PortError> {
         Ok(None)
     }
 }
@@ -326,6 +394,51 @@ impl LeaseStore for FakeLeaseStore {
             .cloned();
         state.heartbeat_operations.insert(operation, result.clone());
         Ok(result)
+    }
+
+    async fn report_event(
+        &self,
+        _: OperationKey,
+        lease_id: LeaseId,
+        runner: ClientId,
+        event: JobEvent,
+    ) -> Result<Option<Job>, PortError> {
+        let mut state = self.state.lock().unwrap();
+        let Some(lease) = state
+            .lease
+            .as_ref()
+            .filter(|lease| lease.lease_id() == lease_id && lease.runner_client_id() == runner)
+        else {
+            return Ok(None);
+        };
+        let job_state = match event.kind() {
+            JobEventKind::Started => JobState::Running,
+            JobEventKind::JobTransition { state, .. } => *state,
+            _ => lease.job().state(),
+        };
+        let job = Job::rehydrate(
+            lease.job().id(),
+            lease.job().owner_id(),
+            lease.job().provider(),
+            lease.job().result_ref().to_owned(),
+            job_state,
+            match event.kind() {
+                JobEventKind::JobTransition {
+                    needs_action_reason,
+                    ..
+                } => *needs_action_reason,
+                _ => lease.job().needs_action_reason(),
+            },
+            lease.job().notify_scope(),
+        )
+        .map_err(|_| PortError::Infrastructure)?;
+        state.lease = Some(JobLease::new(
+            lease.lease_id(),
+            job.clone(),
+            lease.runner_client_id(),
+            lease.expires_at(),
+        ));
+        Ok(Some(job))
     }
 }
 

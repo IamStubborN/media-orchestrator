@@ -59,6 +59,11 @@ pub struct JobSummaryDto {
     pub needs_action_reason: Option<NeedsActionReasonDto>,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct JobListDto {
+    pub jobs: Vec<JobDto>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

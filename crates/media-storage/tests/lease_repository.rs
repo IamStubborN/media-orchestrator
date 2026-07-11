@@ -311,14 +311,14 @@ async fn expired_leases_requeue_recoverable_states_and_preserve_checkpoints() {
         .await
         .unwrap()
         .unwrap();
-    let task_id = uuid::Uuid::new_v4();
     test_db
         .connection()
         .execute_raw(Statement::from_sql_and_values(
             sea_orm::DatabaseBackend::Postgres,
-            "INSERT INTO job_tasks (id, job_id, ordinal, state, checkpoint) \
-             VALUES ($1, $2, 0, 'running', '{\"downloaded_bytes\":4096}'::jsonb)",
-            [task_id.into(), created.id().into_uuid().into()],
+            "UPDATE job_tasks SET state = 'running', \
+             checkpoint = '{\"downloaded_bytes\":4096}'::jsonb \
+             WHERE job_id = $1 AND ordinal = 0",
+            [created.id().into_uuid().into()],
         ))
         .await
         .unwrap();

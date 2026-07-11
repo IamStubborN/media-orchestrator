@@ -242,3 +242,29 @@ async fn heartbeat_rejects_ttl_override_and_missing_lease_is_distinct_not_found(
     assert_eq!(ttl.status(), StatusCode::BAD_REQUEST);
     assert_eq!(error(ttl).await.code, ApiErrorCode::InvalidRequest);
 }
+
+#[tokio::test]
+async fn runner_reports_a_started_event_through_the_owned_live_lease() {
+    let expected = lease();
+    let response = app(
+        FakeLeaseStore::with_lease(expected.clone()),
+        ClientId::new(),
+    )
+    .oneshot(post(
+        &format!("/v1/runner/leases/{}/events", expected.lease_id()),
+        RUNNER_TOKEN,
+        "started-event",
+        "started-event-request",
+        Body::from(format!(
+            r#"{{"event_id":"{}","event":{{"type":"started"}}}}"#,
+            uuid::Uuid::new_v4(),
+        )),
+    ))
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(value["job"]["state"], "running");
+}

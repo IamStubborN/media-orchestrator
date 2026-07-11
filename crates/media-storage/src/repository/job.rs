@@ -1,7 +1,7 @@
 use media_core::{Job, JobId, JobStore, NewJob, OperationKey, PortError, QueueStatus, UserId};
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, QueryFilter,
-    Statement, TransactionTrait,
+    QueryOrder, Statement, TransactionTrait,
 };
 
 use crate::{
@@ -51,6 +51,22 @@ impl JobStore for SeaOrmJobStore {
                 .await?;
             let job = Job::try_from(model)
                 .map_err(|_| sea_orm::DbErr::Type("invalid persisted job".to_owned()))?;
+            transaction
+                .execute_raw(Statement::from_sql_and_values(
+                    DatabaseBackend::Postgres,
+                    "INSERT INTO job_tasks (id, job_id, ordinal, state) \
+                     VALUES ($1, $2, 0, 'pending')",
+                    [uuid::Uuid::new_v4().into(), job.id().into_uuid().into()],
+                ))
+                .await?;
+            insert_outbox(
+                &transaction,
+                job.id(),
+                "job.created",
+                operation.as_bytes().to_vec(),
+                serde_json::json!({"state": "queued"}),
+            )
+            .await?;
             operation::complete(
                 &transaction,
                 operation,
@@ -76,6 +92,110 @@ impl JobStore for SeaOrmJobStore {
             .map_err(map_mapping_error)
     }
 
+    async fn list_for_owner(&self, owner: UserId) -> Result<Vec<Job>, PortError> {
+        job::Entity::find()
+            .filter(job::Column::OwnerId.eq(owner.into_uuid()))
+            .order_by_desc(job::Column::CreatedAt)
+            .all(&self.database)
+            .await
+            .map_err(map_database_error)?
+            .into_iter()
+            .map(Job::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_mapping_error)
+    }
+
+    async fn cancel(
+        &self,
+        operation: OperationKey,
+        id: JobId,
+        owner: UserId,
+    ) -> Result<Option<Job>, PortError> {
+        let transaction = self.database.begin().await.map_err(map_database_error)?;
+        let result = async {
+            match operation::claim(&transaction, operation, OperationKind::CancelJob).await? {
+                OperationClaim::Replay(OperationResult::Job(job)) => return Ok(Some(job)),
+                OperationClaim::Replay(OperationResult::None) => return Ok(None),
+                OperationClaim::Replay(OperationResult::Lease(_)) => {
+                    return Err(sea_orm::DbErr::Type(
+                        "cancel-job operation has an invalid result".to_owned(),
+                    ));
+                }
+                OperationClaim::Fresh => {}
+            }
+            let Some(row) = transaction
+                .query_one_raw(Statement::from_sql_and_values(
+                    DatabaseBackend::Postgres,
+                    "SELECT state FROM jobs WHERE id = $1 AND owner_id = $2 FOR UPDATE",
+                    [id.into_uuid().into(), owner.into_uuid().into()],
+                ))
+                .await?
+            else {
+                operation::complete(
+                    &transaction,
+                    operation,
+                    OperationKind::CancelJob,
+                    &OperationResult::None,
+                )
+                .await?;
+                return Ok(None);
+            };
+            let current = row.try_get::<String>("", "state")?;
+            let target = match current.as_str() {
+                "queued" => "cancelled",
+                "leased" | "running" | "blocked_storage" | "publishing" | "plex_pending"
+                => "cancel_requested",
+                "needs_action" => "cancelled",
+                "cancel_requested" | "cancelled" => current.as_str(),
+                "completed" | "partial" | "failed" => {
+                    return Err(sea_orm::DbErr::Custom(
+                        "terminal job cannot be cancelled".to_owned(),
+                    ));
+                }
+                _ => return Err(sea_orm::DbErr::Type("invalid persisted job state".to_owned())),
+            };
+            if target != current {
+                transaction
+                    .execute_raw(Statement::from_sql_and_values(
+                        DatabaseBackend::Postgres,
+                        "UPDATE jobs SET state = $2, updated_at = now(), \
+                         completed_at = CASE WHEN $2 = 'cancelled' THEN now() ELSE completed_at END \
+                         WHERE id = $1",
+                        [id.into_uuid().into(), target.into()],
+                    ))
+                    .await?;
+                insert_outbox(
+                    &transaction,
+                    id,
+                    if target == "cancelled" {
+                        "job.cancelled"
+                    } else {
+                        "job.cancel_requested"
+                    },
+                    operation.as_bytes().to_vec(),
+                    serde_json::json!({"state": target}),
+                )
+                .await?;
+            }
+            let model = job::Entity::find_by_id(id.into_uuid())
+                .one(&transaction)
+                .await?
+                .ok_or_else(|| sea_orm::DbErr::RecordNotFound("job disappeared".to_owned()))?;
+            let job = Job::try_from(model)
+                .map_err(|_| sea_orm::DbErr::Type("invalid persisted job".to_owned()))?;
+            operation::complete(
+                &transaction,
+                operation,
+                OperationKind::CancelJob,
+                &OperationResult::Job(job.clone()),
+            )
+            .await?;
+            Ok(Some(job))
+        }
+        .await;
+        finish(transaction, result).await
+    }
+
     async fn queue_status(&self) -> Result<QueueStatus, PortError> {
         let row = self
             .database
@@ -98,6 +218,31 @@ impl JobStore for SeaOrmJobStore {
             .map_err(|_| PortError::Infrastructure)?;
         Ok(QueueStatus { queued, active })
     }
+}
+
+pub(crate) async fn insert_outbox(
+    transaction: &sea_orm::DatabaseTransaction,
+    job_id: JobId,
+    event_type: &str,
+    dedupe_key: Vec<u8>,
+    payload: serde_json::Value,
+) -> Result<(), sea_orm::DbErr> {
+    transaction
+        .execute_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "INSERT INTO outbox_events \
+             (id, aggregate_type, aggregate_id, event_type, dedupe_key, payload) \
+             VALUES ($1, 'job', $2, $3, $4, $5) ON CONFLICT (dedupe_key) DO NOTHING",
+            [
+                uuid::Uuid::new_v4().into(),
+                job_id.into_uuid().into(),
+                event_type.into(),
+                dedupe_key.into(),
+                payload.into(),
+            ],
+        ))
+        .await?;
+    Ok(())
 }
 
 async fn finish<T>(

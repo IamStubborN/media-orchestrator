@@ -55,6 +55,7 @@ define_id!(EpisodeId);
 define_id!(JobId);
 define_id!(LeaseId);
 define_id!(TaskId);
+define_id!(JobEventId);
 
 pub const PRIMARY_USER_ID: UserId = UserId::from_uuid(uuid::Uuid::from_u128(1));
 pub const SECONDARY_USER_ID: UserId = UserId::from_uuid(uuid::Uuid::from_u128(2));
