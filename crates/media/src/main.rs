@@ -36,7 +36,17 @@ enum JobsCommand {
         #[arg(long)]
         json: bool,
     },
-    Get {
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    #[command(visible_alias = "get")]
+    Show {
+        job_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    Cancel {
         job_id: String,
         #[arg(long)]
         json: bool,
@@ -119,9 +129,17 @@ async fn run_jobs(args: JobsArgs) -> Result<(), RunError> {
             let _ = json;
             client.create_job(provider.into(), result_ref).await?
         }
-        JobsCommand::Get { job_id, json } => {
+        JobsCommand::List { json } => {
+            let _ = json;
+            client.list_jobs().await?
+        }
+        JobsCommand::Show { job_id, json } => {
             let _ = json;
             client.get_job(&job_id).await?
+        }
+        JobsCommand::Cancel { job_id, json } => {
+            let _ = json;
+            client.cancel_job(&job_id).await?
         }
     };
     println!("{output}");

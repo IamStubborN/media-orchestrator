@@ -277,6 +277,101 @@ async fn jobs_get_and_queue_status_use_the_expected_paths() {
 }
 
 #[tokio::test]
+async fn jobs_list_show_and_cancel_use_json_http_contracts() {
+    let router = Router::new()
+        .route(
+            "/v1/jobs",
+            any(|request: Request| async move {
+                if request.method() == Method::GET
+                    && request.headers().contains_key("authorization")
+                    && request.headers().contains_key("x-request-id")
+                    && !request.headers().contains_key("idempotency-key")
+                {
+                    json_response(StatusCode::OK, r#"{"jobs":[]}"#)
+                } else {
+                    json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#)
+                }
+            }),
+        )
+        .route(
+            "/v1/jobs/{job_id}",
+            any(|request: Request| async move {
+                if request.method() == Method::GET {
+                    json_response(StatusCode::OK, r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","provider":"rezka","result_ref":"item","state":"queued","notify_scope":"initiator"}"#)
+                } else {
+                    json_response(StatusCode::METHOD_NOT_ALLOWED, r#"{}"#)
+                }
+            }),
+        )
+        .route(
+            "/v1/jobs/{job_id}/cancel",
+            any(|request: Request| async move {
+                let valid = request.method() == Method::POST
+                    && request.headers().contains_key("authorization")
+                    && request.headers().contains_key("x-request-id")
+                    && request.headers().contains_key("idempotency-key");
+                if valid {
+                    json_response(StatusCode::OK, r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","provider":"rezka","result_ref":"item","state":"cancelled","notify_scope":"initiator"}"#)
+                } else {
+                    json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#)
+                }
+            }),
+        );
+    let server = TestServer::start(router).await;
+    let token_file = SecretFile::new("cli-secret");
+
+    let list = command_output(command(&server, &token_file, ["jobs", "list", "--json"]))
+        .await
+        .unwrap();
+    let show = command_output(command(
+        &server,
+        &token_file,
+        [
+            "jobs",
+            "show",
+            "018f3f86-7b4c-7b4f-9b6a-6d62f45bb111",
+            "--json",
+        ],
+    ))
+    .await
+    .unwrap();
+    let cancel = command_output(command(
+        &server,
+        &token_file,
+        [
+            "jobs",
+            "cancel",
+            "018f3f86-7b4c-7b4f-9b6a-6d62f45bb111",
+            "--json",
+        ],
+    ))
+    .await
+    .unwrap();
+    server.stop().await;
+
+    assert!(
+        list.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    assert_eq!(String::from_utf8(list.stdout).unwrap(), "{\"jobs\":[]}\n");
+    assert!(
+        show.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&show.stderr)
+    );
+    assert!(
+        cancel.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&cancel.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&cancel.stdout).unwrap()["state"],
+        "cancelled",
+    );
+}
+
+#[tokio::test]
 async fn client_preserves_service_url_prefix_with_or_without_a_trailing_slash() {
     let router = Router::new().route(
         "/prefix/v1/queue/status",
