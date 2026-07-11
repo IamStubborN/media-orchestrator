@@ -1,5 +1,10 @@
 use std::collections::HashSet;
 
+use oxc_allocator::Allocator;
+use oxc_ast::ast::{Argument, CallExpression, Expression};
+use oxc_ast_visit::{Visit, walk};
+use oxc_parser::Parser;
+use oxc_span::SourceType;
 use scraper::{ElementRef, Html, Selector};
 use url::Url;
 
@@ -90,341 +95,115 @@ struct PlayerInitialization {
 }
 
 fn parse_player_initializations(document: &Html) -> Result<Vec<PlayerInitialization>, RezkaError> {
-    const FUNCTIONS: [(&str, RezkaMediaKind); 2] = [
-        ("initCDNMoviesEvents", RezkaMediaKind::Movie),
-        ("initCDNSeriesEvents", RezkaMediaKind::Series),
-    ];
-
     let mut found = Vec::new();
     let script_selector = selector("script");
     for script in document.select(&script_selector) {
         let source = script.text().collect::<String>();
-        parse_script_player_initializations(&source, &FUNCTIONS, &mut found)?;
+        parse_script_player_initializations(&source, &mut found)?;
     }
     Ok(found)
 }
 
-#[derive(Copy, Clone)]
-enum JavaScriptState {
-    Code,
-    SingleQuoted,
-    DoubleQuoted,
-    Template,
-    LineComment,
-    BlockComment,
-    Regex { in_character_class: bool },
-}
-
 fn parse_script_player_initializations(
     source: &str,
-    functions: &[(&str, RezkaMediaKind)],
     found: &mut Vec<PlayerInitialization>,
 ) -> Result<(), RezkaError> {
-    let bytes = source.as_bytes();
-    let mut state = JavaScriptState::Code;
-    let mut can_start_regex = true;
-    let mut index = 0;
-    while index < bytes.len() {
-        match state {
-            JavaScriptState::Code => match bytes[index] {
-                b'\'' => {
-                    state = JavaScriptState::SingleQuoted;
-                    can_start_regex = false;
-                }
-                b'"' => {
-                    state = JavaScriptState::DoubleQuoted;
-                    can_start_regex = false;
-                }
-                b'`' => {
-                    state = JavaScriptState::Template;
-                    can_start_regex = false;
-                }
-                b'/' if bytes.get(index + 1) == Some(&b'/') => {
-                    state = JavaScriptState::LineComment;
-                    index += 1;
-                }
-                b'/' if bytes.get(index + 1) == Some(&b'*') => {
-                    state = JavaScriptState::BlockComment;
-                    index += 1;
-                }
-                b'/' if can_start_regex => {
-                    state = JavaScriptState::Regex {
-                        in_character_class: false,
-                    };
-                }
-                b'/' => can_start_regex = true,
-                _ if source.is_char_boundary(index) => {
-                    let mut matched_call = false;
-                    for &(function, kind) in functions {
-                        let Some(arguments_start) =
-                            exact_player_call_arguments_start(source, index, function)
-                        else {
-                            continue;
-                        };
-                        let arguments = &source[arguments_start..];
-                        let (title_id, after_title) = split_player_argument(arguments)?;
-                        let (translation_id, _) = split_player_argument(after_title)?;
-                        found.push(PlayerInitialization {
-                            kind,
-                            title_id: RezkaTitleId::new(parse_positive_decimal(
-                                title_id,
-                                "invalid title ID",
-                            )?)?,
-                            translation_id: TranslationId::new(parse_positive_decimal(
-                                translation_id,
-                                "invalid translation ID",
-                            )?)?,
-                        });
-                        index = arguments_start.saturating_sub(1);
-                        can_start_regex = true;
-                        matched_call = true;
-                        break;
-                    }
-                    if !matched_call {
-                        update_javascript_expression_context(
-                            source,
-                            &mut index,
-                            &mut can_start_regex,
-                        );
-                    }
-                }
-                _ => {}
-            },
-            JavaScriptState::SingleQuoted => match bytes[index] {
-                b'\\' => index += usize::from(index + 1 < bytes.len()),
-                b'\'' => state = JavaScriptState::Code,
-                _ => {}
-            },
-            JavaScriptState::DoubleQuoted => match bytes[index] {
-                b'\\' => index += usize::from(index + 1 < bytes.len()),
-                b'"' => state = JavaScriptState::Code,
-                _ => {}
-            },
-            JavaScriptState::Template => match bytes[index] {
-                b'\\' => index += usize::from(index + 1 < bytes.len()),
-                b'`' => state = JavaScriptState::Code,
-                _ => {}
-            },
-            JavaScriptState::LineComment => {
-                if matches!(bytes[index], b'\n' | b'\r')
-                    || javascript_character_at(source, index)
-                        .is_some_and(is_javascript_non_ascii_line_terminator)
-                {
-                    state = JavaScriptState::Code;
-                }
-            }
-            JavaScriptState::BlockComment => {
-                if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
-                    state = JavaScriptState::Code;
-                    index += 1;
-                }
-            }
-            JavaScriptState::Regex {
-                mut in_character_class,
-            } => match bytes[index] {
-                b'\\' => index += usize::from(index + 1 < bytes.len()),
-                b'[' if !in_character_class => {
-                    in_character_class = true;
-                    state = JavaScriptState::Regex { in_character_class };
-                }
-                b']' if in_character_class => {
-                    in_character_class = false;
-                    state = JavaScriptState::Regex { in_character_class };
-                }
-                b'/' if !in_character_class => {
-                    state = JavaScriptState::Code;
-                    can_start_regex = false;
-                }
-                b'\n' | b'\r' if !in_character_class => {
-                    state = JavaScriptState::Code;
-                    can_start_regex = true;
-                }
-                _ if !in_character_class
-                    && javascript_character_at(source, index)
-                        .is_some_and(is_javascript_non_ascii_line_terminator) =>
-                {
-                    state = JavaScriptState::Code;
-                    can_start_regex = true;
-                }
-                _ => {}
-            },
-        }
-        index += 1;
+    if !source.contains("initCDNMoviesEvents") && !source.contains("initCDNSeriesEvents") {
+        return Ok(());
     }
+
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::default()).parse();
+    if parsed.panicked || !parsed.diagnostics.is_empty() || !parsed.irregular_whitespaces.is_empty()
+    {
+        return Ok(());
+    }
+
+    let mut visitor = PlayerInitializationVisitor::default();
+    visitor.visit_program(&parsed.program);
+    if let Some(error) = visitor.error {
+        return Err(error);
+    }
+    found.extend(visitor.found);
     Ok(())
 }
 
-fn exact_player_call_arguments_start(source: &str, index: usize, function: &str) -> Option<usize> {
-    if source[..index]
-        .chars()
-        .next_back()
-        .is_some_and(is_javascript_identifier_continue)
-        || source[..index]
-            .chars()
-            .rev()
-            .find(|character| !is_javascript_whitespace(*character))
-            == Some('.')
-    {
+#[derive(Default)]
+struct PlayerInitializationVisitor {
+    found: Vec<PlayerInitialization>,
+    error: Option<RezkaError>,
+}
+
+impl<'a> Visit<'a> for PlayerInitializationVisitor {
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        if self.error.is_none()
+            && let Some(kind) = exact_player_call_kind(call)
+        {
+            self.capture(call, kind);
+        }
+        walk::walk_call_expression(self, call);
+    }
+}
+
+impl PlayerInitializationVisitor {
+    fn capture(&mut self, call: &CallExpression<'_>, kind: RezkaMediaKind) {
+        let result = (|| {
+            let title_id = player_integer_argument(call.arguments.first(), "invalid title ID")?;
+            let translation_id =
+                player_integer_argument(call.arguments.get(1), "invalid translation ID")?;
+            Ok(PlayerInitialization {
+                kind,
+                title_id: RezkaTitleId::new(title_id)?,
+                translation_id: TranslationId::new(translation_id)?,
+            })
+        })();
+
+        match result {
+            Ok(initialization) => self.found.push(initialization),
+            Err(error) => self.error = Some(error),
+        }
+    }
+}
+
+fn exact_player_call_kind(call: &CallExpression<'_>) -> Option<RezkaMediaKind> {
+    if call.optional {
         return None;
     }
-
-    let after_sof = exact_identifier_end(source, index, "sof")?;
-    let first_dot = skip_javascript_whitespace(source, after_sof);
-    let after_first_dot = source[first_dot..]
-        .strip_prefix('.')
-        .map(|_| first_dot + 1)?;
-    let tv_start = skip_javascript_whitespace(source, after_first_dot);
-    let after_tv = exact_identifier_end(source, tv_start, "tv")?;
-    let second_dot = skip_javascript_whitespace(source, after_tv);
-    let after_second_dot = source[second_dot..]
-        .strip_prefix('.')
-        .map(|_| second_dot + 1)?;
-    let function_start = skip_javascript_whitespace(source, after_second_dot);
-    let after_function = exact_identifier_end(source, function_start, function)?;
-    let opening_parenthesis = skip_javascript_whitespace(source, after_function);
-    source[opening_parenthesis..]
-        .starts_with('(')
-        .then_some(opening_parenthesis + 1)
-}
-
-fn exact_identifier_end(source: &str, start: usize, expected: &str) -> Option<usize> {
-    if !source[start..].starts_with(expected) {
+    let Expression::StaticMemberExpression(function) = &call.callee else {
         return None;
-    }
-    let end = start + expected.len();
-    (!source[end..]
-        .chars()
-        .next()
-        .is_some_and(is_javascript_identifier_continue))
-    .then_some(end)
-}
-
-fn skip_javascript_whitespace(source: &str, mut index: usize) -> usize {
-    while let Some(character) = source[index..].chars().next() {
-        if !is_javascript_whitespace(character) {
-            break;
-        }
-        index += character.len_utf8();
-    }
-    index
-}
-
-fn update_javascript_expression_context(
-    source: &str,
-    index: &mut usize,
-    can_start_regex: &mut bool,
-) {
-    let character = source[*index..]
-        .chars()
-        .next()
-        .expect("index is a character boundary within source");
-    if is_javascript_identifier_start(character) {
-        let start = *index;
-        let mut end = start;
-        for candidate in source[start..].chars() {
-            if !is_javascript_identifier_continue(candidate) {
-                break;
-            }
-            end += candidate.len_utf8();
-        }
-        *can_start_regex = matches!(
-            &source[start..end],
-            "await"
-                | "case"
-                | "delete"
-                | "do"
-                | "else"
-                | "in"
-                | "instanceof"
-                | "new"
-                | "of"
-                | "return"
-                | "throw"
-                | "typeof"
-                | "void"
-                | "yield"
-        );
-        *index = end.saturating_sub(1);
-        return;
-    }
-
-    *can_start_regex = match character {
-        ')' | ']' | '}' | '.' => false,
-        character if character.is_ascii_digit() => false,
-        character if is_javascript_whitespace(character) => *can_start_regex,
-        _ => true,
     };
-    *index += character.len_utf8().saturating_sub(1);
-}
-
-fn is_javascript_identifier_start(character: char) -> bool {
-    matches!(character, '$' | '_') || character.is_alphabetic()
-}
-
-fn javascript_character_at(source: &str, index: usize) -> Option<char> {
-    source
-        .is_char_boundary(index)
-        .then(|| source[index..].chars().next())
-        .flatten()
-}
-
-fn is_javascript_non_ascii_line_terminator(character: char) -> bool {
-    matches!(character, '\u{2028}' | '\u{2029}')
-}
-
-fn is_javascript_whitespace(character: char) -> bool {
-    matches!(
-        character,
-        '\u{0009}'
-            | '\u{000a}'
-            | '\u{000b}'
-            | '\u{000c}'
-            | '\u{000d}'
-            | '\u{0020}'
-            | '\u{00a0}'
-            | '\u{1680}'
-            | '\u{2000}'
-            ..='\u{200a}'
-                | '\u{2028}'
-                | '\u{2029}'
-                | '\u{202f}'
-                | '\u{205f}'
-                | '\u{3000}'
-                | '\u{feff}'
-    )
-}
-
-fn is_javascript_identifier_continue(character: char) -> bool {
-    is_javascript_identifier_start(character)
-        || character.is_alphanumeric()
-        || matches!(
-            character,
-            '\u{0300}'..='\u{036f}'
-                | '\u{1ab0}'..='\u{1aff}'
-                | '\u{1dc0}'..='\u{1dff}'
-                | '\u{200c}'
-                | '\u{200d}'
-                | '\u{203f}'
-                | '\u{2040}'
-                | '\u{2054}'
-                | '\u{20d0}'..='\u{20ff}'
-                | '\u{fe20}'..='\u{fe2f}'
-                | '\u{fe33}'
-                | '\u{fe34}'
-                | '\u{fe4d}'..='\u{fe4f}'
-                | '\u{ff3f}'
-        )
-}
-
-fn split_player_argument(value: &str) -> Result<(&str, &str), RezkaError> {
-    let end = value
-        .find([',', ')'])
-        .ok_or_else(|| invalid_catalog("malformed player initialization"))?;
-    let argument = value[..end].trim();
-    if argument.is_empty() || value.as_bytes()[end] != b',' {
-        return Err(invalid_catalog("malformed player initialization"));
+    if function.optional {
+        return None;
     }
-    Ok((argument, &value[end + 1..]))
+    let kind = match function.property.name.as_str() {
+        "initCDNMoviesEvents" => RezkaMediaKind::Movie,
+        "initCDNSeriesEvents" => RezkaMediaKind::Series,
+        _ => return None,
+    };
+
+    let Expression::StaticMemberExpression(tv) = &function.object else {
+        return None;
+    };
+    if tv.optional || tv.property.name != "tv" {
+        return None;
+    }
+    let Expression::Identifier(root) = &tv.object else {
+        return None;
+    };
+    (root.name == "sof").then_some(kind)
+}
+
+fn player_integer_argument(
+    argument: Option<&Argument<'_>>,
+    reason: &str,
+) -> Result<u64, RezkaError> {
+    let Some(Argument::NumericLiteral(literal)) = argument else {
+        return Err(invalid_catalog(reason));
+    };
+    let Some(raw) = literal.raw else {
+        return Err(invalid_catalog(reason));
+    };
+    parse_positive_decimal(raw.as_str(), reason)
 }
 
 fn parse_title_id(

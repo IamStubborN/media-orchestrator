@@ -202,11 +202,17 @@ fn player_initialization_ignores_non_call_javascript_and_visible_text() {
         r#"const template = `sof.tv.initCDNMoviesEvents(999, 999, {}, {})`;"#,
         r#"function initCDNMoviesEvents(titleId, translationId) {}"#,
         r#"const matcher = /[a/b]sof.tv.initCDNMoviesEvents(999, 999, payload)\/tail/gi;"#,
+        r#"if (ready) /sof.tv.initCDNMoviesEvents(999,999,x)/.test(value);"#,
         r#"other.tv.initCDNMoviesEvents(999, 999, {}, {});"#,
         r#"sof.other.initCDNMoviesEvents(999, 999, {}, {});"#,
         r#"sof["tv"].initCDNMoviesEvents(999, 999, {}, {});"#,
+        r#"sof.tv["initCDNMoviesEvents"](999, 999, {}, {});"#,
+        r#"sof?.tv.initCDNMoviesEvents(999, 999, {}, {});"#,
+        r#"sof.tv?.initCDNMoviesEvents(999, 999, {}, {});"#,
+        r#"sof.tv.initCDNMoviesEvents?.(999, 999, {}, {});"#,
         r#"window.sof.tv.initCDNMoviesEvents(999, 999, {}, {});"#,
         r#"window . sof.tv.initCDNMoviesEvents(999, 999, {}, {});"#,
+        r#"window./*comment*/sof.tv.initCDNMoviesEvents(999, 999, {}, {});"#,
         r#"sof.tv.initCDNMoviesEventsSuffix(999, 999, {}, {});"#,
         r#"prefixsof.tv.initCDNMoviesEvents(999, 999, {}, {});"#,
         r#"πsof.tv.initCDNMoviesEvents(999, 999, {}, {});"#,
@@ -218,11 +224,9 @@ fn player_initialization_ignores_non_call_javascript_and_visible_text() {
     ];
     for source in false_positives {
         let html = valid_page(r#"<input id="post_id" value="61">"#, source);
-        assert_eq!(
-            parse(&html, "/films/no-fallback.html").unwrap().id().get(),
-            61,
-            "false positive source: {source}"
-        );
+        let title = parse(&html, "/films/no-fallback.html")
+            .unwrap_or_else(|error| panic!("unexpected error for {source}: {error:?}"));
+        assert_eq!(title.id().get(), 61, "false positive source: {source}");
     }
 
     let visible = valid_page(
@@ -253,6 +257,80 @@ fn player_initialization_accepts_an_exact_whitespace_separated_call() {
         title.default_translation(),
         Some(title.translations()[0].key())
     );
+}
+
+#[test]
+fn player_initialization_accepts_exact_root_calls_with_javascript_trivia() {
+    let movie = valid_page(
+        "",
+        "sof /* root */ . tv // member\n . initCDNMoviesEvents /* call */ (61, 9, {}, {});",
+    );
+    let title = parse(&movie, "/films/no-fallback.html").unwrap();
+    assert_eq!(title.id().get(), 61);
+    assert_eq!(title.kind(), RezkaMediaKind::Movie);
+
+    let series = r#"<html><head><title>Series</title>
+        <meta property="og:type" content="video.tv_series"></head><body>
+        <h1 class="b-post__title">Series</h1>
+        <ul id="translators-list"><li class="b-translator__item" data-translator_id="18">Studio</li></ul>
+        <script>sof /* root */ . tv /* member */ . initCDNSeriesEvents /* call */ (202, 18, {}, {});</script>
+        </body></html>"#;
+    let title = parse(series, "/series/no-fallback.html").unwrap();
+    assert_eq!(title.id().get(), 202);
+    assert_eq!(title.kind(), RezkaMediaKind::Series);
+}
+
+#[test]
+fn malformed_javascript_is_handled_without_panicking_or_forging_initialization() {
+    for source in [
+        "sof.tv.initCDNMoviesEvents(",
+        "const broken = ; sof.tv.initCDNMoviesEvents(999, 999, {}, {});",
+        "window./* unterminated",
+    ] {
+        let html = valid_page(r#"<input id="post_id" value="61">"#, source);
+        let result = std::panic::catch_unwind(|| parse(&html, "/films/no-fallback.html"));
+        assert!(result.is_ok(), "parser panicked for: {source}");
+        let parsed = result
+            .unwrap()
+            .unwrap_or_else(|error| panic!("unexpected error for {source}: {error:?}"));
+        assert_eq!(parsed.id().get(), 61, "malformed source: {source}");
+    }
+}
+
+#[test]
+fn player_initialization_requires_positive_decimal_u64_literals() {
+    let maximum = valid_page(
+        "",
+        "sof.tv.initCDNMoviesEvents(18446744073709551615, 9, {}, {});",
+    );
+    assert_eq!(
+        parse(&maximum, "/films/no-fallback.html")
+            .unwrap()
+            .id()
+            .get(),
+        u64::MAX
+    );
+
+    for arguments in [
+        "0, 9",
+        "61, 0",
+        "18446744073709551616, 9",
+        "61.0, 9",
+        "6.1e1, 9",
+        "'61', 9",
+        "titleId, 9",
+        "-61, 9",
+        "...ids",
+    ] {
+        let html = valid_page(
+            "",
+            &format!("sof.tv.initCDNMoviesEvents({arguments}, {{}}, {{}});"),
+        );
+        assert_code(
+            parse(&html, "/films/no-fallback.html"),
+            RezkaErrorCode::ProviderResponseInvalid,
+        );
+    }
 }
 
 #[test]

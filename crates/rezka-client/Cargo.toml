@@ -8,6 +8,11 @@ publish.workspace = true
 [dependencies]
 cookie_store.workspace = true
 hex.workspace = true
+oxc_allocator.workspace = true
+oxc_ast.workspace = true
+oxc_ast_visit.workspace = true
+oxc_parser.workspace = true
+oxc_span.workspace = true
 reqwest = { workspace = true, features = ["brotli", "deflate", "form", "gzip"] }
 scraper.workspace = true
 secrecy.workspace = true
