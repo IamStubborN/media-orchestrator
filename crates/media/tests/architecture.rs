@@ -174,3 +174,53 @@ fn media_storage_cannot_reach_api_or_contract() {
         );
     }
 }
+
+#[test]
+fn rezka_client_has_no_workspace_dependencies() {
+    let metadata = workspace_metadata();
+    let rezka = workspace_package_id(&metadata, "rezka-client");
+    let workspace_dependencies: Vec<&str> = direct_dependency_package_ids(&metadata, rezka)
+        .into_iter()
+        .filter(|package_id| metadata.workspace_members.contains(package_id))
+        .map(|package_id| metadata[package_id].name.as_str())
+        .collect();
+
+    assert!(
+        workspace_dependencies.is_empty(),
+        "rezka-client must stay independent of media workspace crates: {workspace_dependencies:?}",
+    );
+}
+
+#[test]
+fn media_runner_has_no_storage_api_or_database_dependencies() {
+    let metadata = workspace_metadata();
+    let runner = workspace_package_id(&metadata, "media-runner");
+
+    for forbidden_name in ["media-api", "media-storage", "sea-orm", "sea-orm-migration"] {
+        let forbidden = metadata
+            .packages
+            .iter()
+            .find(|package| package.name.as_str() == forbidden_name)
+            .map(|package| &package.id);
+        if let Some(forbidden) = forbidden {
+            assert!(
+                !resolved_dependency_reachable(&metadata, runner, forbidden),
+                "media-runner must not reach {forbidden_name}",
+            );
+        }
+    }
+}
+
+#[test]
+fn media_runner_depends_only_on_rezka_client_workspace_crate_in_phase_3() {
+    let metadata = workspace_metadata();
+    let runner = workspace_package_id(&metadata, "media-runner");
+    let mut workspace_dependencies: Vec<&str> = direct_dependency_package_ids(&metadata, runner)
+        .into_iter()
+        .filter(|package_id| metadata.workspace_members.contains(package_id))
+        .map(|package_id| metadata[package_id].name.as_str())
+        .collect();
+    workspace_dependencies.sort_unstable();
+
+    assert_eq!(workspace_dependencies, ["rezka-client"]);
+}
