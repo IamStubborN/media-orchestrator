@@ -137,10 +137,10 @@ impl RezkaClient {
             .get_first_with_failover_accepting(url, None)
             .await?;
 
+        reject_title_access_page(&response.body)?;
         if response.status.is_redirection() {
             return Err(invalid_catalog("title redirect rejected"));
         }
-        reject_title_access_page(&response.body)?;
         if matches!(response.status, StatusCode::NOT_FOUND | StatusCode::GONE) {
             return Err(RezkaError::TitleNotFound {
                 context: sanitize_provider_text("title not found"),
@@ -235,15 +235,24 @@ fn reject_title_access_page(html: &str) -> Result<(), RezkaError> {
 
     let restricted_selector = Selector::parse(".b-player__restricted__block_message")
         .expect("static restricted selector is valid");
-    let suggestion_selector = Selector::parse(".b-restricted__suggest")
-        .expect("static restricted suggestion selector is valid");
     for restricted in document.select(&restricted_selector) {
-        let full_text = restricted.text().collect::<String>();
-        let suggestion_text = restricted
-            .select(&suggestion_selector)
-            .map(|element| element.text().collect::<String>())
+        let message = restricted
+            .descendants()
+            .filter_map(|descendant| {
+                let text = descendant.value().as_text()?;
+                let inside_suggestion = descendant
+                    .ancestors()
+                    .take_while(|ancestor| ancestor.id() != restricted.id())
+                    .filter_map(scraper::ElementRef::wrap)
+                    .any(|element| {
+                        element
+                            .value()
+                            .classes()
+                            .any(|class| class == "b-restricted__suggest")
+                    });
+                (!inside_suggestion).then_some(&**text)
+            })
             .collect::<String>();
-        let message = full_text.replacen(&suggestion_text, "", 1);
         if !message.trim().is_empty() {
             return Err(RezkaError::TranslationUnavailable {
                 reason: ProviderFailureReason::Restricted,

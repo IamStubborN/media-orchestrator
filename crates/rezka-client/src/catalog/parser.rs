@@ -55,7 +55,7 @@ pub fn parse_title_page(
     selected_origin: &Url,
 ) -> Result<TitleDetails, RezkaError> {
     let document = Html::parse_document(html);
-    let initializations = parse_player_initializations(html)?;
+    let initializations = parse_player_initializations(&document)?;
     let id = parse_title_id(&document, &initializations, locator)?;
     let kind = parse_media_kind(&document, &initializations)?;
     let title = required_element_text(
@@ -89,34 +89,146 @@ struct PlayerInitialization {
     translation_id: TranslationId,
 }
 
-fn parse_player_initializations(html: &str) -> Result<Vec<PlayerInitialization>, RezkaError> {
+fn parse_player_initializations(document: &Html) -> Result<Vec<PlayerInitialization>, RezkaError> {
     const FUNCTIONS: [(&str, RezkaMediaKind); 2] = [
         ("initCDNMoviesEvents", RezkaMediaKind::Movie),
         ("initCDNSeriesEvents", RezkaMediaKind::Series),
     ];
 
     let mut found = Vec::new();
-    for (function, kind) in FUNCTIONS {
-        let mut remaining = html;
-        while let Some(position) = remaining.find(function) {
-            remaining = &remaining[position + function.len()..];
-            let arguments = remaining.trim_start();
-            let Some(arguments) = arguments.strip_prefix('(') else {
-                continue;
-            };
-            let (title_id, after_title) = split_player_argument(arguments)?;
-            let (translation_id, _) = split_player_argument(after_title)?;
-            found.push(PlayerInitialization {
-                kind,
-                title_id: RezkaTitleId::new(parse_positive_decimal(title_id, "invalid title ID")?)?,
-                translation_id: TranslationId::new(parse_positive_decimal(
-                    translation_id,
-                    "invalid translation ID",
-                )?)?,
-            });
-        }
+    let script_selector = selector("script");
+    for script in document.select(&script_selector) {
+        let source = script.text().collect::<String>();
+        parse_script_player_initializations(&source, &FUNCTIONS, &mut found)?;
     }
     Ok(found)
+}
+
+#[derive(Copy, Clone)]
+enum JavaScriptState {
+    Code,
+    SingleQuoted,
+    DoubleQuoted,
+    Template,
+    LineComment,
+    BlockComment,
+}
+
+fn parse_script_player_initializations(
+    source: &str,
+    functions: &[(&str, RezkaMediaKind)],
+    found: &mut Vec<PlayerInitialization>,
+) -> Result<(), RezkaError> {
+    let bytes = source.as_bytes();
+    let mut state = JavaScriptState::Code;
+    let mut index = 0;
+    while index < bytes.len() {
+        match state {
+            JavaScriptState::Code => match bytes[index] {
+                b'\'' => state = JavaScriptState::SingleQuoted,
+                b'"' => state = JavaScriptState::DoubleQuoted,
+                b'`' => state = JavaScriptState::Template,
+                b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                    state = JavaScriptState::LineComment;
+                    index += 1;
+                }
+                b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                    state = JavaScriptState::BlockComment;
+                    index += 1;
+                }
+                _ if source.is_char_boundary(index) => {
+                    for &(function, kind) in functions {
+                        let Some(arguments_start) =
+                            exact_call_arguments_start(source, index, function)
+                        else {
+                            continue;
+                        };
+                        let arguments = &source[arguments_start..];
+                        let (title_id, after_title) = split_player_argument(arguments)?;
+                        let (translation_id, _) = split_player_argument(after_title)?;
+                        found.push(PlayerInitialization {
+                            kind,
+                            title_id: RezkaTitleId::new(parse_positive_decimal(
+                                title_id,
+                                "invalid title ID",
+                            )?)?,
+                            translation_id: TranslationId::new(parse_positive_decimal(
+                                translation_id,
+                                "invalid translation ID",
+                            )?)?,
+                        });
+                        index = arguments_start;
+                        break;
+                    }
+                }
+                _ => {}
+            },
+            JavaScriptState::SingleQuoted => match bytes[index] {
+                b'\\' => index += usize::from(index + 1 < bytes.len()),
+                b'\'' => state = JavaScriptState::Code,
+                _ => {}
+            },
+            JavaScriptState::DoubleQuoted => match bytes[index] {
+                b'\\' => index += usize::from(index + 1 < bytes.len()),
+                b'"' => state = JavaScriptState::Code,
+                _ => {}
+            },
+            JavaScriptState::Template => match bytes[index] {
+                b'\\' => index += usize::from(index + 1 < bytes.len()),
+                b'`' => state = JavaScriptState::Code,
+                _ => {}
+            },
+            JavaScriptState::LineComment => {
+                if matches!(bytes[index], b'\n' | b'\r') {
+                    state = JavaScriptState::Code;
+                }
+            }
+            JavaScriptState::BlockComment => {
+                if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                    state = JavaScriptState::Code;
+                    index += 1;
+                }
+            }
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
+fn exact_call_arguments_start(source: &str, index: usize, function: &str) -> Option<usize> {
+    if !source[index..].starts_with(function)
+        || source[..index]
+            .chars()
+            .next_back()
+            .is_some_and(is_javascript_identifier_continue)
+    {
+        return None;
+    }
+
+    let mut after_identifier = index + function.len();
+    if source[after_identifier..]
+        .chars()
+        .next()
+        .is_some_and(is_javascript_identifier_continue)
+    {
+        return None;
+    }
+    while let Some(character) = source[after_identifier..].chars().next() {
+        if !character.is_whitespace() {
+            break;
+        }
+        after_identifier += character.len_utf8();
+    }
+    source[after_identifier..]
+        .starts_with('(')
+        .then_some(after_identifier + 1)
+}
+
+fn is_javascript_identifier_continue(character: char) -> bool {
+    character == '_'
+        || character == '$'
+        || character.is_alphanumeric()
+        || matches!(character, '\u{200c}' | '\u{200d}')
 }
 
 fn split_player_argument(value: &str) -> Result<(&str, &str), RezkaError> {
@@ -173,7 +285,9 @@ fn parse_locator_title_id(locator: &TitleLocator) -> Result<RezkaTitleId, RezkaE
         .next()
         .and_then(|value| value.strip_suffix(".html"))
         .ok_or_else(|| invalid_catalog("title ID missing"))?;
-    let prefix = filename.split('-').next().unwrap_or_default();
+    let (prefix, _) = filename
+        .split_once('-')
+        .ok_or_else(|| invalid_catalog("title ID missing"))?;
     RezkaTitleId::new(parse_positive_decimal(prefix, "title ID missing")?)
 }
 

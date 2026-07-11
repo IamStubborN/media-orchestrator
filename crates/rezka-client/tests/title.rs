@@ -186,6 +186,58 @@ fn invalid_or_absent_title_ids_fail_atomically() {
         parse(&valid_page("", ""), "/films/no-id.html"),
         RezkaErrorCode::ProviderResponseInvalid,
     );
+    assert_code(
+        parse(&valid_page("", ""), "/films/61.html"),
+        RezkaErrorCode::ProviderResponseInvalid,
+    );
+}
+
+#[test]
+fn player_initialization_ignores_non_call_javascript_and_visible_text() {
+    let false_positives = [
+        r#"// initCDNMoviesEvents(999, 999, {}, {});
+            /* initCDNMoviesEvents(999, 999, {}, {}); */"#,
+        r#"const quoted = "initCDNMoviesEvents(999, 999, {}, {});";"#,
+        r#"const singleQuoted = 'initCDNMoviesEvents(999, 999, {}, {});';"#,
+        r#"const template = `initCDNMoviesEvents(999, 999, {}, {})`;"#,
+        r#"initCDNMoviesEventsSuffix(999, 999, {}, {});"#,
+        r#"prefixinitCDNMoviesEvents(999, 999, {}, {});"#,
+        r#"const название = 1;"#,
+    ];
+    for source in false_positives {
+        let html = valid_page(r#"<input id="post_id" value="61">"#, source);
+        assert_eq!(
+            parse(&html, "/films/no-fallback.html").unwrap().id().get(),
+            61,
+            "false positive source: {source}"
+        );
+    }
+
+    let visible = valid_page(
+        r#"<input id="post_id" value="61">
+        <div>initCDNMoviesEvents(999, 999, {}, {});</div>"#,
+        "",
+    );
+    assert_eq!(
+        parse(&visible, "/films/no-fallback.html")
+            .unwrap()
+            .id()
+            .get(),
+        61
+    );
+}
+
+#[test]
+fn player_initialization_accepts_an_exact_whitespace_separated_call() {
+    let html = valid_page("", "sof.tv.initCDNMoviesEvents \n  (61, 9, {}, {});");
+    let title = parse(&html, "/films/no-fallback.html").unwrap();
+
+    assert_eq!(title.id().get(), 61);
+    assert_eq!(title.kind(), RezkaMediaKind::Movie);
+    assert_eq!(
+        title.default_translation(),
+        Some(title.translations()[0].key())
+    );
 }
 
 #[test]
@@ -292,6 +344,60 @@ fn selection_validates_membership_and_media_kind() {
     ));
 }
 
+#[test]
+fn title_capability_debug_matrix_is_exact_and_redacted() {
+    let html = r#"<html><head><title>Safe document title</title>
+        <meta property="og:type" content="video.movie"></head><body>
+        <input id="post_id" value="901">
+        <h1 class="b-post__title">Sensitive Movie 198.51.100.42</h1>
+        <div class="b-post__origtitle">Original Secret</div>
+        <div class="b-content__main"><div class="b-sidecover">
+          <img src="https://media.secret.example/poster.jpg?token=debug-secret">
+        </div></div>
+        <ul id="translators-list"><li class="b-translator__item"
+          data-translator_id="7">Secret Studio token=debug-secret</li></ul>
+        </body></html>"#;
+    let title = parse(html, "/films/private/901-secret-title.html").unwrap();
+    let selected = title
+        .select_translation(title.translations()[0].key())
+        .unwrap();
+    let request = selected.clone().movie_request().unwrap();
+    let debug_values = [
+        format!("{:?}", title.translations()[0]),
+        format!("{:?}", selected.title()),
+        format!("{selected:?}"),
+        format!("{request:?}"),
+        format!("{title:?}"),
+    ];
+
+    assert_eq!(
+        debug_values,
+        [
+            "Translation { key: Movie { id: TranslationId(7), is_camrip: false, has_ads: false, is_director: false }, name: \"[REDACTED]\", is_premium: false, .. }",
+            "TitlePlaybackRef { id: RezkaTitleId(901), locator: \"[REDACTED]\", kind: Movie }",
+            "SelectedTranslation { title: TitlePlaybackRef { id: RezkaTitleId(901), locator: \"[REDACTED]\", kind: Movie }, translation: Translation { key: Movie { id: TranslationId(7), is_camrip: false, has_ads: false, is_director: false }, name: \"[REDACTED]\", is_premium: false, .. } }",
+            "Movie(SelectedTranslation { title: TitlePlaybackRef { id: RezkaTitleId(901), locator: \"[REDACTED]\", kind: Movie }, translation: Translation { key: Movie { id: TranslationId(7), is_camrip: false, has_ads: false, is_director: false }, name: \"[REDACTED]\", is_premium: false, .. } })",
+            "TitleDetails { id: RezkaTitleId(901), locator: \"[REDACTED]\", title: \"[REDACTED]\", original_title: Some(\"[REDACTED]\"), release_year: None, kind: Movie, thumbnail: Some(\"[REDACTED]\"), translations: 1, default_translation: None }",
+        ]
+    );
+    for debug in debug_values {
+        for forbidden in [
+            "Sensitive Movie",
+            "Original Secret",
+            "Secret Studio",
+            "/films/private/901-secret-title.html",
+            "rezka.test",
+            "media.secret.example",
+            "198.51.100.42",
+            "token=debug-secret",
+            "debug-secret",
+            "?token",
+        ] {
+            assert!(!debug.contains(forbidden), "leaked {forbidden} in {debug}");
+        }
+    }
+}
+
 fn test_client(server: &MockServer) -> RezkaClient {
     RezkaClient::new(RezkaClientConfig {
         mirrors: MirrorSet::new(vec![Url::parse(&server.uri()).unwrap()]).unwrap(),
@@ -365,6 +471,97 @@ async fn title_uses_selected_origin_and_rejects_cross_origin_redirects() {
     assert_code(
         client.title(&locator("/films/101-fixture.html")).await,
         RezkaErrorCode::ProviderResponseInvalid,
+    );
+}
+
+#[tokio::test]
+async fn title_classifies_access_states_before_redirect_rejection() {
+    let cases = [
+        (
+            r#"<div id="anubis_challenge"></div>"#,
+            RezkaErrorCode::ChallengeRequired,
+        ),
+        (
+            "<title> Sign In </title>",
+            RezkaErrorCode::AuthenticationRequired,
+        ),
+        ("<title> Verify </title>", RezkaErrorCode::ChallengeRequired),
+        (
+            r#"<div class="b-player__restricted__block_message">Private title</div>"#,
+            RezkaErrorCode::TranslationUnavailable,
+        ),
+    ];
+
+    for (body, expected) in cases {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/films/77-title.html"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", "https://foreign.example/title")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+        let mut client = test_client(&server);
+        assert_code(
+            client.title(&locator("/films/77-title.html")).await,
+            expected,
+        );
+    }
+}
+
+#[tokio::test]
+async fn empty_same_origin_and_cross_origin_redirects_are_invalid() {
+    for location in ["/other-title", "https://foreign.example/title"] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/films/77-title.html"))
+            .respond_with(ResponseTemplate::new(302).insert_header("Location", location))
+            .mount(&server)
+            .await;
+        let mut client = test_client(&server);
+        assert_code(
+            client.title(&locator("/films/77-title.html")).await,
+            RezkaErrorCode::ProviderResponseInvalid,
+        );
+    }
+}
+
+#[tokio::test]
+async fn restricted_state_ignores_all_suggestion_subtrees_structurally() {
+    let suggestion_only = r#"<div class="b-player__restricted__block_message">
+        <span class="b-restricted__suggest"> First <strong>nested</strong> suggestion </span>
+
+        <span class="b-restricted__suggest"> Second suggestion </span>
+      </div>"#;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/films/77-title.html"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(suggestion_only))
+        .mount(&server)
+        .await;
+    let mut client = test_client(&server);
+    assert_code(
+        client.title(&locator("/films/77-title.html")).await,
+        RezkaErrorCode::ProviderResponseInvalid,
+    );
+
+    let real_text = r#"<div class="b-player__restricted__block_message">
+        <span class="b-restricted__suggest"> First suggestion </span>
+        Actual restriction
+        <span class="b-restricted__suggest"> Second suggestion </span>
+      </div>"#;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/films/77-title.html"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(real_text))
+        .mount(&server)
+        .await;
+    let mut client = test_client(&server);
+    assert_code(
+        client.title(&locator("/films/77-title.html")).await,
+        RezkaErrorCode::TranslationUnavailable,
     );
 }
 
