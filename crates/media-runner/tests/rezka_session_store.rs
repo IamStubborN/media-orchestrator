@@ -124,6 +124,23 @@ fn delete_removes_an_existing_envelope() {
 }
 
 #[test]
+fn encrypted_store_delete_removes_file_and_missing_delete_is_idempotent() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("rezka-session.bin");
+    let store = EncryptedRezkaSessionStore::new(RezkaSessionStoreConfig {
+        path: path.clone(),
+        key: key(7),
+    })
+    .unwrap();
+    store.save(&snapshot(0x55)).unwrap();
+    assert!(path.exists());
+
+    store.delete().unwrap();
+    assert!(!path.exists());
+    store.delete().unwrap();
+}
+
+#[test]
 fn invalid_path_returns_only_a_sanitized_error() {
     let error = EncryptedRezkaSessionStore::new(RezkaSessionStoreConfig {
         path: PathBuf::new(),

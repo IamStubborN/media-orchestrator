@@ -229,6 +229,70 @@ async fn failed_login_is_sanitized() {
     assert!(!rendered.contains("rezka-user"));
 }
 
+#[tokio::test]
+async fn repeated_anubis_after_pass_returns_challenge_failed_without_login_or_loop() {
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(include_str!("fixtures/anubis_challenge.html")),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/.within.website/x/cmd/anubis/api/pass-challenge"))
+        .respond_with(
+            ResponseTemplate::new(302).insert_header("set-cookie", "anubis=opaque; Path=/"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/ajax/login/"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let mut client = RezkaClient::new(config(base.clone())).unwrap();
+    let error = client
+        .ensure_authenticated(&credentials(), &probe(&base))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), rezka_client::RezkaErrorCode::ChallengeFailed);
+}
+
+#[tokio::test]
+async fn dle_redirect_without_session_cookie_is_provider_response_invalid() {
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<input name=\"login_name\">"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/ajax/login/"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "/"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut client = RezkaClient::new(config(base.clone())).unwrap();
+    let error = client
+        .ensure_authenticated(&credentials(), &probe(&base))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.code(),
+        rezka_client::RezkaErrorCode::ProviderResponseInvalid
+    );
+}
+
 #[test]
 fn credentials_debug_is_fully_redacted() {
     let rendered = format!("{:?}", credentials());
