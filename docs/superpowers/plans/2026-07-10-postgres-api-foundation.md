@@ -360,15 +360,15 @@ MEDIA_RUNNER_TOKEN_FILE
 MEDIA_LEASE_TTL_SECONDS (default 60; valid 30-300)
 ```
 
-- [ ] Write failing tests for a missing database URL file, unreadable secret file, empty token, redacted config/debug output, and default listen address.
-- [ ] Implement typed configuration loaded only in `media`; libraries receive constructed clients and values.
-- [ ] Add `media migrate` using `media_storage::Migrator::up`; `media serve` MUST fail fast before binding the listener when migrations are pending and MUST NOT apply them automatically.
-- [ ] At service startup, read three token files with `secrecy::SecretString`, hash them, and upsert fixed client mappings without logging secret content.
-- [ ] Add a local `StorageIdempotencyAdapter` newtype which implements the API-owned idempotency port by mapping to `media-storage` repository records; compose all stores, core applications, and the Axum router without adding an API dependency to storage.
-- [ ] Compose SeaORM stores, core applications, and the Axum router; install structured tracing without logging headers/bodies.
-- [ ] Implement Reqwest CLI client with bearer token file, generated request ID, generated idempotency key for create, and stable JSON output.
-- [ ] Add black-box tests against an in-process Axum listener for `jobs create/get` and `queue status`.
-- [ ] Run workspace gates; commit: `feat(media): compose service migrations and http cli`.
+- [x] Write failing tests for a missing database URL file, unreadable secret file, empty token, redacted config/debug output, and default listen address.
+- [x] Implement typed configuration loaded only in `media`; libraries receive constructed clients and values.
+- [x] Add `media migrate` using `media_storage::Migrator::up`; `media serve` MUST fail fast before binding the listener when migrations are pending and MUST NOT apply them automatically.
+- [x] At service startup, read three token files with `secrecy::SecretString`, hash them, and upsert fixed client mappings without logging secret content.
+- [x] Add a local `StorageIdempotencyAdapter` newtype which implements the API-owned idempotency port by mapping to `media-storage` repository records; compose all stores, core applications, and the Axum router without adding an API dependency to storage.
+- [x] Compose SeaORM stores, core applications, and the Axum router; install structured tracing without logging headers/bodies.
+- [x] Implement Reqwest CLI client with bearer token file, generated request ID, generated idempotency key for create, and stable JSON output.
+- [x] Add black-box tests against an in-process Axum listener for `jobs create/get` and `queue status`.
+- [x] Run workspace gates; commit: `feat(media): compose service migrations and http cli`.
 
 ## Task 9: End-to-End PostgreSQL Gate and CI
 
