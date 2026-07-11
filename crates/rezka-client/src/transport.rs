@@ -189,20 +189,53 @@ impl Transport {
         referer: Option<Url>,
         status_policy: ResponseStatusPolicy,
     ) -> Result<TransportResponse, RezkaError> {
+        self.send_idempotent_with_failover(Method::GET, url, referer, None, status_policy)
+            .await
+    }
+
+    pub(crate) async fn post_form_with_failover(
+        &mut self,
+        url: Url,
+        referer: Option<Url>,
+        form: &[(&str, &str)],
+    ) -> Result<TransportResponse, RezkaError> {
+        self.send_idempotent_with_failover(
+            Method::POST,
+            url,
+            referer,
+            Some(form),
+            ResponseStatusPolicy::Default,
+        )
+        .await
+    }
+
+    async fn send_idempotent_with_failover(
+        &mut self,
+        method: Method,
+        url: Url,
+        referer: Option<Url>,
+        form: Option<&[(&str, &str)]>,
+        status_policy: ResponseStatusPolicy,
+    ) -> Result<TransportResponse, RezkaError> {
         let max_attempts = usize::from(self.max_retries)
             .saturating_add(1)
             .min(self.mirrors.len());
         let original = url;
+        let original_referer = referer;
 
         for attempt in 0..max_attempts {
             let attempt_url = self.mirrors.rewrite_to_selected(&original)?;
+            let attempt_referer = original_referer
+                .as_ref()
+                .map(|referer| self.mirrors.rewrite_to_selected(referer))
+                .transpose()?;
 
             match self
                 .send_first(
-                    Method::GET,
+                    method.clone(),
                     attempt_url,
-                    referer.clone(),
-                    None,
+                    attempt_referer,
+                    form,
                     status_policy,
                 )
                 .await

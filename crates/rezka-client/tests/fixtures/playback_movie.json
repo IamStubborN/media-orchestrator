@@ -1,0 +1,6 @@
+{
+  "success": true,
+  "url": "[720p]https://cdn.example.com/movie.mp4,[1080p]https://cdn.example.com/movie.m3u8",
+  "subtitle": "[English]https://sub.example.com/movie-en.vtt,[Ukrainian]https://sub.example.com/movie-ua.vtt",
+  "subtitle_lns": {"English": "en", "Ukrainian": "ua"}
+}

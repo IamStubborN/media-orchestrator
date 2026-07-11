@@ -4,15 +4,132 @@ use scraper::{Html, Selector};
 use serde::de::{self, MapAccess, Visitor};
 
 use super::{
-    EpisodeAvailability, SeasonAvailability, SelectedTranslation, SeriesAvailability,
-    invalid_playback,
+    EpisodeAvailability, PlaybackManifest, PlaybackRequest, ResolvedTarget, SeasonAvailability,
+    SelectedTranslation, SeriesAvailability, invalid_playback,
 };
-use crate::RezkaError;
+use crate::{
+    ProviderFailureReason, RezkaError, parse_stream_variants, parse_subtitle_fields,
+    redaction::sanitize_provider_text, session::anubis::detect_challenge,
+};
 
 const MAX_SEASONS: usize = 256;
 const MAX_EPISODES_PER_SEASON: usize = 4_096;
 const MAX_TOTAL_EPISODES: usize = 16_384;
 const MAX_LABEL_BYTES: usize = 4_096;
+
+pub fn parse_playback_manifest(
+    wrapper_json: &str,
+    request: PlaybackRequest,
+) -> Result<PlaybackManifest, RezkaError> {
+    if detect_challenge(wrapper_json) {
+        return Err(RezkaError::ChallengeRequired {
+            context: sanitize_provider_text("playback challenge detected"),
+        });
+    }
+    let wrapper: PlaybackWrapper = serde_json::from_str(wrapper_json)
+        .map_err(|_| invalid_playback("invalid playback response"))?;
+    if !wrapper.success {
+        return Err(playback_failure(wrapper.message.as_deref()));
+    }
+    let stream_payload = wrapper
+        .url
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| invalid_playback("playback streams missing"))?;
+    let variants = parse_stream_variants(&stream_payload)?;
+    let subtitles = parse_subtitle_fields(wrapper_json)?;
+    let (title, translation, target) = match request {
+        PlaybackRequest::Movie(selection) => (
+            selection.title,
+            *selection.translation.key(),
+            ResolvedTarget::Movie,
+        ),
+        PlaybackRequest::Episode(selected) => (
+            selected.selection.title,
+            *selected.selection.translation.key(),
+            ResolvedTarget::Episode {
+                season: selected.season,
+                episode: selected.episode,
+            },
+        ),
+    };
+    Ok(PlaybackManifest::new(
+        title,
+        translation,
+        target,
+        variants,
+        subtitles,
+    ))
+}
+
+fn playback_failure(message: Option<&str>) -> RezkaError {
+    let normalized = message.unwrap_or_default().trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "translation unavailable" => RezkaError::TranslationUnavailable {
+            reason: ProviderFailureReason::TranslationUnavailable,
+        },
+        "episode unavailable" => RezkaError::EpisodeUnavailable {
+            reason: ProviderFailureReason::EpisodeUnavailable,
+        },
+        "premium required" => RezkaError::QualityUnavailable {
+            reason: ProviderFailureReason::PremiumRequired,
+        },
+        "authentication required" => RezkaError::AuthenticationRequired {
+            context: sanitize_provider_text("playback authentication required"),
+        },
+        _ => RezkaError::QualityUnavailable {
+            reason: ProviderFailureReason::Unknown,
+        },
+    }
+}
+
+struct PlaybackWrapper {
+    success: bool,
+    url: Option<String>,
+    message: Option<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for PlaybackWrapper {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(PlaybackWrapperVisitor)
+    }
+}
+
+struct PlaybackWrapperVisitor;
+
+impl<'de> Visitor<'de> for PlaybackWrapperVisitor {
+    type Value = PlaybackWrapper;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a playback response object")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut success = None;
+        let mut url = None;
+        let mut message = None;
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "success" => set_once(&mut success, map.next_value()?, "success")?,
+                "url" => set_once(&mut url, map.next_value()?, "url")?,
+                "message" => set_once(&mut message, map.next_value()?, "message")?,
+                _ => {
+                    let _: de::IgnoredAny = map.next_value()?;
+                }
+            }
+        }
+        Ok(PlaybackWrapper {
+            success: success.ok_or_else(|| de::Error::missing_field("success"))?,
+            url,
+            message,
+        })
+    }
+}
 
 pub fn parse_series_availability(
     wrapper_json: &str,

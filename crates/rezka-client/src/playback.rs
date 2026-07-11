@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::{
-    ProviderFailureReason, RezkaError,
+    ProviderFailureReason, RezkaError, StreamVariant, SubtitleTrack,
     catalog::{RezkaMediaKind, RezkaTitleId, TitleLocator, Translation, TranslationKey},
     redaction::sanitize_provider_text,
     session::RezkaClient,
@@ -259,6 +259,83 @@ impl PlaybackRequest {
     }
 }
 
+pub struct PlaybackManifest {
+    title: TitlePlaybackRef,
+    translation: TranslationKey,
+    target: ResolvedTarget,
+    variants: Vec<StreamVariant>,
+    preferred_variant: usize,
+    subtitles: Vec<SubtitleTrack>,
+}
+
+impl PlaybackManifest {
+    pub(crate) fn new(
+        title: TitlePlaybackRef,
+        translation: TranslationKey,
+        target: ResolvedTarget,
+        variants: Vec<StreamVariant>,
+        subtitles: Vec<SubtitleTrack>,
+    ) -> Self {
+        Self {
+            title,
+            translation,
+            target,
+            variants,
+            preferred_variant: 0,
+            subtitles,
+        }
+    }
+
+    #[must_use]
+    pub const fn title(&self) -> &TitlePlaybackRef {
+        &self.title
+    }
+
+    #[must_use]
+    pub const fn translation(&self) -> &TranslationKey {
+        &self.translation
+    }
+
+    #[must_use]
+    pub const fn target(&self) -> ResolvedTarget {
+        self.target
+    }
+
+    #[must_use]
+    pub fn variants(&self) -> &[StreamVariant] {
+        &self.variants
+    }
+
+    #[must_use]
+    pub const fn preferred_variant_index(&self) -> usize {
+        self.preferred_variant
+    }
+
+    #[must_use]
+    pub fn preferred_variant(&self) -> &StreamVariant {
+        &self.variants[self.preferred_variant]
+    }
+
+    #[must_use]
+    pub fn subtitles(&self) -> &[SubtitleTrack] {
+        &self.subtitles
+    }
+}
+
+impl fmt::Debug for PlaybackManifest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PlaybackManifest")
+            .field("title", &self.title)
+            .field("translation", &self.translation)
+            .field("target", &self.target)
+            .field("variants", &self.variants)
+            .field("preferred_variant", &self.preferred_variant)
+            .field("subtitles", &self.subtitles)
+            .finish()
+    }
+}
+
 impl fmt::Debug for PlaybackRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -298,6 +375,69 @@ impl RezkaClient {
             .post_form_first(endpoint, Some(referer), &form)
             .await?;
         parser::parse_series_availability(&response.body, selection.clone())
+    }
+
+    pub async fn resolve(
+        &mut self,
+        request: PlaybackRequest,
+    ) -> Result<PlaybackManifest, RezkaError> {
+        let origin = self.transport_mut().selected_origin().clone();
+        let endpoint = origin
+            .join(AJAX_PATH)
+            .map_err(|_| invalid_playback("invalid playback endpoint"))?;
+        let title = match &request {
+            PlaybackRequest::Movie(selection) => selection.title(),
+            PlaybackRequest::Episode(selected) => selected.selection.title(),
+        };
+        let referer = origin
+            .join(title.locator().as_str())
+            .map_err(|_| invalid_playback("invalid title referer"))?;
+
+        let owned_form = playback_form(&request);
+        let form = owned_form
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect::<Vec<_>>();
+        let response = self
+            .transport_mut()
+            .post_form_with_failover(endpoint, Some(referer), &form)
+            .await?;
+        parser::parse_playback_manifest(&response.body, request)
+    }
+}
+
+fn playback_form(request: &PlaybackRequest) -> Vec<(&'static str, String)> {
+    match request {
+        PlaybackRequest::Movie(selection) => vec![
+            ("id", selection.title().id().get().to_string()),
+            (
+                "translator_id",
+                selection.translation().id().get().to_string(),
+            ),
+            (
+                "is_camrip",
+                u8::from(selection.translation().is_camrip()).to_string(),
+            ),
+            (
+                "is_ads",
+                u8::from(selection.translation().has_ads()).to_string(),
+            ),
+            (
+                "is_director",
+                u8::from(selection.translation().is_director()).to_string(),
+            ),
+            ("action", "get_movie".to_owned()),
+        ],
+        PlaybackRequest::Episode(selected) => vec![
+            ("id", selected.selection.title().id().get().to_string()),
+            (
+                "translator_id",
+                selected.selection.translation().id().get().to_string(),
+            ),
+            ("season", selected.season.to_string()),
+            ("episode", selected.episode.to_string()),
+            ("action", "get_stream".to_owned()),
+        ],
     }
 }
 

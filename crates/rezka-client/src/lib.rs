@@ -18,8 +18,8 @@ pub use catalog::{
 pub use error::{ProviderFailureReason, RezkaError, RezkaErrorCode};
 pub use mirror::MirrorSet;
 pub use playback::{
-    EpisodeAvailability, PlaybackRequest, ResolvedTarget, SeasonAvailability, SelectedEpisode,
-    SelectedTranslation, SeriesAvailability, TitlePlaybackRef,
+    EpisodeAvailability, PlaybackManifest, PlaybackRequest, ResolvedTarget, SeasonAvailability,
+    SelectedEpisode, SelectedTranslation, SeriesAvailability, TitlePlaybackRef,
 };
 pub use quality::{
     AdvertisedQuality, QualityTier, StreamEndpoint, StreamKind, StreamVariant,
