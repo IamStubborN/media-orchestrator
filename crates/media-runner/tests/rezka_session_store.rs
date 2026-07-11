@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::{io::Write as _, path::PathBuf};
+
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 use aes_gcm::{
     Aes256Gcm,
@@ -207,6 +210,117 @@ fn invalid_nonce_length_is_rejected_without_envelope_details() {
         format!("{error:?}: {error}"),
         "InvalidEnvelope: encrypted Rezka session envelope is invalid"
     );
+}
+
+#[test]
+fn unknown_envelope_fields_are_rejected() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("rezka-session.bin");
+    let store = store(path.clone(), 7);
+    store.save(&snapshot(0x77)).unwrap();
+    let mut envelope: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    envelope["unexpected"] = serde_json::Value::String("ignored".to_owned());
+    std::fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+
+    let error = store.load().unwrap_err();
+
+    assert_eq!(error, RezkaSessionStoreError::InvalidEnvelope);
+}
+
+#[test]
+fn oversized_regular_file_is_rejected() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("rezka-session.bin");
+    let store = store(path.clone(), 7);
+    store.save(&snapshot(0x78)).unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(&vec![b' '; 1024 * 1024]).unwrap();
+
+    let error = store.load().unwrap_err();
+
+    assert_eq!(error, RezkaSessionStoreError::InvalidEnvelope);
+}
+
+#[test]
+fn directory_is_rejected_as_an_invalid_envelope() {
+    let dir = TempDir::new().unwrap();
+
+    let error = store(dir.path().to_path_buf(), 7).load().unwrap_err();
+
+    assert_eq!(error, RezkaSessionStoreError::InvalidEnvelope);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_is_rejected_instead_of_loading_its_target() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new().unwrap();
+    let target = dir.path().join("target.bin");
+    store(target.clone(), 7).save(&snapshot(0x79)).unwrap();
+    let link = dir.path().join("session-link.bin");
+    symlink(&target, &link).unwrap();
+
+    let error = store(link, 7).load().unwrap_err();
+
+    assert_eq!(error, RezkaSessionStoreError::ReadFailed);
+}
+
+#[cfg(unix)]
+#[test]
+fn device_is_rejected_as_an_invalid_envelope() {
+    let error = store(PathBuf::from("/dev/null"), 7).load().unwrap_err();
+
+    assert_eq!(error, RezkaSessionStoreError::InvalidEnvelope);
+}
+
+#[cfg(unix)]
+#[test]
+fn fifo_is_rejected_promptly_without_blocking() {
+    let dir = TempDir::new().unwrap();
+    let fifo = dir.path().join("session.fifo");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("fifo_load_helper")
+        .arg("--nocapture")
+        .env("MEDIA_RUNNER_FIFO_TEST_PATH", &fifo)
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("FIFO load blocked past the watchdog deadline");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn fifo_load_helper() {
+    let Some(path) = std::env::var_os("MEDIA_RUNNER_FIFO_TEST_PATH") else {
+        return;
+    };
+
+    let error = store(PathBuf::from(path), 7).load().unwrap_err();
+    assert_eq!(error, RezkaSessionStoreError::InvalidEnvelope);
 }
 
 #[test]

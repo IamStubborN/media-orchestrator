@@ -1,4 +1,8 @@
-use std::{fmt, io::Write as _, path::Path};
+use std::{
+    fmt,
+    io::{Read as _, Write as _},
+    path::Path,
+};
 
 use aes_gcm::{
     Aes256Gcm, Nonce,
@@ -10,10 +14,10 @@ use rezka_client::SessionSnapshot;
 use secrecy::{ExposeSecret as _, SecretBox};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use zeroize::Zeroize as _;
 
 const ENVELOPE_VERSION: u8 = 1;
 const NONCE_LENGTH: usize = 12;
+const MAX_ENVELOPE_BYTES: usize = 256 * 1024;
 const AAD: &[u8] = b"media-orchestrator:rezka-session:v1";
 
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -73,10 +77,8 @@ impl EncryptedRezkaSessionStore {
     }
 
     pub fn load(&self) -> Result<Option<SessionSnapshot>, RezkaSessionStoreError> {
-        let envelope_bytes = match std::fs::read(&self.config.path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(RezkaSessionStoreError::ReadFailed),
+        let Some(envelope_bytes) = read_envelope(&self.config.path)? else {
+            return Ok(None);
         };
         let envelope: Envelope = serde_json::from_slice(&envelope_bytes)
             .map_err(|_| RezkaSessionStoreError::InvalidEnvelope)?;
@@ -90,7 +92,7 @@ impl EncryptedRezkaSessionStore {
             .map_err(|_| RezkaSessionStoreError::InvalidEnvelope)?;
         let cipher = cipher(&self.config.key);
         let nonce = Nonce::from(nonce);
-        let mut plaintext = cipher
+        let plaintext = cipher
             .decrypt(
                 &nonce,
                 Payload {
@@ -99,9 +101,8 @@ impl EncryptedRezkaSessionStore {
                 },
             )
             .map_err(|_| RezkaSessionStoreError::DecryptionFailed)?;
-        let snapshot =
-            SessionSnapshot::from_secret_bytes(SecretBox::new(Box::new(plaintext.clone())));
-        plaintext.zeroize();
+        // SecretBox zeroizes its Vec on drop; moving it avoids another plaintext allocation.
+        let snapshot = SessionSnapshot::from_secret_bytes(SecretBox::new(Box::new(plaintext)));
 
         Ok(Some(snapshot))
     }
@@ -142,6 +143,7 @@ impl EncryptedRezkaSessionStore {
 }
 
 #[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct Envelope {
     version: u8,
     nonce_b64: String,
@@ -158,6 +160,76 @@ fn decode_nonce(encoded: &str) -> Result<[u8; NONCE_LENGTH], RezkaSessionStoreEr
         .map_err(|_| RezkaSessionStoreError::InvalidEnvelope)?
         .try_into()
         .map_err(|_| RezkaSessionStoreError::InvalidEnvelope)
+}
+
+fn read_envelope(path: &Path) -> Result<Option<Vec<u8>>, RezkaSessionStoreError> {
+    let Some(file) = open_envelope_file(path)? else {
+        return Ok(None);
+    };
+    let metadata = file
+        .metadata()
+        .map_err(|_| RezkaSessionStoreError::ReadFailed)?;
+    if !metadata.is_file() || metadata.len() > MAX_ENVELOPE_BYTES as u64 {
+        return Err(RezkaSessionStoreError::InvalidEnvelope);
+    }
+
+    let initial_capacity = usize::try_from(metadata.len())
+        .unwrap_or(MAX_ENVELOPE_BYTES)
+        .min(MAX_ENVELOPE_BYTES);
+    read_bounded(file, initial_capacity).map(Some)
+}
+
+#[cfg(unix)]
+fn open_envelope_file(path: &Path) -> Result<Option<std::fs::File>, RezkaSessionStoreError> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let result = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path);
+    map_open_result(result)
+}
+
+#[cfg(not(unix))]
+fn open_envelope_file(path: &Path) -> Result<Option<std::fs::File>, RezkaSessionStoreError> {
+    // Rust has no portable no-follow open flag. This best-effort pre-check has a residual
+    // symlink replacement race; descriptor metadata and bounded reads still enforce type/size.
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(RezkaSessionStoreError::InvalidEnvelope);
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(RezkaSessionStoreError::ReadFailed),
+    }
+
+    map_open_result(std::fs::OpenOptions::new().read(true).open(path))
+}
+
+fn map_open_result(
+    result: std::io::Result<std::fs::File>,
+) -> Result<Option<std::fs::File>, RezkaSessionStoreError> {
+    match result {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(RezkaSessionStoreError::ReadFailed),
+    }
+}
+
+fn read_bounded(
+    reader: impl std::io::Read,
+    initial_capacity: usize,
+) -> Result<Vec<u8>, RezkaSessionStoreError> {
+    let mut bytes = Vec::with_capacity(initial_capacity.min(MAX_ENVELOPE_BYTES));
+    reader
+        .take((MAX_ENVELOPE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| RezkaSessionStoreError::ReadFailed)?;
+    if bytes.len() > MAX_ENVELOPE_BYTES {
+        return Err(RezkaSessionStoreError::InvalidEnvelope);
+    }
+
+    Ok(bytes)
 }
 
 fn persist_envelope(path: &Path, envelope_bytes: &[u8]) -> Result<(), RezkaSessionStoreError> {
@@ -186,4 +258,20 @@ fn persist_envelope(path: &Path, envelope_bytes: &[u8]) -> Result<(), RezkaSessi
         .map_err(|_| RezkaSessionStoreError::WriteFailed)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::{MAX_ENVELOPE_BYTES, RezkaSessionStoreError, read_bounded};
+
+    #[test]
+    fn bounded_reader_detects_one_byte_overflow() {
+        let input = vec![0_u8; MAX_ENVELOPE_BYTES + 1];
+
+        let error = read_bounded(Cursor::new(input), 0).unwrap_err();
+
+        assert_eq!(error, RezkaSessionStoreError::InvalidEnvelope);
+    }
 }
