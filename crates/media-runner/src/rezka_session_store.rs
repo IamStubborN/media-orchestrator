@@ -129,6 +129,9 @@ impl EncryptedRezkaSessionStore {
         };
         let envelope_bytes =
             serde_json::to_vec(&envelope).map_err(|_| RezkaSessionStoreError::WriteFailed)?;
+        if envelope_bytes.len() > MAX_ENVELOPE_BYTES {
+            return Err(RezkaSessionStoreError::InvalidEnvelope);
+        }
 
         persist_envelope(&self.config.path, &envelope_bytes)
     }

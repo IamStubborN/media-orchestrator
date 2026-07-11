@@ -14,6 +14,8 @@ allow = [
   "CDLA-Permissive-2.0",
   "ISC",
   "MIT",
+  # Unmodified transitive Servo HTML/CSS parser crates use MPL-2.0.
+  "MPL-2.0",
   "Unicode-3.0",
   "Zlib",
 ]

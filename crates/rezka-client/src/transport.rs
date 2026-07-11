@@ -2,10 +2,14 @@ use std::{collections::BTreeSet, error::Error as _, fmt, io, time::Duration as S
 
 use reqwest::{
     Client, Method, StatusCode,
-    header::{COOKIE, HeaderName, HeaderValue, LOCATION, REFERER, RETRY_AFTER, SET_COOKIE},
+    header::{
+        CONTENT_LENGTH, COOKIE, HeaderName, HeaderValue, LOCATION, REFERER, RETRY_AFTER, SET_COOKIE,
+    },
     redirect::Policy,
 };
 
+pub const MAX_PROVIDER_RESPONSE_BODY_BYTES: usize = 2 * 1024 * 1024;
+const PROVIDER_RESPONSE_BODY_OVERFLOW_BYTES: usize = MAX_PROVIDER_RESPONSE_BODY_BYTES + 1;
 const X_REQUESTED_WITH: HeaderName = HeaderName::from_static("x-requested-with");
 const XML_HTTP_REQUEST: HeaderValue = HeaderValue::from_static("XMLHttpRequest");
 use time::Duration;
@@ -61,8 +65,8 @@ pub struct Transport {
 
 impl Transport {
     pub fn new(
-        mirrors: MirrorSet,
-        jar: SessionJar,
+        mut mirrors: MirrorSet,
+        mut jar: SessionJar,
         user_agent: String,
         request_timeout: Duration,
         max_retries: u8,
@@ -75,6 +79,16 @@ impl Transport {
             return Err(RezkaError::Configuration {
                 message: "invalid request timeout",
             });
+        }
+
+        if jar.has_origin_binding() {
+            if !mirrors.select_matching_origin(|origin| jar.is_bound_to(origin)) {
+                return Err(RezkaError::Configuration {
+                    message: "snapshot origin is not a configured Rezka mirror",
+                });
+            }
+        } else {
+            jar.bind_to(mirrors.selected_origin())?;
         }
 
         let client = Client::builder()
@@ -92,6 +106,22 @@ impl Transport {
             jar,
             max_retries,
         })
+    }
+
+    pub fn from_snapshot(
+        mirrors: MirrorSet,
+        snapshot: &SessionSnapshot,
+        user_agent: String,
+        request_timeout: Duration,
+        max_retries: u8,
+    ) -> Result<Self, RezkaError> {
+        Self::new(
+            mirrors,
+            SessionJar::import(snapshot)?,
+            user_agent,
+            request_timeout,
+            max_retries,
+        )
     }
 
     #[must_use]
@@ -136,6 +166,7 @@ impl Transport {
                     if !self.mirrors.select_next() {
                         return Err(failure.error);
                     }
+                    self.jar = SessionJar::bound_empty(self.mirrors.selected_origin())?;
                 }
                 Err(failure) => return Err(failure.error),
             }
@@ -223,7 +254,7 @@ impl Transport {
 
     async fn process_response(
         &mut self,
-        response: reqwest::Response,
+        mut response: reqwest::Response,
     ) -> Result<TransportResponse, AttemptFailure> {
         let status = response.status();
         let url = response.url().clone();
@@ -264,10 +295,34 @@ impl Transport {
             return Err(AttemptFailure::terminal(invalid_http_status(status, &url)));
         }
 
-        let body = response
-            .bytes()
+        let declared_length = response
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok());
+        if declared_length.is_some_and(|length| length > MAX_PROVIDER_RESPONSE_BODY_BYTES as u64) {
+            return Err(AttemptFailure::terminal(oversized_response_body()));
+        }
+
+        let initial_capacity = declared_length
+            .and_then(|length| usize::try_from(length).ok())
+            .unwrap_or_default()
+            .min(MAX_PROVIDER_RESPONSE_BODY_BYTES);
+        let mut body = Vec::with_capacity(initial_capacity);
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|_| AttemptFailure::terminal(transport_error()))?;
+            .map_err(|_| AttemptFailure::terminal(transport_error()))?
+        {
+            let cumulative_length = body
+                .len()
+                .checked_add(chunk.len())
+                .ok_or_else(|| AttemptFailure::terminal(oversized_response_body()))?;
+            if cumulative_length >= PROVIDER_RESPONSE_BODY_OVERFLOW_BYTES {
+                return Err(AttemptFailure::terminal(oversized_response_body()));
+            }
+            body.extend_from_slice(&chunk);
+        }
         let body = String::from_utf8_lossy(&body).into_owned();
 
         Ok(TransportResponse {
@@ -339,6 +394,10 @@ fn invalid_response(reason: &str) -> RezkaError {
     RezkaError::ProviderResponseInvalid {
         context: sanitize_provider_text(reason),
     }
+}
+
+fn oversized_response_body() -> RezkaError {
+    invalid_response("provider response body exceeds limit")
 }
 
 fn invalid_http_status(status: StatusCode, url: &Url) -> RezkaError {

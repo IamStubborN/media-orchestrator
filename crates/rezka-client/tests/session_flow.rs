@@ -115,6 +115,66 @@ struct AnubisPassQuery {
     redir: String,
 }
 
+#[derive(Clone)]
+struct ExpensiveChallenge;
+
+impl Respond for ExpensiveChallenge {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_string(
+            r#"<script id="anubis_challenge">{"challenge":{"id":"expensive","randomData":"deliberately-expensive-proof"},"rules":{"difficulty":32}}</script>"#,
+        )
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn expensive_proof_does_not_block_other_current_thread_tasks() {
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .respond_with(ExpensiveChallenge)
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut expensive_config = config(base.clone());
+    expensive_config.anubis_max_nonce = 1_000_000;
+    let mut client = RezkaClient::new(expensive_config).unwrap();
+    let credentials = credentials();
+    let probe = probe(&base);
+    let ticks = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let heartbeat_ticks = Arc::clone(&ticks);
+    let heartbeat = tokio::spawn(async move {
+        loop {
+            heartbeat_ticks
+                .lock()
+                .unwrap()
+                .push(std::time::Instant::now());
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    let error = client
+        .ensure_authenticated(&credentials, &probe)
+        .await
+        .unwrap_err();
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    heartbeat.abort();
+    assert_eq!(error.code(), RezkaErrorCode::ChallengeFailed);
+
+    let ticks = ticks.lock().unwrap();
+    let max_gap = ticks
+        .windows(2)
+        .map(|window| window[1].duration_since(window[0]))
+        .max()
+        .unwrap();
+    assert!(
+        max_gap < std::time::Duration::from_millis(250),
+        "current-thread heartbeat stalled for {max_gap:?}"
+    );
+}
+
 impl Match for AnubisPassQuery {
     fn matches(&self, request: &Request) -> bool {
         let query: std::collections::HashMap<_, _> =

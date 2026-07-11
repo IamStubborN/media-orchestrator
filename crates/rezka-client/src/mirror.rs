@@ -54,6 +54,14 @@ impl MirrorSet {
         true
     }
 
+    pub(crate) fn select_matching_origin(&mut self, predicate: impl Fn(&Url) -> bool) -> bool {
+        let Some(selected) = self.origins.iter().position(predicate) else {
+            return false;
+        };
+        self.selected = selected;
+        true
+    }
+
     #[must_use]
     pub(crate) fn len(&self) -> usize {
         self.origins.len()

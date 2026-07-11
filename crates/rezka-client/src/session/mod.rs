@@ -54,7 +54,17 @@ impl RezkaClient {
         config: RezkaClientConfig,
         snapshot: &SessionSnapshot,
     ) -> Result<Self, RezkaError> {
-        Self::with_jar(config, SessionJar::import(snapshot)?)
+        let transport = Transport::from_snapshot(
+            config.mirrors,
+            snapshot,
+            config.user_agent,
+            config.request_timeout,
+            config.max_retries,
+        )?;
+        Ok(Self {
+            transport,
+            anubis_max_nonce: config.anubis_max_nonce,
+        })
     }
 
     pub async fn ensure_authenticated(
@@ -67,7 +77,12 @@ impl RezkaClient {
         if detect_challenge(response.body()) {
             let started = Instant::now();
             let challenge = parse_challenge(response.body())?;
-            let proof = solve_challenge(&challenge, self.anubis_max_nonce)?;
+            let solver_challenge = challenge.clone();
+            let max_nonce = self.anubis_max_nonce;
+            let proof =
+                tokio::task::spawn_blocking(move || solve_challenge(&solver_challenge, max_nonce))
+                    .await
+                    .map_err(|_| challenge_solver_join_failed())??;
             submit_challenge(
                 &mut self.transport,
                 &challenge,
@@ -155,6 +170,12 @@ impl RezkaClient {
 fn challenge_failed() -> RezkaError {
     RezkaError::ChallengeFailed {
         context: sanitize_provider_text("challenge remained after one pass"),
+    }
+}
+
+fn challenge_solver_join_failed() -> RezkaError {
+    RezkaError::ChallengeFailed {
+        context: sanitize_provider_text("challenge solver task failed"),
     }
 }
 

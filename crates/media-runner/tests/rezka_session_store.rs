@@ -18,7 +18,28 @@ fn key(byte: u8) -> SecretBox<[u8; 32]> {
 }
 
 fn snapshot(byte: u8) -> SessionSnapshot {
-    SessionSnapshot::from_secret_bytes(SecretBox::new(Box::new(vec![byte; 64])))
+    snapshot_with_len(byte, 64)
+}
+
+fn snapshot_with_len(byte: u8, len: usize) -> SessionSnapshot {
+    SessionSnapshot::from_secret_bytes(SecretBox::new(Box::new(vec![byte; len])))
+}
+
+fn serialized_envelope_len(plaintext_len: usize) -> usize {
+    const JSON_WITH_EMPTY_VALUES_LEN: usize =
+        br#"{"version":1,"nonce_b64":"","ciphertext_b64":""}"#.len();
+    const NONCE_B64_LEN: usize = 16;
+    const TAG_LEN: usize = 16;
+
+    JSON_WITH_EMPTY_VALUES_LEN + NONCE_B64_LEN + (plaintext_len + TAG_LEN).div_ceil(3) * 4
+}
+
+fn max_plaintext_len() -> usize {
+    const MAX_ENVELOPE_BYTES: usize = 256 * 1024;
+    (0..=MAX_ENVELOPE_BYTES)
+        .rev()
+        .find(|len| serialized_envelope_len(*len) <= MAX_ENVELOPE_BYTES)
+        .unwrap()
 }
 
 fn store(path: PathBuf, key_byte: u8) -> EncryptedRezkaSessionStore {
@@ -84,6 +105,44 @@ fn repeated_saves_use_distinct_envelopes_and_overwrite_with_latest_snapshot() {
     assert_ne!(first["ciphertext_b64"], second["ciphertext_b64"]);
     assert!(store.load().unwrap().unwrap().secret_eq(&snapshot(0x22)));
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn maximum_sized_envelope_round_trips_at_the_calculated_boundary() {
+    const MAX_ENVELOPE_BYTES: usize = 256 * 1024;
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("rezka-session.bin");
+    let store = store(path.clone(), 7);
+    let plaintext_len = max_plaintext_len();
+    assert!(serialized_envelope_len(plaintext_len) <= MAX_ENVELOPE_BYTES);
+    assert!(serialized_envelope_len(plaintext_len + 1) > MAX_ENVELOPE_BYTES);
+
+    let original = snapshot_with_len(0x5a, plaintext_len);
+    store.save(&original).unwrap();
+
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len() as usize,
+        serialized_envelope_len(plaintext_len)
+    );
+    assert!(store.load().unwrap().unwrap().secret_eq(&original));
+}
+
+#[test]
+fn oversized_save_is_rejected_without_overwriting_previous_envelope() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("rezka-session.bin");
+    let store = store(path.clone(), 7);
+    let previous = snapshot(0x31);
+    store.save(&previous).unwrap();
+    let previous_envelope = std::fs::read(&path).unwrap();
+
+    let error = store
+        .save(&snapshot_with_len(0x7f, max_plaintext_len() + 1))
+        .unwrap_err();
+
+    assert_eq!(error, RezkaSessionStoreError::InvalidEnvelope);
+    assert_eq!(std::fs::read(&path).unwrap(), previous_envelope);
+    assert!(store.load().unwrap().unwrap().secret_eq(&previous));
 }
 
 #[test]

@@ -55,7 +55,7 @@ fn cookie_snapshot_round_trips_and_remains_redacted_in_debug() {
 
     let snapshot = jar.export().unwrap();
     let debug = format!("{snapshot:?}");
-    assert!(debug.contains("[REDACTED]"));
+    assert_eq!(debug, "SessionSnapshot { bytes: [REDACTED] }");
     assert!(!debug.contains("session_cookie"));
     assert!(!debug.contains("opaque-a"));
 
@@ -63,6 +63,175 @@ fn cookie_snapshot_round_trips_and_remains_redacted_in_debug() {
     assert!(restored.contains_cookie_for_url(&origin, "session_cookie"));
     assert!(restored.contains_cookie_for_url(&origin, "persistent_cookie"));
     assert!(!restored.contains_cookie_for_url(&origin, "expired_cookie"));
+}
+
+#[test]
+fn session_jar_never_matches_cookies_outside_its_exact_origin() {
+    let mut jar = SessionJar::empty();
+    let origin = Url::parse("https://rezka.test/").unwrap();
+    jar.store_response_cookies(
+        ["site_session=opaque; Domain=rezka.test; Path=/; HttpOnly"]
+            .iter()
+            .copied(),
+        &origin,
+    );
+
+    for forbidden in [
+        "https://cdn.rezka.test/account/probe",
+        "https://rezka.test:444/account/probe",
+        "http://rezka.test/account/probe",
+    ] {
+        let forbidden = Url::parse(forbidden).unwrap();
+        assert!(!jar.contains_cookie_for_url(&forbidden, "site_session"));
+    }
+}
+
+#[tokio::test]
+async fn failover_to_another_port_discards_the_previous_origin_jar() {
+    use rezka_client::transport::Transport;
+    use time::Duration;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header_exists, method, path},
+    };
+
+    let first = MockServer::start().await;
+    let first_origin = Url::parse(&first.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .respond_with(
+            ResponseTemplate::new(503)
+                .insert_header("set-cookie", "origin_session=must-not-leak; Path=/"),
+        )
+        .expect(1)
+        .mount(&first)
+        .await;
+
+    let second = MockServer::start().await;
+    let second_origin = Url::parse(&second.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .and(header_exists("cookie"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&second)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("valid-marker"))
+        .expect(1)
+        .mount(&second)
+        .await;
+
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![first_origin.clone(), second_origin.clone()]).unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        Duration::seconds(2),
+        1,
+    )
+    .unwrap();
+
+    let response = transport
+        .get_first_with_failover(first_origin.join("/account/probe").unwrap(), None)
+        .await
+        .unwrap();
+
+    assert_eq!(response.url, second_origin.join("/account/probe").unwrap());
+    let restored = SessionJar::import(&transport.export_session().unwrap()).unwrap();
+    assert!(!restored.contains_cookie_for_url(&second_origin, "origin_session"));
+}
+
+#[tokio::test]
+async fn snapshot_restart_selects_its_configured_alternate_origin() {
+    use rezka_client::session::{
+        RezkaClient, RezkaClientConfig, SessionValidation, SessionValidationProbe,
+    };
+    use time::Duration;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
+
+    let primary = MockServer::start().await;
+    let primary_origin = Url::parse(&primary.uri()).unwrap();
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&primary)
+        .await;
+
+    let alternate = MockServer::start().await;
+    let alternate_origin = Url::parse(&alternate.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .and(header("cookie", "PHPSESSID=alternate"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("valid-marker"))
+        .expect(1)
+        .mount(&alternate)
+        .await;
+
+    let mut jar = SessionJar::empty();
+    jar.store_response_cookies(
+        ["PHPSESSID=alternate; Path=/; HttpOnly"].iter().copied(),
+        &alternate_origin,
+    );
+    let snapshot = jar.export().unwrap();
+    let config = RezkaClientConfig {
+        mirrors: MirrorSet::new(vec![primary_origin, alternate_origin.clone()]).unwrap(),
+        user_agent: "media-orchestrator-test".to_owned(),
+        request_timeout: Duration::seconds(2),
+        max_retries: 1,
+        anubis_max_nonce: 1,
+    };
+    let probe = SessionValidationProbe::new(
+        alternate_origin.join("/account/probe").unwrap(),
+        vec!["valid-marker".to_owned()],
+        vec!["invalid-marker".to_owned()],
+    )
+    .unwrap();
+    let mut client = RezkaClient::from_snapshot(config, &snapshot).unwrap();
+
+    let response = client.fetch_probe(&probe).await.unwrap();
+
+    assert_eq!(
+        RezkaClient::classify_probe(&probe, &response),
+        SessionValidation::Valid
+    );
+    assert_eq!(response.url.origin(), alternate_origin.origin());
+}
+
+#[test]
+fn snapshot_origin_absent_from_configured_mirrors_fails_closed() {
+    use rezka_client::session::{RezkaClient, RezkaClientConfig};
+    use time::Duration;
+
+    let snapshot_origin = Url::parse("https://snapshot.rezka.test/").unwrap();
+    let mut jar = SessionJar::empty();
+    jar.store_response_cookies(
+        ["PHPSESSID=opaque; Path=/; HttpOnly"].iter().copied(),
+        &snapshot_origin,
+    );
+    let snapshot = jar.export().unwrap();
+    let config = RezkaClientConfig {
+        mirrors: MirrorSet::new(vec![Url::parse("https://configured.rezka.test/").unwrap()])
+            .unwrap(),
+        user_agent: "media-orchestrator-test".to_owned(),
+        request_timeout: Duration::seconds(2),
+        max_retries: 0,
+        anubis_max_nonce: 1,
+    };
+
+    let error = match RezkaClient::from_snapshot(config, &snapshot) {
+        Ok(_) => panic!("unconfigured snapshot origin must fail closed"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.code(), rezka_client::RezkaErrorCode::Configuration);
+    assert_eq!(
+        error.to_string(),
+        "configuration invalid: snapshot origin is not a configured Rezka mirror"
+    );
 }
 
 #[tokio::test]
@@ -520,6 +689,121 @@ async fn truncated_terminal_status_is_classified_before_body_read() {
     );
     let restored = SessionJar::import(&transport.export_session().unwrap()).unwrap();
     assert!(restored.contains_cookie_for_url(&base, "terminal_status_cookie"));
+}
+
+#[tokio::test]
+async fn provider_response_body_accepts_the_exact_two_mib_boundary() {
+    use rezka_client::transport::Transport;
+    use time::Duration;
+
+    const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+    let (base, raw_server) = support::spawn_http_body_response(&[], MAX_BODY_BYTES, false);
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![base.clone()]).unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        Duration::seconds(10),
+        0,
+    )
+    .unwrap();
+
+    let response = transport
+        .get_first(base.join("/account/probe").unwrap(), None)
+        .await
+        .unwrap();
+
+    raw_server.join().unwrap();
+    assert_eq!(response.body.len(), MAX_BODY_BYTES);
+}
+
+#[tokio::test]
+async fn declared_oversized_provider_body_is_rejected_before_reading() {
+    use rezka_client::transport::Transport;
+    use time::Duration;
+
+    const OVERSIZED_BODY_BYTES: usize = 2 * 1024 * 1024 + 1;
+    let (base, raw_server) = support::spawn_declared_http_body_response(OVERSIZED_BODY_BYTES);
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![base.clone()]).unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        Duration::seconds(10),
+        0,
+    )
+    .unwrap();
+
+    let error = transport
+        .get_first(base.join("/account/probe").unwrap(), None)
+        .await
+        .unwrap_err();
+
+    raw_server.join().unwrap();
+    assert_eq!(
+        error.code(),
+        rezka_client::RezkaErrorCode::ProviderResponseInvalid
+    );
+}
+
+#[tokio::test]
+async fn chunked_oversized_provider_body_is_rejected_at_one_byte_overflow() {
+    use rezka_client::transport::Transport;
+    use time::Duration;
+
+    const OVERSIZED_BODY_BYTES: usize = 2 * 1024 * 1024 + 1;
+    let (base, raw_server) = support::spawn_http_body_response(&[], OVERSIZED_BODY_BYTES, true);
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![base.clone()]).unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        Duration::seconds(10),
+        0,
+    )
+    .unwrap();
+
+    let error = transport
+        .get_first(base.join("/account/probe").unwrap(), None)
+        .await
+        .unwrap_err();
+
+    raw_server.join().unwrap();
+    assert_eq!(
+        error.code(),
+        rezka_client::RezkaErrorCode::ProviderResponseInvalid
+    );
+}
+
+#[tokio::test]
+async fn response_cookie_is_stored_before_oversized_body_failure() {
+    use rezka_client::transport::Transport;
+    use time::Duration;
+
+    const OVERSIZED_BODY_BYTES: usize = 2 * 1024 * 1024 + 1;
+    let (base, raw_server) = support::spawn_http_body_response(
+        &["Set-Cookie: oversize_cookie=opaque; Path=/"],
+        OVERSIZED_BODY_BYTES,
+        true,
+    );
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![base.clone()]).unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        Duration::seconds(10),
+        0,
+    )
+    .unwrap();
+
+    let error = transport
+        .get_first(base.join("/account/probe").unwrap(), None)
+        .await
+        .unwrap_err();
+
+    raw_server.join().unwrap();
+    assert_eq!(
+        error.code(),
+        rezka_client::RezkaErrorCode::ProviderResponseInvalid
+    );
+    let restored = SessionJar::import(&transport.export_session().unwrap()).unwrap();
+    assert!(restored.contains_cookie_for_url(&base, "oversize_cookie"));
 }
 
 #[tokio::test]
