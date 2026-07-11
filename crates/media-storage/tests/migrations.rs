@@ -315,6 +315,15 @@ async fn postgres_enforces_domain_and_concurrency_invariants() {
         "operation_receipts_result_shape_check",
     )
     .await;
+    assert_rejected(
+        db,
+        "INSERT INTO operation_receipts
+           (id, operation_key, operation_kind, result_kind, result_snapshot)
+         VALUES ('00000000-0000-0024-0000-000000000007',
+                 decode(repeat('07', 32), 'hex'), 'create_job', 'job', NULL)",
+        "operation_receipts_result_shape_check",
+    )
+    .await;
     execute(
         db,
         "INSERT INTO operation_receipts

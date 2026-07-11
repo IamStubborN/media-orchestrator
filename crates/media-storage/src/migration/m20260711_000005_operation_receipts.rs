@@ -42,6 +42,7 @@ impl MigrationTrait for Migration {
                         (result_kind IN ('pending', 'none') AND result_snapshot IS NULL)
                         OR (
                             result_kind IN ('job', 'lease')
+                            AND result_snapshot IS NOT NULL
                             AND jsonb_typeof(result_snapshot) = 'object'
                         )
                     ),

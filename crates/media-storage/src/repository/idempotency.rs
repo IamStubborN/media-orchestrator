@@ -14,7 +14,7 @@ pub enum ReservationRecord {
         response: StoredResponseRecord,
     },
     Conflict,
-    InProgress,
+    InProgress(ReservationHandle),
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
@@ -292,15 +292,15 @@ impl SeaOrmIdempotencyRepository {
             if row.try_get::<Vec<u8>>("", "request_hash")? != request_hash {
                 return Ok(ReservationRecord::Conflict);
             }
+            let handle = ReservationHandle::new(
+                client,
+                key.to_owned(),
+                request_hash,
+                row.try_get("", "generation")?,
+            );
             match row.try_get::<String>("", "status")?.as_str() {
-                "in_progress" => Ok(ReservationRecord::InProgress),
+                "in_progress" => Ok(ReservationRecord::InProgress(handle)),
                 "completed" => {
-                    let handle = ReservationHandle::new(
-                        client,
-                        key.to_owned(),
-                        request_hash,
-                        row.try_get("", "generation")?,
-                    );
                     let status = row
                         .try_get::<i16>("", "response_status")?
                         .try_into()
@@ -335,7 +335,9 @@ impl SeaOrmIdempotencyRepository {
                     "UPDATE idempotency_records SET status = 'completed', response_status = $5, \
                      response_content_type = $6, response_body = $7, updated_at = now() \
                      WHERE client_id = $1 AND idempotency_key = $2 AND request_hash = $3 \
-                     AND generation = $4 AND status = 'in_progress' AND expires_at > now()",
+                     AND generation = $4 AND expires_at > now() AND (status = 'in_progress' \
+                     OR (status = 'completed' AND response_status = $5 \
+                     AND response_content_type = $6 AND response_body = $7))",
                     [
                         handle.client_id.into_uuid().into(),
                         handle.key.clone().into(),

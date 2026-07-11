@@ -18,7 +18,8 @@ use media_api::{
     IdempotencyStore, Reservation, StoredHttpResponse,
 };
 use media_core::{
-    PRIMARY_CLIENT_ID, ClientStore, CredentialDigest, RUNNER_CLIENT_ID, SECONDARY_CLIENT_ID,
+    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, BootstrapClient, ClientRole, ClientStore, CredentialDigest,
+    RUNNER_CLIENT_ID, SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
 };
 use media_storage::{Migrator, SeaOrmClientStore, SeaOrmIdempotencyRepository};
 use sea_orm::{Database, DatabaseConnection};
@@ -70,7 +71,7 @@ impl Drop for SecretFile {
 struct TestDatabase {
     connection: DatabaseConnection,
     url: String,
-    _container: ContainerAsync<GenericImage>,
+    container: ContainerAsync<GenericImage>,
 }
 
 impl TestDatabase {
@@ -99,7 +100,7 @@ impl TestDatabase {
         Self {
             connection,
             url,
-            _container: container,
+            container,
         }
     }
 
@@ -107,6 +108,17 @@ impl TestDatabase {
         Database::connect(&self.url)
             .await
             .expect("an independent database connection must open")
+    }
+
+    async fn shutdown(self) {
+        self.connection
+            .close()
+            .await
+            .expect("root database pool must close");
+        self.container
+            .rm()
+            .await
+            .expect("PostgreSQL test container must be removed synchronously");
     }
 }
 
@@ -220,15 +232,45 @@ fn digest(token: &str) -> CredentialDigest {
     CredentialDigest::from(bytes)
 }
 
+async fn bootstrap_database_clients(database: &DatabaseConnection) {
+    let store = SeaOrmClientStore::new(database.clone());
+    for client in [
+        BootstrapClient::new(
+            PRIMARY_CLIENT_ID,
+            "hermes-primary".to_owned(),
+            ClientRole::Hermes,
+            Some(PRIMARY_USER_ID),
+            digest("primary-token-task-8b"),
+        )
+        .unwrap(),
+        BootstrapClient::new(
+            SECONDARY_CLIENT_ID,
+            "hermes-secondary".to_owned(),
+            ClientRole::Hermes,
+            Some(SECONDARY_USER_ID),
+            digest("secondary-token-task-8b"),
+        )
+        .unwrap(),
+        BootstrapClient::new(
+            RUNNER_CLIENT_ID,
+            "runner".to_owned(),
+            ClientRole::Runner,
+            None,
+            digest("runner-token-task-8b"),
+        )
+        .unwrap(),
+    ] {
+        store.upsert_client(client).await.unwrap();
+    }
+}
+
 async fn migrated_service() -> (TestDatabase, ServerConfig) {
     let database = TestDatabase::start().await;
     migrate(&database_config(&database.url))
         .await
         .expect("explicit migration command must apply the schema");
     let config = server_config(&database.url, "127.0.0.1:0".parse().unwrap());
-    prepare_service(&config)
-        .await
-        .expect("current schema must permit service preparation");
+    bootstrap_database_clients(&database.connection).await;
     (database, config)
 }
 
@@ -257,6 +299,7 @@ async fn migrate_applies_the_explicit_schema() {
             .unwrap()
             .is_empty()
     );
+    database.shutdown().await;
 }
 
 #[tokio::test]
@@ -286,6 +329,7 @@ async fn migrate_command_loads_only_the_database_config_and_applies_the_schema()
             .unwrap()
             .is_empty()
     );
+    database.shutdown().await;
 }
 
 #[tokio::test]
@@ -299,11 +343,15 @@ async fn pending_migrations_fail_before_an_unavailable_listener_is_bound() {
         .expect_err("pending migrations must stop startup");
 
     assert_eq!(error, ServiceError::PendingMigrations);
+    drop(occupied);
+    database.shutdown().await;
 }
 
 #[tokio::test]
 async fn startup_bootstraps_fixed_clients_with_sha256_digests_without_secret_leakage() {
-    let (database, config) = migrated_service().await;
+    let database = TestDatabase::start().await;
+    migrate(&database_config(&database.url)).await.unwrap();
+    let config = server_config(&database.url, "127.0.0.1:0".parse().unwrap());
 
     let prepared = prepare_service(&config)
         .await
@@ -318,7 +366,7 @@ async fn startup_bootstraps_fixed_clients_with_sha256_digests_without_secret_lea
         assert!(!rendered.contains(secret));
     }
 
-    let clients = SeaOrmClientStore::new(database.connect().await);
+    let clients = SeaOrmClientStore::new(database.connection.clone());
     assert_eq!(
         clients
             .find_by_digest(digest("primary-token-task-8b"))
@@ -346,18 +394,22 @@ async fn startup_bootstraps_fixed_clients_with_sha256_digests_without_secret_lea
             .client_id(),
         RUNNER_CLIENT_ID,
     );
+    drop(clients);
+    drop(prepared);
+    database.shutdown().await;
 }
 
 #[tokio::test]
 async fn storage_adapter_maps_every_reservation_variant_and_preserves_generations() {
     let (database, _) = migrated_service().await;
-    let adapter =
-        StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(database.connect().await));
+    let adapter = StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(
+        database.connection.clone(),
+    ));
 
     let in_progress = reserved(&adapter, "in-progress", 1).await;
     assert!(matches!(
         adapter.reserve(request("in-progress", 1)).await.unwrap(),
-        Reservation::InProgress
+        Reservation::InProgress(_)
     ));
     assert!(matches!(
         adapter.reserve(request("in-progress", 2)).await.unwrap(),
@@ -383,13 +435,16 @@ async fn storage_adapter_maps_every_reservation_variant_and_preserves_generation
     };
 
     adapter.abort_in_progress(&in_progress).await.unwrap();
+    drop(adapter);
+    database.shutdown().await;
 }
 
 #[tokio::test]
 async fn storage_adapter_forwards_the_exact_generation_for_complete_and_abort() {
     let (database, _) = migrated_service().await;
-    let adapter =
-        StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(database.connect().await));
+    let adapter = StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(
+        database.connection.clone(),
+    ));
 
     let abort_handle = reserved(&adapter, "abort", 4).await;
     let wrong_abort = IdempotencyHandle::new(
@@ -402,7 +457,7 @@ async fn storage_adapter_forwards_the_exact_generation_for_complete_and_abort() 
     );
     assert!(matches!(
         adapter.reserve(request("abort", 4)).await.unwrap(),
-        Reservation::InProgress
+        Reservation::InProgress(_)
     ));
     adapter.abort_in_progress(&abort_handle).await.unwrap();
 
@@ -426,25 +481,30 @@ async fn storage_adapter_forwards_the_exact_generation_for_complete_and_abort() 
         adapter.reserve(request("complete", 5)).await.unwrap(),
         Reservation::Replay { .. }
     ));
+    drop(adapter);
+    database.shutdown().await;
 }
 
 #[tokio::test]
 async fn storage_adapter_lifecycle_is_stateless_across_adapter_instances() {
     let (database, _) = migrated_service().await;
-    let reserving =
-        StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(database.connect().await));
+    let reserving = StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(
+        database.connection.clone(),
+    ));
     let handle = reserved(&reserving, "stateless", 6).await;
     drop(reserving);
 
-    StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(database.connect().await))
-        .complete(
-            &handle,
-            StoredHttpResponse::new(204, String::new(), Vec::new()),
-        )
-        .await
-        .expect("a fresh adapter must reconstruct the exact storage handle");
+    StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(
+        database.connection.clone(),
+    ))
+    .complete(
+        &handle,
+        StoredHttpResponse::new(204, String::new(), Vec::new()),
+    )
+    .await
+    .expect("a fresh adapter must reconstruct the exact storage handle");
     let replay = match StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(
-        database.connect().await,
+        database.connection.clone(),
     ))
     .reserve(request("stateless", 6))
     .await
@@ -455,14 +515,18 @@ async fn storage_adapter_lifecycle_is_stateless_across_adapter_instances() {
     };
     assert_eq!(replay.generation(), handle.generation());
 
-    let aborting =
-        StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(database.connect().await));
+    let aborting = StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(
+        database.connection.clone(),
+    ));
     let abort_handle = reserved(&aborting, "stateless-abort", 7).await;
     drop(aborting);
-    StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(database.connect().await))
-        .abort_in_progress(&abort_handle)
-        .await
-        .expect("a fresh adapter must abort by the exact reservation generation");
+    StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(
+        database.connection.clone(),
+    ))
+    .abort_in_progress(&abort_handle)
+    .await
+    .expect("a fresh adapter must abort by the exact reservation generation");
+    database.shutdown().await;
 }
 
 #[tokio::test]
@@ -477,11 +541,13 @@ async fn storage_adapter_keeps_infrastructure_failures_distinct_from_conflicts()
         adapter.abort_in_progress(&handle).await,
         Err(IdempotencyError::Infrastructure)
     );
+    drop(adapter);
+    database.shutdown().await;
 }
 
 #[tokio::test]
 async fn prepared_service_serves_on_an_ephemeral_loopback_listener_and_stops_gracefully() {
-    let (_database, config) = migrated_service().await;
+    let (database, config) = migrated_service().await;
     let prepared = prepare_service(&config).await.unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -504,11 +570,12 @@ async fn prepared_service_serves_on_an_ephemeral_loopback_listener_and_stops_gra
         .expect("service shutdown must be bounded")
         .expect("service task must not panic")
         .expect("service must stop cleanly");
+    database.shutdown().await;
 }
 
 #[tokio::test]
 async fn graceful_shutdown_deadline_terminates_a_never_finishing_connection() {
-    let (_database, config) = migrated_service().await;
+    let (database, config) = migrated_service().await;
     let prepared = prepare_service(&config).await.unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -542,6 +609,7 @@ async fn graceful_shutdown_deadline_terminates_a_never_finishing_connection() {
 
     assert_eq!(result, Err(ServiceError::ShutdownTimeout));
     drop(connection);
+    database.shutdown().await;
 }
 
 #[cfg(unix)]
@@ -613,4 +681,5 @@ async fn serve_process_emits_json_tracing_and_gracefully_handles_int_and_term() 
             assert!(!rendered.contains(secret), "tracing exposed {secret}");
         }
     }
+    database.shutdown().await;
 }

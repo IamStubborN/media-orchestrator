@@ -11,7 +11,7 @@ use std::{
 
 use media_api::{
     ApiState, IdempotencyError, IdempotencyGeneration, IdempotencyHandle, IdempotencyRequest,
-    IdempotencyStore, Reservation, StoredHttpResponse,
+    IdempotencyStore, OperationCompletionStore, Reservation, StoredHttpResponse,
 };
 use media_core::{
     Actor, ClientId, ClientStore, CredentialDigest, Job, JobApplication, JobId, JobLease, JobState,
@@ -253,22 +253,27 @@ impl LeaseStore for NoopLeaseStore {
 
 #[derive(Clone, Default)]
 pub struct FakeLeaseStore {
-    lease: Arc<Mutex<Option<JobLease>>>,
-    lease_operations: Arc<Mutex<HashMap<OperationKey, Option<JobLease>>>>,
-    heartbeat_operations: Arc<Mutex<HashMap<OperationKey, Option<JobLease>>>>,
+    state: Arc<Mutex<FakeLeaseState>>,
     lease_calls: Arc<AtomicUsize>,
     heartbeat_calls: Arc<AtomicUsize>,
+}
+
+#[derive(Default)]
+struct FakeLeaseState {
+    lease: Option<JobLease>,
+    lease_operations: HashMap<OperationKey, Option<JobLease>>,
+    heartbeat_operations: HashMap<OperationKey, Option<JobLease>>,
 }
 
 impl FakeLeaseStore {
     pub fn with_lease(lease: JobLease) -> Self {
         let store = Self::default();
-        *store.lease.lock().unwrap() = Some(lease);
+        store.state.lock().unwrap().lease = Some(lease);
         store
     }
 
     pub fn set_lease(&self, lease: Option<JobLease>) {
-        *self.lease.lock().unwrap() = lease;
+        self.state.lock().unwrap().lease = lease;
     }
 
     pub fn lease_calls(&self) -> usize {
@@ -288,27 +293,17 @@ impl LeaseStore for FakeLeaseStore {
         runner: ClientId,
         _: time::Duration,
     ) -> Result<Option<JobLease>, PortError> {
-        if let Some(result) = self
-            .lease_operations
-            .lock()
-            .unwrap()
-            .get(&operation)
-            .cloned()
-        {
+        let mut state = self.state.lock().unwrap();
+        if let Some(result) = state.lease_operations.get(&operation).cloned() {
             return Ok(result);
         }
         self.lease_calls.fetch_add(1, Ordering::SeqCst);
-        let result = self
+        let result = state
             .lease
-            .lock()
-            .unwrap()
             .as_ref()
             .filter(|lease| lease.runner_client_id() == runner)
             .cloned();
-        self.lease_operations
-            .lock()
-            .unwrap()
-            .insert(operation, result.clone());
+        state.lease_operations.insert(operation, result.clone());
         Ok(result)
     }
 
@@ -319,27 +314,17 @@ impl LeaseStore for FakeLeaseStore {
         runner: ClientId,
         _: time::Duration,
     ) -> Result<Option<JobLease>, PortError> {
-        if let Some(result) = self
-            .heartbeat_operations
-            .lock()
-            .unwrap()
-            .get(&operation)
-            .cloned()
-        {
+        let mut state = self.state.lock().unwrap();
+        if let Some(result) = state.heartbeat_operations.get(&operation).cloned() {
             return Ok(result);
         }
         self.heartbeat_calls.fetch_add(1, Ordering::SeqCst);
-        let result = self
+        let result = state
             .lease
-            .lock()
-            .unwrap()
             .as_ref()
             .filter(|lease| lease.lease_id() == lease_id && lease.runner_client_id() == runner)
             .cloned();
-        self.heartbeat_operations
-            .lock()
-            .unwrap()
-            .insert(operation, result.clone());
+        state.heartbeat_operations.insert(operation, result.clone());
         Ok(result)
     }
 }
@@ -405,7 +390,7 @@ impl IdempotencyStore for ControlledIdempotencyStore {
             ControlledReservation::Reserved => Reservation::Reserved(handle),
             ControlledReservation::Replay(response) => Reservation::Replay { handle, response },
             ControlledReservation::Conflict => Reservation::Conflict,
-            ControlledReservation::InProgress => Reservation::InProgress,
+            ControlledReservation::InProgress => Reservation::InProgress(handle),
         })
     }
 
@@ -491,7 +476,7 @@ impl IdempotencyStore for CommitThenErrorIdempotencyStore {
             }
             Some(CommitThenErrorEntry::InProgress(handle)) => {
                 if handle.fingerprint() == request.fingerprint() {
-                    Ok(Reservation::InProgress)
+                    Ok(Reservation::InProgress(handle.clone()))
                 } else {
                     Ok(Reservation::Conflict)
                 }
@@ -567,13 +552,11 @@ impl IdempotencyStore for MemoryIdempotencyStore {
             return Ok(Reservation::Conflict);
         }
 
-        Ok(entry
-            .response
-            .clone()
-            .map_or(Reservation::InProgress, |response| Reservation::Replay {
-                handle: IdempotencyHandle::new(request, entry.generation),
-                response,
-            }))
+        let handle = IdempotencyHandle::new(request, entry.generation);
+        Ok(match entry.response.clone() {
+            Some(response) => Reservation::Replay { handle, response },
+            None => Reservation::InProgress(handle),
+        })
     }
 
     async fn complete(
@@ -586,14 +569,17 @@ impl IdempotencyStore for MemoryIdempotencyStore {
         let entry = entries
             .get_mut(&key)
             .ok_or(IdempotencyError::Infrastructure)?;
-        if entry.fingerprint != *handle.fingerprint()
-            || entry.generation != handle.generation()
-            || entry.response.is_some()
-        {
+        if entry.fingerprint != *handle.fingerprint() || entry.generation != handle.generation() {
             return Err(IdempotencyError::Infrastructure);
         }
-        entry.response = Some(response);
-        Ok(())
+        match entry.response.as_ref() {
+            None => {
+                entry.response = Some(response);
+                Ok(())
+            }
+            Some(existing) if existing == &response => Ok(()),
+            Some(_) => Err(IdempotencyError::Infrastructure),
+        }
     }
 
     async fn abort_in_progress(&self, handle: &IdempotencyHandle) -> Result<(), IdempotencyError> {
@@ -674,6 +660,40 @@ impl ReadinessPort for FakeReadiness {
     }
 }
 
+#[derive(Clone)]
+pub struct FakeOperationCompletionStore {
+    completed: bool,
+    calls: Arc<AtomicUsize>,
+}
+
+impl FakeOperationCompletionStore {
+    pub fn incomplete() -> Self {
+        Self {
+            completed: false,
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    pub fn completed() -> Self {
+        Self {
+            completed: true,
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl OperationCompletionStore for FakeOperationCompletionStore {
+    async fn is_completed(&self, _: OperationKey) -> Result<bool, IdempotencyError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self.completed)
+    }
+}
+
 pub fn state(clients: FakeClientStore, readiness: FakeReadiness) -> ApiState {
     state_with_idempotency(clients, readiness, Arc::new(NoopIdempotencyStore))
 }
@@ -690,6 +710,7 @@ pub fn state_with_idempotency(
         ),
         Arc::new(clients),
         idempotency,
+        Arc::new(FakeOperationCompletionStore::incomplete()),
         Arc::new(readiness),
     )
 }
@@ -700,11 +721,28 @@ pub fn state_with_stores(
     leases: Arc<dyn LeaseStore>,
     idempotency: Arc<dyn IdempotencyStore>,
 ) -> ApiState {
+    state_with_stores_and_completion(
+        clients,
+        jobs,
+        leases,
+        idempotency,
+        Arc::new(FakeOperationCompletionStore::incomplete()),
+    )
+}
+
+pub fn state_with_stores_and_completion(
+    clients: FakeClientStore,
+    jobs: Arc<dyn JobStore>,
+    leases: Arc<dyn LeaseStore>,
+    idempotency: Arc<dyn IdempotencyStore>,
+    operations: Arc<dyn OperationCompletionStore>,
+) -> ApiState {
     ApiState::new(
         Arc::new(JobApplication::new(jobs)),
         Arc::new(LeaseApplication::new(leases, time::Duration::seconds(60)).unwrap()),
         Arc::new(clients),
         idempotency,
+        operations,
         Arc::new(FakeReadiness::ready()),
     )
 }

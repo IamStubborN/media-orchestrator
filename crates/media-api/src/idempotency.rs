@@ -199,7 +199,7 @@ pub enum Reservation {
         response: StoredHttpResponse,
     },
     Conflict,
-    InProgress,
+    InProgress(IdempotencyHandle),
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
@@ -222,6 +222,12 @@ pub trait IdempotencyStore: Send + Sync {
     ) -> Result<(), IdempotencyError>;
 
     async fn abort_in_progress(&self, handle: &IdempotencyHandle) -> Result<(), IdempotencyError>;
+}
+
+/// API-owned read port for reconciling a stranded HTTP reservation.
+#[async_trait::async_trait]
+pub trait OperationCompletionStore: Send + Sync {
+    async fn is_completed(&self, operation: OperationKey) -> Result<bool, IdempotencyError>;
 }
 
 pub(crate) async fn execute<F, Fut>(
@@ -260,8 +266,14 @@ where
         Ok(Reservation::Conflict) => {
             return ApiError::idempotency_conflict(&request_id).into_response();
         }
-        Ok(Reservation::InProgress) => {
-            return ApiError::idempotency_in_progress(&request_id).into_response();
+        Ok(Reservation::InProgress(handle)) => {
+            match state.operations().is_completed(operation_key).await {
+                Ok(true) => handle,
+                Ok(false) => {
+                    return ApiError::idempotency_in_progress(&request_id).into_response();
+                }
+                Err(_) => return ApiError::internal(&request_id).into_response(),
+            }
         }
         Err(_) => return ApiError::internal(&request_id).into_response(),
     };
@@ -402,15 +414,17 @@ mod tests {
     use crate::RequestId;
 
     use super::{
-        IdempotencyError, IdempotencyRequest, IdempotencyStore, StoredHttpResponse, buffer,
-        fingerprint, operation_key,
+        IdempotencyError, IdempotencyRequest, IdempotencyStore, OperationCompletionStore,
+        StoredHttpResponse, buffer, fingerprint, operation_key,
     };
 
     #[test]
     fn port_is_object_safe() {
         fn accept(_: Option<&dyn IdempotencyStore>) {}
+        fn accept_operations(_: Option<&dyn OperationCompletionStore>) {}
 
         accept(None);
+        accept_operations(None);
     }
 
     #[test]

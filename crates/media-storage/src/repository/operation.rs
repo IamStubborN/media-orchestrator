@@ -1,7 +1,7 @@
-use media_core::{Job, JobId, JobLease, LeaseId, OperationKey, UserId};
+use media_core::{Job, JobId, JobLease, LeaseId, OperationKey, PortError, UserId};
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseTransaction, EntityTrait, QueryFilter,
-    Statement,
+    ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, DatabaseTransaction,
+    EntityTrait, QueryFilter, Statement,
 };
 
 use crate::{
@@ -10,7 +10,41 @@ use crate::{
         job_state_value, needs_action_reason_value, notify_scope_value, parse_job_state,
         parse_needs_action_reason, parse_notify_scope, parse_provider, provider_value,
     },
+    repository::map_database_error,
 };
+
+#[derive(Clone)]
+pub struct SeaOrmOperationReceiptRepository {
+    database: DatabaseConnection,
+}
+
+impl std::fmt::Debug for SeaOrmOperationReceiptRepository {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SeaOrmOperationReceiptRepository { database: [REDACTED] }")
+    }
+}
+
+impl SeaOrmOperationReceiptRepository {
+    #[must_use]
+    pub fn new(database: DatabaseConnection) -> Self {
+        Self { database }
+    }
+
+    pub async fn is_completed(&self, key: OperationKey) -> Result<bool, PortError> {
+        self.database
+            .query_one_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "SELECT EXISTS (SELECT 1 FROM operation_receipts \
+                 WHERE operation_key = $1 AND result_kind <> 'pending') AS completed",
+                [key.as_bytes().to_vec().into()],
+            ))
+            .await
+            .map_err(map_database_error)?
+            .ok_or(PortError::Infrastructure)?
+            .try_get("", "completed")
+            .map_err(map_database_error)
+    }
+}
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) enum OperationKind {

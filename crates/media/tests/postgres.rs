@@ -1,10 +1,13 @@
 use std::{
     collections::HashMap,
     ffi::OsString,
-    io,
+    future, io,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -13,7 +16,9 @@ use axum::{
     http::Request as AxumRequest,
 };
 use media::{
-    composition::{StorageIdempotencyAdapter, migrate, prepare_service},
+    composition::{
+        StorageIdempotencyAdapter, StorageOperationCompletionAdapter, migrate, prepare_service,
+    },
     config::{ConfigSource, DatabaseConfig, ServerConfig},
 };
 use media_api::{
@@ -21,13 +26,17 @@ use media_api::{
     Reservation, StoredHttpResponse,
 };
 use media_contract::{JobDto, LeaseDto};
-use media_core::{JobApplication, LeaseApplication};
+use media_core::{
+    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, BootstrapClient, ClientRole, ClientStore, CredentialDigest,
+    JobApplication, LeaseApplication, RUNNER_CLIENT_ID, SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
+};
 use media_storage::{
     SeaOrmClientStore, SeaOrmIdempotencyRepository, SeaOrmJobStore, SeaOrmLeaseStore,
-    SeaOrmReadiness,
+    SeaOrmOperationReceiptRepository, SeaOrmReadiness,
 };
 use reqwest::{Client, Response, StatusCode, header};
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement};
+use sha2::{Digest, Sha256};
 use testcontainers::{
     GenericImage, ImageExt,
     core::{IntoContainerPort, WaitFor},
@@ -50,6 +59,52 @@ const RUNNER_TOKEN: &str = "task-9-runner-token";
 #[derive(Clone)]
 struct FailingCompletionStore {
     inner: StorageIdempotencyAdapter,
+}
+
+#[derive(Clone)]
+struct HangingCompletionStore {
+    inner: StorageIdempotencyAdapter,
+    entered: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    abort_calls: Arc<AtomicUsize>,
+}
+
+impl HangingCompletionStore {
+    fn new(inner: StorageIdempotencyAdapter) -> (Self, oneshot::Receiver<()>, Arc<AtomicUsize>) {
+        let (entered, receiver) = oneshot::channel();
+        let abort_calls = Arc::new(AtomicUsize::new(0));
+        (
+            Self {
+                inner,
+                entered: Arc::new(Mutex::new(Some(entered))),
+                abort_calls: abort_calls.clone(),
+            },
+            receiver,
+            abort_calls,
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl IdempotencyStore for HangingCompletionStore {
+    async fn reserve(&self, request: IdempotencyRequest) -> Result<Reservation, IdempotencyError> {
+        self.inner.reserve(request).await
+    }
+
+    async fn complete(
+        &self,
+        _: &IdempotencyHandle,
+        _: StoredHttpResponse,
+    ) -> Result<(), IdempotencyError> {
+        if let Some(entered) = self.entered.lock().unwrap().take() {
+            let _ = entered.send(());
+        }
+        future::pending().await
+    }
+
+    async fn abort_in_progress(&self, handle: &IdempotencyHandle) -> Result<(), IdempotencyError> {
+        self.abort_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.abort_in_progress(handle).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -75,6 +130,60 @@ fn storage_idempotency(database: &DatabaseConnection) -> StorageIdempotencyAdapt
     StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(database.clone()))
 }
 
+fn storage_operations(database: &DatabaseConnection) -> StorageOperationCompletionAdapter {
+    StorageOperationCompletionAdapter::new(SeaOrmOperationReceiptRepository::new(database.clone()))
+}
+
+fn token_digest(token: &str) -> CredentialDigest {
+    let bytes: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+    CredentialDigest::from(bytes)
+}
+
+async fn bootstrap_database_clients(database: &DatabaseConnection) {
+    let store = SeaOrmClientStore::new(database.clone());
+    for client in [
+        (
+            PRIMARY_CLIENT_ID,
+            PRIMARY_USER_ID,
+            PRIMARY_TOKEN,
+            "test-hermes-primary",
+        ),
+        (
+            SECONDARY_CLIENT_ID,
+            SECONDARY_USER_ID,
+            SECONDARY_TOKEN,
+            "test-hermes-secondary",
+        ),
+    ] {
+        store
+            .upsert_client(
+                BootstrapClient::new(
+                    client.0,
+                    client.3.to_owned(),
+                    ClientRole::Hermes,
+                    Some(client.1),
+                    token_digest(client.2),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    store
+        .upsert_client(
+            BootstrapClient::new(
+                RUNNER_CLIENT_ID,
+                "test-runner".to_owned(),
+                ClientRole::Runner,
+                None,
+                token_digest(RUNNER_TOKEN),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+}
+
 fn database_router(
     database: &DatabaseConnection,
     idempotency: Arc<dyn IdempotencyStore>,
@@ -94,6 +203,7 @@ fn database_router(
         leases,
         Arc::new(SeaOrmClientStore::new(database.clone())),
         idempotency,
+        Arc::new(storage_operations(database)),
         Arc::new(SeaOrmReadiness::new(database.clone())),
     ))
 }
@@ -113,6 +223,25 @@ async fn query_one(database: &DatabaseConnection, sql: &str) -> sea_orm::QueryRe
         .await
         .unwrap()
         .unwrap()
+}
+
+async fn crash_before_http_completion(
+    app: axum::Router,
+    request: AxumRequest<Body>,
+    entered: oneshot::Receiver<()>,
+    abort_calls: &AtomicUsize,
+) {
+    let task = tokio::spawn(async move { app.oneshot(request).await });
+    tokio::time::timeout(TEST_TIMEOUT, entered)
+        .await
+        .expect("business mutation must reach HTTP completion")
+        .expect("completion hook must remain alive");
+    task.abort();
+    assert!(
+        task.await.unwrap_err().is_cancelled(),
+        "request task must model abrupt process cancellation",
+    );
+    assert_eq!(abort_calls.load(Ordering::SeqCst), 0);
 }
 
 #[derive(Default)]
@@ -321,6 +450,11 @@ async fn postgres_api_foundation_works_end_to_end() {
         .expect("service shutdown must be bounded")
         .expect("service task must not panic")
         .expect("service must stop cleanly");
+    drop(client);
+    container
+        .rm()
+        .await
+        .expect("PostgreSQL test container must be removed synchronously");
 }
 
 #[tokio::test]
@@ -343,13 +477,8 @@ async fn postgres_mutations_reenter_after_replay_completion_failure_across_route
     let database_url =
         format!("postgres://media:media-test-password@127.0.0.1:{port}/media_orchestrator");
     migrate(&database_config(&database_url)).await.unwrap();
-    prepare_service(&server_config(
-        &database_url,
-        "127.0.0.1:0".parse().unwrap(),
-    ))
-    .await
-    .unwrap();
     let database = Database::connect(&database_url).await.unwrap();
+    bootstrap_database_clients(&database).await;
     let failing = || {
         database_router(
             &database,
@@ -503,4 +632,254 @@ async fn postgres_mutations_reenter_after_replay_completion_failure_across_route
     assert_eq!(counts.try_get::<i64>("", "jobs").unwrap(), 1);
     assert_eq!(counts.try_get::<i64>("", "receipts").unwrap(), 3);
     assert_eq!(counts.try_get::<i32>("", "attempts").unwrap(), 1);
+    database
+        .close()
+        .await
+        .expect("database pool must close before container removal");
+    container
+        .rm()
+        .await
+        .expect("PostgreSQL test container must be removed synchronously");
+}
+
+#[tokio::test]
+async fn stranded_http_reservations_reconcile_completed_mutations_without_abort() {
+    let container = GenericImage::new(POSTGRES_IMAGE, POSTGRES_TAG_AND_DIGEST)
+        .with_exposed_port(POSTGRES_PORT.tcp())
+        .with_wait_for(WaitFor::message_on_stderr(
+            "database system is ready to accept connections",
+        ))
+        .with_env_var("POSTGRES_DB", "media_orchestrator")
+        .with_env_var("POSTGRES_USER", "media")
+        .with_env_var("POSTGRES_PASSWORD", "media-test-password")
+        .start()
+        .await
+        .expect("Docker must run the pinned PostgreSQL image");
+    let port = container
+        .get_host_port_ipv4(POSTGRES_PORT.tcp())
+        .await
+        .expect("PostgreSQL must expose its port");
+    let database_url =
+        format!("postgres://media:media-test-password@127.0.0.1:{port}/media_orchestrator");
+    migrate(&database_config(&database_url)).await.unwrap();
+    let database = Database::connect(&database_url).await.unwrap();
+    bootstrap_database_clients(&database).await;
+    let completing = || database_router(&database, Arc::new(storage_idempotency(&database)));
+
+    let create_body =
+        r#"{"provider":"rezka","result_ref":"stranded-create","notify_scope":"initiator"}"#;
+    let (hanging, entered, aborts) = HangingCompletionStore::new(storage_idempotency(&database));
+    crash_before_http_completion(
+        database_router(&database, Arc::new(hanging)),
+        post_request(
+            "/v1/jobs",
+            PRIMARY_TOKEN,
+            "stranded-create",
+            Body::from(create_body),
+        ),
+        entered,
+        aborts.as_ref(),
+    )
+    .await;
+    assert_eq!(
+        query_one(
+            &database,
+            "SELECT status FROM idempotency_records \
+             WHERE idempotency_key = 'stranded-create'",
+        )
+        .await
+        .try_get::<String>("", "status")
+        .unwrap(),
+        "in_progress",
+    );
+    let persisted_job_id = query_one(
+        &database,
+        "SELECT id::text AS id FROM jobs WHERE result_ref = 'stranded-create'",
+    )
+    .await
+    .try_get::<String>("", "id")
+    .unwrap();
+
+    let retried_create = completing()
+        .oneshot(post_request(
+            "/v1/jobs",
+            PRIMARY_TOKEN,
+            "stranded-create",
+            Body::from(create_body),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(retried_create.status(), StatusCode::CREATED);
+    let retried_create_body = to_bytes(retried_create.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let retried_job: JobDto = serde_json::from_slice(&retried_create_body).unwrap();
+    assert_eq!(retried_job.id.to_string(), persisted_job_id);
+    let replayed_create = completing()
+        .oneshot(post_request(
+            "/v1/jobs",
+            PRIMARY_TOKEN,
+            "stranded-create",
+            Body::from(create_body),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replayed_create.status(), StatusCode::CREATED);
+    assert_eq!(
+        to_bytes(replayed_create.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+        retried_create_body,
+    );
+
+    let (hanging, entered, aborts) = HangingCompletionStore::new(storage_idempotency(&database));
+    crash_before_http_completion(
+        database_router(&database, Arc::new(hanging)),
+        post_request(
+            "/v1/runner/leases",
+            RUNNER_TOKEN,
+            "stranded-lease",
+            Body::empty(),
+        ),
+        entered,
+        aborts.as_ref(),
+    )
+    .await;
+    let lease_row = query_one(
+        &database,
+        "SELECT id::text AS id, expires_at FROM job_leases WHERE slot = 1",
+    )
+    .await;
+    let persisted_lease_id = lease_row.try_get::<String>("", "id").unwrap();
+    let persisted_lease_expiry = lease_row
+        .try_get::<time::OffsetDateTime>("", "expires_at")
+        .unwrap();
+
+    let retried_lease = completing()
+        .oneshot(post_request(
+            "/v1/runner/leases",
+            RUNNER_TOKEN,
+            "stranded-lease",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(retried_lease.status(), StatusCode::OK);
+    let retried_lease_body = to_bytes(retried_lease.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let retried_lease: LeaseDto = serde_json::from_slice(&retried_lease_body).unwrap();
+    assert_eq!(retried_lease.lease_id.to_string(), persisted_lease_id);
+    assert_eq!(
+        query_one(
+            &database,
+            "SELECT expires_at FROM job_leases WHERE slot = 1",
+        )
+        .await
+        .try_get::<time::OffsetDateTime>("", "expires_at")
+        .unwrap(),
+        persisted_lease_expiry,
+    );
+    let replayed_lease = completing()
+        .oneshot(post_request(
+            "/v1/runner/leases",
+            RUNNER_TOKEN,
+            "stranded-lease",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replayed_lease.status(), StatusCode::OK);
+    assert_eq!(
+        to_bytes(replayed_lease.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+        retried_lease_body,
+    );
+
+    let heartbeat_path = format!("/v1/runner/leases/{}/heartbeat", retried_lease.lease_id);
+    let (hanging, entered, aborts) = HangingCompletionStore::new(storage_idempotency(&database));
+    crash_before_http_completion(
+        database_router(&database, Arc::new(hanging)),
+        post_request(
+            &heartbeat_path,
+            RUNNER_TOKEN,
+            "stranded-heartbeat",
+            Body::empty(),
+        ),
+        entered,
+        aborts.as_ref(),
+    )
+    .await;
+    let persisted_heartbeat_expiry = query_one(
+        &database,
+        "SELECT expires_at FROM job_leases WHERE slot = 1",
+    )
+    .await
+    .try_get::<time::OffsetDateTime>("", "expires_at")
+    .unwrap();
+
+    let retried_heartbeat = completing()
+        .oneshot(post_request(
+            &heartbeat_path,
+            RUNNER_TOKEN,
+            "stranded-heartbeat",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(retried_heartbeat.status(), StatusCode::OK);
+    let retried_heartbeat_body = to_bytes(retried_heartbeat.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let retried_heartbeat: LeaseDto = serde_json::from_slice(&retried_heartbeat_body).unwrap();
+    assert_eq!(retried_heartbeat.lease_id, retried_lease.lease_id);
+    assert_eq!(
+        query_one(
+            &database,
+            "SELECT expires_at FROM job_leases WHERE slot = 1",
+        )
+        .await
+        .try_get::<time::OffsetDateTime>("", "expires_at")
+        .unwrap(),
+        persisted_heartbeat_expiry,
+    );
+    let replayed_heartbeat = completing()
+        .oneshot(post_request(
+            &heartbeat_path,
+            RUNNER_TOKEN,
+            "stranded-heartbeat",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replayed_heartbeat.status(), StatusCode::OK);
+    assert_eq!(
+        to_bytes(replayed_heartbeat.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+        retried_heartbeat_body,
+    );
+
+    let counts = query_one(
+        &database,
+        "SELECT (SELECT count(*)::bigint FROM jobs) AS jobs, \
+         (SELECT count(*)::bigint FROM operation_receipts) AS receipts, \
+         (SELECT count(*)::bigint FROM idempotency_records \
+          WHERE status = 'completed') AS completed_http, \
+         (SELECT attempt_count FROM jobs WHERE result_ref = 'stranded-create') AS attempts",
+    )
+    .await;
+    assert_eq!(counts.try_get::<i64>("", "jobs").unwrap(), 1);
+    assert_eq!(counts.try_get::<i64>("", "receipts").unwrap(), 3);
+    assert_eq!(counts.try_get::<i64>("", "completed_http").unwrap(), 3);
+    assert_eq!(counts.try_get::<i32>("", "attempts").unwrap(), 1);
+    database
+        .close()
+        .await
+        .expect("database pool must close before container removal");
+    container
+        .rm()
+        .await
+        .expect("PostgreSQL test container must be removed synchronously");
 }

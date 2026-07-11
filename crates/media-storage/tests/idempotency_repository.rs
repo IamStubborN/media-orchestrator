@@ -149,6 +149,59 @@ async fn completed_same_hash_replays_exact_response_and_changed_hash_conflicts()
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_exact_completions_are_idempotent_but_different_responses_conflict() {
+    use std::sync::Arc;
+
+    let (test_db, first) = repository().await;
+    let second = SeaOrmIdempotencyRepository::new(test_db.connect().await);
+    let handle = Arc::new(reserve_handle(&first, "complete-race", HASH_A, future_expiry()).await);
+    let response = StoredResponseRecord::new(
+        201,
+        "application/json".to_owned(),
+        br#"{"job_id":"stable"}"#.to_vec(),
+    )
+    .unwrap();
+
+    let left_handle = handle.clone();
+    let left_response = response.clone();
+    let left = tokio::spawn(async move { first.complete(&left_handle, left_response).await });
+    let right_handle = handle.clone();
+    let right_response = response.clone();
+    let right = tokio::spawn(async move { second.complete(&right_handle, right_response).await });
+
+    assert_eq!(left.await.unwrap(), Ok(()));
+    assert_eq!(right.await.unwrap(), Ok(()));
+
+    let repository = SeaOrmIdempotencyRepository::new(test_db.connect().await);
+    assert_eq!(
+        repository
+            .complete(
+                &handle,
+                StoredResponseRecord::new(
+                    202,
+                    "application/json".to_owned(),
+                    br#"{"job_id":"different"}"#.to_vec(),
+                )
+                .unwrap(),
+            )
+            .await,
+        Err(PortError::Conflict),
+    );
+    assert!(matches!(
+        repository
+            .reserve(
+                PRIMARY_CLIENT_ID,
+                "complete-race",
+                HASH_A,
+                future_expiry(),
+            )
+            .await
+            .unwrap(),
+        ReservationRecord::Replay { response: replayed, .. } if replayed == response
+    ));
+}
+
 #[tokio::test]
 async fn no_content_response_round_trips_with_absent_content_type_representation() {
     let (_test_db, repository) = repository().await;
@@ -212,13 +265,13 @@ async fn committed_complete_survives_error_recovery_abort_and_requires_completed
 async fn live_reservation_is_in_progress_abort_retries_and_expiry_replaces() {
     let (_test_db, repository) = repository().await;
     let live = reserve_handle(&repository, "live", HASH_A, future_expiry()).await;
-    assert_eq!(
+    assert!(matches!(
         repository
             .reserve(PRIMARY_CLIENT_ID, "live", HASH_A, future_expiry())
             .await
             .unwrap(),
-        ReservationRecord::InProgress,
-    );
+        ReservationRecord::InProgress(handle) if handle == live
+    ));
     assert_eq!(
         repository
             .reserve(PRIMARY_CLIENT_ID, "live", HASH_B, future_expiry())
@@ -285,9 +338,9 @@ async fn concurrent_reservations_have_one_winner() {
             (left, right),
             (
                 ReservationRecord::Reserved(_),
-                ReservationRecord::InProgress
+                ReservationRecord::InProgress(_)
             ) | (
-                ReservationRecord::InProgress,
+                ReservationRecord::InProgress(_),
                 ReservationRecord::Reserved(_)
             )
         ),

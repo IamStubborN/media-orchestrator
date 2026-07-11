@@ -15,7 +15,7 @@ use media_core::{ClientStore, JobApplication, LeaseApplication, ReadinessPort};
 pub use error::ApiError;
 pub use idempotency::{
     IdempotencyError, IdempotencyGeneration, IdempotencyHandle, IdempotencyRequest,
-    IdempotencyStore, Reservation, StoredHttpResponse,
+    IdempotencyStore, OperationCompletionStore, Reservation, StoredHttpResponse,
 };
 pub use request_id::RequestId;
 
@@ -35,6 +35,7 @@ pub struct ApiState {
     pub(crate) leases: Arc<LeaseApplication>,
     pub(crate) clients: Arc<dyn ClientStore>,
     pub(crate) idempotency: Arc<dyn IdempotencyStore>,
+    pub(crate) operations: Arc<dyn OperationCompletionStore>,
     pub(crate) readiness: Arc<dyn ReadinessPort>,
 }
 
@@ -45,6 +46,7 @@ impl ApiState {
         leases: Arc<LeaseApplication>,
         clients: Arc<dyn ClientStore>,
         idempotency: Arc<dyn IdempotencyStore>,
+        operations: Arc<dyn OperationCompletionStore>,
         readiness: Arc<dyn ReadinessPort>,
     ) -> Self {
         Self {
@@ -52,6 +54,7 @@ impl ApiState {
             leases,
             clients,
             idempotency,
+            operations,
             readiness,
         }
     }
@@ -69,6 +72,11 @@ impl ApiState {
     #[must_use]
     pub fn idempotency(&self) -> &dyn IdempotencyStore {
         self.idempotency.as_ref()
+    }
+
+    #[must_use]
+    pub fn operations(&self) -> &dyn OperationCompletionStore {
+        self.operations.as_ref()
     }
 }
 

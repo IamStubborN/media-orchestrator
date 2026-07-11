@@ -3,7 +3,8 @@ mod support;
 use media_core::{
     PRIMARY_USER_ID, JobId, JobState, JobStore, NewJob, NotifyScope, Provider, SECONDARY_USER_ID,
 };
-use media_storage::SeaOrmJobStore;
+use media_storage::{SeaOrmJobStore, SeaOrmOperationReceiptRepository};
+use sea_orm::ConnectionTrait;
 use support::{TestDatabase, operation_key, query};
 
 fn new_job(owner: media_core::UserId, provider: Provider, reference: &str) -> NewJob {
@@ -113,4 +114,39 @@ async fn repeated_operation_key_returns_the_original_job_without_a_second_insert
             .len(),
         1,
     );
+}
+
+#[tokio::test]
+async fn operation_completion_query_reports_only_completed_receipts() {
+    let test_db = TestDatabase::start_migrated().await;
+    let jobs = SeaOrmJobStore::new(test_db.connection().clone());
+    let receipts = SeaOrmOperationReceiptRepository::new(test_db.connection().clone());
+    let missing = operation_key();
+    assert!(!receipts.is_completed(missing).await.unwrap());
+
+    let pending = operation_key();
+    test_db
+        .connection()
+        .execute_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            "INSERT INTO operation_receipts \
+             (id, operation_key, operation_kind, result_kind) \
+             VALUES ($1, $2, 'create_job', 'pending')",
+            [
+                uuid::Uuid::new_v4().into(),
+                pending.as_bytes().to_vec().into(),
+            ],
+        ))
+        .await
+        .unwrap();
+    assert!(!receipts.is_completed(pending).await.unwrap());
+
+    let completed = operation_key();
+    jobs.create(
+        completed,
+        new_job(PRIMARY_USER_ID, Provider::Rezka, "completion-query"),
+    )
+    .await
+    .unwrap();
+    assert!(receipts.is_completed(completed).await.unwrap());
 }

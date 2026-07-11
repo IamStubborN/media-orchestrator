@@ -10,14 +10,15 @@ use media_api::router;
 use media_contract::{ApiError, ApiErrorCode, LeaseDto};
 use media_core::{
     PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole, Job, JobId, JobLease, JobState, LeaseId,
-    NotifyScope, Provider, RUNNER_CLIENT_ID,
+    LeaseStore, NotifyScope, OperationKey, Provider, RUNNER_CLIENT_ID,
 };
 use tower::ServiceExt;
 
 use support::{
     CommitThenErrorIdempotencyStore, ControlledIdempotencyStore, ControlledReservation,
-    FakeClientStore, FakeJobStore, FakeLeaseStore, MemoryIdempotencyStore, RUNNER_TOKEN,
-    VALID_TOKEN, state_with_stores,
+    FakeClientStore, FakeJobStore, FakeLeaseStore, FakeOperationCompletionStore,
+    MemoryIdempotencyStore, RUNNER_TOKEN, VALID_TOKEN, state_with_stores,
+    state_with_stores_and_completion,
 };
 
 const BODY: &str = r#"{"provider":"rezka","result_ref":"selection-1","notify_scope":"initiator"}"#;
@@ -52,6 +53,21 @@ fn app_with_idempotency(
         Arc::new(jobs),
         Arc::new(FakeLeaseStore::default()),
         idempotency,
+    ))
+}
+
+fn app_with_reconciliation(
+    jobs: FakeJobStore,
+    idempotency: Arc<dyn media_api::IdempotencyStore>,
+    operations: Arc<dyn media_api::OperationCompletionStore>,
+) -> axum::Router {
+    let actor = Actor::new(PRIMARY_CLIENT_ID, Some(PRIMARY_USER_ID), ClientRole::Hermes).unwrap();
+    router(state_with_stores_and_completion(
+        FakeClientStore::new([(VALID_TOKEN, actor)]),
+        Arc::new(jobs),
+        Arc::new(FakeLeaseStore::default()),
+        idempotency,
+        operations,
     ))
 }
 
@@ -184,6 +200,58 @@ async fn concurrent_duplicate_returns_stable_in_progress_error() {
     jobs.unblock_creates();
     assert_eq!(first.await.unwrap().status(), StatusCode::CREATED);
     assert_eq!(jobs.create_calls(), 1);
+}
+
+#[tokio::test]
+async fn completed_operation_reenters_an_in_progress_reservation_and_repairs_http_replay() {
+    let jobs = FakeJobStore::default();
+    let idempotency = ControlledIdempotencyStore::new([ControlledReservation::InProgress]);
+    let operations = FakeOperationCompletionStore::completed();
+    let response = app_with_reconciliation(
+        jobs.clone(),
+        Arc::new(idempotency.clone()),
+        Arc::new(operations.clone()),
+    )
+    .oneshot(request(
+        "completed-operation",
+        BODY,
+        "completed-operation-retry",
+    ))
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(operations.calls(), 1);
+    assert_eq!(idempotency.complete_calls(), 1);
+    assert_eq!(idempotency.abort_calls(), 0);
+    assert_eq!(jobs.create_calls(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fake_lease_store_records_each_concurrent_operation_once() {
+    let lease = lease_at(LeaseId::new(), 1_783_707_660);
+    let store = FakeLeaseStore::with_lease(lease.clone());
+
+    for marker in 1..=32_u8 {
+        let key = OperationKey::from_bytes([marker; 32]);
+        let barrier = Arc::new(tokio::sync::Barrier::new(16));
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..16 {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            tasks.spawn(async move {
+                barrier.wait().await;
+                store
+                    .lease_next(key, RUNNER_CLIENT_ID, time::Duration::seconds(60))
+                    .await
+                    .unwrap()
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            assert_eq!(result.unwrap(), Some(lease.clone()));
+        }
+        assert_eq!(store.lease_calls(), usize::from(marker));
+    }
 }
 
 #[tokio::test]

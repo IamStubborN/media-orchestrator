@@ -14,6 +14,7 @@ pub use idempotency::{
 pub use identity::SeaOrmIdentityStore;
 pub use job::SeaOrmJobStore;
 pub use lease::SeaOrmLeaseStore;
+pub use operation::SeaOrmOperationReceiptRepository;
 pub use readiness::SeaOrmReadiness;
 
 use media_core::PortError;

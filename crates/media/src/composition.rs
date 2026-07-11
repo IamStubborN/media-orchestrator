@@ -6,17 +6,17 @@ use std::{
 
 use media_api::{
     ApiState, IdempotencyError, IdempotencyGeneration, IdempotencyHandle, IdempotencyRequest,
-    IdempotencyStore, Reservation, StoredHttpResponse,
+    IdempotencyStore, OperationCompletionStore, Reservation, StoredHttpResponse,
 };
 use media_core::{
     PRIMARY_CLIENT_ID, PRIMARY_USER_ID, BootstrapClient, ClientRole, ClientStore, CredentialDigest,
-    JobApplication, LeaseApplication, PortError, RUNNER_CLIENT_ID, ReadinessPort,
+    JobApplication, LeaseApplication, OperationKey, PortError, RUNNER_CLIENT_ID, ReadinessPort,
     SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
 };
 use media_storage::{
     ReservationGeneration as StorageReservationGeneration, ReservationHandle, ReservationRecord,
     SeaOrmClientStore, SeaOrmIdempotencyRepository, SeaOrmJobStore, SeaOrmLeaseStore,
-    SeaOrmReadiness, StoredResponseRecord,
+    SeaOrmOperationReceiptRepository, SeaOrmReadiness, StoredResponseRecord,
 };
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
@@ -52,6 +52,35 @@ pub enum ServiceError {
 #[derive(Clone)]
 pub struct StorageIdempotencyAdapter {
     repository: SeaOrmIdempotencyRepository,
+}
+
+/// Composition-local bridge for checking only durable operation completion.
+#[derive(Clone)]
+pub struct StorageOperationCompletionAdapter {
+    repository: SeaOrmOperationReceiptRepository,
+}
+
+impl std::fmt::Debug for StorageOperationCompletionAdapter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("StorageOperationCompletionAdapter { repository: [REDACTED] }")
+    }
+}
+
+impl StorageOperationCompletionAdapter {
+    #[must_use]
+    pub fn new(repository: SeaOrmOperationReceiptRepository) -> Self {
+        Self { repository }
+    }
+}
+
+#[async_trait::async_trait]
+impl OperationCompletionStore for StorageOperationCompletionAdapter {
+    async fn is_completed(&self, operation: OperationKey) -> Result<bool, IdempotencyError> {
+        self.repository
+            .is_completed(operation)
+            .await
+            .map_err(map_idempotency_error)
+    }
 }
 
 impl std::fmt::Debug for StorageIdempotencyAdapter {
@@ -103,7 +132,7 @@ impl IdempotencyStore for StorageIdempotencyAdapter {
                 }
             }
             ReservationRecord::Conflict => Reservation::Conflict,
-            ReservationRecord::InProgress => Reservation::InProgress,
+            ReservationRecord::InProgress(storage) => Reservation::InProgress(api_handle(&storage)),
         })
     }
 
@@ -248,9 +277,12 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
         .map_err(|_| ServiceError::Bootstrap)?,
     );
     let idempotency = Arc::new(StorageIdempotencyAdapter::new(
-        SeaOrmIdempotencyRepository::new(database),
+        SeaOrmIdempotencyRepository::new(database.clone()),
     ));
-    let state = ApiState::new(jobs, leases, clients, idempotency, readiness);
+    let operations = Arc::new(StorageOperationCompletionAdapter::new(
+        SeaOrmOperationReceiptRepository::new(database),
+    ));
+    let state = ApiState::new(jobs, leases, clients, idempotency, operations, readiness);
 
     Ok(PreparedService {
         router: media_api::router(state),
