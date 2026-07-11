@@ -62,9 +62,20 @@ fn catalog_query_requires_a_visible_unicode_scalar() {
         assert_invalid(CatalogQuery::new(invisible));
     }
 
+    for blank in ["\u{115f}", "\u{2800}", "\u{3164}", "\u{ffa0}"] {
+        assert_invalid(CatalogQuery::new(blank));
+
+        let visible_query = format!("query{blank}");
+        assert_eq!(
+            CatalogQuery::new(&visible_query).unwrap().as_str(),
+            visible_query
+        );
+    }
+
+    let visible_query = "query\u{200b}\u{fe0f}";
     assert_eq!(
-        CatalogQuery::new("query\u{200b}\u{fe0f}").unwrap().as_str(),
-        "query\u{200b}\u{fe0f}"
+        CatalogQuery::new(visible_query).unwrap().as_str(),
+        visible_query
     );
 }
 
@@ -87,12 +98,21 @@ fn title_locator_enforces_exact_boundary_and_rejects_unsafe_paths() {
         "/films/%2E/title.html",
         "/films/%2e%2e%5cprivate.html",
         "/films/%252e%252e%255cprivate.html",
+        "/films/%zz/title.html",
+        "/films/title%.html",
+        "/films/title%2.html",
         "/films/title",
         "https://foreign.test/films/title.html",
         "/films/title\u{0000}.html",
     ] {
         assert_invalid(TitleLocator::new(invalid));
     }
+
+    let encoded_percent = "/films/100%25-title.html";
+    assert_eq!(
+        TitleLocator::new(encoded_percent).unwrap().as_str(),
+        encoded_percent
+    );
 }
 
 #[test]
@@ -264,6 +284,42 @@ fn continuation_rejects_unsafe_or_noncanonical_targets() {
         &query(),
         &origin(),
     ));
+}
+
+#[test]
+fn continuation_rejects_malformed_percent_encodings() {
+    for (query, href) in [
+        (
+            "query%zz",
+            "/search/?do=search&subaction=search&q=query%zz&page=2",
+        ),
+        (
+            "query%",
+            "/search/?do=search&subaction=search&q=query%&page=2",
+        ),
+        (
+            "query%2",
+            "/search/?do=search&subaction=search&q=query%2&page=2",
+        ),
+    ] {
+        assert_invalid(parse_catalog_page(
+            &page_with_next(&[href]),
+            &CatalogQuery::new(query).unwrap(),
+            &origin(),
+        ));
+    }
+
+    for href in [
+        "/search/%zz/?do=search&subaction=search&q=query&page=2",
+        "/search/%/?do=search&subaction=search&q=query&page=2",
+        "/search/%2/?do=search&subaction=search&q=query&page=2",
+    ] {
+        assert_invalid(parse_catalog_page(
+            &page_with_next(&[href]),
+            &query(),
+            &origin(),
+        ));
+    }
 }
 
 #[test]

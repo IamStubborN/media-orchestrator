@@ -193,6 +193,10 @@ pub(crate) fn invalid_catalog(reason: &str) -> RezkaError {
 }
 
 pub(crate) fn path_has_prohibited_segment(path: &str) -> bool {
+    if has_malformed_percent_encoding(path) {
+        return true;
+    }
+
     let mut candidate = path.to_owned();
     loop {
         if candidate.contains('\\')
@@ -213,6 +217,25 @@ pub(crate) fn path_has_prohibited_segment(path: &str) -> bool {
     }
 }
 
+pub(crate) fn has_malformed_percent_encoding(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            index += 1;
+            continue;
+        }
+        if decode_hex(bytes.get(index + 1).copied()).is_none()
+            || decode_hex(bytes.get(index + 2).copied()).is_none()
+        {
+            return true;
+        }
+        index += 3;
+    }
+
+    false
+}
+
 fn is_visible_catalog_scalar(character: char) -> bool {
     !matches!(
         character as u32,
@@ -230,6 +253,7 @@ fn is_visible_catalog_scalar(character: char) -> bool {
             | 0x200b..=0x200f
             | 0x202a..=0x202e
             | 0x2060..=0x206f
+            | 0x2800
             | 0x3164
             | 0xfe00..=0xfe0f
             | 0xfeff

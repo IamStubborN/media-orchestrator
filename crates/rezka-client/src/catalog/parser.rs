@@ -5,7 +5,7 @@ use crate::{
     PublicImageUrl, RezkaError,
     catalog::{
         CatalogContinuation, CatalogEntry, CatalogPage, CatalogQuery, MAX_CATALOG_ENTRIES,
-        TitleLocator, invalid_catalog, path_has_prohibited_segment,
+        TitleLocator, has_malformed_percent_encoding, invalid_catalog, path_has_prohibited_segment,
     },
     mirror::same_origin,
 };
@@ -158,6 +158,7 @@ fn parse_continuation_target(
     if href.starts_with("//")
         || href.contains('\\')
         || href.chars().any(char::is_control)
+        || has_malformed_percent_encoding(href)
         || path_has_prohibited_segment(raw_path)
     {
         return Err(invalid_catalog("invalid catalog continuation"));
