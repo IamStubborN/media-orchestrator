@@ -28,5 +28,7 @@ pub use ports::{
 pub use rezka_session_store::{
     EncryptedRezkaSessionStore, RezkaSessionStoreConfig, RezkaSessionStoreError,
 };
-pub use storage::{GIB, PeakEstimate, StorageBlocked, StoragePreflight};
+pub use storage::{
+    GIB, PeakEstimate, StorageBlocked, StoragePreflight, StorageRoots, StorageRootsError,
+};
 pub use subtitle::{SubtitleValidationError, validate_webvtt};

@@ -1,5 +1,69 @@
 pub const GIB: u64 = 1024 * 1024 * 1024;
 
+use std::path::{Component, Path, PathBuf};
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct StorageRoots {
+    staging: PathBuf,
+    tv: PathBuf,
+    movies: PathBuf,
+}
+
+impl StorageRoots {
+    pub fn new(
+        staging: impl Into<PathBuf>,
+        tv: impl Into<PathBuf>,
+        movies: impl Into<PathBuf>,
+    ) -> Result<Self, StorageRootsError> {
+        let roots = Self {
+            staging: staging.into(),
+            tv: tv.into(),
+            movies: movies.into(),
+        };
+        let paths = [&roots.staging, &roots.tv, &roots.movies];
+        if paths.iter().any(|path| !valid_root(path))
+            || paths.iter().enumerate().any(|(index, left)| {
+                paths
+                    .iter()
+                    .skip(index + 1)
+                    .any(|right| left.starts_with(right) || right.starts_with(left))
+            })
+        {
+            return Err(StorageRootsError);
+        }
+        Ok(roots)
+    }
+
+    #[must_use]
+    pub fn staging(&self) -> &Path {
+        &self.staging
+    }
+
+    #[must_use]
+    pub fn tv(&self) -> &Path {
+        &self.tv
+    }
+
+    #[must_use]
+    pub fn movies(&self) -> &Path {
+        &self.movies
+    }
+}
+
+fn valid_root(path: &Path) -> bool {
+    path.is_absolute()
+        && path.components().all(|component| {
+            !matches!(
+                component,
+                Component::CurDir | Component::ParentDir | Component::Prefix(_)
+            )
+        })
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
+#[error("runner storage roots are invalid")]
+pub struct StorageRootsError;
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct PeakEstimate {
     bytes: u64,

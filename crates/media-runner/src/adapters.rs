@@ -12,13 +12,58 @@ use tokio::io::AsyncWriteExt as _;
 use crate::{
     Cancellation, FileSystemPort, HttpPort, MediaProbe, PlexCheck, PlexExpectation,
     PlexObservation, ProcessCommand, ProcessPort, ResumeAction, RunnerPortError, RunnerServicePort,
-    SensitiveUrl, decide_resume,
+    SensitiveUrl, StorageRoots, decide_resume,
 };
 
 const MAX_SUBTITLE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Copy, Clone, Default)]
 pub struct TokioFileSystem;
+
+impl TokioFileSystem {
+    pub async fn prepare_storage_roots(&self, roots: &StorageRoots) -> Result<(), RunnerPortError> {
+        for path in [roots.staging(), roots.tv(), roots.movies()] {
+            self.create_dir_all(path).await?;
+        }
+        let staging = tokio::fs::canonicalize(roots.staging())
+            .await
+            .map_err(|_| RunnerPortError::Filesystem)?;
+        let tv = tokio::fs::canonicalize(roots.tv())
+            .await
+            .map_err(|_| RunnerPortError::Filesystem)?;
+        let movies = tokio::fs::canonicalize(roots.movies())
+            .await
+            .map_err(|_| RunnerPortError::Filesystem)?;
+        if staging.starts_with(&tv)
+            || staging.starts_with(&movies)
+            || tv.starts_with(&staging)
+            || movies.starts_with(&staging)
+            || !same_filesystem(&staging, &tv).await?
+            || !same_filesystem(&staging, &movies).await?
+        {
+            return Err(RunnerPortError::Filesystem);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+async fn same_filesystem(left: &Path, right: &Path) -> Result<bool, RunnerPortError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let left = tokio::fs::metadata(left)
+        .await
+        .map_err(|_| RunnerPortError::Filesystem)?;
+    let right = tokio::fs::metadata(right)
+        .await
+        .map_err(|_| RunnerPortError::Filesystem)?;
+    Ok(left.dev() == right.dev())
+}
+
+#[cfg(not(unix))]
+async fn same_filesystem(_left: &Path, _right: &Path) -> Result<bool, RunnerPortError> {
+    Err(RunnerPortError::Filesystem)
+}
 
 #[async_trait]
 impl FileSystemPort for TokioFileSystem {

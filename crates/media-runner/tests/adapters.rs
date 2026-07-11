@@ -2,8 +2,8 @@ use std::{path::PathBuf, sync::Arc};
 
 use media_runner::{
     Cancellation, FileSystemPort, HttpPort, HttpRunnerServiceAdapter, PlexCheck, PlexExpectation,
-    ProcessPort, ReqwestHttpAdapter, RunnerServicePort, SensitiveUrl, TokioFileSystem,
-    TokioProcessAdapter,
+    ProcessPort, ReqwestHttpAdapter, RunnerServicePort, SensitiveUrl, StorageRoots,
+    TokioFileSystem, TokioProcessAdapter,
 };
 use secrecy::SecretString;
 use tempfile::tempdir;
@@ -52,6 +52,57 @@ async fn filesystem_publication_is_atomic_and_never_replaces_existing_video() {
         b"first"
     );
     assert_eq!(filesystem.read(&second).await.unwrap().unwrap(), b"second");
+}
+
+#[tokio::test]
+async fn filesystem_prepares_storage_roots_on_one_filesystem() {
+    let temporary = tempdir().unwrap();
+    let roots = StorageRoots::new(
+        temporary.path().join("staging"),
+        temporary.path().join("tv"),
+        temporary.path().join("movies"),
+    )
+    .unwrap();
+
+    TokioFileSystem.prepare_storage_roots(&roots).await.unwrap();
+
+    assert!(roots.staging().is_dir());
+    assert!(roots.tv().is_dir());
+    assert!(roots.movies().is_dir());
+}
+
+#[tokio::test]
+async fn opt_in_ffmpeg_fixture_preserves_odd_source_dimensions_in_probe() {
+    if std::env::var_os("MEDIA_RUN_FFMPEG_FIXTURE").is_none() {
+        return;
+    }
+    let temporary = tempdir().unwrap();
+    let fixture = temporary.path().join("fixture.mkv");
+    let status = tokio::process::Command::new("ffmpeg")
+        .args([
+            "-nostdin",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=size=1280x682:rate=1",
+            "-t",
+            "1",
+            "-c:v",
+            "libx264",
+            "-y",
+        ])
+        .arg(&fixture)
+        .status()
+        .await
+        .unwrap();
+    assert!(status.success());
+    let adapter = TokioProcessAdapter::new("ffprobe", "ffmpeg", std::time::Duration::from_secs(10));
+
+    let probe = adapter.probe(&fixture, &Active).await.unwrap();
+
+    assert_eq!((probe.width, probe.height), (1280, 682));
 }
 
 #[tokio::test]

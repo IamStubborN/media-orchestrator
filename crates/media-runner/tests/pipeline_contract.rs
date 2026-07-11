@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use media_runner::{
     GIB, MediaProbe, PeakEstimate, PlexExpectation, PlexObservation, ResumeAction,
-    StoragePreflight, build_rezka_vaapi_command, decide_resume, validate_plex_observation,
-    validate_webvtt,
+    StoragePreflight, StorageRoots, build_rezka_vaapi_command, decide_resume,
+    validate_plex_observation, validate_webvtt,
 };
 
 #[test]
@@ -107,4 +107,11 @@ fn plex_verification_requires_exact_path_and_canonical_episode_identity() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn storage_roots_require_absolute_non_overlapping_staging_and_plex_paths() {
+    assert!(StorageRoots::new("/staging/rezka", "/plex/tv", "/plex/movies").is_ok());
+    assert!(StorageRoots::new("/plex/tv/staging", "/plex/tv", "/plex/movies").is_err());
+    assert!(StorageRoots::new("relative/staging", "/plex/tv", "/plex/movies").is_err());
 }
