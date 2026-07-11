@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod catalog;
 pub mod error;
 pub mod mirror;
 pub mod redaction;
@@ -7,6 +8,7 @@ pub mod secret_url;
 pub mod session;
 pub mod transport;
 
+pub use catalog::{CatalogContinuation, CatalogEntry, CatalogPage, CatalogQuery, TitleLocator};
 pub use error::{ProviderFailureReason, RezkaError, RezkaErrorCode};
 pub use mirror::MirrorSet;
 pub use secret_url::{PublicImageUrl, SecretMediaUrl, SecretSubtitleUrl};
