@@ -1,7 +1,34 @@
 #![forbid(unsafe_code)]
 
+mod adapters;
+mod download;
+mod media;
+mod pipeline;
+mod plex;
+mod ports;
 pub mod rezka_session_store;
+mod storage;
+mod subtitle;
+
+pub use adapters::{
+    HttpRunnerServiceAdapter, ReqwestHttpAdapter, TokioFileSystem, TokioProcessAdapter,
+};
+pub use download::{ResumeAction, ResumeError, decide_resume};
+pub use media::{MediaProbe, MediaProbeError, ProcessCommand, build_rezka_vaapi_command};
+pub use pipeline::{
+    EpisodeOutcome, EpisodePipeline, EpisodeWork, ProviderKind, SensitiveUrl, SensitiveUrlError,
+    SubtitleTrack,
+};
+pub use plex::{PlexExpectation, PlexMismatch, PlexObservation, validate_plex_observation};
+pub use ports::{
+    Cancellation, FileSystemPort, HttpPort, PlexCheck, ProcessPort, RunnerPortError,
+    RunnerServicePort,
+};
 
 pub use rezka_session_store::{
     EncryptedRezkaSessionStore, RezkaSessionStoreConfig, RezkaSessionStoreError,
 };
+pub use storage::{
+    GIB, PeakEstimate, StorageBlocked, StoragePreflight, StorageRoots, StorageRootsError,
+};
+pub use subtitle::{SubtitleValidationError, validate_webvtt};
