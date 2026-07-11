@@ -34,6 +34,30 @@ fn mirror_origins_reject_credentials_paths_queries_and_fragments() {
 }
 
 #[test]
+fn mirror_set_debug_is_exactly_redacted() {
+    let mut mirrors = MirrorSet::new(vec![
+        Url::parse("https://private-origin.example/").unwrap(),
+        Url::parse("http://127.0.0.42:43123/").unwrap(),
+    ])
+    .unwrap();
+    assert!(mirrors.select_next());
+
+    let debug = format!("{mirrors:?}");
+
+    assert_eq!(debug, "MirrorSet { origins: [REDACTED], selected: 1 }");
+    for forbidden in [
+        "private-origin",
+        "example",
+        "127.0.0.42",
+        "43123",
+        "https://",
+        "http://",
+    ] {
+        assert!(!debug.contains(forbidden), "Debug leaked {forbidden}");
+    }
+}
+
+#[test]
 fn cookie_snapshot_round_trips_and_remains_redacted_in_debug() {
     let mut jar = SessionJar::empty();
     let origin = Url::parse("https://rezka.test/").unwrap();
@@ -438,6 +462,111 @@ async fn successful_failovers_promote_origins_for_repeated_non_wrapping_operatio
             .origin(),
         first_origin.origin()
     );
+}
+
+#[derive(Clone)]
+struct LoggedFailoverResponse {
+    label: &'static str,
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    statuses: std::sync::Arc<Vec<u16>>,
+    log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl wiremock::Respond for LoggedFailoverResponse {
+    fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let cookie = request
+            .headers
+            .get("cookie")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("none");
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("{}:{cookie}", self.label));
+        let response = wiremock::ResponseTemplate::new(self.statuses[call]);
+        if call == 0 {
+            response.insert_header(
+                "set-cookie",
+                format!("{}_session=private; Path=/", self.label),
+            )
+        } else {
+            response
+        }
+    }
+}
+
+#[tokio::test]
+async fn terminal_full_failover_promotes_last_attempt_for_the_next_operation() {
+    use rezka_client::transport::Transport;
+    use std::sync::{Arc, Mutex, atomic::AtomicUsize};
+    use time::Duration;
+    use wiremock::{Mock, MockServer, matchers::path};
+
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let start = |label: &'static str, statuses: Vec<u16>| {
+        let log = Arc::clone(&log);
+        async move {
+            let server = MockServer::start().await;
+            Mock::given(path("/account/probe"))
+                .respond_with(LoggedFailoverResponse {
+                    label,
+                    calls: Arc::new(AtomicUsize::new(0)),
+                    statuses: Arc::new(statuses),
+                    log,
+                })
+                .mount(&server)
+                .await;
+            server
+        }
+    };
+    let first = start("A", vec![503, 200]).await;
+    let second = start("B", vec![503]).await;
+    let third = start("C", vec![503, 503]).await;
+    let first_origin = Url::parse(&first.uri()).unwrap();
+    let second_origin = Url::parse(&second.uri()).unwrap();
+    let third_origin = Url::parse(&third.uri()).unwrap();
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![
+            first_origin.clone(),
+            second_origin,
+            third_origin.clone(),
+        ])
+        .unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        Duration::seconds(2),
+        2,
+    )
+    .unwrap();
+    let probe = first_origin.join("/account/probe").unwrap();
+
+    let first_error = transport
+        .get_first_with_failover(probe.clone(), None)
+        .await
+        .unwrap_err();
+    assert_eq!(first_error.code(), rezka_client::RezkaErrorCode::Transport);
+    assert_eq!(transport.selected_origin(), &third_origin);
+
+    let response = transport
+        .get_first_with_failover(probe, None)
+        .await
+        .unwrap();
+
+    assert_eq!(response.url.origin(), first_origin.origin());
+    assert_eq!(
+        *log.lock().unwrap(),
+        [
+            "A:none",
+            "B:none",
+            "C:none",
+            "C:C_session=private",
+            "A:none",
+        ]
+    );
+    let restored = SessionJar::import(&transport.export_session().unwrap()).unwrap();
+    assert!(!restored.contains_cookie_for_url(&first_origin, "C_session"));
+    assert!(!restored.contains_cookie_for_url(&third_origin, "C_session"));
 }
 
 #[test]

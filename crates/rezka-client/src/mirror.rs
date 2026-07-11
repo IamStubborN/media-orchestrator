@@ -2,10 +2,19 @@ use url::Url;
 
 use crate::RezkaError;
 
-#[derive(Debug)]
 pub struct MirrorSet {
     origins: Vec<Url>,
     selected: usize,
+}
+
+impl std::fmt::Debug for MirrorSet {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "MirrorSet {{ origins: [REDACTED], selected: {} }}",
+            self.selected
+        )
+    }
 }
 
 impl MirrorSet {

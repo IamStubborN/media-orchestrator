@@ -167,14 +167,19 @@ impl Transport {
                 }
                 Err(failure) if failure.eligible && attempt + 1 < max_attempts => {
                     if !self.mirrors.select_next() {
+                        self.mirrors.promote_selected();
                         return Err(failure.error);
                     }
                     self.jar = SessionJar::bound_empty(self.mirrors.selected_origin())?;
                 }
-                Err(failure) => return Err(failure.error),
+                Err(failure) => {
+                    self.mirrors.promote_selected();
+                    return Err(failure.error);
+                }
             }
         }
 
+        self.mirrors.promote_selected();
         Err(transport_error())
     }
 

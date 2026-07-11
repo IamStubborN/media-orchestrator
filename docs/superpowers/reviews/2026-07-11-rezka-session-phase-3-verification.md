@@ -87,3 +87,50 @@ GREEN focused evidence:
 - `git diff --check`: PASS.
 - `.superpowers/sdd/progress.md`: unchanged, SHA-1
   `46e2b028780571c8aa851efae4461a22fcb9cc16`.
+
+## Final Review Closure
+
+Date: 2026-07-11
+Base commit: `9a26467797273cb3c4ca7919e56a5e6d5f1e58f4`
+
+RED evidence:
+
+- Derived `MirrorSet` Debug rendered the configured domain, loopback IP, port, schemes, and complete
+  URL structures instead of the exact redacted representation.
+- After A, B, and C all returned eligible failures, the next logical operation retried C and stopped
+  because selection remained at the non-wrapping tail; it could not advance to recovered A.
+- A database URL containing 8,193 bytes without a final newline passed validation after bounded read
+  and line-ending removal.
+
+GREEN focused evidence:
+
+- `mirror_set_debug_is_exactly_redacted`: PASS with exact
+  `MirrorSet { origins: [REDACTED], selected: 1 }` output and explicit URL, hostname, IP, port, and
+  scheme leak assertions.
+- `terminal_full_failover_promotes_last_attempt_for_the_next_operation`: PASS. The request log is
+  exactly A, B, C, C, A; the retry bound is preserved, C's cookie is sent only to C, and the jar is
+  cleared before recovered A succeeds.
+- `database_config_enforces_the_post_trim_byte_limit`: PASS. Exactly 8,192 bytes plus one final
+  newline is accepted as 8,192 bytes, while 8,193 bytes without a newline is rejected.
+- Full focused suites: 35 mirror/cookie/origin tests, 21 media configuration tests, and 4 redaction
+  tests passed.
+
+Current final gates:
+
+- `mise run format`: PASS after applying rustfmt to the new tests.
+- `mise run check`: PASS.
+- `mise run lint`: PASS.
+- `mise run test`: PASS, 272 passed and one credentialed live probe skipped; one passing test was
+  marked `LEAK` by nextest.
+- `mise run test-integration`: PASS, 40 storage tests and 14 media composition/PostgreSQL tests; one
+  passing storage test was marked `LEAK`, with zero failures.
+- `mise run audit`: PASS. Cargo Deny reported advisories, bans, licenses, and sources OK; Cargo Audit
+  scanned 518 dependencies without a vulnerability failure.
+- `mise run build`: PASS. The existing `proc-macro-error2 v2.0.1` future-incompatibility warning
+  remains unchanged.
+- Explicit ignored live probe negative opt-in check: PASS by expected pre-network failure with
+  `explicit live probe requires REZKA_LIVE_PROBE=1: NotPresent`.
+- Phase 4+ scope scan: PASS with no matches.
+- Static scan confirms `MirrorSet` has no derived Debug, `select_next` remains non-wrapping, and no
+  unbounded provider `Response::bytes()` read was introduced.
+- `.superpowers/sdd/progress.md`: unchanged.

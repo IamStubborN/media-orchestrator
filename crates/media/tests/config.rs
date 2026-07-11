@@ -113,6 +113,33 @@ fn database_config_reports_an_unreadable_secret_without_exposing_contents() {
     assert!(!rendered.contains("postgres://"));
 }
 
+#[test]
+fn database_config_enforces_the_post_trim_byte_limit() {
+    const MAX_DATABASE_URL_BYTES: usize = 8 * 1024;
+    let mut source = FakeSource::default();
+    source.set_secret(
+        "MEDIA_DATABASE_URL_FILE",
+        &[vec![b'x'; MAX_DATABASE_URL_BYTES], b"\n".to_vec()].concat(),
+    );
+
+    let config = DatabaseConfig::load_from(&source).unwrap();
+    assert_eq!(
+        config.database_url().expose_secret().len(),
+        MAX_DATABASE_URL_BYTES
+    );
+
+    source.set_secret(
+        "MEDIA_DATABASE_URL_FILE",
+        &vec![b'y'; MAX_DATABASE_URL_BYTES + 1],
+    );
+    assert_eq!(
+        DatabaseConfig::load_from(&source).unwrap_err(),
+        ConfigError::InvalidSecret {
+            name: "MEDIA_DATABASE_URL_FILE",
+        }
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn process_config_source_rejects_secret_symlinks_without_leaking_paths_or_values() {

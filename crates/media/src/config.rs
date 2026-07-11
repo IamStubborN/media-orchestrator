@@ -426,6 +426,7 @@ fn read_secret(
     let valid = match kind {
         SecretKind::DatabaseUrl => {
             !contents.is_empty()
+                && contents.len() <= MAX_DATABASE_URL_BYTES
                 && contents
                     .iter()
                     .all(|byte| !byte.is_ascii_whitespace() && !byte.is_ascii_control())
