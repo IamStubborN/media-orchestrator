@@ -10,9 +10,13 @@ use url::Url;
 pub fn spawn_truncated_http_response(status: &str, headers: &[&str]) -> (Url, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let origin = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
-    let headers = headers.join("\r\n");
+    let headers = if headers.is_empty() {
+        String::new()
+    } else {
+        format!("{}\r\n", headers.join("\r\n"))
+    };
     let response = format!(
-        "HTTP/1.1 {status}\r\n{headers}\r\nConnection: close\r\nContent-Length: 64\r\n\r\nshort"
+        "HTTP/1.1 {status}\r\n{headers}Connection: close\r\nContent-Length: 64\r\n\r\nraw-body-secret"
     );
 
     let server = thread::spawn(move || {

@@ -11,7 +11,7 @@ use url::Url;
 use crate::{
     RezkaError,
     mirror::{MirrorSet, same_origin},
-    redaction::{redact_url, sanitize_provider_text},
+    redaction::{redact_url, sanitize_http_status, sanitize_provider_text},
     session::cookie::{SessionJar, SessionSnapshot},
 };
 
@@ -251,9 +251,7 @@ impl Transport {
             });
         }
         if !(status.is_success() || status.is_redirection()) {
-            return Err(AttemptFailure::terminal(invalid_response(
-                "unexpected upstream status",
-            )));
+            return Err(AttemptFailure::terminal(invalid_http_status(status, &url)));
         }
 
         let body = response
@@ -330,5 +328,12 @@ fn transport_error() -> RezkaError {
 fn invalid_response(reason: &str) -> RezkaError {
     RezkaError::ProviderResponseInvalid {
         context: sanitize_provider_text(reason),
+    }
+}
+
+fn invalid_http_status(status: StatusCode, url: &Url) -> RezkaError {
+    let url = redact_url(url.as_str());
+    RezkaError::ProviderResponseInvalid {
+        context: sanitize_http_status(status.as_u16(), &url),
     }
 }

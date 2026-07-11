@@ -70,3 +70,8 @@ pub fn sanitize_provider_text(input: &str) -> SanitizedSnippet {
     let _ = input;
     SanitizedSnippet("[REDACTED_PROVIDER_TEXT]".to_owned())
 }
+
+#[must_use]
+pub(crate) fn sanitize_http_status(status: u16, url: &RedactedUrl) -> SanitizedSnippet {
+    SanitizedSnippet(format!("HTTP {status} at {url}"))
+}

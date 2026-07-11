@@ -523,6 +523,62 @@ async fn truncated_terminal_status_is_classified_before_body_read() {
 }
 
 #[tokio::test]
+async fn terminal_http_status_context_is_useful_and_structurally_redacted() {
+    use rezka_client::transport::Transport;
+    use time::Duration;
+
+    let mut rendered_errors = Vec::new();
+
+    for (status_line, status_code) in [
+        ("401 Unauthorized", 401),
+        ("403 Forbidden", 403),
+        ("500 Internal Server Error", 500),
+    ] {
+        let (base, raw_server) = support::spawn_truncated_http_response(status_line, &[]);
+        let ip_literal = base.host_str().unwrap().to_owned();
+        let mut request_url = base.join("/private/account").unwrap();
+        request_url.set_username("private-user").unwrap();
+        request_url.set_password(Some("private-password")).unwrap();
+        request_url.set_query(Some("token=query-secret"));
+        let mut transport = Transport::new(
+            MirrorSet::new(vec![base]).unwrap(),
+            SessionJar::empty(),
+            "media-orchestrator-test".to_owned(),
+            Duration::seconds(2),
+            0,
+        )
+        .unwrap();
+
+        let error = transport.get_first(request_url, None).await.unwrap_err();
+        raw_server.join().unwrap();
+        assert_eq!(
+            error.code(),
+            rezka_client::RezkaErrorCode::ProviderResponseInvalid
+        );
+
+        let rendered = format!("{error:?}: {error}");
+        assert!(rendered.contains(&format!("HTTP {status_code}")));
+        assert!(rendered.contains("redacted.invalid"));
+        assert!(rendered.contains("/private/account"));
+        for forbidden in [
+            "private-user",
+            "private-password",
+            "token",
+            "query-secret",
+            ip_literal.as_str(),
+            "raw-body-secret",
+        ] {
+            assert!(!rendered.contains(forbidden), "leaked {forbidden}");
+        }
+        rendered_errors.push(rendered);
+    }
+
+    assert_ne!(rendered_errors[0], rendered_errors[1]);
+    assert_ne!(rendered_errors[1], rendered_errors[2]);
+    assert_ne!(rendered_errors[0], rendered_errors[2]);
+}
+
+#[tokio::test]
 async fn first_response_does_not_auto_redirect_and_debug_remains_redacted() {
     use rezka_client::transport::Transport;
     use time::Duration;
