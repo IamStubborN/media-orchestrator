@@ -1,0 +1,278 @@
+use std::{
+    future::IntoFuture,
+    path::PathBuf,
+    process::Output,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
+
+use axum::{
+    Router,
+    body::{Body, to_bytes},
+    extract::Request,
+    http::{Method, StatusCode},
+    response::Response,
+    routing::any,
+};
+use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
+
+static SECRET_FILE_ID: AtomicU64 = AtomicU64::new(0);
+const CLI_TIMEOUT: Duration = Duration::from_secs(5);
+
+struct SecretFile(PathBuf);
+
+impl SecretFile {
+    fn new(contents: &str) -> Self {
+        let id = SECRET_FILE_ID.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("media-http-cli-{}-{id}.secret", std::process::id()));
+        std::fs::write(&path, contents).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for SecretFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+struct TestServer {
+    service_url: String,
+    shutdown: Option<oneshot::Sender<()>>,
+    task: JoinHandle<Result<(), std::io::Error>>,
+}
+
+impl TestServer {
+    async fn start(router: Router) -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (shutdown, receiver) = oneshot::channel();
+        let task = tokio::spawn(
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async move {
+                    let _ = receiver.await;
+                })
+                .into_future(),
+        );
+        Self {
+            service_url: format!("http://{address}"),
+            shutdown: Some(shutdown),
+            task,
+        }
+    }
+
+    async fn stop(mut self) {
+        self.shutdown.take().unwrap().send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), self.task)
+            .await
+            .expect("test server must stop within two seconds")
+            .expect("test server task must not panic")
+            .expect("test server must shut down cleanly");
+    }
+}
+
+fn command(
+    server: &TestServer,
+    token_file: &SecretFile,
+    args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+) -> assert_cmd::Command {
+    let mut command = assert_cmd::cargo::cargo_bin_cmd!("media");
+    command
+        .env_clear()
+        .env("MEDIA_SERVICE_URL", &server.service_url)
+        .env("MEDIA_TOKEN_FILE", &token_file.0)
+        .args(args);
+    command
+}
+
+async fn command_output(mut command: assert_cmd::Command) -> Result<Output, String> {
+    match tokio::time::timeout(
+        CLI_TIMEOUT,
+        tokio::task::spawn_blocking(move || command.output()),
+    )
+    .await
+    {
+        Ok(Ok(Ok(output))) => Ok(output),
+        Ok(Ok(Err(error))) => Err(format!("CLI subprocess could not start: {error}")),
+        Ok(Err(error)) => Err(format!("CLI subprocess task failed: {error}")),
+        Err(_) => Err(format!(
+            "CLI subprocess did not finish within {CLI_TIMEOUT:?}"
+        )),
+    }
+}
+
+fn json_response(status: StatusCode, body: &'static str) -> Response<Body> {
+    Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn jobs_create_uses_auth_generated_headers_and_stable_json() {
+    let router = Router::new().route(
+        "/v1/jobs",
+        any(|request: Request| async move {
+            let valid_method = request.method() == Method::POST;
+            let bearer = request
+                .headers()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                == Some("Bearer cli-secret");
+            let request_id = request
+                .headers()
+                .get("x-request-id")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| uuid::Uuid::parse_str(value).is_ok());
+            let idempotency_key = request
+                .headers()
+                .get("idempotency-key")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| uuid::Uuid::parse_str(value).is_ok());
+            let body = to_bytes(request.into_body(), 64 * 1024).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let valid_body = body
+                == serde_json::json!({
+                    "provider": "rezka",
+                    "result_ref": "rezka:series:42",
+                    "notify_scope": "initiator"
+                });
+            if valid_method && bearer && request_id && idempotency_key && valid_body {
+                json_response(
+                    StatusCode::CREATED,
+                    r#"{ "state": "queued", "result_ref": "rezka:series:42", "provider": "rezka", "notify_scope": "initiator", "id": "018f3f86-7b4c-7b4f-9b6a-6d62f45bb111" }"#,
+                )
+            } else {
+                json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#)
+            }
+        }),
+    );
+    let server = TestServer::start(router).await;
+    let token_file = SecretFile::new("cli-secret\n");
+
+    let output = command_output(command(
+        &server,
+        &token_file,
+        [
+            "jobs",
+            "create",
+            "--provider",
+            "rezka",
+            "--result-ref",
+            "rezka:series:42",
+            "--json",
+        ],
+    ))
+    .await;
+    server.stop().await;
+    let output = output.expect("CLI subprocess must finish before the harness timeout");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "{\"id\":\"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111\",\"notify_scope\":\"initiator\",\"provider\":\"rezka\",\"result_ref\":\"rezka:series:42\",\"state\":\"queued\"}\n",
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[tokio::test]
+async fn jobs_get_and_queue_status_use_the_expected_paths() {
+    let router = Router::new()
+        .route(
+            "/v1/jobs/{job_id}",
+            any(|request: Request| async move {
+                if request.method() == Method::GET
+                    && request.headers().contains_key("authorization")
+                    && request.headers().contains_key("x-request-id")
+                    && !request.headers().contains_key("idempotency-key")
+                {
+                    json_response(StatusCode::OK, r#"{ "state": "queued", "id": "018f3f86-7b4c-7b4f-9b6a-6d62f45bb111", "provider": "rezka", "result_ref": "item", "notify_scope": "initiator" }"#)
+                } else {
+                    json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#)
+                }
+            }),
+        )
+        .route(
+            "/v1/queue/status",
+            any(|request: Request| async move {
+                if request.method() == Method::GET
+                    && request.headers().contains_key("authorization")
+                    && request.headers().contains_key("x-request-id")
+                    && !request.headers().contains_key("idempotency-key")
+                {
+                    json_response(StatusCode::OK, r#"{ "queued": 3, "active": false }"#)
+                } else {
+                    json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#)
+                }
+            }),
+        );
+    let server = TestServer::start(router).await;
+    let token_file = SecretFile::new("cli-secret");
+
+    let get = command_output(command(
+        &server,
+        &token_file,
+        [
+            "jobs",
+            "get",
+            "018f3f86-7b4c-7b4f-9b6a-6d62f45bb111",
+            "--json",
+        ],
+    ))
+    .await;
+    let queue = command_output(command(&server, &token_file, ["queue", "status", "--json"])).await;
+    server.stop().await;
+    let get = get.expect("CLI subprocess must finish before the harness timeout");
+    let queue = queue.expect("CLI subprocess must finish before the harness timeout");
+
+    assert!(
+        get.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&get.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(get.stdout).unwrap(),
+        "{\"id\":\"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111\",\"notify_scope\":\"initiator\",\"provider\":\"rezka\",\"result_ref\":\"item\",\"state\":\"queued\"}\n",
+    );
+    assert!(
+        queue.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&queue.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(queue.stdout).unwrap(),
+        "{\"active\":false,\"queued\":3}\n"
+    );
+}
+
+#[tokio::test]
+async fn cli_preserves_http_error_status_and_body_on_stderr() {
+    let router = Router::new().route(
+        "/v1/queue/status",
+        any(|| async {
+            json_response(
+                StatusCode::CONFLICT,
+                r#"{"code":"conflict","message":"queue unavailable","request_id":"req-server"}"#,
+            )
+        }),
+    );
+    let server = TestServer::start(router).await;
+    let token_file = SecretFile::new("cli-secret");
+
+    let output = command_output(command(&server, &token_file, ["queue", "status", "--json"])).await;
+    server.stop().await;
+    let output = output.expect("CLI subprocess must finish before the harness timeout");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "HTTP 409 Conflict: {\"code\":\"conflict\",\"message\":\"queue unavailable\",\"request_id\":\"req-server\"}\n",
+    );
+}

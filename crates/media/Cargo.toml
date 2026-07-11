@@ -9,9 +9,17 @@ publish.workspace = true
 clap.workspace = true
 media-contract = { path = "../media-contract", version = "=0.1.0" }
 media-core = { path = "../media-core", version = "=0.1.0" }
+reqwest.workspace = true
+secrecy.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["net", "sync", "time"] }
+uuid.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true
+axum.workspace = true
 cargo_metadata.workspace = true
 
 [lints]
