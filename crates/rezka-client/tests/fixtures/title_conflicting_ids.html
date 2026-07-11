@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Conflicting IDs</title>
+    <meta property="og:type" content="video.movie">
+  </head>
+  <body>
+    <main class="b-content__main">
+      <input id="post_id" value="401">
+      <div id="send-video-issue" data-id="402"></div>
+      <h1 class="b-post__title" itemprop="name">Conflicting IDs</h1>
+      <ul id="translators-list">
+        <li class="b-translator__item" data-translator_id="31">Studio</li>
+      </ul>
+      <script>
+        sof.tv.initCDNMoviesEvents(401, 31, {}, {});
+      </script>
+    </main>
+  </body>
+</html>

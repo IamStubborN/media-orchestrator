@@ -1,10 +1,12 @@
 use std::fmt;
 
+use reqwest::StatusCode;
 use scraper::{Html, Selector};
 use url::Url;
 
 use crate::{
-    PublicImageUrl, RezkaError,
+    ProviderFailureReason, PublicImageUrl, RezkaError,
+    playback::{SelectedTranslation, TitlePlaybackRef},
     redaction::sanitize_provider_text,
     session::{RezkaClient, anubis::detect_challenge},
 };
@@ -46,6 +48,7 @@ impl fmt::Debug for CatalogQuery {
     }
 }
 
+#[derive(Clone)]
 pub struct TitleLocator(String);
 
 impl TitleLocator {
@@ -123,6 +126,34 @@ impl RezkaClient {
         self.fetch_catalog_page(url, &continuation.query).await
     }
 
+    pub async fn title(&mut self, locator: &TitleLocator) -> Result<TitleDetails, RezkaError> {
+        let url = self
+            .transport_mut()
+            .selected_origin()
+            .join(locator.as_str())
+            .map_err(|_| invalid_catalog("invalid title endpoint"))?;
+        let response = self
+            .transport_mut()
+            .get_first_with_failover_accepting(url, None)
+            .await?;
+
+        if response.status.is_redirection() {
+            return Err(invalid_catalog("title redirect rejected"));
+        }
+        reject_title_access_page(&response.body)?;
+        if matches!(response.status, StatusCode::NOT_FOUND | StatusCode::GONE) {
+            return Err(RezkaError::TitleNotFound {
+                context: sanitize_provider_text("title not found"),
+            });
+        }
+        if response.status != StatusCode::OK {
+            return Err(invalid_catalog("invalid title HTTP status"));
+        }
+
+        let selected_origin = self.transport_mut().selected_origin().clone();
+        parser::parse_title_page(&response.body, locator, &selected_origin)
+    }
+
     async fn fetch_catalog_page(
         &mut self,
         url: Url,
@@ -172,6 +203,55 @@ fn reject_catalog_access_page(html: &str) -> Result<(), RezkaError> {
         }),
         _ => Ok(()),
     }
+}
+
+fn reject_title_access_page(html: &str) -> Result<(), RezkaError> {
+    if detect_challenge(html) {
+        return Err(RezkaError::ChallengeRequired {
+            context: sanitize_provider_text("title challenge required"),
+        });
+    }
+
+    let document = Html::parse_document(html);
+    let title_selector = Selector::parse("title").expect("static title selector is valid");
+    let title = document
+        .select(&title_selector)
+        .next()
+        .map(|element| element.text().collect::<String>())
+        .map(|value| value.trim().to_owned());
+    match title.as_deref() {
+        Some("Sign In") => {
+            return Err(RezkaError::AuthenticationRequired {
+                context: sanitize_provider_text("title authentication required"),
+            });
+        }
+        Some("Verify") => {
+            return Err(RezkaError::ChallengeRequired {
+                context: sanitize_provider_text("title verification required"),
+            });
+        }
+        _ => {}
+    }
+
+    let restricted_selector = Selector::parse(".b-player__restricted__block_message")
+        .expect("static restricted selector is valid");
+    let suggestion_selector = Selector::parse(".b-restricted__suggest")
+        .expect("static restricted suggestion selector is valid");
+    for restricted in document.select(&restricted_selector) {
+        let full_text = restricted.text().collect::<String>();
+        let suggestion_text = restricted
+            .select(&suggestion_selector)
+            .map(|element| element.text().collect::<String>())
+            .collect::<String>();
+        let message = full_text.replacen(&suggestion_text, "", 1);
+        if !message.trim().is_empty() {
+            return Err(RezkaError::TranslationUnavailable {
+                reason: ProviderFailureReason::Restricted,
+            });
+        }
+    }
+
+    Ok(())
 }
 
 pub struct CatalogEntry {
@@ -234,6 +314,264 @@ impl fmt::Debug for CatalogEntry {
 pub struct CatalogPage {
     entries: Vec<CatalogEntry>,
     continuation: Option<CatalogContinuation>,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum RezkaMediaKind {
+    Movie,
+    Series,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct RezkaTitleId(u64);
+
+impl RezkaTitleId {
+    pub fn new(value: u64) -> Result<Self, RezkaError> {
+        if value == 0 {
+            return Err(invalid_catalog("invalid title ID"));
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct TranslationId(u64);
+
+impl TranslationId {
+    pub fn new(value: u64) -> Result<Self, RezkaError> {
+        if value == 0 {
+            return Err(invalid_catalog("invalid translation ID"));
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum TranslationKey {
+    Movie {
+        id: TranslationId,
+        is_camrip: bool,
+        has_ads: bool,
+        is_director: bool,
+    },
+    Series {
+        id: TranslationId,
+    },
+}
+
+impl TranslationKey {
+    #[must_use]
+    pub const fn id(self) -> TranslationId {
+        match self {
+            Self::Movie { id, .. } | Self::Series { id } => id,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Translation {
+    key: TranslationKey,
+    name: String,
+    is_premium: bool,
+    is_director: bool,
+    is_camrip: bool,
+    has_ads: bool,
+}
+
+impl Translation {
+    pub(crate) fn new(
+        key: TranslationKey,
+        name: String,
+        is_premium: bool,
+        is_director: bool,
+        is_camrip: bool,
+        has_ads: bool,
+    ) -> Self {
+        Self {
+            key,
+            name,
+            is_premium,
+            is_director,
+            is_camrip,
+            has_ads,
+        }
+    }
+
+    #[must_use]
+    pub const fn key(&self) -> &TranslationKey {
+        &self.key
+    }
+
+    #[must_use]
+    pub const fn id(&self) -> TranslationId {
+        self.key.id()
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn is_premium(&self) -> bool {
+        self.is_premium
+    }
+
+    #[must_use]
+    pub const fn is_director(&self) -> bool {
+        self.is_director
+    }
+
+    #[must_use]
+    pub const fn is_camrip(&self) -> bool {
+        self.is_camrip
+    }
+
+    #[must_use]
+    pub const fn has_ads(&self) -> bool {
+        self.has_ads
+    }
+}
+
+impl fmt::Debug for Translation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Translation")
+            .field("key", &self.key)
+            .field("name", &"[REDACTED]")
+            .field("is_premium", &self.is_premium)
+            .finish_non_exhaustive()
+    }
+}
+
+pub struct TitleDetails {
+    id: RezkaTitleId,
+    locator: TitleLocator,
+    title: String,
+    original_title: Option<String>,
+    release_year: Option<u16>,
+    kind: RezkaMediaKind,
+    thumbnail: Option<PublicImageUrl>,
+    translations: Vec<Translation>,
+    default_translation: Option<TranslationKey>,
+}
+
+impl TitleDetails {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        id: RezkaTitleId,
+        locator: TitleLocator,
+        title: String,
+        original_title: Option<String>,
+        release_year: Option<u16>,
+        kind: RezkaMediaKind,
+        thumbnail: Option<PublicImageUrl>,
+        translations: Vec<Translation>,
+        default_translation: Option<TranslationKey>,
+    ) -> Self {
+        Self {
+            id,
+            locator,
+            title,
+            original_title,
+            release_year,
+            kind,
+            thumbnail,
+            translations,
+            default_translation,
+        }
+    }
+
+    #[must_use]
+    pub const fn id(&self) -> RezkaTitleId {
+        self.id
+    }
+
+    #[must_use]
+    pub const fn locator(&self) -> &TitleLocator {
+        &self.locator
+    }
+
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    #[must_use]
+    pub fn original_title(&self) -> Option<&str> {
+        self.original_title.as_deref()
+    }
+
+    #[must_use]
+    pub const fn release_year(&self) -> Option<u16> {
+        self.release_year
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> RezkaMediaKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn thumbnail(&self) -> Option<&PublicImageUrl> {
+        self.thumbnail.as_ref()
+    }
+
+    #[must_use]
+    pub fn translations(&self) -> &[Translation] {
+        &self.translations
+    }
+
+    #[must_use]
+    pub const fn default_translation(&self) -> Option<&TranslationKey> {
+        self.default_translation.as_ref()
+    }
+
+    pub fn select_translation(
+        &self,
+        key: &TranslationKey,
+    ) -> Result<SelectedTranslation, RezkaError> {
+        let translation = self
+            .translations
+            .iter()
+            .find(|translation| translation.key() == key)
+            .cloned()
+            .ok_or(RezkaError::TranslationUnavailable {
+                reason: ProviderFailureReason::TranslationUnavailable,
+            })?;
+        let title = TitlePlaybackRef::new(self.id, self.locator.clone(), self.kind);
+        Ok(SelectedTranslation::new(title, translation))
+    }
+}
+
+impl fmt::Debug for TitleDetails {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TitleDetails")
+            .field("id", &self.id)
+            .field("locator", &"[REDACTED]")
+            .field("title", &"[REDACTED]")
+            .field(
+                "original_title",
+                &self.original_title.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("release_year", &self.release_year)
+            .field("kind", &self.kind)
+            .field("thumbnail", &self.thumbnail.as_ref().map(|_| "[REDACTED]"))
+            .field("translations", &self.translations.len())
+            .field("default_translation", &self.default_translation)
+            .finish()
+    }
 }
 
 impl CatalogPage {
