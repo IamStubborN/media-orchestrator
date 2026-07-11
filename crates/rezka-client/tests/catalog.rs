@@ -50,6 +50,25 @@ fn catalog_query_enforces_normalized_text_and_exact_boundaries() {
 }
 
 #[test]
+fn catalog_query_requires_a_visible_unicode_scalar() {
+    for invisible in [
+        "\u{00ad}",
+        "\u{200b}",
+        "\u{2060}",
+        "\u{fe0f}",
+        "\u{e0100}",
+        "\u{200b}\u{2060}\u{feff}",
+    ] {
+        assert_invalid(CatalogQuery::new(invisible));
+    }
+
+    assert_eq!(
+        CatalogQuery::new("query\u{200b}\u{fe0f}").unwrap().as_str(),
+        "query\u{200b}\u{fe0f}"
+    );
+}
+
+#[test]
 fn title_locator_enforces_exact_boundary_and_rejects_unsafe_paths() {
     let boundary = format!("/{}.html", "a".repeat(2_048 - "/.html".len()));
     assert_eq!(TitleLocator::new(&boundary).unwrap().as_str(), boundary);
@@ -66,6 +85,8 @@ fn title_locator_enforces_exact_boundary_and_rejects_unsafe_paths() {
         "/films/%2e%2e/title.html",
         "/films/%252e%252e/title.html",
         "/films/%2E/title.html",
+        "/films/%2e%2e%5cprivate.html",
+        "/films/%252e%252e%255cprivate.html",
         "/films/title",
         "https://foreign.test/films/title.html",
         "/films/title\u{0000}.html",
@@ -179,6 +200,28 @@ fn continuation_accepts_exact_pagination_encodings_and_decoded_query_equality() 
 }
 
 #[test]
+fn continuation_accepts_large_page_tokens_and_canonicalizes_leading_zeroes() {
+    let large_page = "9".repeat(1_900);
+    for (href, expected) in [
+        (
+            "/search/?do=search&subaction=search&q=query&page=0002".to_owned(),
+            "/search/?do=search&subaction=search&q=query&page=2".to_owned(),
+        ),
+        (
+            "/search/page/0002/?do=search&subaction=search&q=query".to_owned(),
+            "/search/page/2/?do=search&subaction=search&q=query".to_owned(),
+        ),
+        (
+            format!("/search/?do=search&subaction=search&q=query&page={large_page}"),
+            format!("/search/?do=search&subaction=search&q=query&page={large_page}"),
+        ),
+    ] {
+        let page = parse_catalog_page(&page_with_next(&[&href]), &query(), &origin()).unwrap();
+        assert_eq!(page.continuation().unwrap().as_str(), expected);
+    }
+}
+
+#[test]
 fn continuation_normalizes_same_origin_absolute_links_and_allows_identical_targets() {
     let relative = "/search/?do=search&subaction=search&q=query&page=2";
     let absolute = "https://rezka.test/search/?do=search&subaction=search&q=query&page=2";
@@ -202,6 +245,8 @@ fn continuation_rejects_unsafe_or_noncanonical_targets() {
         "https://foreign.test/search/?do=search&subaction=search&q=query&page=2",
         "/search/%2e%2e/?do=search&subaction=search&q=query&page=2",
         "/search/%252e%252e/?do=search&subaction=search&q=query&page=2",
+        "/search%5c/page/2/?do=search&subaction=search&q=query",
+        "/search%255c/page/2/?do=search&subaction=search&q=query",
         "/search/page/two/?do=search&subaction=search&q=query",
         "/search/page/2?do=search&subaction=search&q=query",
         "/search/?do=search&subaction=search&q=query&page=2#fragment",

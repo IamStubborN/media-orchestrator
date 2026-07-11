@@ -188,10 +188,10 @@ fn parse_continuation_target(
             else {
                 return Err(invalid_catalog("invalid catalog continuation path"));
             };
-            if number.contains('/') || !is_page_number(number) {
+            let Some(page) = canonical_page_number(number) else {
                 return Err(invalid_catalog("invalid catalog continuation path"));
-            }
-            (Some(number), true)
+            };
+            (Some(page), true)
         }
     };
 
@@ -223,7 +223,9 @@ fn parse_continuation_target(
     }
 
     let page = match (path_form, page, query_page) {
-        (false, None, Some(page)) if is_page_number(&page) => page,
+        (false, None, Some(page)) => canonical_page_number(&page)
+            .map(str::to_owned)
+            .ok_or_else(|| invalid_catalog("invalid catalog continuation pagination"))?,
         (true, Some(page), None) => page.to_owned(),
         _ => return Err(invalid_catalog("invalid catalog continuation pagination")),
     };
@@ -235,13 +237,27 @@ fn parse_continuation_target(
     if !path_form {
         serializer.append_pair("page", &page);
     }
-    let target = format!("{}?{}", url.path(), serializer.finish());
+    let path = if path_form {
+        format!("/search/page/{page}/")
+    } else {
+        url.path().to_owned()
+    };
+    let target = format!("{path}?{}", serializer.finish());
     CatalogContinuation::from_normalized(target)
 }
 
-fn is_page_number(value: &str) -> bool {
-    value.as_bytes().iter().all(u8::is_ascii_digit)
-        && value.parse::<u64>().is_ok_and(|number| number > 1)
+fn canonical_page_number(value: &str) -> Option<&str> {
+    if !value.as_bytes().iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+
+    let canonical = value.trim_start_matches('0');
+    (canonical.len() > 1
+        || canonical
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| *byte > b'1'))
+    .then_some(canonical)
 }
 
 fn selector(value: &str) -> Selector {
