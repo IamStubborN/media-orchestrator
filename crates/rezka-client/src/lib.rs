@@ -15,7 +15,10 @@ pub use catalog::{
 };
 pub use error::{ProviderFailureReason, RezkaError, RezkaErrorCode};
 pub use mirror::MirrorSet;
-pub use playback::{PlaybackRequest, SelectedTranslation, TitlePlaybackRef};
+pub use playback::{
+    EpisodeAvailability, PlaybackRequest, ResolvedTarget, SeasonAvailability, SelectedEpisode,
+    SelectedTranslation, SeriesAvailability, TitlePlaybackRef,
+};
 pub use secret_url::{PublicImageUrl, SecretMediaUrl, SecretSubtitleUrl};
 pub use session::{
     ProbeResponse, RezkaClient, RezkaClientConfig, RezkaCredentials, SessionValidation,
