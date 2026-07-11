@@ -1,3 +1,5 @@
+mod support;
+
 use rezka_client::{
     mirror::MirrorSet,
     session::cookie::{SessionJar, SessionSnapshot},
@@ -279,6 +281,59 @@ async fn eligible_connect_failure_selects_next_mirror_within_retry_bound() {
 }
 
 #[tokio::test]
+async fn later_failover_invocation_starts_at_the_currently_selected_mirror() {
+    use rezka_client::transport::Transport;
+    use std::net::TcpListener;
+    use time::Duration;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path, query_param},
+    };
+
+    let unavailable_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let primary = Url::parse(&format!(
+        "http://{}",
+        unavailable_listener.local_addr().unwrap()
+    ))
+    .unwrap();
+    drop(unavailable_listener);
+
+    let second = MockServer::start().await;
+    let selected = Url::parse(&second.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .and(query_param("source", "configured"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("valid-marker"))
+        .expect(2)
+        .mount(&second)
+        .await;
+
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![primary.clone(), selected.clone()]).unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        Duration::seconds(2),
+        1,
+    )
+    .unwrap();
+    let configured_probe = primary.join("/account/probe?source=configured").unwrap();
+
+    let first = transport
+        .get_first_with_failover(configured_probe.clone(), None)
+        .await
+        .unwrap();
+    let second = transport
+        .get_first_with_failover(configured_probe, None)
+        .await
+        .unwrap();
+
+    let selected_probe = selected.join("/account/probe?source=configured").unwrap();
+    assert_eq!(first.url, selected_probe);
+    assert_eq!(second.url, selected_probe);
+    assert_eq!(transport.selected_origin(), &selected);
+}
+
+#[tokio::test]
 async fn zero_retry_budget_never_contacts_or_selects_second_mirror() {
     use rezka_client::transport::Transport;
     use std::net::TcpListener;
@@ -358,6 +413,116 @@ async fn exhausted_eligible_upstream_status_returns_transport_error() {
 }
 
 #[tokio::test]
+async fn truncated_eligible_status_fails_over_before_body_read() {
+    use rezka_client::transport::Transport;
+    use time::Duration;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    let (unavailable, raw_server) = support::spawn_truncated_http_response(
+        "503 Service Unavailable",
+        &["Set-Cookie: first_status_cookie=opaque; Path=/"],
+    );
+    let second = MockServer::start().await;
+    let available = Url::parse(&second.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("valid-marker"))
+        .expect(1)
+        .mount(&second)
+        .await;
+
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![unavailable.clone(), available.clone()]).unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        Duration::seconds(2),
+        1,
+    )
+    .unwrap();
+
+    let response = transport
+        .get_first_with_failover(unavailable.join("/account/probe").unwrap(), None)
+        .await
+        .unwrap();
+
+    raw_server.join().unwrap();
+    assert_eq!(response.url, available.join("/account/probe").unwrap());
+    assert_eq!(transport.selected_origin(), &available);
+}
+
+#[tokio::test]
+async fn truncated_rate_limit_preserves_retry_after_and_response_cookie() {
+    use rezka_client::{RezkaError, transport::Transport};
+    use time::Duration;
+
+    let (base, raw_server) = support::spawn_truncated_http_response(
+        "429 Too Many Requests",
+        &[
+            "Retry-After: 17",
+            "Set-Cookie: rate_limit_cookie=opaque; Path=/",
+        ],
+    );
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![base.clone()]).unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        Duration::seconds(2),
+        0,
+    )
+    .unwrap();
+
+    let error = transport
+        .get_first(base.join("/account/probe").unwrap(), None)
+        .await
+        .unwrap_err();
+
+    raw_server.join().unwrap();
+    match error {
+        RezkaError::RateLimited {
+            retry_after_seconds,
+        } => assert_eq!(retry_after_seconds, Some(17)),
+        other => panic!("expected rate limit, got {other:?}"),
+    }
+    let restored = SessionJar::import(&transport.export_session().unwrap()).unwrap();
+    assert!(restored.contains_cookie_for_url(&base, "rate_limit_cookie"));
+}
+
+#[tokio::test]
+async fn truncated_terminal_status_is_classified_before_body_read() {
+    use rezka_client::transport::Transport;
+    use time::Duration;
+
+    let (base, raw_server) = support::spawn_truncated_http_response(
+        "401 Unauthorized",
+        &["Set-Cookie: terminal_status_cookie=opaque; Path=/"],
+    );
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![base.clone()]).unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        Duration::seconds(2),
+        0,
+    )
+    .unwrap();
+
+    let error = transport
+        .get_first(base.join("/account/probe").unwrap(), None)
+        .await
+        .unwrap_err();
+
+    raw_server.join().unwrap();
+    assert_eq!(
+        error.code(),
+        rezka_client::RezkaErrorCode::ProviderResponseInvalid
+    );
+    let restored = SessionJar::import(&transport.export_session().unwrap()).unwrap();
+    assert!(restored.contains_cookie_for_url(&base, "terminal_status_cookie"));
+}
+
+#[tokio::test]
 async fn first_response_does_not_auto_redirect_and_debug_remains_redacted() {
     use rezka_client::transport::Transport;
     use time::Duration;
@@ -413,6 +578,52 @@ async fn first_response_does_not_auto_redirect_and_debug_remains_redacted() {
     }
     let restored = SessionJar::import(&transport.export_session().unwrap()).unwrap();
     assert!(restored.contains_cookie_for_url(&base, "first_hop"));
+}
+
+#[tokio::test]
+async fn rejected_response_cookie_is_absent_from_metadata_and_jar() {
+    use rezka_client::transport::Transport;
+    use time::Duration;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/login"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .append_header("set-cookie", "accepted_cookie=opaque-a; Path=/")
+                .append_header(
+                    "set-cookie",
+                    "PHPSESSID=must-be-rejected; Domain=unrelated.test; Path=/",
+                ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![base.clone()]).unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        Duration::seconds(2),
+        0,
+    )
+    .unwrap();
+
+    let response = transport
+        .get_first(base.join("/login").unwrap(), None)
+        .await
+        .unwrap();
+
+    assert!(response.stored_cookie_names().contains("accepted_cookie"));
+    assert!(!response.stored_cookie_names().contains("PHPSESSID"));
+    let restored = SessionJar::import(&transport.export_session().unwrap()).unwrap();
+    assert!(restored.contains_cookie_for_url(&base, "accepted_cookie"));
+    assert!(!restored.contains_cookie_for_url(&base, "PHPSESSID"));
 }
 
 #[tokio::test]

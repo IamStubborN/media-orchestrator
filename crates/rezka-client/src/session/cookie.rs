@@ -92,8 +92,9 @@ impl SessionJar {
             let Ok(cookie) = RawCookie::parse(header.to_owned()) else {
                 continue;
             };
-            names.insert(cookie.name().to_owned());
-            let _ = self.store.insert_raw(&cookie, url);
+            if self.store.insert_raw(&cookie, url).is_ok() {
+                names.insert(cookie.name().to_owned());
+            }
         }
 
         names

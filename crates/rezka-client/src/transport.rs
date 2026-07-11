@@ -117,11 +117,7 @@ impl Transport {
         let original = url;
 
         for attempt in 0..max_attempts {
-            let attempt_url = if attempt == 0 {
-                original.clone()
-            } else {
-                self.mirrors.rewrite_to_selected(&original)?
-            };
+            let attempt_url = self.mirrors.rewrite_to_selected(&original)?;
 
             match self
                 .send_first(Method::GET, attempt_url, referer.clone(), None)
@@ -240,12 +236,6 @@ impl Transport {
             .jar
             .store_response_cookies_with_names(cookie_headers, &url);
 
-        let body = response
-            .bytes()
-            .await
-            .map_err(|_| AttemptFailure::terminal(transport_error()))?;
-        let body = String::from_utf8_lossy(&body).into_owned();
-
         if status == StatusCode::TOO_MANY_REQUESTS {
             return Err(AttemptFailure::terminal(RezkaError::RateLimited {
                 retry_after_seconds,
@@ -265,6 +255,12 @@ impl Transport {
                 "unexpected upstream status",
             )));
         }
+
+        let body = response
+            .bytes()
+            .await
+            .map_err(|_| AttemptFailure::terminal(transport_error()))?;
+        let body = String::from_utf8_lossy(&body).into_owned();
 
         Ok(TransportResponse {
             status,
