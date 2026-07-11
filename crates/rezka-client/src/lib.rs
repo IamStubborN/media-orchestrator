@@ -8,4 +8,7 @@ pub mod transport;
 
 pub use error::{RezkaError, RezkaErrorCode};
 pub use mirror::MirrorSet;
-pub use session::cookie::SessionSnapshot;
+pub use session::{
+    ProbeResponse, RezkaClient, RezkaClientConfig, RezkaCredentials, SessionValidation,
+    SessionValidationProbe, cookie::SessionSnapshot,
+};

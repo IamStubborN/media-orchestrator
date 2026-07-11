@@ -2,9 +2,12 @@ use std::{collections::BTreeSet, error::Error as _, fmt, io, time::Duration as S
 
 use reqwest::{
     Client, Method, StatusCode,
-    header::{COOKIE, LOCATION, REFERER, RETRY_AFTER, SET_COOKIE},
+    header::{COOKIE, HeaderName, HeaderValue, LOCATION, REFERER, RETRY_AFTER, SET_COOKIE},
     redirect::Policy,
 };
+
+const X_REQUESTED_WITH: HeaderName = HeaderName::from_static("x-requested-with");
+const XML_HTTP_REQUEST: HeaderValue = HeaderValue::from_static("XMLHttpRequest");
 use time::Duration;
 use url::Url;
 
@@ -94,6 +97,11 @@ impl Transport {
     #[must_use]
     pub fn selected_origin(&self) -> &Url {
         self.mirrors.selected_origin()
+    }
+
+    #[must_use]
+    pub(crate) fn contains_mirror_origin(&self, candidate: &Url) -> bool {
+        self.mirrors.contains_origin(candidate)
     }
 
     pub async fn get_first(
@@ -201,7 +209,9 @@ impl Transport {
             request = request.header(COOKIE, cookie);
         }
         if let Some(form) = form {
-            request = request.form(form);
+            request = request
+                .header(X_REQUESTED_WITH, XML_HTTP_REQUEST)
+                .form(form);
         }
 
         let response = request.send().await.map_err(|error| AttemptFailure {
