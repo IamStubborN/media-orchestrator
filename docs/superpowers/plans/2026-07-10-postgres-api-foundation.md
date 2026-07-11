@@ -375,30 +375,30 @@ MEDIA_LEASE_TTL_SECONDS (default 60; valid 30-300)
 **Files:**
 - Modify: `.mise.toml`
 - Modify: `.github/workflows/ci.yml`
-- Create: `tests/postgres.rs`
+- Create: `crates/media/tests/postgres.rs` (the repository root is a virtual Cargo workspace)
 - Modify: `README.md`
 - Modify: `docs/ARCHITECTURE.md` only if implemented dependencies differ from its current graph
 
-- [ ] Add `mise run test-integration` that runs the opt-in PostgreSQL/Testcontainers suite and fails clearly when Docker is unavailable.
-- [ ] Write one real-DB end-to-end test: migrate, bootstrap clients, authenticated idempotent create job, owner read, cross-owner 404, concurrent runner lease, heartbeat, and queue status.
-- [ ] Add a CI integration job on Ubuntu with Docker, after the normal verify job; keep provider/live-network tests excluded.
-- [ ] Update README with PostgreSQL prerequisites, migration commands, secret-file setup using dummy local values, service/CLI examples, and explicit no-public-route warning.
-- [ ] Run `mise run format`, `check`, `lint`, `test`, `test-integration`, `audit`, and `build`.
-- [ ] Run `cargo metadata` architecture tests and `git diff --check`.
-- [ ] Commit: `ci: verify postgres api foundation`.
+- [x] Add `mise run test-integration` that runs the opt-in PostgreSQL/Testcontainers suite and fails clearly when Docker is unavailable.
+- [x] Write one real-DB end-to-end test: migrate, bootstrap clients, authenticated idempotent create job, owner read, cross-owner 404, concurrent runner lease, heartbeat, and queue status.
+- [x] Add a CI integration job on Ubuntu with Docker, after the normal verify job; keep provider/live-network tests excluded.
+- [x] Update README with PostgreSQL prerequisites, migration commands, secret-file setup using dummy local values, service/CLI examples, and explicit no-public-route warning.
+- [x] Run `mise run format`, `check`, `lint`, `test`, `test-integration`, `audit`, and `build`.
+- [x] Run `cargo metadata` architecture tests and `git diff --check`.
+- [x] Commit: `ci: verify postgres api foundation`.
 
 ## Phase Completion Checklist
 
-- [ ] Explicit migrations create and reverse all schema; fixed users are seeded and no token is seeded.
-- [ ] SeaORM entities remain private to `media-storage` and adapters return domain types.
-- [ ] Domain use cases depend only on async ports; API handlers contain no SQL or SeaORM imports.
-- [ ] Hermes tokens resolve to fixed users and request bodies cannot spoof ownership.
-- [ ] Runner credentials cannot access user job details.
-- [ ] Same idempotency key/body replays exactly; different body and in-progress reuse conflict.
-- [ ] Concurrent lease calls produce at most one active lease, enforced by PostgreSQL.
-- [ ] `media migrate`, `serve`, `jobs create/get`, and `queue status` work through the multi-call binary.
-- [ ] Unit, router, migration, repository, concurrency, CLI, and real-DB E2E tests pass.
+- [x] Explicit migrations create and reverse all schema; fixed users are seeded and no token is seeded.
+- [x] SeaORM entities remain private to `media-storage` and adapters return domain types.
+- [x] Domain use cases depend only on async ports; API handlers contain no SQL or SeaORM imports.
+- [x] Hermes tokens resolve to fixed users and request bodies cannot spoof ownership.
+- [x] Runner credentials cannot access user job details.
+- [x] Same idempotency key/body replays exactly; different body and in-progress reuse conflict.
+- [x] Concurrent lease calls produce at most one active lease, enforced by PostgreSQL.
+- [x] `media migrate`, `serve`, `jobs create/get`, and `queue status` work through the multi-call binary.
+- [x] Unit, router, migration, repository, concurrency, CLI, and real-DB E2E tests pass.
 - [ ] CI verify and PostgreSQL integration jobs pass on GitHub.
-- [ ] No provider, download, ffmpeg, Plex, Gluetun, Telegram, or public ingress behavior was added in this phase.
+- [x] No provider, download, ffmpeg, Plex, Gluetun, Telegram, or public ingress behavior was added in this phase.
 
 The next focused plan is `2026-07-10-rezka-session-authentication.md`.
