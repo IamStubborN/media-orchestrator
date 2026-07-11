@@ -398,7 +398,7 @@ MEDIA_LEASE_TTL_SECONDS (default 60; valid 30-300)
 - [x] Concurrent lease calls produce at most one active lease, enforced by PostgreSQL.
 - [x] `media migrate`, `serve`, `jobs create/get`, and `queue status` work through the multi-call binary.
 - [x] Unit, router, migration, repository, concurrency, CLI, and real-DB E2E tests pass.
-- [ ] CI verify and PostgreSQL integration jobs pass on GitHub.
+- [x] CI verify and PostgreSQL integration jobs pass on GitHub.
 - [x] No provider, download, ffmpeg, Plex, Gluetun, Telegram, or public ingress behavior was added in this phase.
 
 The next focused plan is `2026-07-10-rezka-session-authentication.md`.
