@@ -1,0 +1,240 @@
+use std::{
+    collections::HashMap,
+    ffi::OsString,
+    io,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+use media::{
+    composition::{migrate, prepare_service},
+    config::{ConfigSource, DatabaseConfig, ServerConfig},
+};
+use media_contract::{JobDto, LeaseDto};
+use reqwest::{Client, Response, StatusCode, header};
+use testcontainers::{
+    GenericImage, ImageExt,
+    core::{IntoContainerPort, WaitFor},
+    runners::AsyncRunner,
+};
+use tokio::{net::TcpListener, sync::oneshot};
+
+const POSTGRES_IMAGE: &str = "postgres";
+const POSTGRES_TAG_AND_DIGEST: &str = concat!(
+    "17-alpine@sha256:",
+    "742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193"
+);
+const POSTGRES_PORT: u16 = 5432;
+const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+const PRIMARY_TOKEN: &str = "task-9-primary-token";
+const SECONDARY_TOKEN: &str = "task-9-secondary-token";
+const RUNNER_TOKEN: &str = "task-9-runner-token";
+
+#[derive(Default)]
+struct FakeSource {
+    environment: HashMap<&'static str, OsString>,
+    files: HashMap<PathBuf, Vec<u8>>,
+}
+
+impl FakeSource {
+    fn set_secret(&mut self, name: &'static str, value: impl AsRef<[u8]>) {
+        let path = PathBuf::from(format!("/{name}.secret"));
+        self.environment.insert(name, path.clone().into_os_string());
+        self.files.insert(path, value.as_ref().to_vec());
+    }
+
+    fn set_environment(&mut self, name: &'static str, value: impl Into<OsString>) {
+        self.environment.insert(name, value.into());
+    }
+}
+
+impl ConfigSource for FakeSource {
+    fn var_os(&self, name: &'static str) -> Option<OsString> {
+        self.environment.get(name).cloned()
+    }
+
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        self.files
+            .get(path)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing test secret"))
+    }
+}
+
+fn database_config(url: &str) -> DatabaseConfig {
+    let mut source = FakeSource::default();
+    source.set_secret("MEDIA_DATABASE_URL_FILE", url);
+    DatabaseConfig::load_from(&source).expect("database config must load")
+}
+
+fn server_config(url: &str, listen_addr: SocketAddr) -> ServerConfig {
+    let mut source = FakeSource::default();
+    source.set_secret("MEDIA_DATABASE_URL_FILE", url);
+    source.set_secret("MEDIA_PRIMARY_TOKEN_FILE", PRIMARY_TOKEN);
+    source.set_secret("MEDIA_SECONDARY_TOKEN_FILE", SECONDARY_TOKEN);
+    source.set_secret("MEDIA_RUNNER_TOKEN_FILE", RUNNER_TOKEN);
+    source.set_environment("MEDIA_LISTEN_ADDR", listen_addr.to_string());
+    ServerConfig::load_from(&source).expect("server config must load")
+}
+
+fn authenticated(
+    client: &Client,
+    method: reqwest::Method,
+    url: impl reqwest::IntoUrl,
+    token: &str,
+) -> reqwest::RequestBuilder {
+    client
+        .request(method, url)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+}
+
+async fn send(request: reqwest::RequestBuilder) -> Response {
+    tokio::time::timeout(TEST_TIMEOUT, request.send())
+        .await
+        .expect("HTTP request must complete within the test timeout")
+        .expect("HTTP request must succeed")
+}
+
+#[tokio::test]
+async fn postgres_api_foundation_works_end_to_end() {
+    let container = GenericImage::new(POSTGRES_IMAGE, POSTGRES_TAG_AND_DIGEST)
+        .with_exposed_port(POSTGRES_PORT.tcp())
+        .with_wait_for(WaitFor::message_on_stderr(
+            "database system is ready to accept connections",
+        ))
+        .with_env_var("POSTGRES_DB", "media_orchestrator")
+        .with_env_var("POSTGRES_USER", "media")
+        .with_env_var("POSTGRES_PASSWORD", "media-test-password")
+        .start()
+        .await
+        .expect("Docker must run the pinned PostgreSQL image");
+    let port = container
+        .get_host_port_ipv4(POSTGRES_PORT.tcp())
+        .await
+        .expect("PostgreSQL must expose its port");
+    let database_url =
+        format!("postgres://media:media-test-password@127.0.0.1:{port}/media_orchestrator");
+
+    migrate(&database_config(&database_url))
+        .await
+        .expect("explicit migrations must apply");
+    let config = server_config(&database_url, "127.0.0.1:0".parse().unwrap());
+    let service = prepare_service(&config)
+        .await
+        .expect("service must bootstrap fixed clients");
+    let listener = TcpListener::bind(config.listen_addr()).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (shutdown, receiver) = oneshot::channel();
+    let service_task = tokio::spawn(service.serve_with_shutdown(listener, async move {
+        let _ = receiver.await;
+    }));
+
+    let client = Client::new();
+    let base_url = format!("http://{address}");
+    let create_body = serde_json::json!({
+        "provider": "rezka",
+        "result_ref": "rezka:series:42:season:1",
+        "notify_scope": "initiator"
+    });
+    let create = || {
+        authenticated(
+            &client,
+            reqwest::Method::POST,
+            format!("{base_url}/v1/jobs"),
+            PRIMARY_TOKEN,
+        )
+        .header("idempotency-key", "task-9-create-job")
+        .json(&create_body)
+    };
+
+    let created = send(create()).await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created_content_type = created.headers()[header::CONTENT_TYPE].clone();
+    let created_body = created.bytes().await.unwrap();
+    let job: JobDto = serde_json::from_slice(&created_body).unwrap();
+
+    let replayed = send(create()).await;
+    assert_eq!(replayed.status(), StatusCode::CREATED);
+    assert_eq!(
+        replayed.headers()[header::CONTENT_TYPE],
+        created_content_type
+    );
+    assert_eq!(replayed.bytes().await.unwrap(), created_body);
+
+    let owner_read = send(authenticated(
+        &client,
+        reqwest::Method::GET,
+        format!("{base_url}/v1/jobs/{}", job.id),
+        PRIMARY_TOKEN,
+    ))
+    .await;
+    assert_eq!(owner_read.status(), StatusCode::OK);
+    assert_eq!(owner_read.json::<JobDto>().await.unwrap(), job);
+
+    let cross_owner_read = send(authenticated(
+        &client,
+        reqwest::Method::GET,
+        format!("{base_url}/v1/jobs/{}", job.id),
+        SECONDARY_TOKEN,
+    ))
+    .await;
+    assert_eq!(cross_owner_read.status(), StatusCode::NOT_FOUND);
+
+    let lease = |key: &'static str| {
+        authenticated(
+            &client,
+            reqwest::Method::POST,
+            format!("{base_url}/v1/runner/leases"),
+            RUNNER_TOKEN,
+        )
+        .header("idempotency-key", key)
+    };
+    let (first_lease, second_lease) = tokio::join!(
+        send(lease("task-9-lease-first")),
+        send(lease("task-9-lease-second"))
+    );
+    let (winner, loser) = match (first_lease.status(), second_lease.status()) {
+        (StatusCode::OK, StatusCode::NO_CONTENT) => (first_lease, second_lease),
+        (StatusCode::NO_CONTENT, StatusCode::OK) => (second_lease, first_lease),
+        statuses => panic!("expected exactly one lease winner, got {statuses:?}"),
+    };
+    assert_eq!(loser.bytes().await.unwrap().len(), 0);
+    let lease: LeaseDto = winner.json().await.unwrap();
+    assert_eq!(lease.job.id, job.id);
+
+    let heartbeat = send(
+        authenticated(
+            &client,
+            reqwest::Method::POST,
+            format!("{base_url}/v1/runner/leases/{}/heartbeat", lease.lease_id),
+            RUNNER_TOKEN,
+        )
+        .header("idempotency-key", "task-9-heartbeat"),
+    )
+    .await;
+    assert_eq!(heartbeat.status(), StatusCode::OK);
+    let heartbeat_lease: LeaseDto = heartbeat.json().await.unwrap();
+    assert_eq!(heartbeat_lease.lease_id, lease.lease_id);
+    assert_eq!(heartbeat_lease.job.id, job.id);
+
+    let queue = send(authenticated(
+        &client,
+        reqwest::Method::GET,
+        format!("{base_url}/v1/queue/status"),
+        PRIMARY_TOKEN,
+    ))
+    .await;
+    assert_eq!(queue.status(), StatusCode::OK);
+    assert_eq!(
+        queue.json::<serde_json::Value>().await.unwrap(),
+        serde_json::json!({ "queued": 0, "active": true })
+    );
+
+    shutdown.send(()).unwrap();
+    tokio::time::timeout(TEST_TIMEOUT, service_task)
+        .await
+        .expect("service shutdown must be bounded")
+        .expect("service task must not panic")
+        .expect("service must stop cleanly");
+}
