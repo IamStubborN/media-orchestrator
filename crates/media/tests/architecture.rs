@@ -134,3 +134,43 @@ fn media_contract_cannot_reach_media_core() {
         "media-contract must not reach media-core through the resolved dependency graph",
     );
 }
+
+#[test]
+fn media_api_depends_only_on_core_and_contract_workspace_crates() {
+    let metadata = workspace_metadata();
+    let api = workspace_package_id(&metadata, "media-api");
+    let mut workspace_dependencies: Vec<&str> = direct_dependency_package_ids(&metadata, api)
+        .into_iter()
+        .filter(|package_id| metadata.workspace_members.contains(package_id))
+        .map(|package_id| metadata[package_id].name.as_str())
+        .collect();
+    workspace_dependencies.sort_unstable();
+
+    assert_eq!(workspace_dependencies, ["media-contract", "media-core"]);
+}
+
+#[test]
+fn media_api_cannot_reach_storage() {
+    let metadata = workspace_metadata();
+    let api = workspace_package_id(&metadata, "media-api");
+    let storage = workspace_package_id(&metadata, "media-storage");
+
+    assert!(
+        !resolved_dependency_reachable(&metadata, api, storage),
+        "media-api must not reach media-storage through the resolved dependency graph",
+    );
+}
+
+#[test]
+fn media_storage_cannot_reach_api_or_contract() {
+    let metadata = workspace_metadata();
+    let storage = workspace_package_id(&metadata, "media-storage");
+
+    for forbidden_name in ["media-api", "media-contract"] {
+        let forbidden = workspace_package_id(&metadata, forbidden_name);
+        assert!(
+            !resolved_dependency_reachable(&metadata, storage, forbidden),
+            "media-storage must not reach {forbidden_name} through the resolved dependency graph",
+        );
+    }
+}

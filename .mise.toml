@@ -19,7 +19,21 @@ run = "cargo check --workspace --all-targets --all-features --locked"
 run = "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings"
 
 [tasks.test]
-run = "cargo nextest run --workspace --all-features"
+run = "cargo nextest run --workspace --locked"
+
+[tasks.test-integration]
+run = '''
+if ! command -v docker >/dev/null 2>&1; then
+  echo "Docker is required for PostgreSQL integration tests, but the docker command was not found." >&2
+  exit 1
+fi
+if ! docker info >/dev/null 2>&1; then
+  echo "Docker is required for PostgreSQL integration tests, but the daemon is unavailable." >&2
+  exit 1
+fi
+cargo nextest run -p media-storage --features integration-tests --locked
+cargo nextest run -p media --features integration-tests --test service_composition --test postgres --locked
+'''
 
 [tasks.audit]
 run = "cargo deny check && cargo audit"

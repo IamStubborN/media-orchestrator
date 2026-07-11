@@ -1,0 +1,28 @@
+[package]
+name = "media-api"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+axum.workspace = true
+http-body-util.workspace = true
+media-contract = { path = "../media-contract", version = "=0.1.0" }
+media-core = { path = "../media-core", version = "=0.1.0" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time = { workspace = true, features = ["formatting"] }
+tokio = { workspace = true, features = ["time"] }
+uuid.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+tokio.workspace = true
+tower.workspace = true
+
+[lints]
+workspace = true

@@ -20,5 +20,18 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo check --workspace --all-targets --all-features --locked
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - run: cargo nextest run --workspace --all-features
+      - run: cargo nextest run --workspace --locked
       - run: cargo deny check && cargo audit
+
+  postgres-integration:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # v2.83.0
+        with:
+          tool: rust@1.97.0, cargo-nextest@0.9.140
+          fallback: none
+      - run: docker info
+      - run: cargo nextest run -p media-storage --features integration-tests --locked
+      - run: cargo nextest run -p media --features integration-tests --test service_composition --test postgres --locked
