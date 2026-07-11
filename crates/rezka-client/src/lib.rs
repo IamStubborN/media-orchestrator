@@ -7,3 +7,5 @@ pub mod session;
 pub mod transport;
 
 pub use error::{RezkaError, RezkaErrorCode};
+pub use mirror::MirrorSet;
+pub use session::cookie::SessionSnapshot;
