@@ -153,6 +153,10 @@ impl RezkaClient {
         self.transport.export_session()
     }
 
+    pub(crate) fn transport_mut(&mut self) -> &mut Transport {
+        &mut self.transport
+    }
+
     fn with_jar(config: RezkaClientConfig, jar: SessionJar) -> Result<Self, RezkaError> {
         let transport = Transport::new(
             config.mirrors,
@@ -226,9 +230,53 @@ fn inconclusive_validation() -> RezkaError {
 #[cfg(test)]
 mod tests {
     use super::{proof_semaphore, solve_challenge_async};
-    use crate::{RezkaErrorCode, session::anubis::AnubisChallenge};
+    use crate::{
+        RezkaErrorCode,
+        mirror::MirrorSet,
+        session::{RezkaCredentials, anubis::AnubisChallenge, cookie::SessionJar, dle},
+        transport::Transport,
+    };
+    use secrecy::SecretString;
+    use time::Duration;
+    use url::Url;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
 
     static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[tokio::test]
+    async fn dle_login_keeps_rejecting_not_found_statuses() {
+        let server = MockServer::start().await;
+        let origin = Url::parse(&server.uri()).unwrap();
+        Mock::given(method("POST"))
+            .and(path("/ajax/login/"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut transport = Transport::new(
+            MirrorSet::new(vec![origin]).unwrap(),
+            SessionJar::empty(),
+            "media-orchestrator-test".to_owned(),
+            Duration::seconds(2),
+            0,
+        )
+        .unwrap();
+
+        let error = dle::login(
+            &mut transport,
+            &RezkaCredentials {
+                username: SecretString::from("user"),
+                password: SecretString::from("password"),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.code(), RezkaErrorCode::ProviderResponseInvalid);
+    }
 
     fn challenge(difficulty: u8) -> AnubisChallenge {
         AnubisChallenge {

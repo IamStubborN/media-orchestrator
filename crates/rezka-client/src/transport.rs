@@ -12,6 +12,7 @@ pub const MAX_PROVIDER_RESPONSE_BODY_BYTES: usize = 2 * 1024 * 1024;
 const PROVIDER_RESPONSE_BODY_OVERFLOW_BYTES: usize = MAX_PROVIDER_RESPONSE_BODY_BYTES + 1;
 const X_REQUESTED_WITH: HeaderName = HeaderName::from_static("x-requested-with");
 const XML_HTTP_REQUEST: HeaderValue = HeaderValue::from_static("XMLHttpRequest");
+const TITLE_ACCEPTED_TERMINAL_STATUSES: [StatusCode; 2] = [StatusCode::NOT_FOUND, StatusCode::GONE];
 use time::Duration;
 use url::Url;
 
@@ -61,6 +62,19 @@ pub struct Transport {
     mirrors: MirrorSet,
     jar: SessionJar,
     max_retries: u8,
+}
+
+#[derive(Copy, Clone)]
+enum ResponseStatusPolicy {
+    Default,
+    #[allow(dead_code, reason = "Task 4 is the first title caller")]
+    Title,
+}
+
+impl ResponseStatusPolicy {
+    fn accepts_terminal_status(self, status: StatusCode) -> bool {
+        matches!(self, Self::Title) && TITLE_ACCEPTED_TERMINAL_STATUSES.contains(&status)
+    }
 }
 
 impl Transport {
@@ -139,9 +153,15 @@ impl Transport {
         url: Url,
         referer: Option<Url>,
     ) -> Result<TransportResponse, RezkaError> {
-        self.send_first(Method::GET, url, referer, None)
-            .await
-            .map_err(|failure| failure.error)
+        self.send_first(
+            Method::GET,
+            url,
+            referer,
+            None,
+            ResponseStatusPolicy::Default,
+        )
+        .await
+        .map_err(|failure| failure.error)
     }
 
     pub async fn get_first_with_failover(
@@ -149,16 +169,75 @@ impl Transport {
         url: Url,
         referer: Option<Url>,
     ) -> Result<TransportResponse, RezkaError> {
+        self.get_first_with_failover_using_policy(url, referer, ResponseStatusPolicy::Default)
+            .await
+    }
+
+    #[allow(dead_code, reason = "Task 4 is the first title caller")]
+    pub(crate) async fn get_first_with_failover_accepting(
+        &mut self,
+        url: Url,
+        referer: Option<Url>,
+    ) -> Result<TransportResponse, RezkaError> {
+        self.get_first_with_failover_using_policy(url, referer, ResponseStatusPolicy::Title)
+            .await
+    }
+
+    async fn get_first_with_failover_using_policy(
+        &mut self,
+        url: Url,
+        referer: Option<Url>,
+        status_policy: ResponseStatusPolicy,
+    ) -> Result<TransportResponse, RezkaError> {
+        self.send_idempotent_with_failover(Method::GET, url, referer, None, status_policy)
+            .await
+    }
+
+    pub(crate) async fn post_form_with_failover(
+        &mut self,
+        url: Url,
+        referer: Option<Url>,
+        form: &[(&str, &str)],
+    ) -> Result<TransportResponse, RezkaError> {
+        self.send_idempotent_with_failover(
+            Method::POST,
+            url,
+            referer,
+            Some(form),
+            ResponseStatusPolicy::Default,
+        )
+        .await
+    }
+
+    async fn send_idempotent_with_failover(
+        &mut self,
+        method: Method,
+        url: Url,
+        referer: Option<Url>,
+        form: Option<&[(&str, &str)]>,
+        status_policy: ResponseStatusPolicy,
+    ) -> Result<TransportResponse, RezkaError> {
         let max_attempts = usize::from(self.max_retries)
             .saturating_add(1)
             .min(self.mirrors.len());
         let original = url;
+        let original_referer = referer;
 
         for attempt in 0..max_attempts {
             let attempt_url = self.mirrors.rewrite_to_selected(&original)?;
+            let attempt_referer = original_referer
+                .as_ref()
+                .map(|referer| self.mirrors.rewrite_to_selected(referer))
+                .transpose()?;
 
             match self
-                .send_first(Method::GET, attempt_url, referer.clone(), None)
+                .send_first(
+                    method.clone(),
+                    attempt_url,
+                    attempt_referer,
+                    form,
+                    status_policy,
+                )
                 .await
             {
                 Ok(response) => {
@@ -195,7 +274,13 @@ impl Transport {
 
         loop {
             let response = self
-                .send_first(Method::GET, current_url, current_referer, None)
+                .send_first(
+                    Method::GET,
+                    current_url,
+                    current_referer,
+                    None,
+                    ResponseStatusPolicy::Default,
+                )
                 .await
                 .map_err(|failure| failure.error)?;
 
@@ -221,9 +306,15 @@ impl Transport {
         referer: Option<Url>,
         form: &[(&str, &str)],
     ) -> Result<TransportResponse, RezkaError> {
-        self.send_first(Method::POST, url, referer, Some(form))
-            .await
-            .map_err(|failure| failure.error)
+        self.send_first(
+            Method::POST,
+            url,
+            referer,
+            Some(form),
+            ResponseStatusPolicy::Default,
+        )
+        .await
+        .map_err(|failure| failure.error)
     }
 
     pub fn export_session(&self) -> Result<SessionSnapshot, RezkaError> {
@@ -236,6 +327,7 @@ impl Transport {
         url: Url,
         referer: Option<Url>,
         form: Option<&[(&str, &str)]>,
+        status_policy: ResponseStatusPolicy,
     ) -> Result<TransportResponse, AttemptFailure> {
         self.guard_selected_origin(&url)
             .map_err(AttemptFailure::terminal)?;
@@ -257,12 +349,13 @@ impl Transport {
             eligible: eligible_request_failure(&error),
             error: transport_error(),
         })?;
-        self.process_response(response).await
+        self.process_response(response, status_policy).await
     }
 
     async fn process_response(
         &mut self,
         mut response: reqwest::Response,
+        status_policy: ResponseStatusPolicy,
     ) -> Result<TransportResponse, AttemptFailure> {
         let status = response.status();
         let url = response.url().clone();
@@ -300,7 +393,10 @@ impl Transport {
                 eligible: true,
             });
         }
-        if !(status.is_success() || status.is_redirection()) {
+        if !(status.is_success()
+            || status.is_redirection()
+            || status_policy.accepts_terminal_status(status))
+        {
             return Err(AttemptFailure::terminal(invalid_http_status(status, &url)));
         }
 
@@ -423,7 +519,14 @@ fn invalid_http_status(status: StatusCode, url: &Url) -> RezkaError {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_provider_body;
+    use super::{Transport, decode_provider_body};
+    use crate::{RezkaErrorCode, mirror::MirrorSet, session::cookie::SessionJar};
+    use time::Duration;
+    use url::Url;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
 
     #[test]
     fn valid_utf8_body_reuses_the_original_allocation() {
@@ -438,5 +541,99 @@ mod tests {
     #[test]
     fn invalid_utf8_body_is_decoded_lossily() {
         assert_eq!(decode_provider_body(vec![b'a', 0xff, b'b']), "a\u{fffd}b");
+    }
+
+    #[tokio::test]
+    async fn title_status_policy_returns_404_and_410_after_storing_cookies_and_reading_bodies() {
+        for status in [404, 410] {
+            let server = MockServer::start().await;
+            let origin = Url::parse(&server.uri()).unwrap();
+            Mock::given(method("GET"))
+                .and(path("/title"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .insert_header("set-cookie", "title_status=opaque; Path=/")
+                        .set_body_string("title-status-body"),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let mut transport = Transport::new(
+                MirrorSet::new(vec![origin.clone()]).unwrap(),
+                SessionJar::empty(),
+                "media-orchestrator-test".to_owned(),
+                Duration::seconds(2),
+                0,
+            )
+            .unwrap();
+
+            let response = transport
+                .get_first_with_failover_accepting(origin.join("/title").unwrap(), None)
+                .await
+                .unwrap();
+
+            assert_eq!(response.status.as_u16(), status);
+            assert_eq!(response.body, "title-status-body");
+            assert!(response.stored_cookie_names().contains("title_status"));
+        }
+    }
+
+    #[tokio::test]
+    async fn title_status_policy_keeps_rate_limits_and_eligible_upstream_statuses_precedent() {
+        for status in [502, 503, 504] {
+            let first = MockServer::start().await;
+            let first_origin = Url::parse(&first.uri()).unwrap();
+            Mock::given(method("GET"))
+                .and(path("/title"))
+                .respond_with(ResponseTemplate::new(status))
+                .expect(1)
+                .mount(&first)
+                .await;
+            let second = MockServer::start().await;
+            let second_origin = Url::parse(&second.uri()).unwrap();
+            Mock::given(method("GET"))
+                .and(path("/title"))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(1)
+                .mount(&second)
+                .await;
+            let mut transport = Transport::new(
+                MirrorSet::new(vec![first_origin.clone(), second_origin.clone()]).unwrap(),
+                SessionJar::empty(),
+                "media-orchestrator-test".to_owned(),
+                Duration::seconds(2),
+                1,
+            )
+            .unwrap();
+
+            let response = transport
+                .get_first_with_failover_accepting(first_origin.join("/title").unwrap(), None)
+                .await
+                .unwrap();
+            assert_eq!(response.url, second_origin.join("/title").unwrap());
+        }
+
+        let rate_limited = MockServer::start().await;
+        let rate_limited_origin = Url::parse(&rate_limited.uri()).unwrap();
+        Mock::given(method("GET"))
+            .and(path("/title"))
+            .respond_with(ResponseTemplate::new(429))
+            .expect(1)
+            .mount(&rate_limited)
+            .await;
+        let mut transport = Transport::new(
+            MirrorSet::new(vec![rate_limited_origin.clone()]).unwrap(),
+            SessionJar::empty(),
+            "media-orchestrator-test".to_owned(),
+            Duration::seconds(2),
+            0,
+        )
+        .unwrap();
+
+        let error = transport
+            .get_first_with_failover_accepting(rate_limited_origin.join("/title").unwrap(), None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), RezkaErrorCode::RateLimited);
     }
 }

@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Movie page</title>
+    <meta property="og:type" content="video.movie">
+  </head>
+  <body>
+    <main class="b-content__main">
+      <input id="post_id" value="101">
+      <div id="send-video-issue" data-id="101"></div>
+      <div id="user-favorites-holder" data-post_id="101"></div>
+      <div class="b-userset__fav_holder" data-post_id="101"></div>
+      <h1 class="b-post__title" itemprop="name">Fixture Movie</h1>
+      <div class="b-post__origtitle">Original Fixture Movie</div>
+      <div class="b-sidecover">
+        <img src="https://images.example.com/movie.jpg" alt="">
+      </div>
+      <table class="b-post__info">
+        <tr><td>Year:</td><td><a href="/year/2024/">2024</a></td></tr>
+      </table>
+      <ul id="translators-list">
+        <li class="b-translator__item active" data-translator_id="7" data-camrip="0" data-ads="0" data-director="0">Studio</li>
+        <li class="b-translator__item b-prem_translator" data-translator_id="7" data-camrip="1" data-ads="0" data-director="0">Studio CAM</li>
+        <li class="b-translator__item" data-translator_id="8" data-camrip="0" data-ads="1" data-director="1">Director</li>
+      </ul>
+      <script>
+        sof.tv.initCDNMoviesEvents(101, 7, {}, {});
+      </script>
+    </main>
+  </body>
+</html>

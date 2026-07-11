@@ -1,0 +1,5 @@
+{
+  "success": true,
+  "seasons": "<ul><li class=\"b-simple_season__item\" data-tab_id=\"2\">Season 2</li><li class=\"b-simple_season__item\" data-tab_id=\"1\">Season 1</li></ul>",
+  "episodes": "<ul><li class=\"b-simple_episode__item\" data-season_id=\"2\" data-episode_id=\"3\">Episode 3</li><li class=\"b-simple_episode__item\" data-season_id=\"1\" data-episode_id=\"2\">Episode 2</li><li class=\"b-simple_episode__item\" data-season_id=\"1\" data-episode_id=\"1\">Episode 1</li></ul>"
+}

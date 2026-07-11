@@ -10,6 +10,8 @@ ignore = ["RUSTSEC-2026-0173"]
 [licenses]
 allow = [
   "Apache-2.0",
+  # Oxc's dragonbox_ecma dependency uses the LLVM exception with Apache-2.0.
+  "Apache-2.0 WITH LLVM-exception",
   "BSD-3-Clause",
   "CDLA-Permissive-2.0",
   "ISC",

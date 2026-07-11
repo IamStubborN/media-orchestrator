@@ -1,6 +1,6 @@
 use rezka_client::{
     SessionSnapshot,
-    error::{RezkaError, RezkaErrorCode},
+    error::{ProviderFailureReason, RezkaError, RezkaErrorCode},
     redaction::{redact_url, sanitize_provider_text},
     session::{RezkaCredentials, SessionValidationProbe},
 };
@@ -56,6 +56,96 @@ fn error_display_and_debug_never_include_provider_secret_material() {
     assert!(rendered.contains("provider response invalid"));
     for forbidden in ["sig=abc", "hunter2", "PHPSESSID", "secret"] {
         assert!(!rendered.contains(forbidden), "leaked {forbidden}");
+    }
+}
+
+#[test]
+fn new_error_variants_and_provider_reasons_never_leak_provider_material() {
+    let context = sanitize_provider_text(
+        "The title title-secret at https://cdn.example.invalid/video?token=token-secret from 203.0.113.9 sent Cookie: session-secret and provider-message-secret",
+    );
+    let errors = [
+        (
+            RezkaError::ChallengeRequired {
+                context: context.clone(),
+            },
+            RezkaErrorCode::ChallengeRequired,
+        ),
+        (
+            RezkaError::TitleNotFound {
+                context: context.clone(),
+            },
+            RezkaErrorCode::TitleNotFound,
+        ),
+        (
+            RezkaError::TranslationUnavailable {
+                reason: ProviderFailureReason::TranslationUnavailable,
+            },
+            RezkaErrorCode::TranslationUnavailable,
+        ),
+        (
+            RezkaError::EpisodeUnavailable {
+                reason: ProviderFailureReason::EpisodeUnavailable,
+            },
+            RezkaErrorCode::EpisodeUnavailable,
+        ),
+        (
+            RezkaError::QualityUnavailable {
+                reason: ProviderFailureReason::PremiumRequired,
+            },
+            RezkaErrorCode::QualityUnavailable,
+        ),
+        (
+            RezkaError::StreamExpired {
+                reason: ProviderFailureReason::Unknown,
+            },
+            RezkaErrorCode::StreamExpired,
+        ),
+    ];
+
+    for (error, expected_code) in errors {
+        assert_eq!(error.code(), expected_code);
+        let rendered = format!("{error:?}: {error}");
+        for forbidden in [
+            "title-secret",
+            "https://",
+            "cdn.example.invalid",
+            "203.0.113.9",
+            "token-secret",
+            "session-secret",
+            "provider-message-secret",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "leaked {forbidden}: {rendered}"
+            );
+        }
+    }
+}
+
+#[test]
+fn provider_failure_reason_display_is_static() {
+    let expected = [
+        (
+            ProviderFailureReason::AuthenticationRequired,
+            "authentication required",
+        ),
+        (ProviderFailureReason::PremiumRequired, "premium required"),
+        (ProviderFailureReason::Restricted, "content restricted"),
+        (
+            ProviderFailureReason::TranslationUnavailable,
+            "translation unavailable",
+        ),
+        (
+            ProviderFailureReason::EpisodeUnavailable,
+            "episode unavailable",
+        ),
+        (ProviderFailureReason::RateLimited, "rate limited"),
+        (ProviderFailureReason::Unknown, "provider failure"),
+    ];
+
+    for (reason, display) in expected {
+        assert_eq!(reason.to_string(), display);
     }
 }
 
