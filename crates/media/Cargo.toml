@@ -21,9 +21,9 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true
-tokio = { workspace = true, features = ["net", "sync", "time"] }
+tokio = { workspace = true, features = ["net", "signal", "sync", "time"] }
 tracing = "=0.1.44"
-tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["env-filter", "fmt", "json"] }
 uuid.workspace = true
 
 [dev-dependencies]
@@ -31,6 +31,7 @@ assert_cmd.workspace = true
 axum.workspace = true
 cargo_metadata.workspace = true
 testcontainers.workspace = true
+wait-timeout = "=0.2.1"
 
 [lints]
 workspace = true

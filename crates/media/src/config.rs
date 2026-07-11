@@ -183,7 +183,7 @@ impl ClientConfig {
 
     pub fn load_from(source: &impl ConfigSource) -> Result<Self, ConfigError> {
         let service_url = required_environment(source, SERVICE_URL)?;
-        let service_url = reqwest::Url::parse(&service_url)
+        let mut service_url = reqwest::Url::parse(&service_url)
             .map_err(|_| ConfigError::InvalidEnvironment { name: SERVICE_URL })?;
         if !matches!(service_url.scheme(), "http" | "https")
             || service_url.host_str().is_none()
@@ -193,6 +193,10 @@ impl ClientConfig {
             || service_url.fragment().is_some()
         {
             return Err(ConfigError::InvalidEnvironment { name: SERVICE_URL });
+        }
+        if !service_url.path().ends_with('/') {
+            let directory_path = format!("{}/", service_url.path());
+            service_url.set_path(&directory_path);
         }
 
         Ok(Self {

@@ -209,6 +209,8 @@ pub enum Reservation {
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
 pub enum IdempotencyError {
+    #[error("idempotency storage conflict")]
+    Conflict,
     #[error("idempotency storage failed")]
     Infrastructure,
 }
@@ -384,13 +386,24 @@ fn replay(stored: StoredHttpResponse, fallback_request_id: &RequestId) -> Option
 mod tests {
     use media_core::{PRIMARY_CLIENT_ID, ClientId};
 
-    use super::{IdempotencyRequest, IdempotencyStore, StoredHttpResponse, fingerprint};
+    use super::{
+        IdempotencyError, IdempotencyRequest, IdempotencyStore, StoredHttpResponse, fingerprint,
+    };
 
     #[test]
     fn port_is_object_safe() {
         fn accept(_: Option<&dyn IdempotencyStore>) {}
 
         accept(None);
+    }
+
+    #[test]
+    fn storage_conflicts_remain_distinct_from_infrastructure_failures() {
+        assert_ne!(IdempotencyError::Conflict, IdempotencyError::Infrastructure);
+        assert_eq!(
+            IdempotencyError::Conflict.to_string(),
+            "idempotency storage conflict"
+        );
     }
 
     #[test]

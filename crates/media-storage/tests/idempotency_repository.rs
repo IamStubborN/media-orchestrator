@@ -5,8 +5,8 @@ use media_core::{
     PortError,
 };
 use media_storage::{
-    ReservationHandle, ReservationRecord, SeaOrmClientStore, SeaOrmIdempotencyRepository,
-    StoredResponseRecord,
+    ReservationGeneration, ReservationHandle, ReservationHandleError, ReservationRecord,
+    SeaOrmClientStore, SeaOrmIdempotencyRepository, StoredResponseRecord,
 };
 use support::TestDatabase;
 
@@ -62,6 +62,37 @@ async fn reservation_exposes_generation_scoped_lifecycle_handle() {
     assert_eq!(handle.request_hash(), &HASH_A);
     assert_ne!(handle.generation().as_uuid(), &uuid::Uuid::nil());
     repository.abort_in_progress(&handle).await.unwrap();
+}
+
+#[test]
+fn reservation_handle_rehydrates_exact_typed_parts_and_rejects_invalid_identity() {
+    let generation_uuid = uuid::Uuid::new_v4();
+    let generation = ReservationGeneration::from_uuid(generation_uuid);
+    let handle = ReservationHandle::rehydrate(
+        PRIMARY_CLIENT_ID,
+        "rehydrated".to_owned(),
+        HASH_A,
+        generation,
+    )
+    .unwrap();
+
+    assert_eq!(handle.client_id(), PRIMARY_CLIENT_ID);
+    assert_eq!(handle.key(), "rehydrated");
+    assert_eq!(handle.request_hash(), &HASH_A);
+    assert_eq!(handle.generation().as_uuid(), &generation_uuid);
+    assert_eq!(
+        ReservationHandle::rehydrate(PRIMARY_CLIENT_ID, String::new(), HASH_A, generation),
+        Err(ReservationHandleError::EmptyKey)
+    );
+    assert_eq!(
+        ReservationHandle::rehydrate(
+            PRIMARY_CLIENT_ID,
+            "nil-generation".to_owned(),
+            HASH_A,
+            ReservationGeneration::from_uuid(uuid::Uuid::nil()),
+        ),
+        Err(ReservationHandleError::NilGeneration)
+    );
 }
 
 #[test]

@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
     process::Output,
     sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -86,20 +86,45 @@ fn command(
     command
 }
 
-async fn command_output(mut command: assert_cmd::Command) -> Result<Output, String> {
-    match tokio::time::timeout(
-        CLI_TIMEOUT,
-        tokio::task::spawn_blocking(move || command.output()),
-    )
-    .await
-    {
-        Ok(Ok(Ok(output))) => Ok(output),
-        Ok(Ok(Err(error))) => Err(format!("CLI subprocess could not start: {error}")),
-        Ok(Err(error)) => Err(format!("CLI subprocess task failed: {error}")),
-        Err(_) => Err(format!(
-            "CLI subprocess did not finish within {CLI_TIMEOUT:?}"
-        )),
+async fn command_output(command: assert_cmd::Command) -> Result<Output, String> {
+    command_output_with_timeout(command, CLI_TIMEOUT).await
+}
+
+async fn command_output_with_timeout(
+    mut command: assert_cmd::Command,
+    timeout: Duration,
+) -> Result<Output, String> {
+    command.timeout(timeout);
+    match tokio::task::spawn_blocking(move || command.output()).await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(error)) => Err(format!("CLI subprocess could not start: {error}")),
+        Err(error) => Err(format!("CLI subprocess task failed: {error}")),
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn command_timeout_kills_and_reaps_the_child_process() {
+    let mut command = assert_cmd::Command::new("sh");
+    command.args(["-c", "echo $$; exec sleep 30"]);
+    let started = Instant::now();
+
+    let output = command_output_with_timeout(command, Duration::from_millis(100))
+        .await
+        .expect("timed out child must still produce a reaped output status");
+
+    assert!(!output.status.success());
+    assert!(started.elapsed() < Duration::from_secs(2));
+    let pid = String::from_utf8(output.stdout)
+        .unwrap()
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+    let status = std::process::Command::new("sh")
+        .args(["-c", &format!("kill -0 {pid} 2>/dev/null")])
+        .status()
+        .unwrap();
+    assert!(!status.success(), "timed out child {pid} was not reaped");
 }
 
 fn json_response(status: StatusCode, body: &'static str) -> Response<Body> {
@@ -249,6 +274,39 @@ async fn jobs_get_and_queue_status_use_the_expected_paths() {
         String::from_utf8(queue.stdout).unwrap(),
         "{\"active\":false,\"queued\":3}\n"
     );
+}
+
+#[tokio::test]
+async fn client_preserves_service_url_prefix_with_or_without_a_trailing_slash() {
+    let router = Router::new().route(
+        "/prefix/v1/queue/status",
+        any(|| async { json_response(StatusCode::OK, r#"{"queued":1,"active":false}"#) }),
+    );
+    let server = TestServer::start(router).await;
+    let token_file = SecretFile::new("cli-secret");
+
+    for suffix in ["/prefix", "/prefix/"] {
+        let mut prefixed = command(&server, &token_file, ["queue", "status", "--json"]);
+        prefixed.env(
+            "MEDIA_SERVICE_URL",
+            format!("{}{suffix}", server.service_url),
+        );
+        let output = command_output(prefixed)
+            .await
+            .expect("CLI subprocess must finish before the harness timeout");
+
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "{\"active\":false,\"queued\":1}\n"
+        );
+    }
+
+    server.stop().await;
 }
 
 #[tokio::test]

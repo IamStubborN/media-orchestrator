@@ -1,10 +1,10 @@
 use std::{
     collections::HashMap,
     ffi::OsString,
-    io,
+    io::{self, Read},
     net::SocketAddr,
     path::{Path, PathBuf},
-    process::Output,
+    process::{Child, Command, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
@@ -31,6 +31,8 @@ use testcontainers::{
     runners::AsyncRunner,
 };
 use tokio::{net::TcpListener, sync::oneshot};
+#[cfg(unix)]
+use wait_timeout::ChildExt;
 
 const POSTGRES_IMAGE: &str = "postgres";
 const POSTGRES_TAG_AND_DIGEST: &str = concat!(
@@ -102,6 +104,60 @@ impl TestDatabase {
             .await
             .expect("an independent database connection must open")
     }
+}
+
+#[cfg(unix)]
+fn wait_for_output(mut child: Child, timeout: Duration) -> Result<Output, String> {
+    let status = match child.wait_timeout(timeout) {
+        Ok(Some(status)) => status,
+        Ok(None) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("child did not stop within {timeout:?}"));
+        }
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("child wait failed: {error}"));
+        }
+    };
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    child
+        .stdout
+        .take()
+        .expect("child stdout must be piped")
+        .read_to_end(&mut stdout)
+        .unwrap();
+    child
+        .stderr
+        .take()
+        .expect("child stderr must be piped")
+        .read_to_end(&mut stderr)
+        .unwrap();
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+#[cfg(unix)]
+async fn wait_until_healthy(child: &mut Child, address: SocketAddr) {
+    for _ in 0..100 {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "serve process exited before becoming healthy"
+        );
+        if reqwest::get(format!("http://{address}/v1/health"))
+            .await
+            .is_ok_and(|response| response.status().is_success())
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("serve process did not become healthy");
 }
 
 #[derive(Default)]
@@ -340,7 +396,7 @@ async fn storage_adapter_forwards_the_exact_generation_for_complete_abort_and_di
     );
     assert_eq!(
         adapter.abort_in_progress(&wrong_abort).await,
-        Err(IdempotencyError::Infrastructure)
+        Err(IdempotencyError::Conflict)
     );
     assert!(matches!(
         adapter.reserve(request("abort", 4)).await.unwrap(),
@@ -356,7 +412,7 @@ async fn storage_adapter_forwards_the_exact_generation_for_complete_abort_and_di
     let response = StoredHttpResponse::new(204, String::new(), Vec::new());
     assert_eq!(
         adapter.complete(&wrong_complete, response.clone()).await,
-        Err(IdempotencyError::Infrastructure)
+        Err(IdempotencyError::Conflict)
     );
     adapter.complete(&complete_handle, response).await.unwrap();
     let replay_handle = match adapter.reserve(request("complete", 5)).await.unwrap() {
@@ -370,13 +426,69 @@ async fn storage_adapter_forwards_the_exact_generation_for_complete_abort_and_di
     );
     assert_eq!(
         adapter.discard_completed(&wrong_discard).await,
-        Err(IdempotencyError::Infrastructure)
+        Err(IdempotencyError::Conflict)
     );
     adapter.discard_completed(&replay_handle).await.unwrap();
     assert!(matches!(
         adapter.reserve(request("complete", 5)).await.unwrap(),
         Reservation::Reserved(_)
     ));
+}
+
+#[tokio::test]
+async fn storage_adapter_lifecycle_is_stateless_across_adapter_instances() {
+    let (database, _) = migrated_service().await;
+    let reserving =
+        StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(database.connect().await));
+    let handle = reserved(&reserving, "stateless", 6).await;
+    drop(reserving);
+
+    StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(database.connect().await))
+        .complete(
+            &handle,
+            StoredHttpResponse::new(204, String::new(), Vec::new()),
+        )
+        .await
+        .expect("a fresh adapter must reconstruct the exact storage handle");
+    let replay = match StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(
+        database.connect().await,
+    ))
+    .reserve(request("stateless", 6))
+    .await
+    .unwrap()
+    {
+        Reservation::Replay { handle, .. } => handle,
+        other => panic!("expected replay, got {other:?}"),
+    };
+    assert_eq!(replay.generation(), handle.generation());
+
+    StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(database.connect().await))
+        .discard_completed(&replay)
+        .await
+        .expect("a fresh adapter must discard by the exact replay generation");
+
+    let aborting =
+        StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(database.connect().await));
+    let abort_handle = reserved(&aborting, "stateless-abort", 7).await;
+    drop(aborting);
+    StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(database.connect().await))
+        .abort_in_progress(&abort_handle)
+        .await
+        .expect("a fresh adapter must abort by the exact reservation generation");
+}
+
+#[tokio::test]
+async fn storage_adapter_keeps_infrastructure_failures_distinct_from_conflicts() {
+    let (database, _) = migrated_service().await;
+    let closed = database.connect().await;
+    closed.close_by_ref().await.unwrap();
+    let adapter = StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(closed));
+    let handle = IdempotencyHandle::new(request("disconnected", 8), IdempotencyGeneration::new());
+
+    assert_eq!(
+        adapter.abort_in_progress(&handle).await,
+        Err(IdempotencyError::Infrastructure)
+    );
 }
 
 #[tokio::test]
@@ -404,4 +516,75 @@ async fn prepared_service_serves_on_an_ephemeral_loopback_listener_and_stops_gra
         .expect("service shutdown must be bounded")
         .expect("service task must not panic")
         .expect("service must stop cleanly");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn serve_process_emits_json_tracing_and_gracefully_handles_int_and_term() {
+    let (database, _) = migrated_service().await;
+    let database_url = SecretFile::new(&database.url);
+    let primary = SecretFile::new("json-primary-token");
+    let secondary = SecretFile::new("json-secondary-token");
+    let runner = SecretFile::new("json-runner-token");
+
+    for signal in ["INT", "TERM"] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let mut child = Command::new(assert_cmd::cargo::cargo_bin!("media"))
+            .arg("serve")
+            .env_clear()
+            .env("RUST_LOG", "media=info")
+            .env("MEDIA_DATABASE_URL_FILE", &database_url.0)
+            .env("MEDIA_PRIMARY_TOKEN_FILE", &primary.0)
+            .env("MEDIA_SECONDARY_TOKEN_FILE", &secondary.0)
+            .env("MEDIA_RUNNER_TOKEN_FILE", &runner.0)
+            .env("MEDIA_LISTEN_ADDR", address.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        wait_until_healthy(&mut child, address).await;
+        let pid = child.id().to_string();
+        assert!(
+            Command::new("kill")
+                .args([format!("-{signal}"), pid])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let output =
+            tokio::task::spawn_blocking(move || wait_for_output(child, Duration::from_secs(2)))
+                .await
+                .unwrap()
+                .unwrap();
+
+        assert!(
+            output.status.success(),
+            "{signal} stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let rendered = format!(
+            "{}{}",
+            String::from_utf8(output.stdout).unwrap(),
+            String::from_utf8(output.stderr).unwrap()
+        );
+        let events: Vec<serde_json::Value> = rendered
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("every tracing event must be JSON"))
+            .collect();
+        assert!(
+            events
+                .iter()
+                .any(|event| { event["fields"]["message"] == "media service listening" })
+        );
+        for secret in [
+            database.url.as_str(),
+            "json-primary-token",
+            "json-secondary-token",
+            "json-runner-token",
+        ] {
+            assert!(!rendered.contains(secret), "tracing exposed {secret}");
+        }
+    }
 }

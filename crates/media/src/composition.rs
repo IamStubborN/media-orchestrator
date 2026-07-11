@@ -1,21 +1,18 @@
-use std::{
-    collections::HashMap,
-    future::Future,
-    sync::{Arc, Mutex},
-};
+use std::{future::Future, sync::Arc};
 
 use media_api::{
     ApiState, IdempotencyError, IdempotencyGeneration, IdempotencyHandle, IdempotencyRequest,
     IdempotencyStore, Reservation, StoredHttpResponse,
 };
 use media_core::{
-    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, BootstrapClient, ClientId, ClientRole, ClientStore,
-    CredentialDigest, JobApplication, LeaseApplication, RUNNER_CLIENT_ID, ReadinessPort,
+    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, BootstrapClient, ClientRole, ClientStore, CredentialDigest,
+    JobApplication, LeaseApplication, PortError, RUNNER_CLIENT_ID, ReadinessPort,
     SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
 };
 use media_storage::{
-    ReservationHandle, ReservationRecord, SeaOrmClientStore, SeaOrmIdempotencyRepository,
-    SeaOrmJobStore, SeaOrmLeaseStore, SeaOrmReadiness, StoredResponseRecord,
+    ReservationGeneration as StorageReservationGeneration, ReservationHandle, ReservationRecord,
+    SeaOrmClientStore, SeaOrmIdempotencyRepository, SeaOrmJobStore, SeaOrmLeaseStore,
+    SeaOrmReadiness, StoredResponseRecord,
 };
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
@@ -48,7 +45,6 @@ pub enum ServiceError {
 #[derive(Clone)]
 pub struct StorageIdempotencyAdapter {
     repository: SeaOrmIdempotencyRepository,
-    handles: Arc<Mutex<HashMap<HandleKey, ReservationHandle>>>,
 }
 
 impl std::fmt::Debug for StorageIdempotencyAdapter {
@@ -60,59 +56,17 @@ impl std::fmt::Debug for StorageIdempotencyAdapter {
 impl StorageIdempotencyAdapter {
     #[must_use]
     pub fn new(repository: SeaOrmIdempotencyRepository) -> Self {
-        Self {
-            repository,
-            handles: Arc::new(Mutex::new(HashMap::new())),
-        }
+        Self { repository }
     }
 
-    fn remember(
-        &self,
-        api: &IdempotencyHandle,
-        storage: ReservationHandle,
-    ) -> Result<(), IdempotencyError> {
-        self.handles
-            .lock()
-            .map_err(|_| IdempotencyError::Infrastructure)?
-            .insert(HandleKey::from(api), storage);
-        Ok(())
-    }
-
-    fn storage_handle(
-        &self,
-        handle: &IdempotencyHandle,
-    ) -> Result<ReservationHandle, IdempotencyError> {
-        self.handles
-            .lock()
-            .map_err(|_| IdempotencyError::Infrastructure)?
-            .get(&HandleKey::from(handle))
-            .cloned()
-            .ok_or(IdempotencyError::Infrastructure)
-    }
-
-    fn forget(&self, handle: &IdempotencyHandle) {
-        if let Ok(mut handles) = self.handles.lock() {
-            handles.remove(&HandleKey::from(handle));
-        }
-    }
-}
-
-#[derive(Eq, Hash, PartialEq)]
-struct HandleKey {
-    client_id: ClientId,
-    key: String,
-    fingerprint: [u8; 32],
-    generation: uuid::Uuid,
-}
-
-impl From<&IdempotencyHandle> for HandleKey {
-    fn from(value: &IdempotencyHandle) -> Self {
-        Self {
-            client_id: value.client_id(),
-            key: value.key().to_owned(),
-            fingerprint: *value.fingerprint(),
-            generation: *value.generation().as_uuid(),
-        }
+    fn storage_handle(handle: &IdempotencyHandle) -> Result<ReservationHandle, IdempotencyError> {
+        ReservationHandle::rehydrate(
+            handle.client_id(),
+            handle.key().to_owned(),
+            *handle.fingerprint(),
+            StorageReservationGeneration::from_uuid(*handle.generation().as_uuid()),
+        )
+        .map_err(|_| IdempotencyError::Infrastructure)
     }
 }
 
@@ -128,16 +82,14 @@ impl IdempotencyStore for StorageIdempotencyAdapter {
                 time::OffsetDateTime::now_utc() + IDEMPOTENCY_TTL,
             )
             .await
-            .map_err(|_| IdempotencyError::Infrastructure)?;
+            .map_err(map_idempotency_error)?;
         Ok(match record {
             ReservationRecord::Reserved(storage) => {
                 let api = api_handle(&storage);
-                self.remember(&api, storage)?;
                 Reservation::Reserved(api)
             }
             ReservationRecord::Replay { handle, response } => {
                 let api = api_handle(&handle);
-                self.remember(&api, handle)?;
                 Reservation::Replay {
                     handle: api,
                     response: api_response(response),
@@ -153,33 +105,34 @@ impl IdempotencyStore for StorageIdempotencyAdapter {
         handle: &IdempotencyHandle,
         response: StoredHttpResponse,
     ) -> Result<(), IdempotencyError> {
-        let storage = self.storage_handle(handle)?;
+        let storage = Self::storage_handle(handle)?;
         self.repository
             .complete(&storage, storage_response(response))
             .await
-            .map_err(|_| IdempotencyError::Infrastructure)?;
-        self.forget(handle);
-        Ok(())
+            .map_err(map_idempotency_error)
     }
 
     async fn abort_in_progress(&self, handle: &IdempotencyHandle) -> Result<(), IdempotencyError> {
-        let storage = self.storage_handle(handle)?;
+        let storage = Self::storage_handle(handle)?;
         self.repository
             .abort_in_progress(&storage)
             .await
-            .map_err(|_| IdempotencyError::Infrastructure)?;
-        self.forget(handle);
-        Ok(())
+            .map_err(map_idempotency_error)
     }
 
     async fn discard_completed(&self, handle: &IdempotencyHandle) -> Result<(), IdempotencyError> {
-        let storage = self.storage_handle(handle)?;
+        let storage = Self::storage_handle(handle)?;
         self.repository
             .discard_completed(&storage)
             .await
-            .map_err(|_| IdempotencyError::Infrastructure)?;
-        self.forget(handle);
-        Ok(())
+            .map_err(map_idempotency_error)
+    }
+}
+
+const fn map_idempotency_error(error: PortError) -> IdempotencyError {
+    match error {
+        PortError::Conflict => IdempotencyError::Conflict,
+        PortError::Infrastructure => IdempotencyError::Infrastructure,
     }
 }
 
@@ -283,8 +236,35 @@ pub async fn serve(config: ServerConfig) -> Result<(), ServiceError> {
         .map_err(|_| ServiceError::Listener)?;
     tracing::info!(listen_addr = %address, "media service listening");
     prepared
-        .serve_with_shutdown(listener, std::future::pending())
+        .serve_with_shutdown(listener, shutdown_signal())
         .await
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        let Ok(mut signal) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        else {
+            return std::future::pending::<()>().await;
+        };
+        signal.recv().await;
+    };
+
+    #[cfg(unix)]
+    tokio::select! {
+        () = ctrl_c => {}
+        () = terminate => {}
+    }
+
+    #[cfg(not(unix))]
+    ctrl_c.await;
+
+    tracing::info!("media service shutdown requested");
 }
 
 async fn connect(database_url: &secrecy::SecretString) -> Result<DatabaseConnection, ServiceError> {

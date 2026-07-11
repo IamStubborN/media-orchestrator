@@ -39,7 +39,7 @@ impl HttpClient {
             notify_scope: NotifyScopeDto::Initiator,
         };
         self.execute(
-            self.request(reqwest::Method::POST, "/v1/jobs")?
+            self.request(reqwest::Method::POST, "v1/jobs")?
                 .header(IDEMPOTENCY_KEY_HEADER, generated_identifier())
                 .json(&request),
         )
@@ -47,13 +47,13 @@ impl HttpClient {
     }
 
     pub async fn get_job(&self, job_id: &str) -> Result<String, ClientError> {
-        let path = format!("/v1/jobs/{job_id}");
+        let path = format!("v1/jobs/{job_id}");
         self.execute(self.request(reqwest::Method::GET, &path)?)
             .await
     }
 
     pub async fn queue_status(&self) -> Result<String, ClientError> {
-        self.execute(self.request(reqwest::Method::GET, "/v1/queue/status")?)
+        self.execute(self.request(reqwest::Method::GET, "v1/queue/status")?)
             .await
     }
 
@@ -62,10 +62,10 @@ impl HttpClient {
         method: reqwest::Method,
         path: &str,
     ) -> Result<reqwest::RequestBuilder, ClientError> {
-        let mut endpoint = self.service_url.clone();
-        endpoint.set_path(path);
-        endpoint.set_query(None);
-        endpoint.set_fragment(None);
+        let endpoint = self
+            .service_url
+            .join(path)
+            .map_err(|_| ClientError::Configuration)?;
         Ok(self
             .client
             .request(method, endpoint)

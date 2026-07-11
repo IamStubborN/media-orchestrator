@@ -46,6 +46,23 @@ pub struct ReservationHandle {
     generation: ReservationGeneration,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum ReservationHandleError {
+    EmptyKey,
+    NilGeneration,
+}
+
+impl std::fmt::Display for ReservationHandleError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::EmptyKey => "reservation key cannot be empty",
+            Self::NilGeneration => "reservation generation cannot be nil",
+        })
+    }
+}
+
+impl std::error::Error for ReservationHandleError {}
+
 impl ReservationHandle {
     fn new(client_id: ClientId, key: String, request_hash: [u8; 32], generation: Uuid) -> Self {
         Self {
@@ -54,6 +71,26 @@ impl ReservationHandle {
             request_hash,
             generation: ReservationGeneration::from_uuid(generation),
         }
+    }
+
+    pub fn rehydrate(
+        client_id: ClientId,
+        key: String,
+        request_hash: [u8; 32],
+        generation: ReservationGeneration,
+    ) -> Result<Self, ReservationHandleError> {
+        if key.is_empty() {
+            return Err(ReservationHandleError::EmptyKey);
+        }
+        if generation.as_uuid().is_nil() {
+            return Err(ReservationHandleError::NilGeneration);
+        }
+        Ok(Self {
+            client_id,
+            key,
+            request_hash,
+            generation,
+        })
     }
 
     #[must_use]
