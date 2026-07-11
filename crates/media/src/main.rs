@@ -1,7 +1,8 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use media::{
     client::{ClientError, HttpClient},
-    config::{ClientConfig, ConfigError},
+    composition::{self, ServiceError},
+    config::{ClientConfig, ConfigError, DatabaseConfig, ServerConfig},
 };
 
 #[derive(Debug, Parser)]
@@ -15,6 +16,8 @@ struct Cli {
 enum Command {
     Jobs(JobsArgs),
     Queue(QueueArgs),
+    Migrate,
+    Serve,
 }
 
 #[derive(Debug, Args)]
@@ -75,10 +78,13 @@ enum RunError {
     Config(#[from] ConfigError),
     #[error(transparent)]
     Client(#[from] ClientError),
+    #[error(transparent)]
+    Service(#[from] ServiceError),
 }
 
 #[tokio::main]
 async fn main() {
+    initialize_tracing();
     if let Err(error) = run(Cli::parse()).await {
         eprintln!("{error}");
         std::process::exit(1);
@@ -86,32 +92,58 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<(), RunError> {
+    match cli.command {
+        Command::Jobs(args) => run_jobs(args).await,
+        Command::Queue(args) => run_queue(args).await,
+        Command::Migrate => {
+            let config = DatabaseConfig::load()?;
+            composition::migrate(&config).await?;
+            Ok(())
+        }
+        Command::Serve => {
+            let config = ServerConfig::load()?;
+            composition::serve(config).await?;
+            Ok(())
+        }
+    }
+}
+
+async fn run_jobs(args: JobsArgs) -> Result<(), RunError> {
     let client = HttpClient::new(ClientConfig::load()?)?;
-    let output = match cli.command {
-        Command::Jobs(JobsArgs {
-            command:
-                JobsCommand::Create {
-                    provider,
-                    result_ref,
-                    json,
-                },
-        }) => {
+    let output = match args.command {
+        JobsCommand::Create {
+            provider,
+            result_ref,
+            json,
+        } => {
             let _ = json;
             client.create_job(provider.into(), result_ref).await?
         }
-        Command::Jobs(JobsArgs {
-            command: JobsCommand::Get { job_id, json },
-        }) => {
+        JobsCommand::Get { job_id, json } => {
             let _ = json;
             client.get_job(&job_id).await?
         }
-        Command::Queue(QueueArgs {
-            command: QueueCommand::Status { json },
-        }) => {
+    };
+    println!("{output}");
+    Ok(())
+}
+
+async fn run_queue(args: QueueArgs) -> Result<(), RunError> {
+    let client = HttpClient::new(ClientConfig::load()?)?;
+    let output = match args.command {
+        QueueCommand::Status { json } => {
             let _ = json;
             client.queue_status().await?
         }
     };
     println!("{output}");
     Ok(())
+}
+
+fn initialize_tracing() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_target(false)
+        .compact()
+        .try_init();
 }

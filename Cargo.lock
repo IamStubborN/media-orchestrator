@@ -2062,17 +2062,26 @@ name = "media"
 version = "0.1.0"
 dependencies = [
  "assert_cmd",
+ "async-trait",
  "axum",
  "cargo_metadata",
  "clap",
+ "media-api",
  "media-contract",
  "media-core",
+ "media-storage",
  "reqwest",
+ "sea-orm",
+ "sea-orm-migration",
  "secrecy",
  "serde_json",
+ "sha2 0.11.0",
+ "testcontainers",
  "thiserror",
  "time",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
