@@ -164,3 +164,73 @@ async fn queue_status_exposes_only_counts_and_activity() {
             .all(|window| window != b"result_ref")
     );
 }
+
+#[tokio::test]
+async fn list_returns_only_the_authenticated_owners_jobs() {
+    let own = Job::rehydrate(
+        JobId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        "own-selection".to_owned(),
+        JobState::Queued,
+        None,
+        NotifyScope::Initiator,
+    )
+    .unwrap();
+    let other = Job::rehydrate(
+        JobId::new(),
+        SECONDARY_USER_ID,
+        Provider::Prowlarr,
+        "private-selection".to_owned(),
+        JobState::Queued,
+        None,
+        NotifyScope::Family,
+    )
+    .unwrap();
+
+    let response = app(FakeJobStore::with_jobs([own.clone(), other]))
+        .oneshot(
+            Request::get("/v1/jobs")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(value["jobs"].as_array().unwrap().len(), 1);
+    assert_eq!(value["jobs"][0]["id"], own.id().to_string());
+}
+
+#[tokio::test]
+async fn owner_can_cancel_a_queued_job_immediately() {
+    let job = Job::rehydrate(
+        JobId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        "cancel-selection".to_owned(),
+        JobState::Queued,
+        None,
+        NotifyScope::Initiator,
+    )
+    .unwrap();
+    let response = app(FakeJobStore::with_job(job.clone()))
+        .oneshot(
+            Request::post(format!("/v1/jobs/{}/cancel", job.id()))
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header("idempotency-key", "cancel-job")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(value["state"], "cancelled");
+}

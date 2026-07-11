@@ -9,6 +9,7 @@ mod id;
 mod identity;
 mod job;
 mod operation;
+mod orchestration;
 mod port;
 
 pub use action::NeedsActionReason;
@@ -19,7 +20,7 @@ pub use application::{
     ApplicationError, JobApplication, LeaseApplication, LeaseTtlError, NewJobCommand,
 };
 pub use id::{
-    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, ClientId, EpisodeId, JobId, LeaseId, MediaId,
+    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, ClientId, EpisodeId, JobEventId, JobId, LeaseId, MediaId,
     RUNNER_CLIENT_ID, SeasonId, TaskId, UserId, SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
 };
 pub use identity::{
@@ -32,4 +33,8 @@ pub use job::{
     NotifyScope, Provider, QueueStatus,
 };
 pub use operation::OperationKey;
+pub use orchestration::{
+    Checkpoint, CheckpointValue, JobEvent, JobEventKind, JobEventValidationError,
+    MAX_STAGE_ATTEMPTS, StageFailureOutcome, StageRef,
+};
 pub use port::{ClientStore, IdentityStore, JobStore, LeaseStore, PortError, ReadinessPort};

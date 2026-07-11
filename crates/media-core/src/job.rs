@@ -251,7 +251,7 @@ impl JobState {
     pub fn transition(self, next: Self) -> Result<Self, JobTransitionError> {
         let allowed = matches!(
             (self, next),
-            (Self::Queued, Self::Leased)
+            (Self::Queued, Self::Leased | Self::Cancelled)
                 | (
                     Self::Leased,
                     Self::Running | Self::Queued | Self::CancelRequested
@@ -269,13 +269,21 @@ impl JobState {
                 | (Self::BlockedStorage, Self::Queued | Self::CancelRequested)
                 | (
                     Self::Publishing,
-                    Self::Queued | Self::PlexPending | Self::Failed
+                    Self::Queued | Self::CancelRequested | Self::PlexPending | Self::Failed
                 )
                 | (
                     Self::PlexPending,
-                    Self::Completed | Self::Partial | Self::NeedsAction | Self::Failed
+                    Self::Queued
+                        | Self::CancelRequested
+                        | Self::Completed
+                        | Self::Partial
+                        | Self::NeedsAction
+                        | Self::Failed
                 )
-                | (Self::NeedsAction, Self::Queued | Self::CancelRequested)
+                | (
+                    Self::NeedsAction,
+                    Self::Queued | Self::CancelRequested | Self::Cancelled
+                )
                 | (Self::Partial | Self::Failed, Self::Queued)
         );
 
@@ -313,8 +321,9 @@ mod tests {
         JobState::Cancelled,
     ];
 
-    const ALLOWED: [(JobState, JobState); 24] = [
+    const ALLOWED: [(JobState, JobState); 29] = [
         (JobState::Queued, JobState::Leased),
+        (JobState::Queued, JobState::Cancelled),
         (JobState::Leased, JobState::Running),
         (JobState::Leased, JobState::Queued),
         (JobState::Leased, JobState::CancelRequested),
@@ -329,13 +338,17 @@ mod tests {
         (JobState::BlockedStorage, JobState::CancelRequested),
         (JobState::Publishing, JobState::PlexPending),
         (JobState::Publishing, JobState::Queued),
+        (JobState::Publishing, JobState::CancelRequested),
         (JobState::Publishing, JobState::Failed),
+        (JobState::PlexPending, JobState::Queued),
+        (JobState::PlexPending, JobState::CancelRequested),
         (JobState::PlexPending, JobState::Completed),
         (JobState::PlexPending, JobState::Partial),
         (JobState::PlexPending, JobState::NeedsAction),
         (JobState::PlexPending, JobState::Failed),
         (JobState::NeedsAction, JobState::Queued),
         (JobState::NeedsAction, JobState::CancelRequested),
+        (JobState::NeedsAction, JobState::Cancelled),
         (JobState::Partial, JobState::Queued),
         (JobState::Failed, JobState::Queued),
     ];
@@ -379,7 +392,13 @@ mod tests {
 
     #[test]
     fn expired_active_jobs_can_resume_from_durable_checkpoints() {
-        for state in [JobState::Leased, JobState::Running, JobState::Publishing] {
+        for state in [
+            JobState::Leased,
+            JobState::Running,
+            JobState::BlockedStorage,
+            JobState::Publishing,
+            JobState::PlexPending,
+        ] {
             assert_eq!(
                 state.transition(JobState::Queued).unwrap(),
                 JobState::Queued,

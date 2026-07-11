@@ -3,6 +3,7 @@ mod m20260710_000002_media_identity;
 mod m20260710_000003_jobs;
 mod m20260710_000004_idempotency_leases;
 mod m20260711_000005_operation_receipts;
+mod m20260712_000006_job_orchestration;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseTransaction;
@@ -18,6 +19,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260710_000003_jobs::Migration),
             Box::new(m20260710_000004_idempotency_leases::Migration),
             Box::new(m20260711_000005_operation_receipts::Migration),
+            Box::new(m20260712_000006_job_orchestration::Migration),
         ]
     }
 }

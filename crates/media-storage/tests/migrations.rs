@@ -9,11 +9,12 @@ use support::{TestDatabase, assert_rejected, execute, query};
 const PRIMARY_ID: &str = "00000000-0000-0000-0000-000000000001";
 const SECONDARY_ID: &str = "00000000-0000-0000-0000-000000000002";
 
-const APPLICATION_TABLES: [&str; 13] = [
+const APPLICATION_TABLES: [&str; 15] = [
     "api_clients",
     "episode_provider_mappings",
     "episodes",
     "idempotency_records",
+    "job_events",
     "job_leases",
     "job_stages",
     "job_tasks",
@@ -21,6 +22,7 @@ const APPLICATION_TABLES: [&str; 13] = [
     "media",
     "media_external_refs",
     "operation_receipts",
+    "outbox_events",
     "seasons",
     "users",
 ];
@@ -129,6 +131,7 @@ async fn migrations_apply_seed_fixed_users_and_reverse_cleanly() {
         "episodes.metadata_snapshot",
         "job_stages.checkpoint",
         "job_stages.error_snapshot",
+        "job_events.payload",
         "job_tasks.checkpoint",
         "job_tasks.error_snapshot",
         "jobs.error_snapshot",
@@ -136,6 +139,7 @@ async fn migrations_apply_seed_fixed_users_and_reverse_cleanly() {
         "media.metadata_snapshot",
         "media_external_refs.provider_snapshot",
         "operation_receipts.result_snapshot",
+        "outbox_events.payload",
         "seasons.metadata_snapshot",
     ]
     .into_iter()
@@ -205,7 +209,7 @@ async fn migrations_apply_seed_fixed_users_and_reverse_cleanly() {
              'users', 'api_clients', 'media', 'media_external_refs',
              'seasons', 'episodes', 'episode_provider_mappings', 'jobs',
              'job_tasks', 'job_stages', 'idempotency_records', 'job_leases'
-             , 'operation_receipts'
+             , 'operation_receipts', 'job_events', 'outbox_events'
            ])",
     )
     .await;
@@ -457,9 +461,9 @@ async fn postgres_enforces_domain_and_concurrency_invariants() {
                ('00000000-0000-0020-0000-000000000002', '{PRIMARY_ID}', 'rezka',
                 'result-2', 'leased', 'initiator'),
                ('00000000-0000-0020-0000-000000000003', '{SECONDARY_ID}', 'prowlarr',
-                'result-3', 'leased', 'initiator'),
+                'result-3', 'queued', 'initiator'),
                ('00000000-0000-0020-0000-000000000004', '{SECONDARY_ID}', 'rezka',
-                'result-4', 'leased', 'family');
+                'result-4', 'queued', 'family');
              INSERT INTO job_leases
                (id, slot, job_id, runner_client_id, expires_at)
              VALUES
@@ -470,6 +474,14 @@ async fn postgres_enforces_domain_and_concurrency_invariants() {
     )
     .await
     .unwrap();
+
+    assert_rejected(
+        db,
+        "UPDATE jobs SET state = 'leased' \
+         WHERE id = '00000000-0000-0020-0000-000000000003'",
+        "jobs_single_active_idx",
+    )
+    .await;
 
     assert_rejected(
         db,

@@ -5,6 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
+use media_contract::{RunnerEventRequest, RunnerEventResponse};
 use media_core::{Actor, ApplicationError, LeaseId};
 use serde::Deserialize;
 
@@ -18,6 +19,7 @@ pub(super) fn routes() -> Router<ApiState> {
     Router::new()
         .route("/v1/runner/leases", post(lease_next))
         .route("/v1/runner/leases/{lease_id}/heartbeat", post(heartbeat))
+        .route("/v1/runner/leases/{lease_id}/events", post(report_event))
 }
 
 async fn lease_next(
@@ -75,6 +77,46 @@ async fn heartbeat(
                     Ok(dto) => Json(dto).into_response(),
                     Err(_) => ApiError::internal(&request_id).into_response(),
                 },
+                Err(error) => application_error(error, &request_id),
+            }
+        },
+    )
+    .await
+}
+
+async fn report_event(
+    State(state): State<ApiState>,
+    Extension(actor): Extension<Actor>,
+    Extension(request_id): Extension<RequestId>,
+    Path(lease_id): Path<String>,
+    request: Request,
+) -> Response {
+    idempotency::execute(
+        state,
+        actor,
+        request_id,
+        request,
+        move |state, actor, request_id, operation, body| async move {
+            let Ok(lease_id) = lease_id.parse::<LeaseId>() else {
+                return ApiError::invalid_request(&request_id, "lease ID is invalid")
+                    .into_response();
+            };
+            let event = serde_json::from_slice::<RunnerEventRequest>(&body)
+                .ok()
+                .and_then(|event| convert::runner_event(event).ok());
+            let Some(event) = event else {
+                return ApiError::invalid_request(&request_id, "runner event is invalid")
+                    .into_response();
+            };
+            match state
+                .leases()
+                .report_event(&actor, operation, lease_id, event)
+                .await
+            {
+                Ok(job) => Json(RunnerEventResponse {
+                    job: convert::job(&job),
+                })
+                .into_response(),
                 Err(error) => application_error(error, &request_id),
             }
         },
