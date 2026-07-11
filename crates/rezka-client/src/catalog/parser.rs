@@ -244,7 +244,7 @@ fn parse_continuation_target(
         url.path().to_owned()
     };
     let target = format!("{path}?{}", serializer.finish());
-    CatalogContinuation::from_normalized(target)
+    CatalogContinuation::from_normalized(target, query)
 }
 
 fn canonical_page_number(value: &str) -> Option<&str> {

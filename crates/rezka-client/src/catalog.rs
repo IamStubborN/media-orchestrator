@@ -1,6 +1,13 @@
 use std::fmt;
 
-use crate::{PublicImageUrl, RezkaError, redaction::sanitize_provider_text};
+use scraper::{Html, Selector};
+use url::Url;
+
+use crate::{
+    PublicImageUrl, RezkaError,
+    redaction::sanitize_provider_text,
+    session::{RezkaClient, anubis::detect_challenge},
+};
 
 pub mod parser;
 
@@ -69,26 +76,101 @@ impl fmt::Debug for TitleLocator {
     }
 }
 
-pub struct CatalogContinuation(String);
+pub struct CatalogContinuation {
+    target: String,
+    query: CatalogQuery,
+}
 
 impl CatalogContinuation {
-    pub(crate) fn from_normalized(value: String) -> Result<Self, RezkaError> {
+    pub(crate) fn from_normalized(value: String, query: &CatalogQuery) -> Result<Self, RezkaError> {
         if value.len() > MAX_CATALOG_CONTINUATION_BYTES {
             return Err(invalid_catalog("catalog continuation exceeds limit"));
         }
 
-        Ok(Self(value))
+        Ok(Self {
+            target: value,
+            query: CatalogQuery(query.as_str().to_owned()),
+        })
     }
 
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.target
     }
 }
 
 impl fmt::Debug for CatalogContinuation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("CatalogContinuation([REDACTED])")
+    }
+}
+
+impl RezkaClient {
+    pub async fn search(&mut self, query: &CatalogQuery) -> Result<CatalogPage, RezkaError> {
+        let url = initial_search_url(self.transport_mut().selected_origin(), query)?;
+        self.fetch_catalog_page(url, query).await
+    }
+
+    pub async fn search_next(
+        &mut self,
+        continuation: &CatalogContinuation,
+    ) -> Result<CatalogPage, RezkaError> {
+        let url = self
+            .transport_mut()
+            .selected_origin()
+            .join(continuation.as_str())
+            .map_err(|_| invalid_catalog("invalid catalog continuation"))?;
+        self.fetch_catalog_page(url, &continuation.query).await
+    }
+
+    async fn fetch_catalog_page(
+        &mut self,
+        url: Url,
+        query: &CatalogQuery,
+    ) -> Result<CatalogPage, RezkaError> {
+        let response = self
+            .transport_mut()
+            .get_first_with_failover(url, None)
+            .await?;
+        reject_catalog_access_page(&response.body)?;
+        let selected_origin = self.transport_mut().selected_origin().clone();
+
+        parser::parse_catalog_page(&response.body, query, &selected_origin)
+    }
+}
+
+fn initial_search_url(origin: &Url, query: &CatalogQuery) -> Result<Url, RezkaError> {
+    let mut url = origin
+        .join("/search/")
+        .map_err(|_| invalid_catalog("invalid catalog search endpoint"))?;
+    url.query_pairs_mut()
+        .append_pair("do", "search")
+        .append_pair("subaction", "search")
+        .append_pair("q", query.as_str());
+    Ok(url)
+}
+
+fn reject_catalog_access_page(html: &str) -> Result<(), RezkaError> {
+    if detect_challenge(html) {
+        return Err(RezkaError::ChallengeRequired {
+            context: sanitize_provider_text("catalog challenge required"),
+        });
+    }
+
+    let selector = Selector::parse("title").expect("static title selector is valid");
+    let title = Html::parse_document(html)
+        .select(&selector)
+        .next()
+        .map(|element| element.text().collect::<String>())
+        .map(|value| value.trim().to_owned());
+    match title.as_deref() {
+        Some("Sign In") => Err(RezkaError::AuthenticationRequired {
+            context: sanitize_provider_text("catalog authentication required"),
+        }),
+        Some("Verify") => Err(RezkaError::ChallengeRequired {
+            context: sanitize_provider_text("catalog verification required"),
+        }),
+        _ => Ok(()),
     }
 }
 
@@ -307,17 +389,23 @@ fn decode_hex(value: Option<u8>) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CatalogContinuation, MAX_CATALOG_CONTINUATION_BYTES};
+    use super::{CatalogContinuation, CatalogQuery, MAX_CATALOG_CONTINUATION_BYTES};
 
     #[test]
     fn continuation_budget_accepts_the_boundary_and_rejects_the_next_byte() {
         assert!(
-            CatalogContinuation::from_normalized("x".repeat(MAX_CATALOG_CONTINUATION_BYTES))
-                .is_ok()
+            CatalogContinuation::from_normalized(
+                "x".repeat(MAX_CATALOG_CONTINUATION_BYTES),
+                &CatalogQuery::new("query").unwrap(),
+            )
+            .is_ok()
         );
         assert!(
-            CatalogContinuation::from_normalized("x".repeat(MAX_CATALOG_CONTINUATION_BYTES + 1))
-                .is_err()
+            CatalogContinuation::from_normalized(
+                "x".repeat(MAX_CATALOG_CONTINUATION_BYTES + 1),
+                &CatalogQuery::new("query").unwrap(),
+            )
+            .is_err()
         );
     }
 }

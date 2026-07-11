@@ -1,7 +1,15 @@
 use rezka_client::{
-    CatalogQuery, RezkaErrorCode, TitleLocator, catalog::parser::parse_catalog_page,
+    CatalogQuery, RezkaErrorCode, TitleLocator,
+    catalog::parser::parse_catalog_page,
+    mirror::MirrorSet,
+    session::{RezkaClient, RezkaClientConfig},
 };
+use time::Duration;
 use url::Url;
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{header, method, path, query_param, query_param_is_missing},
+};
 
 const ORIGIN: &str = "https://rezka.test/";
 
@@ -11,6 +19,16 @@ fn query() -> CatalogQuery {
 
 fn origin() -> Url {
     Url::parse(ORIGIN).unwrap()
+}
+
+fn client_config(origins: Vec<Url>, max_retries: u8) -> RezkaClientConfig {
+    RezkaClientConfig {
+        mirrors: MirrorSet::new(origins).unwrap(),
+        user_agent: "media-orchestrator-test".to_owned(),
+        request_timeout: Duration::seconds(2),
+        max_retries,
+        anubis_max_nonce: 1,
+    }
 }
 
 fn page_with_next(hrefs: &[&str]) -> String {
@@ -350,6 +368,168 @@ fn catalog_debug_and_errors_do_not_leak_provider_data() {
     .unwrap_err();
     let rendered = format!("{error:?}: {error}");
     for forbidden in ["query-secret", "foreign-secret", "https://"] {
+        assert!(
+            !rendered.contains(forbidden),
+            "error leaked {forbidden}: {rendered}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn search_constructs_the_exact_query_and_search_next_uses_one_cookie_bearing_request() {
+    let server = MockServer::start().await;
+    let origin = Url::parse(&server.uri()).unwrap();
+    let initial_page = r#"
+        <div class="b-content__inline_items">
+          <div class="b-content__inline_item">
+            <div class="b-content__inline_item-link"><a href="/films/1-first.html">First</a></div>
+          </div>
+        </div>
+        <a href="/search/?do=search&subaction=search&q=query+two&page=2">
+          <span class="b-navigation__next">Next</span>
+        </a>
+    "#;
+    let next_page = r#"
+        <div class="b-content__inline_items">
+          <div class="b-content__inline_item">
+            <div class="b-content__inline_item-link"><a href="/films/2-second.html">Second</a></div>
+          </div>
+        </div>
+    "#;
+
+    Mock::given(method("GET"))
+        .and(path("/search/"))
+        .and(query_param("do", "search"))
+        .and(query_param("subaction", "search"))
+        .and(query_param("q", "query two"))
+        .and(query_param_is_missing("page"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("set-cookie", "catalog_session=opaque; Path=/")
+                .set_body_string(initial_page),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/search/"))
+        .and(query_param("do", "search"))
+        .and(query_param("subaction", "search"))
+        .and(query_param("q", "query two"))
+        .and(query_param("page", "2"))
+        .and(header("cookie", "catalog_session=opaque"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(next_page))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut client = RezkaClient::new(client_config(vec![origin], 0)).unwrap();
+    let page = client
+        .search(&CatalogQuery::new("  query two  ").unwrap())
+        .await
+        .unwrap();
+    let continuation = page.continuation().unwrap();
+    assert_eq!(
+        continuation.as_str(),
+        "/search/?do=search&subaction=search&q=query+two&page=2"
+    );
+
+    let next = client.search_next(continuation).await.unwrap();
+    assert_eq!(next.entries().len(), 1);
+    assert_eq!(next.entries()[0].title(), "Second");
+}
+
+#[tokio::test]
+async fn search_failover_rewrites_to_the_selected_origin_before_parsing_continuations() {
+    let first = MockServer::start().await;
+    let first_origin = Url::parse(&first.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/search/"))
+        .and(query_param("do", "search"))
+        .and(query_param("subaction", "search"))
+        .and(query_param("q", "query"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&first)
+        .await;
+
+    let second = MockServer::start().await;
+    let second_origin = Url::parse(&second.uri()).unwrap();
+    let continuation = format!("{second_origin}search/?do=search&subaction=search&q=query&page=2");
+    let page = format!(
+        r#"<div class="b-content__inline_items">
+              <div class="b-content__inline_item">
+                <div class="b-content__inline_item-link"><a href="/films/1-first.html">First</a></div>
+              </div>
+            </div>
+            <a href="{continuation}"><span class="b-navigation__next">Next</span></a>"#
+    );
+    Mock::given(method("GET"))
+        .and(path("/search/"))
+        .and(query_param("do", "search"))
+        .and(query_param("subaction", "search"))
+        .and(query_param("q", "query"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(page))
+        .expect(1)
+        .mount(&second)
+        .await;
+
+    let mut client = RezkaClient::new(client_config(vec![first_origin, second_origin], 1)).unwrap();
+    let page = client.search(&query()).await.unwrap();
+
+    assert_eq!(
+        page.continuation().unwrap().as_str(),
+        "/search/?do=search&subaction=search&q=query&page=2"
+    );
+}
+
+#[tokio::test]
+async fn catalog_access_pages_are_rejected_before_catalog_parsing() {
+    for (body, expected) in [
+        (
+            r#"<script id="anubis_challenge">malformed-secret</script>"#,
+            RezkaErrorCode::ChallengeRequired,
+        ),
+        (
+            "<title>Sign In</title>",
+            RezkaErrorCode::AuthenticationRequired,
+        ),
+        ("<title>Verify</title>", RezkaErrorCode::ChallengeRequired),
+    ] {
+        let server = MockServer::start().await;
+        let origin = Url::parse(&server.uri()).unwrap();
+        Mock::given(method("GET"))
+            .and(path("/search/"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut client = RezkaClient::new(client_config(vec![origin], 0)).unwrap();
+        let error = client.search(&query()).await.unwrap_err();
+        assert_eq!(error.code(), expected);
+    }
+}
+
+#[tokio::test]
+async fn catalog_transport_errors_do_not_leak_the_query_or_response_body() {
+    let server = MockServer::start().await;
+    let origin = Url::parse(&server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/search/"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("provider-body-secret"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut client = RezkaClient::new(client_config(vec![origin], 0)).unwrap();
+    let error = client
+        .search(&CatalogQuery::new("query-secret").unwrap())
+        .await
+        .unwrap_err();
+    let rendered = format!("{error:?}: {error}");
+
+    for forbidden in ["query-secret", "provider-body-secret"] {
         assert!(
             !rendered.contains(forbidden),
             "error leaked {forbidden}: {rendered}"

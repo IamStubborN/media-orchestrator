@@ -1428,3 +1428,84 @@ async fn rate_limit_is_terminal_and_does_not_select_the_next_mirror() {
     assert_eq!(error.code(), rezka_client::RezkaErrorCode::RateLimited);
     assert_eq!(transport.selected_origin(), &first_origin);
 }
+
+#[tokio::test]
+async fn non_title_operations_continue_to_reject_not_found_statuses() {
+    use rezka_client::{
+        RezkaErrorCode,
+        session::{
+            RezkaClient, RezkaClientConfig, SessionValidationProbe,
+            anubis::{AnubisChallenge, AnubisProof, submit_challenge},
+        },
+        transport::Transport,
+    };
+    use time::Duration;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    let server = MockServer::start().await;
+    let origin = Url::parse(&server.uri()).unwrap();
+    for (request_method, request_path) in [
+        ("GET", "/generic"),
+        ("GET", "/account/probe"),
+        ("GET", "/.within.website/x/cmd/anubis/api/pass-challenge"),
+    ] {
+        Mock::given(method(request_method))
+            .and(path(request_path))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![origin.clone()]).unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        Duration::seconds(2),
+        0,
+    )
+    .unwrap();
+    let error = transport
+        .get_first(origin.join("/generic").unwrap(), None)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), RezkaErrorCode::ProviderResponseInvalid);
+
+    let probe = SessionValidationProbe::new(
+        origin.join("/account/probe").unwrap(),
+        vec!["valid".to_owned()],
+        vec!["invalid".to_owned()],
+    )
+    .unwrap();
+    let mut client = RezkaClient::new(RezkaClientConfig {
+        mirrors: MirrorSet::new(vec![origin.clone()]).unwrap(),
+        user_agent: "media-orchestrator-test".to_owned(),
+        request_timeout: Duration::seconds(2),
+        max_retries: 0,
+        anubis_max_nonce: 1,
+    })
+    .unwrap();
+    let error = client.fetch_probe(&probe).await.unwrap_err();
+    assert_eq!(error.code(), RezkaErrorCode::ProviderResponseInvalid);
+
+    let error = submit_challenge(
+        &mut transport,
+        &AnubisChallenge {
+            id: "challenge".to_owned(),
+            random_data: "random".to_owned(),
+            difficulty: 1,
+        },
+        &AnubisProof {
+            response_hex: "proof".to_owned(),
+            nonce: 0,
+        },
+        origin.join("/redir").unwrap(),
+        0,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code(), RezkaErrorCode::ProviderResponseInvalid);
+}
