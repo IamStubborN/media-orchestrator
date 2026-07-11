@@ -9,7 +9,7 @@ use support::{TestDatabase, assert_rejected, execute, query};
 const PRIMARY_ID: &str = "00000000-0000-0000-0000-000000000001";
 const SECONDARY_ID: &str = "00000000-0000-0000-0000-000000000002";
 
-const APPLICATION_TABLES: [&str; 12] = [
+const APPLICATION_TABLES: [&str; 13] = [
     "api_clients",
     "episode_provider_mappings",
     "episodes",
@@ -20,6 +20,7 @@ const APPLICATION_TABLES: [&str; 12] = [
     "jobs",
     "media",
     "media_external_refs",
+    "operation_receipts",
     "seasons",
     "users",
 ];
@@ -134,6 +135,7 @@ async fn migrations_apply_seed_fixed_users_and_reverse_cleanly() {
         "jobs.request_snapshot",
         "media.metadata_snapshot",
         "media_external_refs.provider_snapshot",
+        "operation_receipts.result_snapshot",
         "seasons.metadata_snapshot",
     ]
     .into_iter()
@@ -203,6 +205,7 @@ async fn migrations_apply_seed_fixed_users_and_reverse_cleanly() {
              'users', 'api_clients', 'media', 'media_external_refs',
              'seasons', 'episodes', 'episode_provider_mappings', 'jobs',
              'job_tasks', 'job_stages', 'idempotency_records', 'job_leases'
+             , 'operation_receipts'
            ])",
     )
     .await;
@@ -273,6 +276,61 @@ async fn postgres_enforces_domain_and_concurrency_invariants() {
            ('00000000-0000-0001-0000-000000000001', 'ownerless-hermes',
             'hermes', NULL, decode(repeat('01', 32), 'hex'))",
         "api_clients_fixed_identity_check",
+    )
+    .await;
+
+    assert_rejected(
+        db,
+        "INSERT INTO operation_receipts
+           (id, operation_key, operation_kind, result_kind)
+         VALUES ('00000000-0000-0024-0000-000000000001',
+                 decode(repeat('01', 31), 'hex'), 'create_job', 'pending')",
+        "operation_receipts_key_length_check",
+    )
+    .await;
+    assert_rejected(
+        db,
+        "INSERT INTO operation_receipts
+           (id, operation_key, operation_kind, result_kind, result_snapshot)
+         VALUES ('00000000-0000-0024-0000-000000000006',
+                 decode(repeat('06', 32), 'hex'), 'create_job', 'lease', '{}'::jsonb)",
+        "operation_receipts_kind_result_check",
+    )
+    .await;
+    assert_rejected(
+        db,
+        "INSERT INTO operation_receipts
+           (id, operation_key, operation_kind, result_kind)
+         VALUES ('00000000-0000-0024-0000-000000000002',
+                 decode(repeat('02', 32), 'hex'), 'unknown', 'pending')",
+        "operation_receipts_kind_check",
+    )
+    .await;
+    assert_rejected(
+        db,
+        "INSERT INTO operation_receipts
+           (id, operation_key, operation_kind, result_kind, result_snapshot)
+         VALUES ('00000000-0000-0024-0000-000000000003',
+                 decode(repeat('03', 32), 'hex'), 'lease_next', 'none', '{}'::jsonb)",
+        "operation_receipts_result_shape_check",
+    )
+    .await;
+    execute(
+        db,
+        "INSERT INTO operation_receipts
+           (id, operation_key, operation_kind, result_kind)
+         VALUES ('00000000-0000-0024-0000-000000000004',
+                 decode(repeat('04', 32), 'hex'), 'heartbeat', 'pending')",
+    )
+    .await
+    .unwrap();
+    assert_rejected(
+        db,
+        "INSERT INTO operation_receipts
+           (id, operation_key, operation_kind, result_kind)
+         VALUES ('00000000-0000-0024-0000-000000000005',
+                 decode(repeat('04', 32), 'hex'), 'heartbeat', 'pending')",
+        "operation_receipts_operation_key_key",
     )
     .await;
 

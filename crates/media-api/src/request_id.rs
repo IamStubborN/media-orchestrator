@@ -16,6 +16,11 @@ impl RequestId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(value: &str) -> Self {
+        Self(value.to_owned())
+    }
 }
 
 pub(crate) async fn assign(mut request: Request, next: Next) -> Response {

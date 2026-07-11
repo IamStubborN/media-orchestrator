@@ -7,7 +7,7 @@ mod idempotency;
 mod request_id;
 mod route;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use axum::{Router, extract::DefaultBodyLimit, middleware};
 use media_core::{ClientStore, JobApplication, LeaseApplication, ReadinessPort};
@@ -23,6 +23,10 @@ const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 // Conservative application-level budgets, independent of proxy/server defaults.
 const MAX_REQUEST_HEADER_COUNT: usize = 64;
 const MAX_REQUEST_HEADER_BYTES: usize = 16 * 1024;
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Copy, Clone)]
+pub(crate) struct RequestTimeout(Duration);
 
 /// Dependencies required by HTTP delivery. Concrete adapters are composed outside this crate.
 #[derive(Clone)]
@@ -73,6 +77,15 @@ impl ApiState {
 /// The request-ID layer is deliberately outermost so every downstream response,
 /// including authentication failures, carries the same correlation ID.
 pub fn build_router(state: ApiState, protected: Router<ApiState>) -> Router {
+    build_router_with_request_timeout(state, protected, DEFAULT_REQUEST_TIMEOUT)
+}
+
+/// Builds the API with an explicit deadline for focused timeout tests.
+pub fn build_router_with_request_timeout(
+    state: ApiState,
+    protected: Router<ApiState>,
+    request_timeout: Duration,
+) -> Router {
     let protected = route::protected_routes().merge(protected);
     let protected = if protected.has_routes() {
         protected.route_layer(middleware::from_fn_with_state(
@@ -88,6 +101,10 @@ pub fn build_router(state: ApiState, protected: Router<ApiState>) -> Router {
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .layer(middleware::from_fn(error::enforce_request_limits))
+        .layer(middleware::from_fn_with_state(
+            RequestTimeout(request_timeout),
+            error::enforce_request_timeout,
+        ))
         .layer(middleware::from_fn(request_id::assign))
 }
 

@@ -1,7 +1,7 @@
 use crate::{
     Actor, BootstrapClient, CanonicalEpisode, CanonicalMedia, CanonicalSeason, ClientId,
     CredentialDigest, EpisodeProviderMapping, ExternalNamespace, Job, JobId, JobLease, LeaseId,
-    MediaExternalReference, NewJob, QueueStatus, UserId,
+    MediaExternalReference, NewJob, OperationKey, QueueStatus, UserId,
 };
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
@@ -21,7 +21,7 @@ pub trait ClientStore: Send + Sync {
 
 #[async_trait::async_trait]
 pub trait JobStore: Send + Sync {
-    async fn create(&self, job: NewJob) -> Result<Job, PortError>;
+    async fn create(&self, operation: OperationKey, job: NewJob) -> Result<Job, PortError>;
 
     async fn find_for_owner(&self, id: JobId, owner: UserId) -> Result<Option<Job>, PortError>;
 
@@ -32,12 +32,14 @@ pub trait JobStore: Send + Sync {
 pub trait LeaseStore: Send + Sync {
     async fn lease_next(
         &self,
+        operation: OperationKey,
         runner: ClientId,
         ttl: time::Duration,
     ) -> Result<Option<JobLease>, PortError>;
 
     async fn heartbeat(
         &self,
+        operation: OperationKey,
         lease: LeaseId,
         runner: ClientId,
         ttl: time::Duration,

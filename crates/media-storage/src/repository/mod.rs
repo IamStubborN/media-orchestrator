@@ -3,6 +3,7 @@ mod idempotency;
 mod identity;
 mod job;
 mod lease;
+mod operation;
 mod readiness;
 
 pub use client::SeaOrmClientStore;

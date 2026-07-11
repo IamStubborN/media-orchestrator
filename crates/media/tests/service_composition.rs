@@ -30,7 +30,11 @@ use testcontainers::{
     core::{IntoContainerPort, WaitFor},
     runners::AsyncRunner,
 };
-use tokio::{net::TcpListener, sync::oneshot};
+use tokio::{
+    io::AsyncWriteExt,
+    net::{TcpListener, TcpStream},
+    sync::oneshot,
+};
 #[cfg(unix)]
 use wait_timeout::ChildExt;
 
@@ -368,23 +372,21 @@ async fn storage_adapter_maps_every_reservation_variant_and_preserves_generation
         )
         .await
         .unwrap();
-    let replay_handle = match adapter.reserve(request("replay", 3)).await.unwrap() {
+    match adapter.reserve(request("replay", 3)).await.unwrap() {
         Reservation::Replay { handle, response } => {
             assert_eq!(handle.generation(), replay_source.generation());
             assert_eq!(response.status(), 201);
             assert_eq!(response.content_type(), "");
             assert_eq!(response.body(), b"created");
-            handle
         }
         other => panic!("expected replay, got {other:?}"),
     };
 
     adapter.abort_in_progress(&in_progress).await.unwrap();
-    adapter.discard_completed(&replay_handle).await.unwrap();
 }
 
 #[tokio::test]
-async fn storage_adapter_forwards_the_exact_generation_for_complete_abort_and_discard() {
+async fn storage_adapter_forwards_the_exact_generation_for_complete_and_abort() {
     let (database, _) = migrated_service().await;
     let adapter =
         StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(database.connect().await));
@@ -419,19 +421,10 @@ async fn storage_adapter_forwards_the_exact_generation_for_complete_abort_and_di
         Reservation::Replay { handle, .. } => handle,
         other => panic!("expected replay, got {other:?}"),
     };
-
-    let wrong_discard = IdempotencyHandle::new(
-        request("complete", 5),
-        IdempotencyGeneration::from_uuid(uuid::Uuid::new_v4()),
-    );
-    assert_eq!(
-        adapter.discard_completed(&wrong_discard).await,
-        Err(IdempotencyError::Conflict)
-    );
-    adapter.discard_completed(&replay_handle).await.unwrap();
+    assert_eq!(replay_handle.generation(), complete_handle.generation());
     assert!(matches!(
         adapter.reserve(request("complete", 5)).await.unwrap(),
-        Reservation::Reserved(_)
+        Reservation::Replay { .. }
     ));
 }
 
@@ -461,11 +454,6 @@ async fn storage_adapter_lifecycle_is_stateless_across_adapter_instances() {
         other => panic!("expected replay, got {other:?}"),
     };
     assert_eq!(replay.generation(), handle.generation());
-
-    StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(database.connect().await))
-        .discard_completed(&replay)
-        .await
-        .expect("a fresh adapter must discard by the exact replay generation");
 
     let aborting =
         StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(database.connect().await));
@@ -516,6 +504,44 @@ async fn prepared_service_serves_on_an_ephemeral_loopback_listener_and_stops_gra
         .expect("service shutdown must be bounded")
         .expect("service task must not panic")
         .expect("service must stop cleanly");
+}
+
+#[tokio::test]
+async fn graceful_shutdown_deadline_terminates_a_never_finishing_connection() {
+    let (_database, config) = migrated_service().await;
+    let prepared = prepare_service(&config).await.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (shutdown, receiver) = oneshot::channel();
+    let task = tokio::spawn(prepared.serve_with_shutdown_timeout(
+        listener,
+        async move {
+            let _ = receiver.await;
+        },
+        Duration::from_millis(20),
+    ));
+
+    let mut connection = TcpStream::connect(address).await.unwrap();
+    connection
+        .write_all(b"GET /v1/health HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\n\r\n")
+        .await
+        .unwrap();
+    assert!(
+        reqwest::get(format!("http://{address}/v1/health"))
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+
+    shutdown.send(()).unwrap();
+    let result = tokio::time::timeout(Duration::from_millis(250), task)
+        .await
+        .expect("the hard shutdown deadline must bound the serving future")
+        .expect("the service task must not panic");
+
+    assert_eq!(result, Err(ServiceError::ShutdownTimeout));
+    drop(connection);
 }
 
 #[cfg(unix)]

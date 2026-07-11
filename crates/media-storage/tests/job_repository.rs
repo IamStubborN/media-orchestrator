@@ -4,7 +4,7 @@ use media_core::{
     PRIMARY_USER_ID, JobId, JobState, JobStore, NewJob, NotifyScope, Provider, SECONDARY_USER_ID,
 };
 use media_storage::SeaOrmJobStore;
-use support::TestDatabase;
+use support::{TestDatabase, operation_key, query};
 
 fn new_job(owner: media_core::UserId, provider: Provider, reference: &str) -> NewJob {
     NewJob::new(
@@ -24,8 +24,14 @@ async fn jobs_round_trip_as_domain_values_and_reads_are_owner_scoped_in_sql() {
     let primary_job = new_job(PRIMARY_USER_ID, Provider::Rezka, "rezka:selection:1");
     let secondary_job = new_job(SECONDARY_USER_ID, Provider::Prowlarr, "prowlarr:result:2");
 
-    let created = store.create(primary_job.clone()).await.unwrap();
-    store.create(secondary_job.clone()).await.unwrap();
+    let created = store
+        .create(operation_key(), primary_job.clone())
+        .await
+        .unwrap();
+    store
+        .create(operation_key(), secondary_job.clone())
+        .await
+        .unwrap();
 
     assert_eq!(created.id(), primary_job.id());
     assert_eq!(created.owner_id(), PRIMARY_USER_ID);
@@ -54,11 +60,17 @@ async fn queue_status_counts_only_queued_jobs_and_reports_a_live_lease() {
     let test_db = TestDatabase::start_migrated().await;
     let store = SeaOrmJobStore::new(test_db.connection().clone());
     let first = store
-        .create(new_job(PRIMARY_USER_ID, Provider::Rezka, "first"))
+        .create(
+            operation_key(),
+            new_job(PRIMARY_USER_ID, Provider::Rezka, "first"),
+        )
         .await
         .unwrap();
     store
-        .create(new_job(SECONDARY_USER_ID, Provider::Prowlarr, "second"))
+        .create(
+            operation_key(),
+            new_job(SECONDARY_USER_ID, Provider::Prowlarr, "second"),
+        )
         .await
         .unwrap();
 
@@ -76,4 +88,29 @@ async fn queue_status_counts_only_queued_jobs_and_reports_a_live_lease() {
     let status = store.queue_status().await.unwrap();
     assert_eq!(status.queued, 1);
     assert!(!status.active);
+}
+
+#[tokio::test]
+async fn repeated_operation_key_returns_the_original_job_without_a_second_insert() {
+    let test_db = TestDatabase::start_migrated().await;
+    let first_store = SeaOrmJobStore::new(test_db.connection().clone());
+    let key = operation_key();
+    let first_input = new_job(PRIMARY_USER_ID, Provider::Rezka, "durable-create");
+
+    let first = first_store.create(key, first_input).await.unwrap();
+    drop(first_store);
+
+    let second_input = new_job(PRIMARY_USER_ID, Provider::Rezka, "durable-create");
+    let replayed = SeaOrmJobStore::new(test_db.connect().await)
+        .create(key, second_input)
+        .await
+        .unwrap();
+
+    assert_eq!(replayed, first);
+    assert_eq!(
+        query(test_db.connection(), "SELECT id FROM jobs")
+            .await
+            .len(),
+        1,
+    );
 }

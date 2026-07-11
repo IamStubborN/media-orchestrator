@@ -6,6 +6,7 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use axum::{
@@ -15,8 +16,11 @@ use axum::{
     http::{HeaderName, HeaderValue, Request, StatusCode, header},
     routing::post,
 };
-use futures_util::stream;
-use media_api::{ApiState, IdempotencyRequest, RequestId, build_router, router};
+use futures_util::{StreamExt, stream};
+use media_api::{
+    ApiState, IdempotencyRequest, RequestId, build_router, build_router_with_request_timeout,
+    router,
+};
 use media_contract::{ApiError as ErrorBody, ApiErrorCode};
 use media_core::{PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole};
 use tower::ServiceExt;
@@ -70,6 +74,26 @@ fn recording_app(
             Arc::new(idempotency),
         ),
         protected,
+    )
+}
+
+fn recording_app_with_timeout(
+    handler_calls: Arc<AtomicUsize>,
+    idempotency: RecordingIdempotencyStore,
+    timeout: Duration,
+) -> Router {
+    let actor = Actor::new(PRIMARY_CLIENT_ID, Some(PRIMARY_USER_ID), ClientRole::Hermes).unwrap();
+    let protected = Router::new()
+        .route("/test/raw", post(raw_recording_handler))
+        .layer(Extension(handler_calls));
+    build_router_with_request_timeout(
+        state_with_idempotency(
+            FakeClientStore::new([(VALID_TOKEN, actor)]),
+            FakeReadiness::ready(),
+            Arc::new(idempotency),
+        ),
+        protected,
+        timeout,
     )
 }
 
@@ -302,6 +326,43 @@ async fn raw_streaming_body_at_the_limit_reaches_handler_and_idempotency() {
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert_eq!(handler_calls.load(Ordering::SeqCst), 1);
     assert_eq!(idempotency.calls(), 1);
+}
+
+#[tokio::test]
+async fn request_timeout_bounds_a_never_finishing_small_body_before_handler_execution() {
+    let handler_calls = Arc::new(AtomicUsize::new(0));
+    let idempotency = RecordingIdempotencyStore::default();
+    let app = recording_app_with_timeout(
+        handler_calls.clone(),
+        idempotency.clone(),
+        Duration::from_millis(20),
+    );
+    let body =
+        stream::iter([Ok::<_, Infallible>(Bytes::from_static(b"x"))]).chain(stream::pending());
+    let request = Request::post("/test/raw")
+        .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+        .header("x-request-id", "request-timeout")
+        .body(Body::from_stream(body))
+        .unwrap();
+
+    let response = tokio::time::timeout(Duration::from_millis(250), app.oneshot(request))
+        .await
+        .expect("the application deadline must bound the request")
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    assert_eq!(response.headers()["x-request-id"], "request-timeout");
+    let body: ErrorBody = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body.code, ApiErrorCode::Internal);
+    assert_eq!(body.message, "request timed out");
+    assert_eq!(body.request_id, "request-timeout");
+    assert_eq!(handler_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(idempotency.calls(), 0);
 }
 
 #[tokio::test]

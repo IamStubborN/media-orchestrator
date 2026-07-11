@@ -7,20 +7,15 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use media_contract::ApiError as ErrorBody;
-use media_core::{Actor, ClientId, MAX_RESULT_REF_BYTES};
+use media_core::{Actor, ClientId, OperationKey};
 use sha2::{Digest, Sha256};
 
 use crate::{ApiError, ApiState, MAX_REQUEST_BODY_BYTES, RequestId, request_id::REQUEST_ID_HEADER};
 
 const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
-// Current POST responses echo at most one request-bounded result_ref and add
-// fixed IDs, enum names, timestamps, and JSON framing. A second request-sized
-// allowance is therefore a conservative bound for every current route.
-const MAX_CURRENT_ROUTE_RESPONSE_BYTES: usize = MAX_RESULT_REF_BYTES + 1024;
-const MAX_STORED_RESPONSE_BYTES: usize = 2 * MAX_REQUEST_BODY_BYTES;
-const _: () = assert!(MAX_REQUEST_BODY_BYTES == MAX_RESULT_REF_BYTES);
-const _: () = assert!(MAX_STORED_RESPONSE_BYTES >= MAX_CURRENT_ROUTE_RESPONSE_BYTES);
+const OPERATION_KEY_DOMAIN: &[u8] = b"media-orchestrator:operation-key:v1";
+const MAX_STORED_RESPONSE_BYTES: usize = 1024 * 1024;
 
 /// Identity and fingerprint of one authenticated write request.
 #[derive(Clone, Eq, PartialEq)]
@@ -227,8 +222,6 @@ pub trait IdempotencyStore: Send + Sync {
     ) -> Result<(), IdempotencyError>;
 
     async fn abort_in_progress(&self, handle: &IdempotencyHandle) -> Result<(), IdempotencyError>;
-
-    async fn discard_completed(&self, handle: &IdempotencyHandle) -> Result<(), IdempotencyError>;
 }
 
 pub(crate) async fn execute<F, Fut>(
@@ -239,7 +232,7 @@ pub(crate) async fn execute<F, Fut>(
     operation: F,
 ) -> Response
 where
-    F: FnOnce(ApiState, Actor, RequestId, Vec<u8>) -> Fut,
+    F: FnOnce(ApiState, Actor, RequestId, OperationKey, Vec<u8>) -> Fut,
     Fut: Future<Output = Response>,
 {
     let key = match idempotency_key(request.headers(), &request_id) {
@@ -254,16 +247,14 @@ where
     };
     let fingerprint = fingerprint(actor.client_id(), &method, &path, &body);
     let idempotency_request = IdempotencyRequest::new(actor.client_id(), key, fingerprint);
+    let operation_key = operation_key(&idempotency_request);
 
     let handle = match state.idempotency().reserve(idempotency_request).await {
         Ok(Reservation::Reserved(handle)) => handle,
-        Ok(Reservation::Replay { handle, response }) => {
+        Ok(Reservation::Replay { response, .. }) => {
             return match replay(response, &request_id) {
                 Some(response) => response,
-                None => {
-                    let _ = state.idempotency().discard_completed(&handle).await;
-                    ApiError::internal(&request_id).into_response()
-                }
+                None => ApiError::internal(&request_id).into_response(),
             };
         }
         Ok(Reservation::Conflict) => {
@@ -275,7 +266,14 @@ where
         Err(_) => return ApiError::internal(&request_id).into_response(),
     };
 
-    let response = operation(state.clone(), actor, request_id.clone(), body.to_vec()).await;
+    let response = operation(
+        state.clone(),
+        actor,
+        request_id.clone(),
+        operation_key,
+        body.to_vec(),
+    )
+    .await;
     let Some((stored, response)) = buffer(response, &request_id).await else {
         let _ = state.idempotency().abort_in_progress(&handle).await;
         return ApiError::internal(&request_id).into_response();
@@ -342,6 +340,20 @@ fn fingerprint(client_id: ClientId, method: &[u8], path: &[u8], body: &[u8]) -> 
     digest.finalize().into()
 }
 
+fn operation_key(request: &IdempotencyRequest) -> OperationKey {
+    let mut digest = Sha256::new();
+    for field in [
+        OPERATION_KEY_DOMAIN,
+        request.client_id().as_uuid().as_bytes().as_slice(),
+        request.key().as_bytes(),
+        request.fingerprint().as_slice(),
+    ] {
+        digest.update((field.len() as u64).to_be_bytes());
+        digest.update(field);
+    }
+    OperationKey::from_bytes(digest.finalize().into())
+}
+
 async fn buffer(
     response: Response,
     request_id: &RequestId,
@@ -384,10 +396,14 @@ fn replay(stored: StoredHttpResponse, fallback_request_id: &RequestId) -> Option
 
 #[cfg(test)]
 mod tests {
+    use axum::{body::Body, response::Response};
     use media_core::{PRIMARY_CLIENT_ID, ClientId};
 
+    use crate::RequestId;
+
     use super::{
-        IdempotencyError, IdempotencyRequest, IdempotencyStore, StoredHttpResponse, fingerprint,
+        IdempotencyError, IdempotencyRequest, IdempotencyStore, StoredHttpResponse, buffer,
+        fingerprint, operation_key,
     };
 
     #[test]
@@ -453,6 +469,71 @@ mod tests {
             fingerprint(PRIMARY_CLIENT_ID, b"PO", b"ST/v1/jobs", b"body"),
             fingerprint(PRIMARY_CLIENT_ID, b"POST", b"/v1/jobs", b"body"),
             "length-prefixing must make field boundaries unambiguous",
+        );
+    }
+
+    #[test]
+    fn operation_key_is_deterministic_and_separates_every_authenticated_input() {
+        let other_client = ClientId::new();
+        let base = IdempotencyRequest::new(PRIMARY_CLIENT_ID, "private-key".to_owned(), [0x11; 32]);
+
+        assert_eq!(operation_key(&base), operation_key(&base));
+        assert_ne!(
+            operation_key(&base),
+            operation_key(&IdempotencyRequest::new(
+                other_client,
+                "private-key".to_owned(),
+                [0x11; 32],
+            )),
+        );
+        assert_ne!(
+            operation_key(&base),
+            operation_key(&IdempotencyRequest::new(
+                PRIMARY_CLIENT_ID,
+                "other-key".to_owned(),
+                [0x11; 32],
+            )),
+        );
+        assert_ne!(
+            operation_key(&base),
+            operation_key(&IdempotencyRequest::new(
+                PRIMARY_CLIENT_ID,
+                "private-key".to_owned(),
+                [0x22; 32],
+            )),
+        );
+        assert_eq!(
+            format!("{:?}", operation_key(&base)),
+            "OperationKey([REDACTED])"
+        );
+    }
+
+    #[tokio::test]
+    async fn buffered_response_accepts_exactly_one_mebibyte() {
+        let response = Response::new(Body::from(vec![0x5a; 1024 * 1024]));
+
+        let (stored, replayed) = buffer(response, &RequestId::for_test("one-mib"))
+            .await
+            .expect("the binding 1 MiB boundary must be accepted");
+
+        assert_eq!(stored.body().len(), 1024 * 1024);
+        assert_eq!(
+            axum::body::to_bytes(replayed.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .len(),
+            1024 * 1024,
+        );
+    }
+
+    #[tokio::test]
+    async fn buffered_response_rejects_one_byte_over_one_mebibyte() {
+        let response = Response::new(Body::from(vec![0x5a; 1024 * 1024 + 1]));
+
+        assert!(
+            buffer(response, &RequestId::for_test("over-one-mib"))
+                .await
+                .is_none()
         );
     }
 }

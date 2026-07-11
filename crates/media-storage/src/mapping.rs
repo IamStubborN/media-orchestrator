@@ -392,14 +392,14 @@ pub(crate) fn parse_job_state(value: &str) -> Result<JobState, MappingError> {
     }
 }
 
-const fn notify_scope_value(value: NotifyScope) -> &'static str {
+pub(crate) const fn notify_scope_value(value: NotifyScope) -> &'static str {
     match value {
         NotifyScope::Initiator => "initiator",
         NotifyScope::Family => "family",
     }
 }
 
-fn parse_notify_scope(value: &str) -> Result<NotifyScope, MappingError> {
+pub(crate) fn parse_notify_scope(value: &str) -> Result<NotifyScope, MappingError> {
     match value {
         "initiator" => Ok(NotifyScope::Initiator),
         "family" => Ok(NotifyScope::Family),
@@ -407,7 +407,14 @@ fn parse_notify_scope(value: &str) -> Result<NotifyScope, MappingError> {
     }
 }
 
-fn parse_needs_action_reason(value: &str) -> Result<NeedsActionReason, MappingError> {
+pub(crate) const fn needs_action_reason_value(value: NeedsActionReason) -> &'static str {
+    match value {
+        NeedsActionReason::IdentityAmbiguous => "identity_ambiguous",
+        NeedsActionReason::PlexMismatch => "plex_mismatch",
+    }
+}
+
+pub(crate) fn parse_needs_action_reason(value: &str) -> Result<NeedsActionReason, MappingError> {
     match value {
         "identity_ambiguous" => Ok(NeedsActionReason::IdentityAmbiguous),
         "plex_mismatch" => Ok(NeedsActionReason::PlexMismatch),

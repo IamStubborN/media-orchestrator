@@ -15,8 +15,8 @@ use media_api::{
 };
 use media_core::{
     Actor, ClientId, ClientStore, CredentialDigest, Job, JobApplication, JobId, JobLease, JobState,
-    JobStore, LeaseApplication, LeaseId, LeaseStore, NewJob, PortError, QueueStatus, ReadinessPort,
-    UserId,
+    JobStore, LeaseApplication, LeaseId, LeaseStore, NewJob, OperationKey, PortError, QueueStatus,
+    ReadinessPort, UserId,
 };
 
 pub const VALID_TOKEN: &str = "primary-token";
@@ -74,7 +74,7 @@ struct NoopJobStore;
 
 #[async_trait::async_trait]
 impl JobStore for NoopJobStore {
-    async fn create(&self, _: NewJob) -> Result<Job, PortError> {
+    async fn create(&self, _: OperationKey, _: NewJob) -> Result<Job, PortError> {
         unreachable!("foundation tests do not create jobs")
     }
 
@@ -93,16 +93,24 @@ impl JobStore for NoopJobStore {
 #[derive(Clone)]
 pub struct FakeJobStore {
     jobs: Arc<Mutex<Vec<Job>>>,
+    operations: Arc<Mutex<HashMap<OperationKey, FakeJobOperation>>>,
     creates: Arc<AtomicUsize>,
     failures_remaining: Arc<AtomicUsize>,
     blocked: Arc<AtomicBool>,
     status: Arc<Mutex<QueueStatus>>,
 }
 
+#[derive(Clone)]
+enum FakeJobOperation {
+    Pending,
+    Completed(Job),
+}
+
 impl Default for FakeJobStore {
     fn default() -> Self {
         Self {
             jobs: Arc::new(Mutex::new(Vec::new())),
+            operations: Arc::new(Mutex::new(HashMap::new())),
             creates: Arc::new(AtomicUsize::new(0)),
             failures_remaining: Arc::new(AtomicUsize::new(0)),
             blocked: Arc::new(AtomicBool::new(false)),
@@ -146,7 +154,31 @@ impl FakeJobStore {
 
 #[async_trait::async_trait]
 impl JobStore for FakeJobStore {
-    async fn create(&self, job: NewJob) -> Result<Job, PortError> {
+    async fn create(&self, operation: OperationKey, job: NewJob) -> Result<Job, PortError> {
+        enum Claim {
+            Replay(Job),
+            Wait,
+            Own,
+        }
+
+        loop {
+            let claim = {
+                let mut operations = self.operations.lock().unwrap();
+                match operations.get(&operation) {
+                    Some(FakeJobOperation::Completed(job)) => Claim::Replay(job.clone()),
+                    Some(FakeJobOperation::Pending) => Claim::Wait,
+                    None => {
+                        operations.insert(operation, FakeJobOperation::Pending);
+                        Claim::Own
+                    }
+                }
+            };
+            match claim {
+                Claim::Replay(job) => return Ok(job),
+                Claim::Wait => tokio::task::yield_now().await,
+                Claim::Own => break,
+            }
+        }
         self.creates.fetch_add(1, Ordering::SeqCst);
         while self.blocked.load(Ordering::SeqCst) {
             tokio::task::yield_now().await;
@@ -158,6 +190,7 @@ impl JobStore for FakeJobStore {
             })
             .is_ok()
         {
+            self.operations.lock().unwrap().remove(&operation);
             return Err(PortError::Infrastructure);
         }
 
@@ -172,6 +205,10 @@ impl JobStore for FakeJobStore {
         )
         .map_err(|_| PortError::Infrastructure)?;
         self.jobs.lock().unwrap().push(persisted.clone());
+        self.operations
+            .lock()
+            .unwrap()
+            .insert(operation, FakeJobOperation::Completed(persisted.clone()));
         Ok(persisted)
     }
 
@@ -196,6 +233,7 @@ struct NoopLeaseStore;
 impl LeaseStore for NoopLeaseStore {
     async fn lease_next(
         &self,
+        _: OperationKey,
         _: media_core::ClientId,
         _: time::Duration,
     ) -> Result<Option<JobLease>, PortError> {
@@ -204,6 +242,7 @@ impl LeaseStore for NoopLeaseStore {
 
     async fn heartbeat(
         &self,
+        _: OperationKey,
         _: LeaseId,
         _: media_core::ClientId,
         _: time::Duration,
@@ -215,19 +254,29 @@ impl LeaseStore for NoopLeaseStore {
 #[derive(Clone, Default)]
 pub struct FakeLeaseStore {
     lease: Arc<Mutex<Option<JobLease>>>,
+    lease_operations: Arc<Mutex<HashMap<OperationKey, Option<JobLease>>>>,
+    heartbeat_operations: Arc<Mutex<HashMap<OperationKey, Option<JobLease>>>>,
     lease_calls: Arc<AtomicUsize>,
+    heartbeat_calls: Arc<AtomicUsize>,
 }
 
 impl FakeLeaseStore {
     pub fn with_lease(lease: JobLease) -> Self {
-        Self {
-            lease: Arc::new(Mutex::new(Some(lease))),
-            lease_calls: Arc::new(AtomicUsize::new(0)),
-        }
+        let store = Self::default();
+        *store.lease.lock().unwrap() = Some(lease);
+        store
+    }
+
+    pub fn set_lease(&self, lease: Option<JobLease>) {
+        *self.lease.lock().unwrap() = lease;
     }
 
     pub fn lease_calls(&self) -> usize {
         self.lease_calls.load(Ordering::SeqCst)
+    }
+
+    pub fn heartbeat_calls(&self) -> usize {
+        self.heartbeat_calls.load(Ordering::SeqCst)
     }
 }
 
@@ -235,32 +284,63 @@ impl FakeLeaseStore {
 impl LeaseStore for FakeLeaseStore {
     async fn lease_next(
         &self,
+        operation: OperationKey,
         runner: ClientId,
         _: time::Duration,
     ) -> Result<Option<JobLease>, PortError> {
+        if let Some(result) = self
+            .lease_operations
+            .lock()
+            .unwrap()
+            .get(&operation)
+            .cloned()
+        {
+            return Ok(result);
+        }
         self.lease_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(self
+        let result = self
             .lease
             .lock()
             .unwrap()
             .as_ref()
             .filter(|lease| lease.runner_client_id() == runner)
-            .cloned())
+            .cloned();
+        self.lease_operations
+            .lock()
+            .unwrap()
+            .insert(operation, result.clone());
+        Ok(result)
     }
 
     async fn heartbeat(
         &self,
+        operation: OperationKey,
         lease_id: LeaseId,
         runner: ClientId,
         _: time::Duration,
     ) -> Result<Option<JobLease>, PortError> {
-        Ok(self
+        if let Some(result) = self
+            .heartbeat_operations
+            .lock()
+            .unwrap()
+            .get(&operation)
+            .cloned()
+        {
+            return Ok(result);
+        }
+        self.heartbeat_calls.fetch_add(1, Ordering::SeqCst);
+        let result = self
             .lease
             .lock()
             .unwrap()
             .as_ref()
             .filter(|lease| lease.lease_id() == lease_id && lease.runner_client_id() == runner)
-            .cloned())
+            .cloned();
+        self.heartbeat_operations
+            .lock()
+            .unwrap()
+            .insert(operation, result.clone());
+        Ok(result)
     }
 }
 
@@ -271,7 +351,6 @@ pub struct ControlledIdempotencyStore {
     fail_abort: bool,
     complete_calls: Arc<AtomicUsize>,
     abort_calls: Arc<AtomicUsize>,
-    discard_calls: Arc<AtomicUsize>,
 }
 
 #[derive(Clone)]
@@ -290,7 +369,6 @@ impl ControlledIdempotencyStore {
             fail_abort: false,
             complete_calls: Arc::new(AtomicUsize::new(0)),
             abort_calls: Arc::new(AtomicUsize::new(0)),
-            discard_calls: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -310,10 +388,6 @@ impl ControlledIdempotencyStore {
 
     pub fn abort_calls(&self) -> usize {
         self.abort_calls.load(Ordering::SeqCst)
-    }
-
-    pub fn discard_calls(&self) -> usize {
-        self.discard_calls.load(Ordering::SeqCst)
     }
 }
 
@@ -356,15 +430,6 @@ impl IdempotencyStore for ControlledIdempotencyStore {
             Ok(())
         }
     }
-
-    async fn discard_completed(&self, _: &IdempotencyHandle) -> Result<(), IdempotencyError> {
-        self.discard_calls.fetch_add(1, Ordering::SeqCst);
-        if self.fail_abort {
-            Err(IdempotencyError::Infrastructure)
-        } else {
-            Ok(())
-        }
-    }
 }
 
 struct NoopIdempotencyStore;
@@ -387,10 +452,6 @@ impl IdempotencyStore for NoopIdempotencyStore {
     }
 
     async fn abort_in_progress(&self, _: &IdempotencyHandle) -> Result<(), IdempotencyError> {
-        Ok(())
-    }
-
-    async fn discard_completed(&self, _: &IdempotencyHandle) -> Result<(), IdempotencyError> {
         Ok(())
     }
 }
@@ -474,17 +535,6 @@ impl IdempotencyStore for CommitThenErrorIdempotencyStore {
             _ => Err(IdempotencyError::Infrastructure),
         }
     }
-
-    async fn discard_completed(&self, handle: &IdempotencyHandle) -> Result<(), IdempotencyError> {
-        let mut entry = self.entry.lock().unwrap();
-        match entry.as_ref() {
-            Some(CommitThenErrorEntry::Completed(current, _)) if current == handle => {
-                *entry = None;
-                Ok(())
-            }
-            _ => Err(IdempotencyError::Infrastructure),
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -559,20 +609,6 @@ impl IdempotencyStore for MemoryIdempotencyStore {
         }
         Err(IdempotencyError::Infrastructure)
     }
-
-    async fn discard_completed(&self, handle: &IdempotencyHandle) -> Result<(), IdempotencyError> {
-        let key = (handle.client_id(), handle.key().to_owned());
-        let mut entries = self.entries.lock().unwrap();
-        if entries.get(&key).is_some_and(|entry| {
-            entry.fingerprint == *handle.fingerprint()
-                && entry.generation == handle.generation()
-                && entry.response.is_some()
-        }) {
-            entries.remove(&key);
-            return Ok(());
-        }
-        Err(IdempotencyError::Infrastructure)
-    }
 }
 
 #[derive(Clone, Default)]
@@ -606,11 +642,6 @@ impl IdempotencyStore for RecordingIdempotencyStore {
     }
 
     async fn abort_in_progress(&self, _: &IdempotencyHandle) -> Result<(), IdempotencyError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-
-    async fn discard_completed(&self, _: &IdempotencyHandle) -> Result<(), IdempotencyError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }

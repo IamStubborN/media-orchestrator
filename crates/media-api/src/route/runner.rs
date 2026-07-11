@@ -31,12 +31,12 @@ async fn lease_next(
         actor,
         request_id,
         request,
-        |state, actor, request_id, body| async move {
+        |state, actor, request_id, operation, body| async move {
             if !valid_empty_body(&body) {
                 return ApiError::invalid_request(&request_id, "request JSON is invalid")
                     .into_response();
             }
-            match state.leases().lease_next(&actor).await {
+            match state.leases().lease_next(&actor, operation).await {
                 Ok(Some(lease)) => match convert::lease(&lease) {
                     Ok(dto) => Json(dto).into_response(),
                     Err(_) => ApiError::internal(&request_id).into_response(),
@@ -61,7 +61,7 @@ async fn heartbeat(
         actor,
         request_id,
         request,
-        move |state, actor, request_id, body| async move {
+        move |state, actor, request_id, operation, body| async move {
             if !valid_empty_body(&body) {
                 return ApiError::invalid_request(&request_id, "request JSON is invalid")
                     .into_response();
@@ -70,7 +70,7 @@ async fn heartbeat(
                 return ApiError::invalid_request(&request_id, "lease ID is invalid")
                     .into_response();
             };
-            match state.leases().heartbeat(&actor, lease_id).await {
+            match state.leases().heartbeat(&actor, operation, lease_id).await {
                 Ok(lease) => match convert::lease(&lease) {
                     Ok(dto) => Json(dto).into_response(),
                     Err(_) => ApiError::internal(&request_id).into_response(),

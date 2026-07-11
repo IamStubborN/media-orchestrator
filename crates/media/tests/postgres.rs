@@ -4,21 +4,37 @@ use std::{
     io,
     net::SocketAddr,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
+use axum::{
+    body::{Body, to_bytes},
+    http::Request as AxumRequest,
+};
 use media::{
-    composition::{migrate, prepare_service},
+    composition::{StorageIdempotencyAdapter, migrate, prepare_service},
     config::{ConfigSource, DatabaseConfig, ServerConfig},
 };
+use media_api::{
+    ApiState, IdempotencyError, IdempotencyHandle, IdempotencyRequest, IdempotencyStore,
+    Reservation, StoredHttpResponse,
+};
 use media_contract::{JobDto, LeaseDto};
+use media_core::{JobApplication, LeaseApplication};
+use media_storage::{
+    SeaOrmClientStore, SeaOrmIdempotencyRepository, SeaOrmJobStore, SeaOrmLeaseStore,
+    SeaOrmReadiness,
+};
 use reqwest::{Client, Response, StatusCode, header};
+use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement};
 use testcontainers::{
     GenericImage, ImageExt,
     core::{IntoContainerPort, WaitFor},
     runners::AsyncRunner,
 };
 use tokio::{net::TcpListener, sync::oneshot};
+use tower::ServiceExt;
 
 const POSTGRES_IMAGE: &str = "postgres";
 const POSTGRES_TAG_AND_DIGEST: &str = concat!(
@@ -30,6 +46,74 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 const PRIMARY_TOKEN: &str = "task-9-primary-token";
 const SECONDARY_TOKEN: &str = "task-9-secondary-token";
 const RUNNER_TOKEN: &str = "task-9-runner-token";
+
+#[derive(Clone)]
+struct FailingCompletionStore {
+    inner: StorageIdempotencyAdapter,
+}
+
+#[async_trait::async_trait]
+impl IdempotencyStore for FailingCompletionStore {
+    async fn reserve(&self, request: IdempotencyRequest) -> Result<Reservation, IdempotencyError> {
+        self.inner.reserve(request).await
+    }
+
+    async fn complete(
+        &self,
+        _: &IdempotencyHandle,
+        _: StoredHttpResponse,
+    ) -> Result<(), IdempotencyError> {
+        Err(IdempotencyError::Infrastructure)
+    }
+
+    async fn abort_in_progress(&self, handle: &IdempotencyHandle) -> Result<(), IdempotencyError> {
+        self.inner.abort_in_progress(handle).await
+    }
+}
+
+fn storage_idempotency(database: &DatabaseConnection) -> StorageIdempotencyAdapter {
+    StorageIdempotencyAdapter::new(SeaOrmIdempotencyRepository::new(database.clone()))
+}
+
+fn database_router(
+    database: &DatabaseConnection,
+    idempotency: Arc<dyn IdempotencyStore>,
+) -> axum::Router {
+    let jobs = Arc::new(JobApplication::new(Arc::new(SeaOrmJobStore::new(
+        database.clone(),
+    ))));
+    let leases = Arc::new(
+        LeaseApplication::new(
+            Arc::new(SeaOrmLeaseStore::new(database.clone())),
+            time::Duration::seconds(60),
+        )
+        .unwrap(),
+    );
+    media_api::router(ApiState::new(
+        jobs,
+        leases,
+        Arc::new(SeaOrmClientStore::new(database.clone())),
+        idempotency,
+        Arc::new(SeaOrmReadiness::new(database.clone())),
+    ))
+}
+
+fn post_request(path: &str, token: &str, key: &str, body: Body) -> AxumRequest<Body> {
+    AxumRequest::post(path)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header("idempotency-key", key)
+        .header("content-type", "application/json")
+        .body(body)
+        .unwrap()
+}
+
+async fn query_one(database: &DatabaseConnection, sql: &str) -> sea_orm::QueryResult {
+    database
+        .query_one_raw(Statement::from_string(DbBackend::Postgres, sql))
+        .await
+        .unwrap()
+        .unwrap()
+}
 
 #[derive(Default)]
 struct FakeSource {
@@ -237,4 +321,186 @@ async fn postgres_api_foundation_works_end_to_end() {
         .expect("service shutdown must be bounded")
         .expect("service task must not panic")
         .expect("service must stop cleanly");
+}
+
+#[tokio::test]
+async fn postgres_mutations_reenter_after_replay_completion_failure_across_router_instances() {
+    let container = GenericImage::new(POSTGRES_IMAGE, POSTGRES_TAG_AND_DIGEST)
+        .with_exposed_port(POSTGRES_PORT.tcp())
+        .with_wait_for(WaitFor::message_on_stderr(
+            "database system is ready to accept connections",
+        ))
+        .with_env_var("POSTGRES_DB", "media_orchestrator")
+        .with_env_var("POSTGRES_USER", "media")
+        .with_env_var("POSTGRES_PASSWORD", "media-test-password")
+        .start()
+        .await
+        .expect("Docker must run the pinned PostgreSQL image");
+    let port = container
+        .get_host_port_ipv4(POSTGRES_PORT.tcp())
+        .await
+        .expect("PostgreSQL must expose its port");
+    let database_url =
+        format!("postgres://media:media-test-password@127.0.0.1:{port}/media_orchestrator");
+    migrate(&database_config(&database_url)).await.unwrap();
+    prepare_service(&server_config(
+        &database_url,
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+    let database = Database::connect(&database_url).await.unwrap();
+    let failing = || {
+        database_router(
+            &database,
+            Arc::new(FailingCompletionStore {
+                inner: storage_idempotency(&database),
+            }),
+        )
+    };
+    let completing = || database_router(&database, Arc::new(storage_idempotency(&database)));
+
+    let create_body =
+        r#"{"provider":"rezka","result_ref":"crash-window-job","notify_scope":"initiator"}"#;
+    let first_create = failing()
+        .oneshot(post_request(
+            "/v1/jobs",
+            PRIMARY_TOKEN,
+            "crash-window-create",
+            Body::from(create_body),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(first_create.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let persisted_job_id = query_one(
+        &database,
+        "SELECT id::text AS id FROM jobs WHERE result_ref = 'crash-window-job'",
+    )
+    .await
+    .try_get::<String>("", "id")
+    .unwrap();
+
+    let retried_create = completing()
+        .oneshot(post_request(
+            "/v1/jobs",
+            PRIMARY_TOKEN,
+            "crash-window-create",
+            Body::from(create_body),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(retried_create.status(), StatusCode::CREATED);
+    let retried_job: JobDto = serde_json::from_slice(
+        &to_bytes(retried_create.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(retried_job.id.to_string(), persisted_job_id);
+
+    let first_lease = failing()
+        .oneshot(post_request(
+            "/v1/runner/leases",
+            RUNNER_TOKEN,
+            "crash-window-lease",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(first_lease.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let lease_row = query_one(
+        &database,
+        "SELECT id::text AS id, expires_at FROM job_leases WHERE slot = 1",
+    )
+    .await;
+    let persisted_lease_id = lease_row.try_get::<String>("", "id").unwrap();
+    let leased_at = lease_row
+        .try_get::<time::OffsetDateTime>("", "expires_at")
+        .unwrap();
+
+    let retried_lease = completing()
+        .oneshot(post_request(
+            "/v1/runner/leases",
+            RUNNER_TOKEN,
+            "crash-window-lease",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(retried_lease.status(), StatusCode::OK);
+    let retried_lease: LeaseDto = serde_json::from_slice(
+        &to_bytes(retried_lease.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(retried_lease.lease_id.to_string(), persisted_lease_id);
+    assert_eq!(
+        query_one(
+            &database,
+            "SELECT expires_at FROM job_leases WHERE slot = 1",
+        )
+        .await
+        .try_get::<time::OffsetDateTime>("", "expires_at")
+        .unwrap(),
+        leased_at,
+    );
+
+    let heartbeat_path = format!("/v1/runner/leases/{}/heartbeat", retried_lease.lease_id);
+    let first_heartbeat = failing()
+        .oneshot(post_request(
+            &heartbeat_path,
+            RUNNER_TOKEN,
+            "crash-window-heartbeat",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(first_heartbeat.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let heartbeat_expiry = query_one(
+        &database,
+        "SELECT expires_at FROM job_leases WHERE slot = 1",
+    )
+    .await
+    .try_get::<time::OffsetDateTime>("", "expires_at")
+    .unwrap();
+
+    let retried_heartbeat = completing()
+        .oneshot(post_request(
+            &heartbeat_path,
+            RUNNER_TOKEN,
+            "crash-window-heartbeat",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(retried_heartbeat.status(), StatusCode::OK);
+    let retried_heartbeat: LeaseDto = serde_json::from_slice(
+        &to_bytes(retried_heartbeat.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(retried_heartbeat.lease_id, retried_lease.lease_id);
+    assert_eq!(
+        query_one(
+            &database,
+            "SELECT expires_at FROM job_leases WHERE slot = 1",
+        )
+        .await
+        .try_get::<time::OffsetDateTime>("", "expires_at")
+        .unwrap(),
+        heartbeat_expiry,
+    );
+
+    let counts = query_one(
+        &database,
+        "SELECT (SELECT count(*)::bigint FROM jobs) AS jobs, \
+         (SELECT count(*)::bigint FROM operation_receipts) AS receipts, \
+         (SELECT attempt_count FROM jobs WHERE result_ref = 'crash-window-job') AS attempts",
+    )
+    .await;
+    assert_eq!(counts.try_get::<i64>("", "jobs").unwrap(), 1);
+    assert_eq!(counts.try_get::<i64>("", "receipts").unwrap(), 3);
+    assert_eq!(counts.try_get::<i32>("", "attempts").unwrap(), 1);
 }

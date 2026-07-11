@@ -8,5 +8,6 @@ pub(crate) mod job_stage;
 pub(crate) mod job_task;
 pub(crate) mod media;
 pub(crate) mod media_external_ref;
+pub(crate) mod operation_receipt;
 pub(crate) mod season;
 pub(crate) mod user;

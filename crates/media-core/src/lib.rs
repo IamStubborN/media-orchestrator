@@ -8,6 +8,7 @@ mod application;
 mod id;
 mod identity;
 mod job;
+mod operation;
 mod port;
 
 pub use action::NeedsActionReason;
@@ -30,4 +31,5 @@ pub use job::{
     Job, JobLease, JobState, JobTransitionError, JobValidationError, MAX_RESULT_REF_BYTES, NewJob,
     NotifyScope, Provider, QueueStatus,
 };
+pub use operation::OperationKey;
 pub use port::{ClientStore, IdentityStore, JobStore, LeaseStore, PortError, ReadinessPort};

@@ -17,6 +17,14 @@ const POSTGRES_TAG_AND_DIGEST: &str = concat!(
 );
 const POSTGRES_PORT: u16 = 5432;
 
+pub fn operation_key() -> media_core::OperationKey {
+    let id = uuid::Uuid::new_v4();
+    let mut bytes = [0_u8; 32];
+    bytes[..16].copy_from_slice(id.as_bytes());
+    bytes[16..].copy_from_slice(id.as_bytes());
+    media_core::OperationKey::from_bytes(bytes)
+}
+
 pub struct TestDatabase {
     connection: DatabaseConnection,
     url: String,

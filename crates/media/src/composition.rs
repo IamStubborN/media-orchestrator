@@ -1,4 +1,8 @@
-use std::{future::Future, sync::Arc};
+use std::{
+    future::{Future, IntoFuture},
+    sync::Arc,
+    time::Duration,
+};
 
 use media_api::{
     ApiState, IdempotencyError, IdempotencyGeneration, IdempotencyHandle, IdempotencyRequest,
@@ -22,6 +26,7 @@ use sha2::{Digest, Sha256};
 use crate::config::{DatabaseConfig, ServerConfig};
 
 const IDEMPOTENCY_TTL: time::Duration = time::Duration::hours(24);
+const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
 pub enum ServiceError {
@@ -39,6 +44,8 @@ pub enum ServiceError {
     Listener,
     #[error("HTTP server failed")]
     Server,
+    #[error("graceful shutdown timed out")]
+    ShutdownTimeout,
 }
 
 /// Composition-local bridge between the API's idempotency port and SeaORM storage.
@@ -119,14 +126,6 @@ impl IdempotencyStore for StorageIdempotencyAdapter {
             .await
             .map_err(map_idempotency_error)
     }
-
-    async fn discard_completed(&self, handle: &IdempotencyHandle) -> Result<(), IdempotencyError> {
-        let storage = Self::storage_handle(handle)?;
-        self.repository
-            .discard_completed(&storage)
-            .await
-            .map_err(map_idempotency_error)
-    }
 }
 
 const fn map_idempotency_error(error: PortError) -> IdempotencyError {
@@ -179,10 +178,40 @@ impl PreparedService {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        axum::serve(listener, self.router)
-            .with_graceful_shutdown(shutdown)
+        self.serve_with_shutdown_timeout(listener, shutdown, DEFAULT_SHUTDOWN_TIMEOUT)
             .await
-            .map_err(|_| ServiceError::Server)
+    }
+
+    pub async fn serve_with_shutdown_timeout<F>(
+        self,
+        listener: tokio::net::TcpListener,
+        shutdown: F,
+        timeout: Duration,
+    ) -> Result<(), ServiceError>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let (observed_shutdown, shutdown_observed) = tokio::sync::oneshot::channel();
+        let server = axum::serve(listener, self.router)
+            .with_graceful_shutdown(async move {
+                shutdown.await;
+                let _ = observed_shutdown.send(());
+            })
+            .into_future();
+        tokio::pin!(server);
+
+        tokio::select! {
+            result = &mut server => result.map_err(|_| ServiceError::Server),
+            observed = shutdown_observed => {
+                if observed.is_err() {
+                    return server.await.map_err(|_| ServiceError::Server);
+                }
+                match tokio::time::timeout(timeout, &mut server).await {
+                    Ok(result) => result.map_err(|_| ServiceError::Server),
+                    Err(_) => Err(ServiceError::ShutdownTimeout),
+                }
+            }
+        }
     }
 }
 

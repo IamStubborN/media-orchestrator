@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     Actor, Job, JobId, JobLease, JobStore, JobValidationError, LeaseId, LeaseStore, NewJob,
-    NotifyScope, PortError, Provider, QueueStatus,
+    NotifyScope, OperationKey, PortError, Provider, QueueStatus,
 };
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -48,6 +48,7 @@ impl JobApplication {
     pub async fn create_job(
         &self,
         actor: &Actor,
+        operation: OperationKey,
         command: NewJobCommand,
     ) -> Result<Job, ApplicationError> {
         let owner_id = actor
@@ -62,7 +63,7 @@ impl JobApplication {
         )
         .map_err(ApplicationError::InvalidInput)?;
 
-        self.store.create(job).await.map_err(Into::into)
+        self.store.create(operation, job).await.map_err(Into::into)
     }
 
     pub async fn get_job(&self, actor: &Actor, id: JobId) -> Result<Job, ApplicationError> {
@@ -113,13 +114,17 @@ impl LeaseApplication {
         Ok(Self { store, ttl })
     }
 
-    pub async fn lease_next(&self, actor: &Actor) -> Result<Option<JobLease>, ApplicationError> {
+    pub async fn lease_next(
+        &self,
+        actor: &Actor,
+        operation: OperationKey,
+    ) -> Result<Option<JobLease>, ApplicationError> {
         let runner = actor
             .require_runner()
             .map_err(|_| ApplicationError::Forbidden)?;
 
         self.store
-            .lease_next(runner, self.ttl)
+            .lease_next(operation, runner, self.ttl)
             .await
             .map_err(Into::into)
     }
@@ -127,6 +132,7 @@ impl LeaseApplication {
     pub async fn heartbeat(
         &self,
         actor: &Actor,
+        operation: OperationKey,
         lease: LeaseId,
     ) -> Result<JobLease, ApplicationError> {
         let runner = actor
@@ -134,7 +140,7 @@ impl LeaseApplication {
             .map_err(|_| ApplicationError::Forbidden)?;
 
         self.store
-            .heartbeat(lease, runner, self.ttl)
+            .heartbeat(operation, lease, runner, self.ttl)
             .await?
             .ok_or(ApplicationError::NotFound)
     }
@@ -152,7 +158,7 @@ mod tests {
     use crate::{
         PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientId, ClientRole, Job, JobId, JobLease,
         JobState, JobStore, JobValidationError, LeaseId, LeaseStore, NewJob, NotifyScope,
-        PortError, Provider, QueueStatus, RUNNER_CLIENT_ID, UserId,
+        OperationKey, PortError, Provider, QueueStatus, RUNNER_CLIENT_ID, UserId,
     };
 
     fn block_on<F: Future>(future: F) -> F::Output {
@@ -175,6 +181,10 @@ mod tests {
         Actor::new(RUNNER_CLIENT_ID, None, ClientRole::Runner).unwrap()
     }
 
+    const fn operation_key(marker: u8) -> OperationKey {
+        OperationKey::from_bytes([marker; 32])
+    }
+
     fn persisted_job(id: JobId, owner_id: UserId, state: JobState) -> Job {
         Job::rehydrate(
             id,
@@ -189,7 +199,7 @@ mod tests {
     }
 
     struct FakeJobStore {
-        created: Mutex<Vec<NewJob>>,
+        created: Mutex<Vec<(OperationKey, NewJob)>>,
         jobs: Mutex<Vec<Job>>,
         status: QueueStatus,
         failure: Option<PortError>,
@@ -211,12 +221,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl JobStore for FakeJobStore {
-        async fn create(&self, job: NewJob) -> Result<Job, PortError> {
+        async fn create(&self, operation: OperationKey, job: NewJob) -> Result<Job, PortError> {
             if let Some(error) = self.failure {
                 return Err(error);
             }
 
-            self.created.lock().unwrap().push(job.clone());
+            self.created.lock().unwrap().push((operation, job.clone()));
             Job::rehydrate(
                 job.id(),
                 job.owner_id(),
@@ -251,10 +261,12 @@ mod tests {
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
     enum LeaseCall {
         Next {
+            operation: OperationKey,
             runner: ClientId,
             ttl: time::Duration,
         },
         Heartbeat {
+            operation: OperationKey,
             lease: LeaseId,
             runner: ClientId,
             ttl: time::Duration,
@@ -271,21 +283,24 @@ mod tests {
     impl LeaseStore for FakeLeaseStore {
         async fn lease_next(
             &self,
+            operation: OperationKey,
             runner: ClientId,
             ttl: time::Duration,
         ) -> Result<Option<JobLease>, PortError> {
             if let Some(error) = self.failure {
                 return Err(error);
             }
-            self.calls
-                .lock()
-                .unwrap()
-                .push(LeaseCall::Next { runner, ttl });
+            self.calls.lock().unwrap().push(LeaseCall::Next {
+                operation,
+                runner,
+                ttl,
+            });
             Ok(self.lease.clone())
         }
 
         async fn heartbeat(
             &self,
+            operation: OperationKey,
             lease: LeaseId,
             runner: ClientId,
             ttl: time::Duration,
@@ -293,10 +308,12 @@ mod tests {
             if let Some(error) = self.failure {
                 return Err(error);
             }
-            self.calls
-                .lock()
-                .unwrap()
-                .push(LeaseCall::Heartbeat { lease, runner, ttl });
+            self.calls.lock().unwrap().push(LeaseCall::Heartbeat {
+                operation,
+                lease,
+                runner,
+                ttl,
+            });
             Ok(self.lease.clone())
         }
     }
@@ -308,6 +325,7 @@ mod tests {
 
         let job = block_on(application.create_job(
             &hermes_actor(),
+            operation_key(1),
             NewJobCommand {
                 provider: Provider::Rezka,
                 result_ref: "selection-1".to_owned(),
@@ -319,7 +337,8 @@ mod tests {
         assert_eq!(job.owner_id(), PRIMARY_USER_ID);
         let created = store.created.lock().unwrap();
         assert_eq!(created.len(), 1);
-        assert_eq!(created[0].owner_id(), PRIMARY_USER_ID);
+        assert_eq!(created[0].0, operation_key(1));
+        assert_eq!(created[0].1.owner_id(), PRIMARY_USER_ID);
     }
 
     #[test]
@@ -329,6 +348,7 @@ mod tests {
 
         let create_error = block_on(application.create_job(
             &runner_actor(),
+            operation_key(2),
             NewJobCommand {
                 provider: Provider::Rezka,
                 result_ref: "selection-1".to_owned(),
@@ -350,6 +370,7 @@ mod tests {
 
         let error = block_on(application.create_job(
             &hermes_actor(),
+            operation_key(3),
             NewJobCommand {
                 provider: Provider::Prowlarr,
                 result_ref: "   ".to_owned(),
@@ -428,11 +449,13 @@ mod tests {
         };
 
         assert_eq!(
-            block_on(conflict.create_job(&hermes_actor(), command())).unwrap_err(),
+            block_on(conflict.create_job(&hermes_actor(), operation_key(4), command()))
+                .unwrap_err(),
             ApplicationError::Conflict,
         );
         assert_eq!(
-            block_on(infrastructure.create_job(&hermes_actor(), command())).unwrap_err(),
+            block_on(infrastructure.create_job(&hermes_actor(), operation_key(5), command()))
+                .unwrap_err(),
             ApplicationError::Infrastructure,
         );
     }
@@ -448,13 +471,14 @@ mod tests {
         let application = LeaseApplication::new(store.clone(), ttl).unwrap();
 
         assert!(
-            block_on(application.lease_next(&runner_actor()))
+            block_on(application.lease_next(&runner_actor(), operation_key(6)))
                 .unwrap()
                 .is_none()
         );
         assert_eq!(
             *store.calls.lock().unwrap(),
             vec![LeaseCall::Next {
+                operation: operation_key(6),
                 runner: RUNNER_CLIENT_ID,
                 ttl,
             }],
@@ -509,7 +533,8 @@ mod tests {
         let application =
             LeaseApplication::new(store.clone(), time::Duration::seconds(60)).unwrap();
 
-        let error = block_on(application.lease_next(&hermes_actor())).unwrap_err();
+        let error =
+            block_on(application.lease_next(&hermes_actor(), operation_key(7))).unwrap_err();
 
         assert_eq!(error, ApplicationError::Forbidden);
         assert!(store.calls.lock().unwrap().is_empty());
@@ -533,12 +558,13 @@ mod tests {
         let application = LeaseApplication::new(store.clone(), ttl).unwrap();
 
         assert_eq!(
-            block_on(application.heartbeat(&runner_actor(), lease_id)).unwrap(),
+            block_on(application.heartbeat(&runner_actor(), operation_key(8), lease_id)).unwrap(),
             lease,
         );
         assert_eq!(
             *store.calls.lock().unwrap(),
             vec![LeaseCall::Heartbeat {
+                operation: operation_key(8),
                 lease: lease_id,
                 runner: RUNNER_CLIENT_ID,
                 ttl,
@@ -558,7 +584,9 @@ mod tests {
         )
         .unwrap();
 
-        let error = block_on(application.heartbeat(&runner_actor(), LeaseId::new())).unwrap_err();
+        let error =
+            block_on(application.heartbeat(&runner_actor(), operation_key(9), LeaseId::new()))
+                .unwrap_err();
 
         assert_eq!(error, ApplicationError::NotFound);
     }

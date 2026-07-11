@@ -5,6 +5,10 @@ rust-version.workspace = true
 version.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+integration-tests = []
+
 [dependencies]
 async-trait.workspace = true
 media-core = { path = "../media-core", version = "=0.1.0" }
@@ -17,6 +21,41 @@ uuid.workspace = true
 [dev-dependencies]
 testcontainers.workspace = true
 tokio.workspace = true
+
+[[test]]
+name = "client_repository"
+path = "tests/client_repository.rs"
+required-features = ["integration-tests"]
+
+[[test]]
+name = "idempotency_repository"
+path = "tests/idempotency_repository.rs"
+required-features = ["integration-tests"]
+
+[[test]]
+name = "identity_repository"
+path = "tests/identity_repository.rs"
+required-features = ["integration-tests"]
+
+[[test]]
+name = "job_repository"
+path = "tests/job_repository.rs"
+required-features = ["integration-tests"]
+
+[[test]]
+name = "lease_repository"
+path = "tests/lease_repository.rs"
+required-features = ["integration-tests"]
+
+[[test]]
+name = "migrations"
+path = "tests/migrations.rs"
+required-features = ["integration-tests"]
+
+[[test]]
+name = "readiness"
+path = "tests/readiness.rs"
+required-features = ["integration-tests"]
 
 [lints]
 workspace = true

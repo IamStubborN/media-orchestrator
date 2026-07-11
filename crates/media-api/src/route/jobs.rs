@@ -27,7 +27,7 @@ async fn create(
         actor,
         request_id,
         request,
-        |state, actor, request_id, body| async move {
+        |state, actor, request_id, operation, body| async move {
             let request = match serde_json::from_slice::<CreateJobRequest>(&body) {
                 Ok(request) => request,
                 Err(_) => {
@@ -37,7 +37,7 @@ async fn create(
             };
             match state
                 .jobs()
-                .create_job(&actor, convert::new_job_command(request))
+                .create_job(&actor, operation, convert::new_job_command(request))
                 .await
             {
                 Ok(job) => (StatusCode::CREATED, Json(convert::job(&job))).into_response(),

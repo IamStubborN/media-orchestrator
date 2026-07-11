@@ -8,7 +8,7 @@ use media_core::{
 };
 use media_storage::{SeaOrmClientStore, SeaOrmJobStore, SeaOrmLeaseStore};
 use sea_orm::{ConnectionTrait, Statement, TransactionTrait};
-use support::{TestDatabase, query};
+use support::{TestDatabase, operation_key, query};
 use tokio::sync::Barrier;
 
 async fn setup() -> (TestDatabase, SeaOrmJobStore, SeaOrmLeaseStore) {
@@ -45,13 +45,19 @@ fn new_job(reference: &str) -> NewJob {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_connections_create_exactly_one_active_lease() {
     let (test_db, jobs, first) = setup().await;
-    jobs.create(new_job("race-job")).await.unwrap();
+    jobs.create(operation_key(), new_job("race-job"))
+        .await
+        .unwrap();
     let second = SeaOrmLeaseStore::new(test_db.connect().await);
     let barrier = Arc::new(Barrier::new(2));
     let lease = |store: SeaOrmLeaseStore, barrier: Arc<Barrier>| async move {
         barrier.wait().await;
         store
-            .lease_next(RUNNER_CLIENT_ID, time::Duration::seconds(60))
+            .lease_next(
+                operation_key(),
+                RUNNER_CLIENT_ID,
+                time::Duration::seconds(60),
+            )
             .await
             .unwrap()
     };
@@ -76,7 +82,9 @@ async fn contender_claims_queued_job_after_advisory_lock_holder_rolls_back() {
     const LEASE_ADVISORY_LOCK: i64 = 0x4d45_4449_414c_5345;
 
     let (test_db, jobs, _leases) = setup().await;
-    jobs.create(new_job("rollback-race-job")).await.unwrap();
+    jobs.create(operation_key(), new_job("rollback-race-job"))
+        .await
+        .unwrap();
     let holder_connection = test_db.connect().await;
     let holder = holder_connection.begin().await.unwrap();
     holder
@@ -91,7 +99,11 @@ async fn contender_claims_queued_job_after_advisory_lock_holder_rolls_back() {
     let contender_store = SeaOrmLeaseStore::new(test_db.connect().await);
     let contender = tokio::spawn(async move {
         contender_store
-            .lease_next(RUNNER_CLIENT_ID, time::Duration::seconds(60))
+            .lease_next(
+                operation_key(),
+                RUNNER_CLIENT_ID,
+                time::Duration::seconds(60),
+            )
             .await
             .unwrap()
     });
@@ -133,16 +145,23 @@ async fn contender_claims_queued_job_after_advisory_lock_holder_rolls_back() {
 #[tokio::test]
 async fn storage_rejects_ttl_outside_the_application_contract() {
     let (_test_db, jobs, leases) = setup().await;
-    jobs.create(new_job("ttl-job")).await.unwrap();
+    jobs.create(operation_key(), new_job("ttl-job"))
+        .await
+        .unwrap();
 
     let lease = leases
-        .lease_next(RUNNER_CLIENT_ID, time::Duration::seconds(30))
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(30),
+        )
         .await
         .unwrap()
         .expect("the inclusive 30 second minimum must be accepted");
     assert!(
         leases
             .heartbeat(
+                operation_key(),
                 lease.lease_id(),
                 RUNNER_CLIENT_ID,
                 time::Duration::seconds(300),
@@ -155,19 +174,28 @@ async fn storage_rejects_ttl_outside_the_application_contract() {
 
     assert_eq!(
         leases
-            .lease_next(RUNNER_CLIENT_ID, time::Duration::seconds(29))
-            .await,
-        Err(PortError::Conflict),
-    );
-    assert_eq!(
-        leases
-            .lease_next(RUNNER_CLIENT_ID, time::Duration::seconds(301))
+            .lease_next(
+                operation_key(),
+                RUNNER_CLIENT_ID,
+                time::Duration::seconds(29),
+            )
             .await,
         Err(PortError::Conflict),
     );
     assert_eq!(
         leases
             .lease_next(
+                operation_key(),
+                RUNNER_CLIENT_ID,
+                time::Duration::seconds(301),
+            )
+            .await,
+        Err(PortError::Conflict),
+    );
+    assert_eq!(
+        leases
+            .lease_next(
+                operation_key(),
                 RUNNER_CLIENT_ID,
                 time::Duration::seconds(300) + time::Duration::nanoseconds(1),
             )
@@ -180,15 +208,25 @@ async fn storage_rejects_ttl_outside_the_application_contract() {
 #[tokio::test]
 async fn active_lease_blocks_claim_and_heartbeat_requires_exact_live_owner() {
     let (test_db, jobs, leases) = setup().await;
-    jobs.create(new_job("heartbeat-job")).await.unwrap();
+    jobs.create(operation_key(), new_job("heartbeat-job"))
+        .await
+        .unwrap();
     let lease = leases
-        .lease_next(RUNNER_CLIENT_ID, time::Duration::seconds(60))
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
         .await
         .unwrap()
         .unwrap();
     assert!(
         leases
-            .lease_next(RUNNER_CLIENT_ID, time::Duration::seconds(60))
+            .lease_next(
+                operation_key(),
+                RUNNER_CLIENT_ID,
+                time::Duration::seconds(60),
+            )
             .await
             .unwrap()
             .is_none()
@@ -197,7 +235,12 @@ async fn active_lease_blocks_claim_and_heartbeat_requires_exact_live_owner() {
     let wrong_runner = ClientId::new();
     assert!(
         leases
-            .heartbeat(lease.lease_id(), wrong_runner, time::Duration::seconds(60),)
+            .heartbeat(
+                operation_key(),
+                lease.lease_id(),
+                wrong_runner,
+                time::Duration::seconds(60),
+            )
             .await
             .unwrap()
             .is_none()
@@ -205,6 +248,7 @@ async fn active_lease_blocks_claim_and_heartbeat_requires_exact_live_owner() {
     assert!(
         leases
             .heartbeat(
+                operation_key(),
                 media_core::LeaseId::new(),
                 RUNNER_CLIENT_ID,
                 time::Duration::seconds(60),
@@ -217,6 +261,7 @@ async fn active_lease_blocks_claim_and_heartbeat_requires_exact_live_owner() {
     let before = time::OffsetDateTime::now_utc() + time::Duration::seconds(55);
     let renewed = leases
         .heartbeat(
+            operation_key(),
             lease.lease_id(),
             RUNNER_CLIENT_ID,
             time::Duration::seconds(60),
@@ -239,6 +284,7 @@ async fn active_lease_blocks_claim_and_heartbeat_requires_exact_live_owner() {
     assert!(
         leases
             .heartbeat(
+                operation_key(),
                 lease.lease_id(),
                 RUNNER_CLIENT_ID,
                 time::Duration::seconds(60),
@@ -252,9 +298,16 @@ async fn active_lease_blocks_claim_and_heartbeat_requires_exact_live_owner() {
 #[tokio::test]
 async fn expired_leases_requeue_recoverable_states_and_preserve_checkpoints() {
     let (test_db, jobs, leases) = setup().await;
-    let created = jobs.create(new_job("recoverable-job")).await.unwrap();
+    let created = jobs
+        .create(operation_key(), new_job("recoverable-job"))
+        .await
+        .unwrap();
     let mut lease = leases
-        .lease_next(RUNNER_CLIENT_ID, time::Duration::seconds(60))
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
         .await
         .unwrap()
         .unwrap();
@@ -291,7 +344,11 @@ async fn expired_leases_requeue_recoverable_states_and_preserve_checkpoints() {
             .await
             .unwrap();
         let recovered = leases
-            .lease_next(RUNNER_CLIENT_ID, time::Duration::seconds(60))
+            .lease_next(
+                operation_key(),
+                RUNNER_CLIENT_ID,
+                time::Duration::seconds(60),
+            )
             .await
             .unwrap()
             .unwrap();
@@ -316,9 +373,16 @@ async fn expired_leases_requeue_recoverable_states_and_preserve_checkpoints() {
 #[tokio::test]
 async fn expired_cancel_requested_job_becomes_cancelled_instead_of_being_stranded() {
     let (test_db, jobs, leases) = setup().await;
-    let created = jobs.create(new_job("cancel-job")).await.unwrap();
+    let created = jobs
+        .create(operation_key(), new_job("cancel-job"))
+        .await
+        .unwrap();
     let lease = leases
-        .lease_next(RUNNER_CLIENT_ID, time::Duration::seconds(60))
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
         .await
         .unwrap()
         .unwrap();
@@ -344,7 +408,11 @@ async fn expired_cancel_requested_job_becomes_cancelled_instead_of_being_strande
 
     assert!(
         leases
-            .lease_next(RUNNER_CLIENT_ID, time::Duration::seconds(60))
+            .lease_next(
+                operation_key(),
+                RUNNER_CLIENT_ID,
+                time::Duration::seconds(60),
+            )
             .await
             .unwrap()
             .is_none()
@@ -368,7 +436,9 @@ async fn expired_cancel_requested_job_becomes_cancelled_instead_of_being_strande
 #[tokio::test]
 async fn failed_queued_to_leased_update_rolls_back_the_inserted_lease() {
     let (test_db, jobs, leases) = setup().await;
-    jobs.create(new_job("trigger-job")).await.unwrap();
+    jobs.create(operation_key(), new_job("trigger-job"))
+        .await
+        .unwrap();
     test_db
         .connection()
         .execute_unprepared(
@@ -382,7 +452,11 @@ async fn failed_queued_to_leased_update_rolls_back_the_inserted_lease() {
 
     assert_eq!(
         leases
-            .lease_next(RUNNER_CLIENT_ID, time::Duration::seconds(60))
+            .lease_next(
+                operation_key(),
+                RUNNER_CLIENT_ID,
+                time::Duration::seconds(60),
+            )
             .await,
         Err(PortError::Infrastructure),
     );
@@ -411,7 +485,11 @@ async fn oversized_persisted_job_is_rejected_before_lease_mutations_commit() {
 
     assert_eq!(
         leases
-            .lease_next(RUNNER_CLIENT_ID, time::Duration::seconds(60))
+            .lease_next(
+                operation_key(),
+                RUNNER_CLIENT_ID,
+                time::Duration::seconds(60),
+            )
             .await,
         Err(PortError::Infrastructure),
     );
@@ -434,9 +512,15 @@ async fn oversized_persisted_job_is_rejected_before_lease_mutations_commit() {
 #[tokio::test]
 async fn oversized_persisted_job_rolls_back_heartbeat_extension() {
     let (test_db, jobs, leases) = setup().await;
-    jobs.create(new_job("oversized-heartbeat")).await.unwrap();
+    jobs.create(operation_key(), new_job("oversized-heartbeat"))
+        .await
+        .unwrap();
     let lease = leases
-        .lease_next(RUNNER_CLIENT_ID, time::Duration::seconds(60))
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
         .await
         .unwrap()
         .unwrap();
@@ -460,6 +544,7 @@ async fn oversized_persisted_job_rolls_back_heartbeat_extension() {
     assert_eq!(
         leases
             .heartbeat(
+                operation_key(),
                 lease.lease_id(),
                 RUNNER_CLIENT_ID,
                 time::Duration::seconds(300),
@@ -475,4 +560,118 @@ async fn oversized_persisted_job_rolls_back_heartbeat_extension() {
         .try_get::<time::OffsetDateTime>("", "expires_at")
         .unwrap();
     assert_eq!(after, before);
+}
+
+#[tokio::test]
+async fn repeated_lease_operation_returns_the_original_lease_without_claiming_again() {
+    let (test_db, jobs, leases) = setup().await;
+    jobs.create(operation_key(), new_job("durable-lease-first"))
+        .await
+        .unwrap();
+    jobs.create(operation_key(), new_job("durable-lease-second"))
+        .await
+        .unwrap();
+    let key = operation_key();
+
+    let first = leases
+        .lease_next(key, RUNNER_CLIENT_ID, time::Duration::seconds(60))
+        .await
+        .unwrap()
+        .unwrap();
+    drop(leases);
+    let replayed = SeaOrmLeaseStore::new(test_db.connect().await)
+        .lease_next(key, RUNNER_CLIENT_ID, time::Duration::seconds(300))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(replayed, first);
+    let states = query(
+        test_db.connection(),
+        "SELECT state FROM jobs ORDER BY result_ref",
+    )
+    .await
+    .into_iter()
+    .map(|row| row.try_get::<String>("", "state").unwrap())
+    .collect::<Vec<_>>();
+    assert_eq!(states, ["leased", "queued"]);
+}
+
+#[tokio::test]
+async fn repeated_empty_lease_operation_stays_empty_after_work_arrives() {
+    let (test_db, jobs, leases) = setup().await;
+    let key = operation_key();
+
+    assert!(
+        leases
+            .lease_next(key, RUNNER_CLIENT_ID, time::Duration::seconds(60))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    jobs.create(operation_key(), new_job("arrived-after-empty-result"))
+        .await
+        .unwrap();
+    drop(leases);
+
+    assert!(
+        SeaOrmLeaseStore::new(test_db.connect().await)
+            .lease_next(key, RUNNER_CLIENT_ID, time::Duration::seconds(60))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(jobs.queue_status().await.unwrap().queued, 1);
+}
+
+#[tokio::test]
+async fn repeated_heartbeat_operation_returns_its_original_expiry_after_a_later_heartbeat() {
+    let (test_db, jobs, leases) = setup().await;
+    jobs.create(operation_key(), new_job("durable-heartbeat"))
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let key = operation_key();
+    let first = leases
+        .heartbeat(
+            key,
+            lease.lease_id(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let later = leases
+        .heartbeat(
+            operation_key(),
+            lease.lease_id(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(300),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(later.expires_at() > first.expires_at());
+    drop(leases);
+
+    let replayed = SeaOrmLeaseStore::new(test_db.connect().await)
+        .heartbeat(
+            key,
+            lease.lease_id(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(300),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(replayed, first);
 }

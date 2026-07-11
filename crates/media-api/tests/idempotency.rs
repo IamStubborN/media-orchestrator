@@ -7,8 +7,11 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use media_api::router;
-use media_contract::{ApiError, ApiErrorCode};
-use media_core::{PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole, LeaseId, RUNNER_CLIENT_ID};
+use media_contract::{ApiError, ApiErrorCode, LeaseDto};
+use media_core::{
+    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole, Job, JobId, JobLease, JobState, LeaseId,
+    NotifyScope, Provider, RUNNER_CLIENT_ID,
+};
 use tower::ServiceExt;
 
 use support::{
@@ -50,6 +53,47 @@ fn app_with_idempotency(
         Arc::new(FakeLeaseStore::default()),
         idempotency,
     ))
+}
+
+fn runner_app_with_idempotency(
+    leases: FakeLeaseStore,
+    idempotency: Arc<dyn media_api::IdempotencyStore>,
+) -> axum::Router {
+    let runner = Actor::new(RUNNER_CLIENT_ID, None, ClientRole::Runner).unwrap();
+    router(state_with_stores(
+        FakeClientStore::new([(RUNNER_TOKEN, runner)]),
+        Arc::new(FakeJobStore::default()),
+        Arc::new(leases),
+        idempotency,
+    ))
+}
+
+fn runner_request(path: &str, key: &str, request_id: &str) -> Request<Body> {
+    Request::post(path)
+        .header(header::AUTHORIZATION, format!("Bearer {RUNNER_TOKEN}"))
+        .header("idempotency-key", key)
+        .header("x-request-id", request_id)
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn lease_at(lease_id: LeaseId, expires_at: i64) -> JobLease {
+    let job = Job::rehydrate(
+        JobId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        "durable-result".to_owned(),
+        JobState::Leased,
+        None,
+        NotifyScope::Initiator,
+    )
+    .unwrap();
+    JobLease::new(
+        lease_id,
+        job,
+        RUNNER_CLIENT_ID,
+        time::OffsetDateTime::from_unix_timestamp(expires_at).unwrap(),
+    )
 }
 
 async fn body_bytes(response: axum::response::Response) -> axum::body::Bytes {
@@ -258,15 +302,16 @@ async fn maximum_sized_create_response_is_persisted_and_replayed_before_mutating
 }
 
 #[tokio::test]
-async fn malformed_replay_is_discarded_before_the_next_retry_executes() {
+async fn malformed_completed_replay_fails_closed_on_every_retry_without_execution() {
     let jobs = FakeJobStore::default();
+    let malformed = media_api::StoredHttpResponse::new(
+        200,
+        "invalid\ncontent-type".to_owned(),
+        b"malformed".to_vec(),
+    );
     let idempotency = ControlledIdempotencyStore::new([
-        ControlledReservation::Replay(media_api::StoredHttpResponse::new(
-            200,
-            "invalid\ncontent-type".to_owned(),
-            b"malformed".to_vec(),
-        )),
-        ControlledReservation::Reserved,
+        ControlledReservation::Replay(malformed.clone()),
+        ControlledReservation::Replay(malformed),
     ]);
     let app = app_with_idempotency(jobs.clone(), Arc::new(idempotency.clone()));
 
@@ -276,8 +321,10 @@ async fn malformed_replay_is_discarded_before_the_next_retry_executes() {
         .await
         .unwrap();
     assert_eq!(malformed.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(error(malformed).await.request_id, "malformed-first");
-    assert_eq!(idempotency.discard_calls(), 1);
+    let first_error = error(malformed).await;
+    assert_eq!(first_error.code, ApiErrorCode::Internal);
+    assert_eq!(first_error.message, "internal server error");
+    assert_eq!(first_error.request_id, "malformed-first");
     assert_eq!(idempotency.abort_calls(), 0);
     assert_eq!(jobs.create_calls(), 0);
 
@@ -285,8 +332,13 @@ async fn malformed_replay_is_discarded_before_the_next_retry_executes() {
         .oneshot(request("malformed", BODY, "malformed-retry"))
         .await
         .unwrap();
-    assert_eq!(retry.status(), StatusCode::CREATED);
-    assert_eq!(jobs.create_calls(), 1);
+    assert_eq!(retry.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let retry_error = error(retry).await;
+    assert_eq!(retry_error.code, first_error.code);
+    assert_eq!(retry_error.message, first_error.message);
+    assert_eq!(retry_error.request_id, "malformed-retry");
+    assert_eq!(idempotency.abort_calls(), 0);
+    assert_eq!(jobs.create_calls(), 0);
 }
 
 #[tokio::test]
@@ -349,6 +401,126 @@ async fn committed_complete_error_cannot_be_aborted_and_retries_as_replay() {
         .unwrap();
     assert_eq!(replay.status(), StatusCode::CREATED);
     assert_eq!(jobs.create_calls(), 1);
+}
+
+#[tokio::test]
+async fn create_reentry_after_replay_completion_failure_mutates_once() {
+    let jobs = FakeJobStore::default();
+    let failing =
+        ControlledIdempotencyStore::new([ControlledReservation::Reserved]).failing_complete();
+    let first = app_with_idempotency(jobs.clone(), Arc::new(failing))
+        .oneshot(request("durable-create", BODY, "durable-create-first"))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let retried = app_with_idempotency(jobs.clone(), Arc::new(MemoryIdempotencyStore::default()))
+        .oneshot(request("durable-create", BODY, "durable-create-retry"))
+        .await
+        .unwrap();
+
+    assert_eq!(retried.status(), StatusCode::CREATED);
+    assert_eq!(jobs.create_calls(), 1);
+}
+
+#[tokio::test]
+async fn lease_reentry_after_replay_completion_failure_returns_the_original_result() {
+    let original = lease_at(LeaseId::new(), 1_783_707_660);
+    let leases = FakeLeaseStore::with_lease(original.clone());
+    let failing =
+        ControlledIdempotencyStore::new([ControlledReservation::Reserved]).failing_complete();
+    let first = runner_app_with_idempotency(leases.clone(), Arc::new(failing))
+        .oneshot(runner_request(
+            "/v1/runner/leases",
+            "durable-lease",
+            "durable-lease-first",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    leases.set_lease(Some(lease_at(LeaseId::new(), 1_783_708_000)));
+
+    let retried =
+        runner_app_with_idempotency(leases.clone(), Arc::new(MemoryIdempotencyStore::default()))
+            .oneshot(runner_request(
+                "/v1/runner/leases",
+                "durable-lease",
+                "durable-lease-retry",
+            ))
+            .await
+            .unwrap();
+
+    assert_eq!(retried.status(), StatusCode::OK);
+    let dto: LeaseDto = serde_json::from_slice(&body_bytes(retried).await).unwrap();
+    assert_eq!(dto.lease_id.to_string(), original.lease_id().to_string());
+    assert_eq!(dto.expires_at, "2026-07-10T18:21:00Z");
+    assert_eq!(leases.lease_calls(), 1);
+}
+
+#[tokio::test]
+async fn empty_lease_reentry_after_replay_completion_failure_stays_no_content() {
+    let leases = FakeLeaseStore::default();
+    let failing =
+        ControlledIdempotencyStore::new([ControlledReservation::Reserved]).failing_complete();
+    let first = runner_app_with_idempotency(leases.clone(), Arc::new(failing))
+        .oneshot(runner_request(
+            "/v1/runner/leases",
+            "durable-empty-lease",
+            "durable-empty-first",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    leases.set_lease(Some(lease_at(LeaseId::new(), 1_783_708_000)));
+
+    let retried =
+        runner_app_with_idempotency(leases.clone(), Arc::new(MemoryIdempotencyStore::default()))
+            .oneshot(runner_request(
+                "/v1/runner/leases",
+                "durable-empty-lease",
+                "durable-empty-retry",
+            ))
+            .await
+            .unwrap();
+
+    assert_eq!(retried.status(), StatusCode::NO_CONTENT);
+    assert_eq!(leases.lease_calls(), 1);
+}
+
+#[tokio::test]
+async fn heartbeat_reentry_after_replay_completion_failure_keeps_the_original_expiry() {
+    let lease_id = LeaseId::new();
+    let original = lease_at(lease_id, 1_783_707_660);
+    let leases = FakeLeaseStore::with_lease(original);
+    let path = format!("/v1/runner/leases/{lease_id}/heartbeat");
+    let failing =
+        ControlledIdempotencyStore::new([ControlledReservation::Reserved]).failing_complete();
+    let first = runner_app_with_idempotency(leases.clone(), Arc::new(failing))
+        .oneshot(runner_request(
+            &path,
+            "durable-heartbeat",
+            "durable-heartbeat-first",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    leases.set_lease(Some(lease_at(lease_id, 1_783_708_000)));
+
+    let retried =
+        runner_app_with_idempotency(leases.clone(), Arc::new(MemoryIdempotencyStore::default()))
+            .oneshot(runner_request(
+                &path,
+                "durable-heartbeat",
+                "durable-heartbeat-retry",
+            ))
+            .await
+            .unwrap();
+
+    assert_eq!(retried.status(), StatusCode::OK);
+    let dto: LeaseDto = serde_json::from_slice(&body_bytes(retried).await).unwrap();
+    assert_eq!(dto.lease_id.to_string(), lease_id.to_string());
+    assert_eq!(dto.expires_at, "2026-07-10T18:21:00Z");
+    assert_eq!(leases.heartbeat_calls(), 1);
 }
 
 #[tokio::test]

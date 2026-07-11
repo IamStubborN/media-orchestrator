@@ -20,7 +20,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo check --workspace --all-targets --all-features --locked
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - run: cargo nextest run --workspace --all-features
+      - run: cargo nextest run --workspace --locked
       - run: cargo deny check && cargo audit
 
   postgres-integration:
@@ -33,5 +33,5 @@ jobs:
           tool: rust@1.97.0, cargo-nextest@0.9.140
           fallback: none
       - run: docker info
-      - run: cargo nextest run -p media-storage --all-features
-      - run: cargo nextest run -p media --test service_composition --test postgres --all-features
+      - run: cargo nextest run -p media-storage --features integration-tests --locked
+      - run: cargo nextest run -p media --features integration-tests --test service_composition --test postgres --locked

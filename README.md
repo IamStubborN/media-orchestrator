@@ -37,9 +37,11 @@ mise run audit
 mise run build
 ```
 
-`mise run test-integration` requires a running Docker daemon. It runs the full
-PostgreSQL/Testcontainers suite with the repository's pinned PostgreSQL 17
-Alpine image. Provider and live-network tests are not part of this gate.
+`mise run test` uses default Cargo features and is Docker-independent.
+`mise run test-integration` requires a running Docker daemon and enables only
+the opt-in `integration-tests` features. It runs the full
+PostgreSQL/Testcontainers suite once with the repository's pinned PostgreSQL 17
+Alpine image. Provider and live-network tests are not part of either gate.
 
 ## Local PostgreSQL Service
 

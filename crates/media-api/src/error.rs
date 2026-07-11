@@ -3,7 +3,7 @@ use std::error::Error as _;
 use axum::{
     Json,
     body::{Body, to_bytes},
-    extract::Request,
+    extract::{Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -12,6 +12,7 @@ use media_contract::{ApiError as ErrorBody, ApiErrorCode};
 
 use crate::{
     MAX_REQUEST_BODY_BYTES, MAX_REQUEST_HEADER_BYTES, MAX_REQUEST_HEADER_COUNT, RequestId,
+    RequestTimeout,
 };
 
 pub struct ApiError {
@@ -96,6 +97,15 @@ impl ApiError {
             StatusCode::BAD_REQUEST,
             ApiErrorCode::InvalidRequest,
             "request body could not be read",
+            request_id,
+        )
+    }
+
+    pub(crate) fn request_timeout(request_id: &RequestId) -> Self {
+        Self::new(
+            StatusCode::REQUEST_TIMEOUT,
+            ApiErrorCode::Internal,
+            "request timed out",
             request_id,
         )
     }
@@ -185,6 +195,22 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status, Json(self.body)).into_response()
+    }
+}
+
+pub(crate) async fn enforce_request_timeout(
+    State(timeout): State<RequestTimeout>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let request_id = request
+        .extensions()
+        .get::<RequestId>()
+        .expect("request-ID middleware must run outside request timeout")
+        .clone();
+    match tokio::time::timeout(timeout.0, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => ApiError::request_timeout(&request_id).into_response(),
     }
 }
 
