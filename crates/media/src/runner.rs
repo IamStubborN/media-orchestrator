@@ -536,7 +536,10 @@ impl MediaJobExecutor {
                 .pipeline
                 .run(&work, control, &reporter)
                 .await
-                .map_err(|_| RunnerError::Execution)?;
+                .map_err(|error| {
+                    tracing::warn!(error = ?error, "Rezka media pipeline failed");
+                    RunnerError::Execution
+                })?;
             control
                 .stage_completed(task_ordinal, "media_pipeline", 1)
                 .await?;
