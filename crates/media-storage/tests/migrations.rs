@@ -9,7 +9,7 @@ use support::{TestDatabase, assert_rejected, execute, query};
 const PRIMARY_ID: &str = "00000000-0000-0000-0000-000000000001";
 const SECONDARY_ID: &str = "00000000-0000-0000-0000-000000000002";
 
-const APPLICATION_TABLES: [&str; 15] = [
+const APPLICATION_TABLES: [&str; 18] = [
     "api_clients",
     "episode_provider_mappings",
     "episodes",
@@ -21,9 +21,12 @@ const APPLICATION_TABLES: [&str; 15] = [
     "jobs",
     "media",
     "media_external_refs",
+    "notification_outbox",
     "operation_receipts",
     "outbox_events",
     "seasons",
+    "tracking_discoveries",
+    "tracking_subscriptions",
     "users",
 ];
 
@@ -139,8 +142,10 @@ async fn migrations_apply_seed_fixed_users_and_reverse_cleanly() {
         "media.metadata_snapshot",
         "media_external_refs.provider_snapshot",
         "operation_receipts.result_snapshot",
+        "notification_outbox.payload",
         "outbox_events.payload",
         "seasons.metadata_snapshot",
+        "tracking_subscriptions.known_episodes",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -210,6 +215,7 @@ async fn migrations_apply_seed_fixed_users_and_reverse_cleanly() {
              'seasons', 'episodes', 'episode_provider_mappings', 'jobs',
              'job_tasks', 'job_stages', 'idempotency_records', 'job_leases'
              , 'operation_receipts', 'job_events', 'outbox_events'
+             , 'tracking_subscriptions', 'tracking_discoveries', 'notification_outbox'
            ])",
     )
     .await;
@@ -224,7 +230,13 @@ async fn migrations_apply_seed_fixed_users_and_reverse_cleanly() {
 
 #[tokio::test]
 async fn a_failed_migration_explicitly_rolls_back_partial_schema() {
-    for migration in Migrator::migrations() {
+    let migrations = Migrator::migrations();
+    assert_eq!(
+        migrations.last().unwrap().name(),
+        "m20260712_000008_tracking_notifications",
+        "tracking notifications must remain after the parallel 000007 search migration",
+    );
+    for migration in migrations {
         assert_eq!(
             migration.use_transaction(),
             Some(true),

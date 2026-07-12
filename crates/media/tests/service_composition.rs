@@ -564,6 +564,34 @@ async fn prepared_service_serves_on_an_ephemeral_loopback_listener_and_stops_gra
     .expect("listener must accept requests")
     .expect("health request must complete");
     assert!(response.status().is_success());
+    let client = reqwest::Client::new();
+    let created = client
+        .post(format!("http://{address}/v1/tracking"))
+        .bearer_auth("primary-token-task-8b")
+        .header("idempotency-key", "service-tracking-add")
+        .json(&serde_json::json!({
+            "provider": "rezka",
+            "title": "Ongoing Show",
+            "translation": "Studio Dub",
+            "known_episodes": [{"season": 1, "episode": 4}],
+            "scope": "family",
+            "series_ongoing": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let listed: serde_json::Value = client
+        .get(format!("http://{address}/v1/tracking"))
+        .bearer_auth("secondary-token-task-8b")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["tracking"].as_array().unwrap().len(), 1);
+    assert!(listed["tracking"][0].get("owner_id").is_none());
     shutdown.send(()).unwrap();
     tokio::time::timeout(TEST_TIMEOUT, task)
         .await

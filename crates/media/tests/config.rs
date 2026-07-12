@@ -100,6 +100,35 @@ fn database_config_requires_the_database_url_file_setting() {
 }
 
 #[test]
+fn notification_webhooks_are_optional_but_both_hmac_secrets_are_atomic() {
+    let source = FakeSource::valid_server();
+    assert!(
+        ServerConfig::load_from(&source)
+            .unwrap()
+            .notifications()
+            .is_none()
+    );
+
+    let mut partial = FakeSource::valid_server();
+    partial.set_secret("MEDIA_PRIMARY_WEBHOOK_HMAC_FILE", b"primary-hmac");
+    assert_eq!(
+        ServerConfig::load_from(&partial).unwrap_err(),
+        ConfigError::MissingEnvironment {
+            name: "MEDIA_SECONDARY_WEBHOOK_HMAC_FILE",
+        }
+    );
+
+    let mut enabled = FakeSource::valid_server();
+    enabled.set_secret("MEDIA_PRIMARY_WEBHOOK_HMAC_FILE", b"primary-hmac");
+    enabled.set_secret("MEDIA_SECONDARY_WEBHOOK_HMAC_FILE", b"secondary-hmac");
+    let config = ServerConfig::load_from(&enabled).unwrap();
+    let rendered = format!("{:?}", config.notifications().unwrap());
+    assert!(rendered.contains("[REDACTED]"));
+    assert!(!rendered.contains("hermes-primary"));
+    assert!(!rendered.contains("primary-hmac"));
+}
+
+#[test]
 fn database_config_reports_an_unreadable_secret_without_exposing_contents() {
     let path = PathBuf::from("/database-url.secret");
     let mut source = FakeSource::default();

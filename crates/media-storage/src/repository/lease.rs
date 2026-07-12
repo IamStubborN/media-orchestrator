@@ -1,6 +1,7 @@
 use media_core::{
-    Checkpoint, CheckpointValue, ClientId, Job, JobEvent, JobEventKind, JobLease, JobState,
-    LeaseId, LeaseStore, OperationKey, PortError, StageFailureOutcome, StageRef,
+    PRIMARY_USER_ID, Checkpoint, CheckpointValue, ClientId, Job, JobEvent, JobEventKind, JobLease,
+    JobState, LeaseId, LeaseStore, NotifyScope, OperationKey, PortError, StageFailureOutcome,
+    StageRef, SECONDARY_USER_ID,
 };
 use sea_orm::{
     ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, Statement, TransactionTrait,
@@ -159,6 +160,7 @@ impl LeaseStore for SeaOrmLeaseStore {
                     payload,
                 )
                 .await?;
+                insert_notification_outbox(&transaction, &updated, &event).await?;
             }
             operation::complete(
                 &transaction,
@@ -171,6 +173,84 @@ impl LeaseStore for SeaOrmLeaseStore {
         }
         .await;
         finish(transaction, result).await
+    }
+}
+
+async fn insert_notification_outbox(
+    transaction: &sea_orm::DatabaseTransaction,
+    job: &Job,
+    event: &JobEvent,
+) -> Result<(), sea_orm::DbErr> {
+    let Some((event_type, message)) = notification_for_event(job, event) else {
+        return Ok(());
+    };
+    let recipients = match job.notify_scope() {
+        NotifyScope::Family => vec!["primary", "secondary"],
+        NotifyScope::Initiator if job.owner_id() == PRIMARY_USER_ID => vec!["primary"],
+        NotifyScope::Initiator if job.owner_id() == SECONDARY_USER_ID => vec!["secondary"],
+        NotifyScope::Initiator => {
+            return Err(sea_orm::DbErr::Type(
+                "job owner has no notification route".to_owned(),
+            ));
+        }
+    };
+    for recipient in recipients {
+        transaction
+            .execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "INSERT INTO notification_outbox \
+                 (id, aggregate_type, aggregate_id, event_type, recipient, source_dedupe_key, payload) \
+                 VALUES ($1, 'job', $2, $3, $4, $5, $6) \
+                 ON CONFLICT (source_dedupe_key, recipient) DO NOTHING",
+                [
+                    Uuid::new_v4().into(),
+                    job.id().into_uuid().into(),
+                    event_type.into(),
+                    recipient.into(),
+                    event.id().into_uuid().as_bytes().to_vec().into(),
+                    serde_json::json!({"message": message}).into(),
+                ],
+            ))
+            .await?;
+    }
+    Ok(())
+}
+
+fn notification_for_event(job: &Job, event: &JobEvent) -> Option<(&'static str, String)> {
+    let id = job.id();
+    match event.kind() {
+        JobEventKind::Started => Some(("started", format!("Media job {id} started."))),
+        JobEventKind::StageCompleted { stage, .. } if stage.name() == "download" => Some((
+            "downloaded",
+            format!("Media job {id} finished downloading."),
+        )),
+        JobEventKind::StageCompleted { stage, .. }
+            if matches!(stage.name(), "encode" | "encoding" | "transcode") =>
+        {
+            Some((
+                "encoding-complete",
+                format!("Media job {id} finished encoding."),
+            ))
+        }
+        JobEventKind::StageFailed { .. } if job.state() == JobState::Failed => {
+            Some(("failed", format!("Media job {id} failed.")))
+        }
+        JobEventKind::JobTransition { state, .. } => match state {
+            JobState::NeedsAction => Some((
+                "choice-needed",
+                format!("Media job {id} needs a choice before it can continue."),
+            )),
+            JobState::Partial => Some((
+                "partial",
+                format!("Media job {id} completed with partial results."),
+            )),
+            JobState::Completed => {
+                Some(("plex-added", format!("Media job {id} was added to Plex.")))
+            }
+            JobState::Failed => Some(("failed", format!("Media job {id} failed."))),
+            _ => None,
+        },
+        _ => None,
     }
 }
 

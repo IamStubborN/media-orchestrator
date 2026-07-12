@@ -17,6 +17,7 @@ enum Command {
     Healthcheck(HealthcheckArgs),
     Jobs(JobsArgs),
     Queue(QueueArgs),
+    Tracking(TrackingArgs),
     Migrate,
     Serve,
 }
@@ -25,6 +26,39 @@ enum Command {
 struct HealthcheckArgs {
     #[arg(long, default_value = "http://127.0.0.1:8080/v1/health")]
     url: reqwest::Url,
+}
+
+#[derive(Debug, Args)]
+struct TrackingArgs {
+    #[command(subcommand)]
+    command: TrackingCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TrackingCommand {
+    Add {
+        #[arg(long, value_enum)]
+        provider: Provider,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        translation: String,
+        #[arg(long = "known-episode", required = true, value_parser = parse_known_episode)]
+        known_episodes: Vec<media_contract::EpisodeSnapshotDto>,
+        #[arg(long, value_enum)]
+        scope: TrackingScope,
+        #[arg(long)]
+        json: bool,
+    },
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    Remove {
+        tracking_id: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -80,6 +114,21 @@ enum Provider {
     Prowlarr,
 }
 
+#[derive(Debug, Copy, Clone, ValueEnum)]
+enum TrackingScope {
+    Personal,
+    Family,
+}
+
+impl From<TrackingScope> for media_contract::TrackingScopeDto {
+    fn from(value: TrackingScope) -> Self {
+        match value {
+            TrackingScope::Personal => Self::Personal,
+            TrackingScope::Family => Self::Family,
+        }
+    }
+}
+
 impl From<Provider> for media_contract::ProviderDto {
     fn from(value: Provider) -> Self {
         match value {
@@ -115,6 +164,7 @@ async fn run(cli: Cli) -> Result<(), RunError> {
         Command::Healthcheck(args) => run_healthcheck(args).await,
         Command::Jobs(args) => run_jobs(args).await,
         Command::Queue(args) => run_queue(args).await,
+        Command::Tracking(args) => run_tracking(args).await,
         Command::Migrate => {
             let config = DatabaseConfig::load()?;
             composition::migrate(&config).await?;
@@ -141,6 +191,57 @@ async fn run_healthcheck(args: HealthcheckArgs) -> Result<(), RunError> {
         return Err(RunError::Healthcheck);
     }
     Ok(())
+}
+
+async fn run_tracking(args: TrackingArgs) -> Result<(), RunError> {
+    let client = HttpClient::new(ClientConfig::load()?)?;
+    let output = match args.command {
+        TrackingCommand::Add {
+            provider,
+            title,
+            translation,
+            known_episodes,
+            scope,
+            json,
+        } => {
+            let _ = json;
+            client
+                .add_tracking(
+                    provider.into(),
+                    title,
+                    translation,
+                    known_episodes,
+                    scope.into(),
+                )
+                .await?
+        }
+        TrackingCommand::List { json } => {
+            let _ = json;
+            client.list_tracking().await?
+        }
+        TrackingCommand::Remove { tracking_id, json } => {
+            let _ = json;
+            client.remove_tracking(&tracking_id).await?
+        }
+    };
+    println!("{output}");
+    Ok(())
+}
+
+fn parse_known_episode(value: &str) -> Result<media_contract::EpisodeSnapshotDto, String> {
+    let Some((season, episode)) = value.split_once(':') else {
+        return Err("known episode must use SEASON:EPISODE".to_owned());
+    };
+    let season = season
+        .parse::<u32>()
+        .map_err(|_| "season must be a positive integer".to_owned())?;
+    let episode = episode
+        .parse::<u32>()
+        .map_err(|_| "episode must be a positive integer".to_owned())?;
+    if season == 0 || episode == 0 {
+        return Err("season and episode must be greater than zero".to_owned());
+    }
+    Ok(media_contract::EpisodeSnapshotDto { season, episode })
 }
 
 async fn run_jobs(args: JobsArgs) -> Result<(), RunError> {

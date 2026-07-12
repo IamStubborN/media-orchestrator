@@ -13,6 +13,10 @@ const LISTEN_ADDR: &str = "MEDIA_LISTEN_ADDR";
 const PRIMARY_TOKEN_FILE: &str = "MEDIA_PRIMARY_TOKEN_FILE";
 const SECONDARY_TOKEN_FILE: &str = "MEDIA_SECONDARY_TOKEN_FILE";
 const RUNNER_TOKEN_FILE: &str = "MEDIA_RUNNER_TOKEN_FILE";
+const PRIMARY_WEBHOOK_HMAC_FILE: &str = "MEDIA_PRIMARY_WEBHOOK_HMAC_FILE";
+const SECONDARY_WEBHOOK_HMAC_FILE: &str = "MEDIA_SECONDARY_WEBHOOK_HMAC_FILE";
+const PRIMARY_WEBHOOK_URL: &str = "MEDIA_PRIMARY_WEBHOOK_URL";
+const SECONDARY_WEBHOOK_URL: &str = "MEDIA_SECONDARY_WEBHOOK_URL";
 const LEASE_TTL_SECONDS: &str = "MEDIA_LEASE_TTL_SECONDS";
 const SERVICE_URL: &str = "MEDIA_SERVICE_URL";
 const TOKEN_FILE: &str = "MEDIA_TOKEN_FILE";
@@ -28,6 +32,8 @@ const REZKA_USER_AGENT: &str = "MEDIA_REZKA_USER_AGENT";
 const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:8080";
 const DEFAULT_REZKA_USER_AGENT: &str = "media-orchestrator/0.1 rezka-session";
 const DEFAULT_LEASE_TTL_SECONDS: i64 = 60;
+const DEFAULT_PRIMARY_WEBHOOK_URL: &str = "http://hermes-primary:8644/webhooks/media-notify";
+const DEFAULT_SECONDARY_WEBHOOK_URL: &str = "http://hermes-secondary:8644/webhooks/media-notify";
 const MIN_LEASE_TTL_SECONDS: i64 = 30;
 const MAX_LEASE_TTL_SECONDS: i64 = 300;
 const MAX_TOKEN_BYTES: usize = 512;
@@ -127,6 +133,7 @@ pub struct ServerConfig {
     secondary_token: SecretString,
     runner_token: SecretString,
     lease_ttl: time::Duration,
+    notifications: Option<NotificationConfig>,
 }
 
 impl ServerConfig {
@@ -163,6 +170,7 @@ impl ServerConfig {
             secondary_token: read_secret(source, SECONDARY_TOKEN_FILE, SecretKind::Token)?,
             runner_token: read_secret(source, RUNNER_TOKEN_FILE, SecretKind::Token)?,
             lease_ttl: time::Duration::seconds(lease_ttl_seconds),
+            notifications: NotificationConfig::load_optional(source)?,
         })
     }
 
@@ -195,6 +203,11 @@ impl ServerConfig {
     pub const fn lease_ttl(&self) -> time::Duration {
         self.lease_ttl
     }
+
+    #[must_use]
+    pub const fn notifications(&self) -> Option<&NotificationConfig> {
+        self.notifications.as_ref()
+    }
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -207,8 +220,79 @@ impl std::fmt::Debug for ServerConfig {
             .field("secondary_token", &"[REDACTED]")
             .field("runner_token", &"[REDACTED]")
             .field("lease_ttl", &self.lease_ttl)
+            .field(
+                "notifications",
+                &self.notifications.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
+}
+
+pub struct NotificationConfig {
+    primary_endpoint: url::Url,
+    secondary_endpoint: url::Url,
+    primary_secret: SecretString,
+    secondary_secret: SecretString,
+}
+
+impl NotificationConfig {
+    fn load_optional(source: &impl ConfigSource) -> Result<Option<Self>, ConfigError> {
+        let primary_file = source.var_os(PRIMARY_WEBHOOK_HMAC_FILE);
+        let secondary_file = source.var_os(SECONDARY_WEBHOOK_HMAC_FILE);
+        if primary_file.is_none() && secondary_file.is_none() {
+            return Ok(None);
+        }
+        if primary_file.is_none() {
+            return Err(ConfigError::MissingEnvironment {
+                name: PRIMARY_WEBHOOK_HMAC_FILE,
+            });
+        }
+        if secondary_file.is_none() {
+            return Err(ConfigError::MissingEnvironment {
+                name: SECONDARY_WEBHOOK_HMAC_FILE,
+            });
+        }
+        let primary_endpoint = optional_environment(source, PRIMARY_WEBHOOK_URL)?
+            .unwrap_or_else(|| DEFAULT_PRIMARY_WEBHOOK_URL.to_owned());
+        let secondary_endpoint = optional_environment(source, SECONDARY_WEBHOOK_URL)?
+            .unwrap_or_else(|| DEFAULT_SECONDARY_WEBHOOK_URL.to_owned());
+        Ok(Some(Self {
+            primary_endpoint: parse_webhook_endpoint(&primary_endpoint, PRIMARY_WEBHOOK_URL)?,
+            secondary_endpoint: parse_webhook_endpoint(&secondary_endpoint, SECONDARY_WEBHOOK_URL)?,
+            primary_secret: read_secret(source, PRIMARY_WEBHOOK_HMAC_FILE, SecretKind::Token)?,
+            secondary_secret: read_secret(source, SECONDARY_WEBHOOK_HMAC_FILE, SecretKind::Token)?,
+        }))
+    }
+
+    pub(crate) fn parts(&self) -> (url::Url, url::Url, SecretString, SecretString) {
+        (
+            self.primary_endpoint.clone(),
+            self.secondary_endpoint.clone(),
+            self.primary_secret.clone(),
+            self.secondary_secret.clone(),
+        )
+    }
+}
+
+impl std::fmt::Debug for NotificationConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("NotificationConfig { endpoints: [REDACTED], secrets: [REDACTED] }")
+    }
+}
+
+fn parse_webhook_endpoint(value: &str, name: &'static str) -> Result<url::Url, ConfigError> {
+    let endpoint = url::Url::parse(value).map_err(|_| ConfigError::InvalidEnvironment { name })?;
+    if !matches!(endpoint.scheme(), "http" | "https")
+        || endpoint.host_str().is_none()
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+        || endpoint.path() != "/webhooks/media-notify"
+    {
+        return Err(ConfigError::InvalidEnvironment { name });
+    }
+    Ok(endpoint)
 }
 
 pub struct ClientConfig {

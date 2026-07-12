@@ -17,6 +17,7 @@ clap.workspace = true
 media-api = { path = "../media-api", version = "=0.1.0" }
 media-contract = { path = "../media-contract", version = "=0.1.0" }
 media-core = { path = "../media-core", version = "=0.1.0" }
+media-integrations = { path = "../media-integrations", version = "=0.1.0" }
 media-runner = { path = "../media-runner", version = "=0.1.0" }
 media-storage = { path = "../media-storage", version = "=0.1.0" }
 reqwest.workspace = true

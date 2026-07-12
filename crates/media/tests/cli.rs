@@ -16,7 +16,14 @@ fn help_keeps_existing_commands_and_exposes_runtime_commands() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    for command in ["jobs", "queue", "healthcheck", "migrate", "serve"] {
+    for command in [
+        "jobs",
+        "queue",
+        "tracking",
+        "healthcheck",
+        "migrate",
+        "serve",
+    ] {
         assert!(stdout.contains(command), "help did not include {command}");
     }
 }

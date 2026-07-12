@@ -1,10 +1,13 @@
 use media_contract::{
-    CheckpointValueDto, CreateJobRequest, JobDto, JobStateDto, LeaseDto, NeedsActionReasonDto,
-    NotifyScopeDto, ProviderDto, PublicId, QueueStatusDto, RunnerEventDto, RunnerEventRequest,
+    CheckpointValueDto, CreateJobRequest, CreateTrackingRequest, EpisodeSnapshotDto, JobDto,
+    JobStateDto, LeaseDto, NeedsActionReasonDto, NotifyScopeDto, ProviderDto, PublicId,
+    QueueStatusDto, RunnerEventDto, RunnerEventRequest, TrackingDto, TrackingScopeDto,
+    TrackingStateDto,
 };
 use media_core::{
-    CheckpointValue, Job, JobEvent, JobEventId, JobEventValidationError, JobLease, JobState,
-    NeedsActionReason, NewJobCommand, NotifyScope, Provider, QueueStatus,
+    CheckpointValue, EpisodeSnapshot, Job, JobEvent, JobEventId, JobEventValidationError, JobLease,
+    JobState, NeedsActionReason, NewJobCommand, NewTrackingCommand, NotifyScope, Provider,
+    QueueStatus, TrackingScope, TrackingSubscription,
 };
 use time::format_description::well_known::Rfc3339;
 
@@ -20,6 +23,55 @@ pub(crate) fn new_job_command(request: CreateJobRequest) -> NewJobCommand {
             NotifyScopeDto::Initiator => NotifyScope::Initiator,
             NotifyScopeDto::Family => NotifyScope::Family,
         },
+    }
+}
+
+pub(crate) fn new_tracking_command(
+    request: CreateTrackingRequest,
+) -> Result<NewTrackingCommand, ()> {
+    let known_episodes = request
+        .known_episodes
+        .into_iter()
+        .map(|episode| EpisodeSnapshot::new(episode.season, episode.episode).map_err(|_| ()))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(NewTrackingCommand {
+        provider: match request.provider {
+            ProviderDto::Rezka => Provider::Rezka,
+            ProviderDto::Prowlarr => Provider::Prowlarr,
+        },
+        title: request.title,
+        translation: request.translation,
+        known_episodes,
+        scope: match request.scope {
+            TrackingScopeDto::Personal => TrackingScope::Personal,
+            TrackingScopeDto::Family => TrackingScope::Family,
+        },
+        series_ongoing: request.series_ongoing,
+    })
+}
+
+pub(crate) fn tracking(value: &TrackingSubscription) -> TrackingDto {
+    TrackingDto {
+        id: public_id(value.id().to_string()),
+        provider: match value.provider() {
+            Provider::Rezka => ProviderDto::Rezka,
+            Provider::Prowlarr => ProviderDto::Prowlarr,
+        },
+        title: value.title().to_owned(),
+        translation: value.translation().to_owned(),
+        known_episodes: value
+            .known_episodes()
+            .iter()
+            .map(|episode| EpisodeSnapshotDto {
+                season: episode.season(),
+                episode: episode.episode(),
+            })
+            .collect(),
+        scope: match value.scope() {
+            TrackingScope::Personal => TrackingScopeDto::Personal,
+            TrackingScope::Family => TrackingScopeDto::Family,
+        },
+        state: TrackingStateDto::Active,
     }
 }
 
