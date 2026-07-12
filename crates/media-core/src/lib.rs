@@ -36,7 +36,9 @@ pub use job::{
     NotifyScope, Provider, QueueStatus,
 };
 pub use notification::{
-    NotificationDelivery, NotificationEventType, NotificationRecipient, NotificationValidationError,
+    NotificationDelivery, NotificationDispatchResult, NotificationDispatcher,
+    NotificationEventType, NotificationOutboxPort, NotificationRecipient, NotificationSink,
+    NotificationValidationError,
 };
 pub use operation::OperationKey;
 pub use orchestration::{
@@ -45,7 +47,8 @@ pub use orchestration::{
 };
 pub use port::{ClientStore, IdentityStore, JobStore, LeaseStore, PortError, ReadinessPort};
 pub use tracking::{
-    EpisodeSnapshot, EpisodeSnapshotError, NewTrackingCommand, NewTrackingSubscription,
-    TrackingApplication, TrackingApplicationError, TrackingScope, TrackingState, TrackingStore,
+    EpisodeDiscoveryPort, EpisodeSnapshot, EpisodeSnapshotError, NewTrackingCommand,
+    NewTrackingSubscription, TrackingApplication, TrackingApplicationError, TrackingRunResult,
+    TrackingRuntime, TrackingScheduleStore, TrackingScope, TrackingState, TrackingStore,
     TrackingSubscription, TrackingValidationError,
 };

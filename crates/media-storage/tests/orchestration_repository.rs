@@ -72,6 +72,15 @@ async fn create_persists_initial_task_and_transactional_outbox_record() {
         outbox[0].try_get::<String>("", "event_type").unwrap(),
         "job.created",
     );
+    assert!(
+        query(
+            test_db.connection(),
+            "SELECT id FROM tracking_subscriptions",
+        )
+        .await
+        .is_empty(),
+        "creating a download job must never enable tracking",
+    );
 }
 
 #[tokio::test]

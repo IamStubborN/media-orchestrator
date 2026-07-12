@@ -76,6 +76,7 @@ impl MigrationTrait for Migration {
                         jsonb_typeof(payload) = 'object' AND payload ? 'message'
                         AND payload - 'message' = '{}'::jsonb
                         AND jsonb_typeof(payload->'message') = 'string'
+                        AND payload->>'message' NOT LIKE '%://%'
                     ),
                     CONSTRAINT notification_attempt_count_check CHECK (attempt_count >= 0),
                     CONSTRAINT notification_lease_pair_check CHECK (
@@ -86,6 +87,15 @@ impl MigrationTrait for Migration {
             "#).await?;
             db.execute_unprepared(
                 "CREATE INDEX tracking_due_idx ON tracking_subscriptions (next_check_at, created_at) WHERE deleted_at IS NULL",
+            ).await?;
+            db.execute_unprepared(
+                "CREATE UNIQUE INDEX tracking_personal_active_unique ON tracking_subscriptions \
+                 (owner_id, provider, title, translation) \
+                 WHERE scope = 'personal' AND deleted_at IS NULL",
+            ).await?;
+            db.execute_unprepared(
+                "CREATE UNIQUE INDEX tracking_family_active_unique ON tracking_subscriptions \
+                 (provider, title, translation) WHERE scope = 'family' AND deleted_at IS NULL",
             ).await?;
             db.execute_unprepared(
                 "CREATE INDEX notification_pending_idx ON notification_outbox (next_attempt_at, created_at) WHERE delivered_at IS NULL",

@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-use media_contract::{CreateJobRequest, NotifyScopeDto, ProviderDto};
+use media_contract::{
+    CreateJobRequest, CreateTrackingRequest, EpisodeSnapshotDto, NotifyScopeDto, ProviderDto,
+    TrackingScopeDto,
+};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::config::ClientConfig;
@@ -70,6 +73,44 @@ impl HttpClient {
     pub async fn queue_status(&self) -> Result<String, ClientError> {
         self.execute(self.request(reqwest::Method::GET, "v1/queue/status")?)
             .await
+    }
+
+    pub async fn add_tracking(
+        &self,
+        provider: ProviderDto,
+        title: String,
+        translation: String,
+        known_episodes: Vec<EpisodeSnapshotDto>,
+        scope: TrackingScopeDto,
+    ) -> Result<String, ClientError> {
+        let request = CreateTrackingRequest {
+            provider,
+            title,
+            translation,
+            known_episodes,
+            scope,
+            series_ongoing: true,
+        };
+        self.execute(
+            self.request(reqwest::Method::POST, "v1/tracking")?
+                .header(IDEMPOTENCY_KEY_HEADER, generated_identifier())
+                .json(&request),
+        )
+        .await
+    }
+
+    pub async fn list_tracking(&self) -> Result<String, ClientError> {
+        self.execute(self.request(reqwest::Method::GET, "v1/tracking")?)
+            .await
+    }
+
+    pub async fn remove_tracking(&self, tracking_id: &str) -> Result<String, ClientError> {
+        let path = format!("v1/tracking/{tracking_id}");
+        self.execute(
+            self.request(reqwest::Method::DELETE, &path)?
+                .header(IDEMPOTENCY_KEY_HEADER, generated_identifier()),
+        )
+        .await
     }
 
     fn request(

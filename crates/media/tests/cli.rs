@@ -16,7 +16,7 @@ fn help_keeps_existing_commands_and_exposes_service_commands() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    for command in ["jobs", "queue", "migrate", "serve"] {
+    for command in ["jobs", "queue", "tracking", "migrate", "serve"] {
         assert!(stdout.contains(command), "help did not include {command}");
     }
 }

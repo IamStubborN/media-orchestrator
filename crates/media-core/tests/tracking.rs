@@ -1,4 +1,8 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    future::Future,
+    sync::{Arc, Mutex},
+    task::{Context, Poll, Waker},
+};
 
 use media_core::{
     PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole, EpisodeSnapshot, NewTrackingCommand,
@@ -75,52 +79,67 @@ fn command(scope: TrackingScope) -> NewTrackingCommand {
     }
 }
 
-#[tokio::test]
-async fn personal_tracking_is_owned_and_visible_only_to_authenticated_owner() {
-    let store = Arc::new(FakeTrackingStore::default());
-    let app = TrackingApplication::new(store);
-
-    let created = app
-        .add(
-            &actor_primary(),
-            OperationKey::from_bytes([1; 32]),
-            command(TrackingScope::Personal),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(created.owner_id(), PRIMARY_USER_ID);
-    assert_eq!(app.list(&actor_primary()).await.unwrap().len(), 1);
-    assert!(app.list(&actor_secondary()).await.unwrap().is_empty());
+fn block_on<F: Future>(future: F) -> F::Output {
+    let mut context = Context::from_waker(Waker::noop());
+    let mut future = Box::pin(future);
+    loop {
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(output) => return output,
+            Poll::Pending => std::thread::yield_now(),
+        }
+    }
 }
 
-#[tokio::test]
-async fn family_tracking_is_visible_and_removable_by_either_fixed_user() {
-    let store = Arc::new(FakeTrackingStore::default());
-    let app = TrackingApplication::new(store);
-    let created = app
-        .add(
-            &actor_primary(),
-            OperationKey::from_bytes([2; 32]),
-            command(TrackingScope::Family),
-        )
-        .await
-        .unwrap();
+#[test]
+fn personal_tracking_is_owned_and_visible_only_to_authenticated_owner() {
+    block_on(async {
+        let store = Arc::new(FakeTrackingStore::default());
+        let app = TrackingApplication::new(store);
 
-    assert_eq!(
-        app.list(&actor_secondary()).await.unwrap(),
-        vec![created.clone()]
-    );
-    assert_eq!(
-        app.remove(
-            &actor_secondary(),
-            OperationKey::from_bytes([3; 32]),
-            created.id(),
-        )
-        .await
-        .unwrap(),
-        created,
-    );
+        let created = app
+            .add(
+                &actor_primary(),
+                OperationKey::from_bytes([1; 32]),
+                command(TrackingScope::Personal),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(created.owner_id(), PRIMARY_USER_ID);
+        assert_eq!(app.list(&actor_primary()).await.unwrap().len(), 1);
+        assert!(app.list(&actor_secondary()).await.unwrap().is_empty());
+    });
+}
+
+#[test]
+fn family_tracking_is_visible_and_removable_by_either_fixed_user() {
+    block_on(async {
+        let store = Arc::new(FakeTrackingStore::default());
+        let app = TrackingApplication::new(store);
+        let created = app
+            .add(
+                &actor_primary(),
+                OperationKey::from_bytes([2; 32]),
+                command(TrackingScope::Family),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            app.list(&actor_secondary()).await.unwrap(),
+            vec![created.clone()]
+        );
+        assert_eq!(
+            app.remove(
+                &actor_secondary(),
+                OperationKey::from_bytes([3; 32]),
+                created.id(),
+            )
+            .await
+            .unwrap(),
+            created,
+        );
+    });
 }
 
 #[test]

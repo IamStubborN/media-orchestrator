@@ -230,7 +230,13 @@ async fn migrations_apply_seed_fixed_users_and_reverse_cleanly() {
 
 #[tokio::test]
 async fn a_failed_migration_explicitly_rolls_back_partial_schema() {
-    for migration in Migrator::migrations() {
+    let migrations = Migrator::migrations();
+    assert_eq!(
+        migrations.last().unwrap().name(),
+        "m20260712_000008_tracking_notifications",
+        "tracking notifications must remain after the parallel 000007 search migration",
+    );
+    for migration in migrations {
         assert_eq!(
             migration.use_transaction(),
             Some(true),

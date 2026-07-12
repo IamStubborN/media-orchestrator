@@ -10,7 +10,9 @@ mod route;
 use std::{sync::Arc, time::Duration};
 
 use axum::{Router, extract::DefaultBodyLimit, middleware};
-use media_core::{ClientStore, JobApplication, LeaseApplication, ReadinessPort};
+use media_core::{
+    ClientStore, JobApplication, LeaseApplication, ReadinessPort, TrackingApplication,
+};
 
 pub use error::ApiError;
 pub use idempotency::{
@@ -37,6 +39,7 @@ pub struct ApiState {
     pub(crate) idempotency: Arc<dyn IdempotencyStore>,
     pub(crate) operations: Arc<dyn OperationCompletionStore>,
     pub(crate) readiness: Arc<dyn ReadinessPort>,
+    pub(crate) tracking: Option<Arc<TrackingApplication>>,
 }
 
 impl ApiState {
@@ -56,7 +59,14 @@ impl ApiState {
             idempotency,
             operations,
             readiness,
+            tracking: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_tracking(mut self, tracking: Arc<TrackingApplication>) -> Self {
+        self.tracking = Some(tracking);
+        self
     }
 
     #[must_use]
@@ -77,6 +87,11 @@ impl ApiState {
     #[must_use]
     pub fn operations(&self) -> &dyn OperationCompletionStore {
         self.operations.as_ref()
+    }
+
+    #[must_use]
+    pub fn tracking(&self) -> Option<&TrackingApplication> {
+        self.tracking.as_deref()
     }
 }
 

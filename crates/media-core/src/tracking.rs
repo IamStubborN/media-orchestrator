@@ -96,6 +96,8 @@ pub enum TrackingValidationError {
     EmptyTitle,
     #[error("translation cannot be empty")]
     EmptyTranslation,
+    #[error("tracking metadata cannot contain a URL")]
+    UrlNotAllowed,
     #[error("known episode snapshot cannot be empty")]
     EmptyEpisodeSnapshot,
     #[error("known episode snapshot contains duplicates")]
@@ -242,6 +244,9 @@ fn validate(
     if translation.trim().is_empty() {
         return Err(TrackingValidationError::EmptyTranslation);
     }
+    if title.contains("://") || translation.contains("://") {
+        return Err(TrackingValidationError::UrlNotAllowed);
+    }
     if known_episodes.is_empty() {
         return Err(TrackingValidationError::EmptyEpisodeSnapshot);
     }
@@ -267,6 +272,96 @@ pub trait TrackingStore: Send + Sync {
         id: TrackingId,
         user: UserId,
     ) -> Result<Option<TrackingSubscription>, PortError>;
+}
+
+#[async_trait::async_trait]
+pub trait TrackingScheduleStore: Send + Sync {
+    async fn list_due(
+        &self,
+        now: time::OffsetDateTime,
+        limit: u32,
+    ) -> Result<Vec<TrackingSubscription>, PortError>;
+    async fn record_future_episode(
+        &self,
+        id: TrackingId,
+        episode: EpisodeSnapshot,
+        next_check_at: time::OffsetDateTime,
+    ) -> Result<bool, PortError>;
+    async fn defer_check(
+        &self,
+        id: TrackingId,
+        next_check_at: time::OffsetDateTime,
+    ) -> Result<(), PortError>;
+}
+
+#[async_trait::async_trait]
+pub trait EpisodeDiscoveryPort: Send + Sync {
+    async fn available_episodes(
+        &self,
+        tracking: &TrackingSubscription,
+    ) -> Result<Vec<EpisodeSnapshot>, PortError>;
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct TrackingRunResult {
+    pub checked: u32,
+    pub discovered: u32,
+    pub failed: u32,
+}
+
+pub struct TrackingRuntime {
+    store: Arc<dyn TrackingScheduleStore>,
+    discovery: Arc<dyn EpisodeDiscoveryPort>,
+}
+
+impl TrackingRuntime {
+    #[must_use]
+    pub fn new(
+        store: Arc<dyn TrackingScheduleStore>,
+        discovery: Arc<dyn EpisodeDiscoveryPort>,
+    ) -> Self {
+        Self { store, discovery }
+    }
+
+    pub async fn run_once(
+        &self,
+        now: time::OffsetDateTime,
+        limit: u32,
+    ) -> Result<TrackingRunResult, PortError> {
+        if limit == 0 || limit > 100 {
+            return Err(PortError::Conflict);
+        }
+        let due = self.store.list_due(now, limit).await?;
+        let mut result = TrackingRunResult {
+            checked: 0,
+            discovered: 0,
+            failed: 0,
+        };
+        let next_check = now + time::Duration::hours(6);
+        for tracking in due {
+            result.checked += 1;
+            let available = match self.discovery.available_episodes(&tracking).await {
+                Ok(available) => available,
+                Err(_) => {
+                    self.store.defer_check(tracking.id(), next_check).await?;
+                    result.failed += 1;
+                    continue;
+                }
+            };
+            for episode in available {
+                if !tracking.known_episodes().contains(&episode)
+                    && self
+                        .store
+                        .record_future_episode(tracking.id(), episode, next_check)
+                        .await?
+                {
+                    result.discovered += 1;
+                }
+            }
+            self.store.defer_check(tracking.id(), next_check).await?;
+        }
+        Ok(result)
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]

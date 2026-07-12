@@ -207,6 +207,126 @@ async fn jobs_create_uses_auth_generated_headers_and_stable_json() {
 }
 
 #[tokio::test]
+async fn tracking_add_list_and_remove_use_strict_json_contracts() {
+    let router = Router::new()
+        .route(
+            "/v1/tracking",
+            any(|request: Request| async move {
+                let method = request.method().clone();
+                let headers = request.headers().clone();
+                let body = to_bytes(request.into_body(), 64 * 1024).await.unwrap();
+                if method == Method::POST {
+                    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    let valid = headers.contains_key("authorization")
+                        && headers.contains_key("x-request-id")
+                        && headers.contains_key("idempotency-key")
+                        && value
+                            == serde_json::json!({
+                                "provider": "rezka",
+                                "title": "Ongoing Show",
+                                "translation": "Studio Dub",
+                                "known_episodes": [{"season": 1, "episode": 4}],
+                                "scope": "family",
+                                "series_ongoing": true
+                            });
+                    if valid {
+                        json_response(StatusCode::CREATED, r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","provider":"rezka","title":"Ongoing Show","translation":"Studio Dub","known_episodes":[{"season":1,"episode":4}],"scope":"family","state":"active"}"#)
+                    } else {
+                        json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#)
+                    }
+                } else if method == Method::GET
+                    && headers.contains_key("authorization")
+                    && !headers.contains_key("idempotency-key")
+                {
+                    json_response(StatusCode::OK, r#"{"tracking":[]}"#)
+                } else {
+                    json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#)
+                }
+            }),
+        )
+        .route(
+            "/v1/tracking/{tracking_id}",
+            any(|request: Request| async move {
+                let valid = request.method() == Method::DELETE
+                    && request.headers().contains_key("authorization")
+                    && request.headers().contains_key("x-request-id")
+                    && request.headers().contains_key("idempotency-key");
+                if valid {
+                    json_response(StatusCode::OK, r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","provider":"rezka","title":"Ongoing Show","translation":"Studio Dub","known_episodes":[{"season":1,"episode":4}],"scope":"family","state":"active"}"#)
+                } else {
+                    json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#)
+                }
+            }),
+        );
+    let server = TestServer::start(router).await;
+    let token_file = SecretFile::new("cli-secret");
+
+    let add = command_output(command(
+        &server,
+        &token_file,
+        [
+            "tracking",
+            "add",
+            "--provider",
+            "rezka",
+            "--title",
+            "Ongoing Show",
+            "--translation",
+            "Studio Dub",
+            "--known-episode",
+            "1:4",
+            "--scope",
+            "family",
+            "--json",
+        ],
+    ))
+    .await
+    .unwrap();
+    let list = command_output(command(
+        &server,
+        &token_file,
+        ["tracking", "list", "--json"],
+    ))
+    .await
+    .unwrap();
+    let remove = command_output(command(
+        &server,
+        &token_file,
+        [
+            "tracking",
+            "remove",
+            "018f3f86-7b4c-7b4f-9b6a-6d62f45bb111",
+            "--json",
+        ],
+    ))
+    .await
+    .unwrap();
+    server.stop().await;
+
+    for output in [&add, &list, &remove] {
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(
+        String::from_utf8(list.stdout).unwrap(),
+        "{\"tracking\":[]}\n"
+    );
+    assert!(
+        String::from_utf8(add.stdout)
+            .unwrap()
+            .contains("\"scope\":\"family\"")
+    );
+    assert!(
+        String::from_utf8(remove.stdout)
+            .unwrap()
+            .contains("\"state\":\"active\"")
+    );
+}
+
+#[tokio::test]
 async fn jobs_get_and_queue_status_use_the_expected_paths() {
     let router = Router::new()
         .route(

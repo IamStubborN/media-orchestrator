@@ -1,8 +1,8 @@
 use media_core::{
     PRIMARY_USER_ID, EpisodeSnapshot, NewTrackingSubscription, NotificationDelivery,
-    NotificationEventType, NotificationId, NotificationRecipient, OperationKey, PortError,
-    Provider, TrackingId, TrackingScope, TrackingStore, TrackingSubscription, UserId,
-    SECONDARY_USER_ID,
+    NotificationEventType, NotificationId, NotificationOutboxPort, NotificationRecipient,
+    OperationKey, PortError, Provider, TrackingId, TrackingScheduleStore, TrackingScope,
+    TrackingStore, TrackingSubscription, UserId, SECONDARY_USER_ID,
 };
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
 
@@ -122,6 +122,63 @@ impl TrackingStore for SeaOrmTrackingStore {
     }
 }
 
+#[async_trait::async_trait]
+impl TrackingScheduleStore for SeaOrmTrackingStore {
+    async fn list_due(
+        &self,
+        now: time::OffsetDateTime,
+        limit: u32,
+    ) -> Result<Vec<TrackingSubscription>, PortError> {
+        if limit == 0 || limit > 100 {
+            return Err(PortError::Conflict);
+        }
+        self.database
+            .query_all_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "SELECT id, owner_id, provider, title, translation, known_episodes, scope \
+                 FROM tracking_subscriptions WHERE deleted_at IS NULL AND next_check_at <= $1 \
+                 ORDER BY next_check_at, created_at LIMIT $2",
+                [now.into(), i64::from(limit).into()],
+            ))
+            .await
+            .map_err(map_database_error)?
+            .iter()
+            .map(tracking_from_row)
+            .collect()
+    }
+
+    async fn record_future_episode(
+        &self,
+        id: TrackingId,
+        episode: EpisodeSnapshot,
+        next_check_at: time::OffsetDateTime,
+    ) -> Result<bool, PortError> {
+        SeaOrmTrackingStore::record_future_episode(self, id, episode, next_check_at).await
+    }
+
+    async fn defer_check(
+        &self,
+        id: TrackingId,
+        next_check_at: time::OffsetDateTime,
+    ) -> Result<(), PortError> {
+        let changed = self
+            .database
+            .execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "UPDATE tracking_subscriptions SET next_check_at = $2, updated_at = now() \
+                 WHERE id = $1 AND deleted_at IS NULL",
+                [id.into_uuid().into(), next_check_at.into()],
+            ))
+            .await
+            .map_err(map_database_error)?;
+        if changed.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(PortError::Conflict)
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SeaOrmNotificationOutbox {
     database: DatabaseConnection,
@@ -135,10 +192,10 @@ impl SeaOrmNotificationOutbox {
 
     pub async fn lease_pending(
         &self,
-        worker: uuid::Uuid,
+        worker: NotificationId,
         now: time::OffsetDateTime,
         ttl: time::Duration,
-        limit: u64,
+        limit: u32,
     ) -> Result<Vec<NotificationDelivery>, PortError> {
         let ttl_seconds = ttl.whole_seconds();
         if !(1..=300).contains(&ttl_seconds) || limit == 0 || limit > 100 {
@@ -147,19 +204,19 @@ impl SeaOrmNotificationOutbox {
         self.database.query_all_raw(Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
             "WITH pending AS (SELECT id FROM notification_outbox WHERE delivered_at IS NULL AND next_attempt_at <= $1 AND (lease_expires_at IS NULL OR lease_expires_at <= $1) ORDER BY next_attempt_at, created_at FOR UPDATE SKIP LOCKED LIMIT $2) UPDATE notification_outbox n SET lease_owner = $3, lease_expires_at = $1 + make_interval(secs => $4) FROM pending WHERE n.id = pending.id RETURNING n.id, n.recipient, n.event_type, n.payload, n.attempt_count",
-            [now.into(), i64::try_from(limit).map_err(|_| PortError::Conflict)?.into(), worker.into(), ttl_seconds.into()],
+            [now.into(), i64::from(limit).into(), worker.into_uuid().into(), ttl_seconds.into()],
         )).await.map_err(map_database_error)?.iter().map(delivery_from_row).collect()
     }
 
     pub async fn mark_delivered(
         &self,
         id: NotificationId,
-        worker: uuid::Uuid,
+        worker: NotificationId,
     ) -> Result<(), PortError> {
         let changed = self.database.execute_raw(Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
             "UPDATE notification_outbox SET delivered_at = now(), lease_owner = NULL, lease_expires_at = NULL, last_error_code = NULL WHERE id = $1 AND lease_owner = $2 AND delivered_at IS NULL",
-            [id.into_uuid().into(), worker.into()],
+            [id.into_uuid().into(), worker.into_uuid().into()],
         )).await.map_err(map_database_error)?;
         if changed.rows_affected() == 1 {
             Ok(())
@@ -171,7 +228,7 @@ impl SeaOrmNotificationOutbox {
     pub async fn mark_failed(
         &self,
         id: NotificationId,
-        worker: uuid::Uuid,
+        worker: NotificationId,
         now: time::OffsetDateTime,
         error_code: &str,
     ) -> Result<(), PortError> {
@@ -181,13 +238,44 @@ impl SeaOrmNotificationOutbox {
         let changed = self.database.execute_raw(Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
             "UPDATE notification_outbox SET attempt_count = attempt_count + 1, next_attempt_at = $3 + make_interval(secs => LEAST(3600, 30 * power(2, attempt_count)::integer)), lease_owner = NULL, lease_expires_at = NULL, last_error_code = $4 WHERE id = $1 AND lease_owner = $2 AND delivered_at IS NULL",
-            [id.into_uuid().into(), worker.into(), now.into(), error_code.into()],
+            [id.into_uuid().into(), worker.into_uuid().into(), now.into(), error_code.into()],
         )).await.map_err(map_database_error)?;
         if changed.rows_affected() == 1 {
             Ok(())
         } else {
             Err(PortError::Conflict)
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl NotificationOutboxPort for SeaOrmNotificationOutbox {
+    async fn lease_pending(
+        &self,
+        worker: NotificationId,
+        now: time::OffsetDateTime,
+        ttl: time::Duration,
+        limit: u32,
+    ) -> Result<Vec<NotificationDelivery>, PortError> {
+        SeaOrmNotificationOutbox::lease_pending(self, worker, now, ttl, limit).await
+    }
+
+    async fn mark_delivered(
+        &self,
+        id: NotificationId,
+        worker: NotificationId,
+    ) -> Result<(), PortError> {
+        SeaOrmNotificationOutbox::mark_delivered(self, id, worker).await
+    }
+
+    async fn mark_failed(
+        &self,
+        id: NotificationId,
+        worker: NotificationId,
+        now: time::OffsetDateTime,
+        error_code: &str,
+    ) -> Result<(), PortError> {
+        SeaOrmNotificationOutbox::mark_failed(self, id, worker, now, error_code).await
     }
 }
 

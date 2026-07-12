@@ -10,20 +10,22 @@ use media_api::{
 };
 use media_core::{
     PRIMARY_CLIENT_ID, PRIMARY_USER_ID, BootstrapClient, ClientRole, ClientStore, CredentialDigest,
-    JobApplication, LeaseApplication, OperationKey, PortError, RUNNER_CLIENT_ID, ReadinessPort,
+    EpisodeDiscoveryPort, JobApplication, LeaseApplication, NotificationDispatcher, NotificationId,
+    OperationKey, PortError, RUNNER_CLIENT_ID, ReadinessPort, TrackingApplication, TrackingRuntime,
     SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
 };
 use media_storage::{
     ReservationGeneration as StorageReservationGeneration, ReservationHandle, ReservationRecord,
     SeaOrmClientStore, SeaOrmIdempotencyRepository, SeaOrmJobStore, SeaOrmLeaseStore,
-    SeaOrmOperationReceiptRepository, SeaOrmReadiness, StoredResponseRecord,
+    SeaOrmNotificationOutbox, SeaOrmOperationReceiptRepository, SeaOrmReadiness,
+    SeaOrmTrackingStore, StoredResponseRecord,
 };
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use secrecy::{ExposeSecret, SecretBox};
 use sha2::{Digest, Sha256};
 
-use crate::config::{DatabaseConfig, RunnerConfig, ServerConfig};
+use crate::config::{DatabaseConfig, NotificationConfig, RunnerConfig, ServerConfig};
 
 const IDEMPOTENCY_TTL: time::Duration = time::Duration::hours(24);
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -261,11 +263,56 @@ fn storage_response(api: StoredHttpResponse) -> StoredResponseRecord {
 
 pub struct PreparedService {
     router: axum::Router,
+    notifications: Option<PreparedNotificationDispatcher>,
+}
+
+pub struct PreparedNotificationDispatcher {
+    dispatcher: NotificationDispatcher,
+    worker: NotificationId,
+}
+
+impl PreparedNotificationDispatcher {
+    pub async fn run_once(&self) -> Result<media_core::NotificationDispatchResult, PortError> {
+        self.dispatcher
+            .run_once(self.worker, time::OffsetDateTime::now_utc(), 25)
+            .await
+    }
+}
+
+pub fn prepare_notification_dispatcher(
+    database: DatabaseConnection,
+    config: &NotificationConfig,
+) -> Result<PreparedNotificationDispatcher, ServiceError> {
+    let (primary_endpoint, secondary_endpoint, primary_secret, secondary_secret) = config.parts();
+    let webhook = media_integrations::hermes::HermesWebhookClient::new(
+        media_integrations::hermes::HermesWebhookConfig::new(
+            primary_endpoint,
+            secondary_endpoint,
+            primary_secret,
+            secondary_secret,
+        ),
+    )
+    .map_err(|_| ServiceError::Bootstrap)?;
+    Ok(PreparedNotificationDispatcher {
+        dispatcher: NotificationDispatcher::new(
+            Arc::new(SeaOrmNotificationOutbox::new(database)),
+            Arc::new(webhook),
+        ),
+        worker: NotificationId::new(),
+    })
+}
+
+#[must_use]
+pub fn prepare_tracking_scheduler(
+    database: DatabaseConnection,
+    discovery: Arc<dyn EpisodeDiscoveryPort>,
+) -> TrackingRuntime {
+    TrackingRuntime::new(Arc::new(SeaOrmTrackingStore::new(database)), discovery)
 }
 
 impl std::fmt::Debug for PreparedService {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("PreparedService { router: [REDACTED] }")
+        formatter.write_str("PreparedService { router: [REDACTED], notifications: [REDACTED] }")
     }
 }
 
@@ -291,8 +338,22 @@ impl PreparedService {
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        let Self {
+            router,
+            notifications,
+        } = self;
+        let notification_task = notifications.map(|dispatcher| {
+            tokio::spawn(async move {
+                loop {
+                    if dispatcher.run_once().await.is_err() {
+                        tracing::warn!("notification dispatch pass failed");
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            })
+        });
         let (observed_shutdown, shutdown_observed) = tokio::sync::oneshot::channel();
-        let server = axum::serve(listener, self.router)
+        let server = axum::serve(listener, router)
             .with_graceful_shutdown(async move {
                 shutdown.await;
                 let _ = observed_shutdown.send(());
@@ -300,18 +361,24 @@ impl PreparedService {
             .into_future();
         tokio::pin!(server);
 
-        tokio::select! {
+        let result = tokio::select! {
             result = &mut server => result.map_err(|_| ServiceError::Server),
             observed = shutdown_observed => {
                 if observed.is_err() {
-                    return server.await.map_err(|_| ServiceError::Server);
-                }
-                match tokio::time::timeout(timeout, &mut server).await {
-                    Ok(result) => result.map_err(|_| ServiceError::Server),
-                    Err(_) => Err(ServiceError::ShutdownTimeout),
+                    server.await.map_err(|_| ServiceError::Server)
+                } else {
+                    match tokio::time::timeout(timeout, &mut server).await {
+                        Ok(result) => result.map_err(|_| ServiceError::Server),
+                        Err(_) => Err(ServiceError::ShutdownTimeout),
+                    }
                 }
             }
+        };
+        if let Some(task) = notification_task {
+            task.abort();
+            let _ = task.await;
         }
+        result
     }
 }
 
@@ -350,13 +417,22 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
     let idempotency = Arc::new(StorageIdempotencyAdapter::new(
         SeaOrmIdempotencyRepository::new(database.clone()),
     ));
+    let tracking = Arc::new(TrackingApplication::new(Arc::new(
+        SeaOrmTrackingStore::new(database.clone()),
+    )));
+    let notifications = config
+        .notifications()
+        .map(|notification| prepare_notification_dispatcher(database.clone(), notification))
+        .transpose()?;
     let operations = Arc::new(StorageOperationCompletionAdapter::new(
         SeaOrmOperationReceiptRepository::new(database),
     ));
-    let state = ApiState::new(jobs, leases, clients, idempotency, operations, readiness);
+    let state = ApiState::new(jobs, leases, clients, idempotency, operations, readiness)
+        .with_tracking(tracking);
 
     Ok(PreparedService {
         router: media_api::router(state),
+        notifications,
     })
 }
 

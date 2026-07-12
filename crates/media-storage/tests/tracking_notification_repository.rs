@@ -2,8 +2,8 @@ mod support;
 
 use media_core::{
     PRIMARY_USER_ID, EpisodeSnapshot, NewTrackingCommand, NewTrackingSubscription,
-    NotificationEventType, NotificationRecipient, OperationKey, Provider, TrackingId,
-    TrackingScope, TrackingStore, SECONDARY_USER_ID,
+    NotificationEventType, NotificationId, NotificationRecipient, OperationKey, Provider,
+    TrackingId, TrackingScope, TrackingStore, SECONDARY_USER_ID,
 };
 use media_storage::{SeaOrmNotificationOutbox, SeaOrmTrackingStore};
 use support::{TestDatabase, operation_key, query};
@@ -168,7 +168,7 @@ async fn outbox_leases_once_retries_with_backoff_and_keeps_stable_delivery_id() 
         .await
         .unwrap();
     let now = time::OffsetDateTime::now_utc();
-    let worker = uuid::Uuid::new_v4();
+    let worker = NotificationId::new();
     let leased = outbox
         .lease_pending(worker, now, time::Duration::seconds(30), 10)
         .await
@@ -182,7 +182,7 @@ async fn outbox_leases_once_retries_with_backoff_and_keeps_stable_delivery_id() 
     );
     assert!(
         outbox
-            .lease_pending(uuid::Uuid::new_v4(), now, time::Duration::seconds(30), 10)
+            .lease_pending(NotificationId::new(), now, time::Duration::seconds(30), 10)
             .await
             .unwrap()
             .is_empty()
@@ -195,7 +195,7 @@ async fn outbox_leases_once_retries_with_backoff_and_keeps_stable_delivery_id() 
         .unwrap();
     assert!(
         outbox
-            .lease_pending(uuid::Uuid::new_v4(), now, time::Duration::seconds(30), 10)
+            .lease_pending(NotificationId::new(), now, time::Duration::seconds(30), 10)
             .await
             .unwrap()
             .is_empty()
