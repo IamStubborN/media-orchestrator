@@ -6,8 +6,11 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode, header},
 };
-use media_api::router;
-use media_contract::{ApiError, ApiErrorCode, LeaseDto};
+use media_api::{PlexReconcileService, PlexServiceError, router};
+use media_contract::{
+    ApiError, ApiErrorCode, LeaseDto, PlexObservationDto, PlexReconcileRequest,
+    PlexReconcileResponse, PlexReconcileStatus,
+};
 use media_core::{
     PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientId, ClientRole, Job, JobId, JobLease, JobState,
     LeaseId, NotifyScope, Provider, RUNNER_CLIENT_ID,
@@ -36,6 +39,39 @@ fn app(leases: FakeLeaseStore, other_runner: ClientId) -> axum::Router {
         Arc::new(leases),
         Arc::new(MemoryIdempotencyStore::default()),
     ))
+}
+
+struct MatchedPlex;
+
+#[async_trait::async_trait]
+impl PlexReconcileService for MatchedPlex {
+    async fn reconcile(
+        &self,
+        request: PlexReconcileRequest,
+    ) -> Result<PlexReconcileResponse, PlexServiceError> {
+        Ok(PlexReconcileResponse {
+            status: PlexReconcileStatus::Matched,
+            observation: Some(PlexObservationDto {
+                path: request.path,
+                canonical_id: request.canonical_id,
+                season: request.season,
+                episode: request.episode,
+            }),
+        })
+    }
+}
+
+fn app_with_plex() -> axum::Router {
+    let user = Actor::new(PRIMARY_CLIENT_ID, Some(PRIMARY_USER_ID), ClientRole::Hermes).unwrap();
+    router(
+        state_with_stores(
+            FakeClientStore::new([(VALID_TOKEN, user), (RUNNER_TOKEN, runner())]),
+            Arc::new(FakeJobStore::default()),
+            Arc::new(FakeLeaseStore::default()),
+            Arc::new(MemoryIdempotencyStore::default()),
+        )
+        .with_plex(Arc::new(MatchedPlex)),
+    )
 }
 
 fn post(path: &str, token: &str, key: &str, request_id: &str, body: Body) -> Request<Body> {
@@ -267,4 +303,37 @@ async fn runner_reports_a_started_event_through_the_owned_live_lease() {
     let value: serde_json::Value =
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(value["job"]["state"], "running");
+}
+
+#[tokio::test]
+async fn runner_reconciles_plex_but_user_cannot_call_the_runner_port() {
+    let body = r#"{"path":"/plex/tv/Show/Season 01/Show - S01E02.mkv","canonical_id":"rezka://42","season":1,"episode":2}"#;
+    let response = app_with_plex()
+        .clone()
+        .oneshot(post(
+            "/v1/runner/plex/reconcile",
+            RUNNER_TOKEN,
+            "plex-runner",
+            "plex-runner-request",
+            Body::from(body),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(value["status"], "matched");
+    assert_eq!(value["observation"]["episode"], 2);
+
+    let forbidden = app_with_plex()
+        .oneshot(post(
+            "/v1/runner/plex/reconcile",
+            VALID_TOKEN,
+            "plex-user",
+            "plex-user-request",
+            Body::from(body),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
 }

@@ -1,10 +1,12 @@
-use crate::{JobDto, PublicId};
+use crate::{ExecutionSelectionDto, JobDto, PublicId};
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct LeaseDto {
     pub lease_id: PublicId,
     pub job: JobDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ExecutionSelectionDto>,
     pub expires_at: String,
 }
 
@@ -25,6 +27,7 @@ mod tests {
                 needs_action_reason: Some(NeedsActionReasonDto::IdentityAmbiguous),
                 notify_scope: NotifyScopeDto::Initiator,
             },
+            execution: None,
             expires_at: "2026-07-10T18:01:00Z".to_owned(),
         };
 

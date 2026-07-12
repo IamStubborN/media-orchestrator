@@ -2,7 +2,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use media::{
     client::{ClientError, HttpClient},
     composition::{self, ServiceError},
-    config::{ClientConfig, ConfigError, DatabaseConfig, ServerConfig},
+    config::{ClientConfig, ConfigError, DatabaseConfig, RunnerConfig, ServerConfig},
 };
 
 #[derive(Debug, Parser)]
@@ -18,8 +18,12 @@ enum Command {
     Jobs(JobsArgs),
     Queue(QueueArgs),
     Tracking(TrackingArgs),
+    Search(SearchArgs),
+    #[command(visible_alias = "select")]
+    Download(DownloadArgs),
     Migrate,
     Serve,
+    Runner,
 }
 
 #[derive(Debug, Args)]
@@ -81,7 +85,7 @@ enum JobsCommand {
         #[arg(long)]
         json: bool,
     },
-    #[command(visible_alias = "get")]
+    #[command(visible_aliases = ["get", "status"])]
     Show {
         job_id: String,
         #[arg(long)]
@@ -129,6 +133,39 @@ impl From<TrackingScope> for media_contract::TrackingScopeDto {
     }
 }
 
+#[derive(Debug, Args)]
+struct SearchArgs {
+    #[arg(value_enum)]
+    source: Provider,
+    #[arg(
+        required_unless_present = "continuation",
+        conflicts_with = "continuation"
+    )]
+    query: Option<String>,
+    #[arg(long = "continue", conflicts_with = "query")]
+    continuation: Option<String>,
+    #[arg(long)]
+    season: Option<u16>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct DownloadArgs {
+    #[arg(long)]
+    session: String,
+    #[arg(long)]
+    result: String,
+    #[arg(long)]
+    translation_id: Option<u64>,
+    #[arg(long)]
+    season: Option<u32>,
+    #[arg(long)]
+    episode: Option<u32>,
+    #[arg(long)]
+    json: bool,
+}
+
 impl From<Provider> for media_contract::ProviderDto {
     fn from(value: Provider) -> Self {
         match value {
@@ -148,6 +185,8 @@ enum RunError {
     Healthcheck,
     #[error(transparent)]
     Service(#[from] ServiceError),
+    #[error(transparent)]
+    Runner(#[from] composition::RunnerError),
 }
 
 #[tokio::main]
@@ -165,6 +204,8 @@ async fn run(cli: Cli) -> Result<(), RunError> {
         Command::Jobs(args) => run_jobs(args).await,
         Command::Queue(args) => run_queue(args).await,
         Command::Tracking(args) => run_tracking(args).await,
+        Command::Search(args) => run_search(args).await,
+        Command::Download(args) => run_download(args).await,
         Command::Migrate => {
             let config = DatabaseConfig::load()?;
             composition::migrate(&config).await?;
@@ -173,6 +214,10 @@ async fn run(cli: Cli) -> Result<(), RunError> {
         Command::Serve => {
             let config = ServerConfig::load()?;
             composition::serve(config).await?;
+            Ok(())
+        }
+        Command::Runner => {
+            composition::run_runner(RunnerConfig::load()?).await?;
             Ok(())
         }
     }
@@ -228,6 +273,31 @@ async fn run_tracking(args: TrackingArgs) -> Result<(), RunError> {
     Ok(())
 }
 
+async fn run_search(args: SearchArgs) -> Result<(), RunError> {
+    let client = HttpClient::new(ClientConfig::load()?)?;
+    let output = match args.continuation {
+        Some(continuation) => client.continue_search(continuation).await?,
+        None => {
+            client
+                .search(media_contract::StartSearchRequest {
+                    source: args.source.into(),
+                    query: args
+                        .query
+                        .expect("clap requires query without continuation"),
+                    season: args.season,
+                    preferred_qualities: Vec::new(),
+                    preferred_languages: Vec::new(),
+                    preferred_codecs: Vec::new(),
+                    preferred_release_groups: Vec::new(),
+                })
+                .await?
+        }
+    };
+    let _ = args.json;
+    println!("{output}");
+    Ok(())
+}
+
 fn parse_known_episode(value: &str) -> Result<media_contract::EpisodeSnapshotDto, String> {
     let Some((season, episode)) = value.split_once(':') else {
         return Err("known episode must use SEASON:EPISODE".to_owned());
@@ -242,6 +312,22 @@ fn parse_known_episode(value: &str) -> Result<media_contract::EpisodeSnapshotDto
         return Err("season and episode must be greater than zero".to_owned());
     }
     Ok(media_contract::EpisodeSnapshotDto { season, episode })
+}
+
+async fn run_download(args: DownloadArgs) -> Result<(), RunError> {
+    let client = HttpClient::new(ClientConfig::load()?)?;
+    let output = client
+        .select(media_contract::SelectResultRequest {
+            session_id: args.session,
+            result_id: args.result,
+            translation_id: args.translation_id,
+            season: args.season,
+            episode: args.episode,
+        })
+        .await?;
+    let _ = args.json;
+    println!("{output}");
+    Ok(())
 }
 
 async fn run_jobs(args: JobsArgs) -> Result<(), RunError> {

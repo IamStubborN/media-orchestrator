@@ -5,6 +5,7 @@ mod job;
 mod lease;
 mod operation;
 mod readiness;
+mod search;
 mod tracking;
 
 pub use client::SeaOrmClientStore;
@@ -17,6 +18,7 @@ pub use job::SeaOrmJobStore;
 pub use lease::SeaOrmLeaseStore;
 pub use operation::SeaOrmOperationReceiptRepository;
 pub use readiness::SeaOrmReadiness;
+pub use search::{SeaOrmSearchRepository, SearchSessionRecord};
 pub use tracking::{SeaOrmNotificationOutbox, SeaOrmTrackingStore};
 
 use media_core::PortError;

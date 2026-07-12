@@ -4,6 +4,7 @@ mod m20260710_000003_jobs;
 mod m20260710_000004_idempotency_leases;
 mod m20260711_000005_operation_receipts;
 mod m20260712_000006_job_orchestration;
+mod m20260712_000007_search_sessions;
 mod m20260712_000008_tracking_notifications;
 
 use sea_orm_migration::prelude::*;
@@ -21,6 +22,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260710_000004_idempotency_leases::Migration),
             Box::new(m20260711_000005_operation_receipts::Migration),
             Box::new(m20260712_000006_job_orchestration::Migration),
+            Box::new(m20260712_000007_search_sessions::Migration),
             Box::new(m20260712_000008_tracking_notifications::Migration),
         ]
     }

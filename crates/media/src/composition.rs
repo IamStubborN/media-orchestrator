@@ -6,7 +6,8 @@ use std::{
 
 use media_api::{
     ApiState, IdempotencyError, IdempotencyGeneration, IdempotencyHandle, IdempotencyRequest,
-    IdempotencyStore, OperationCompletionStore, Reservation, StoredHttpResponse,
+    IdempotencyStore, OperationCompletionStore, PlexReconcileService, PlexServiceError,
+    Reservation, StoredHttpResponse,
 };
 use media_core::{
     PRIMARY_CLIENT_ID, PRIMARY_USER_ID, BootstrapClient, ClientRole, ClientStore, CredentialDigest,
@@ -25,7 +26,12 @@ use sea_orm_migration::MigratorTrait;
 use secrecy::{ExposeSecret, SecretBox};
 use sha2::{Digest, Sha256};
 
-use crate::config::{DatabaseConfig, NotificationConfig, RunnerConfig, ServerConfig};
+use crate::{
+    config::{
+        DatabaseConfig, NotificationConfig, RezkaCompositionConfig, RunnerConfig, ServerConfig,
+    },
+    search::{ConcreteSearchProvider, DurableSearchService, StorageSearchPersistence},
+};
 
 const IDEMPOTENCY_TTL: time::Duration = time::Duration::hours(24);
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -60,6 +66,78 @@ pub enum RunnerCompositionError {
     Store,
 }
 
+pub type RunnerError = crate::runner::RunnerError;
+
+pub async fn run_runner(config: RunnerConfig) -> Result<(), RunnerError> {
+    let rezka = prepare_runner_session(&config).map_err(|_| RunnerError::Configuration)?;
+    let filesystem = Arc::new(media_runner::TokioFileSystem);
+    filesystem
+        .prepare_storage_roots(config.storage_roots())
+        .await
+        .map_err(|_| RunnerError::Configuration)?;
+    let http = Arc::new(
+        media_runner::ReqwestHttpAdapter::new(Duration::from_secs(30))
+            .map_err(|_| RunnerError::Configuration)?,
+    );
+    let process = Arc::new(media_runner::TokioProcessAdapter::new(
+        "ffprobe",
+        "ffmpeg",
+        Duration::from_secs(6 * 60 * 60),
+    ));
+    let (service_url, service_token) = config.service().cloned_parts();
+    let plex_service = Arc::new(
+        media_runner::HttpRunnerServiceAdapter::new(
+            service_url,
+            service_token,
+            Duration::from_secs(30),
+        )
+        .map_err(|_| RunnerError::Configuration)?,
+    );
+    let pipeline = media_runner::EpisodePipeline::new(filesystem, http, process, plex_service);
+    let qbittorrent = match config.qbittorrent() {
+        Some(config) => {
+            let config = media_integrations::qbittorrent::QbittorrentConfig::new(
+                config.base_url().clone(),
+                config.category(),
+                config.username(),
+                config.password().clone(),
+                Duration::from_secs(30),
+            )
+            .map_err(|_| RunnerError::Configuration)?;
+            Some(Arc::new(
+                media_integrations::qbittorrent::QbittorrentClient::connect(config)
+                    .await
+                    .map_err(|_| RunnerError::Configuration)?,
+            ))
+        }
+        None => None,
+    };
+    let gluetun = config
+        .gluetun()
+        .map(|config| {
+            let config = media_integrations::gluetun::GluetunConfig::new(
+                config.base_url().clone(),
+                config.api_key().clone(),
+                Duration::from_secs(30),
+            )
+            .map_err(|_| RunnerError::Configuration)?;
+            media_integrations::gluetun::GluetunClient::new(config)
+                .map(Arc::new)
+                .map_err(|_| RunnerError::Configuration)
+        })
+        .transpose()?;
+    let executor = Arc::new(crate::runner::MediaJobExecutor::new(
+        rezka,
+        pipeline,
+        qbittorrent,
+        gluetun,
+        config.storage_roots().clone(),
+        config.vaapi_device().to_owned(),
+    ));
+    let api = Arc::new(crate::runner::HttpRunnerApi::new(config.service().clone())?);
+    crate::runner::run_loop(api, executor, Duration::from_secs(20)).await
+}
+
 pub struct PreparedRunnerSession {
     pub client: rezka_client::RezkaClient,
     pub credentials: rezka_client::RezkaCredentials,
@@ -82,7 +160,12 @@ impl std::fmt::Debug for PreparedRunnerSession {
 pub fn prepare_runner_session(
     config: &RunnerConfig,
 ) -> Result<PreparedRunnerSession, RunnerCompositionError> {
-    let config = config.rezka();
+    prepare_rezka_session(config.rezka())
+}
+
+pub fn prepare_rezka_session(
+    config: &RezkaCompositionConfig,
+) -> Result<PreparedRunnerSession, RunnerCompositionError> {
     let mirrors = rezka_client::MirrorSet::new(config.mirrors().to_vec())
         .map_err(|_| RunnerCompositionError::Client)?;
     let client = rezka_client::RezkaClient::new(rezka_client::RezkaClientConfig {
@@ -310,6 +393,79 @@ pub fn prepare_tracking_scheduler(
     TrackingRuntime::new(Arc::new(SeaOrmTrackingStore::new(database)), discovery)
 }
 
+pub struct PlexReconcileAdapter {
+    client: media_integrations::plex::PlexClient,
+    tv_section: u32,
+    movies_section: u32,
+}
+
+impl PlexReconcileAdapter {
+    #[must_use]
+    pub fn new(
+        client: media_integrations::plex::PlexClient,
+        tv_section: u32,
+        movies_section: u32,
+    ) -> Self {
+        Self {
+            client,
+            tv_section,
+            movies_section,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl PlexReconcileService for PlexReconcileAdapter {
+    async fn reconcile(
+        &self,
+        request: media_contract::PlexReconcileRequest,
+    ) -> Result<media_contract::PlexReconcileResponse, PlexServiceError> {
+        let path = std::path::PathBuf::from(&request.path);
+        let (season, episode, section) = match (request.season, request.episode) {
+            (Some(season), Some(episode)) => (
+                Some(u16::try_from(season).map_err(|_| PlexServiceError::InvalidRequest)?),
+                Some(u16::try_from(episode).map_err(|_| PlexServiceError::InvalidRequest)?),
+                self.tv_section,
+            ),
+            (None, None) => (None, None, self.movies_section),
+            _ => return Err(PlexServiceError::InvalidRequest),
+        };
+        let scan_path = path.parent().ok_or(PlexServiceError::InvalidRequest)?;
+        let scan = media_integrations::plex::ScanRequest::new(section, scan_path)
+            .map_err(|_| PlexServiceError::InvalidRequest)?;
+        self.client
+            .trigger_scan(&scan)
+            .await
+            .map_err(|_| PlexServiceError::Infrastructure)?;
+        let verification = self
+            .client
+            .verify_path(section, &path, &request.canonical_id, season, episode)
+            .await
+            .map_err(|_| PlexServiceError::Infrastructure)?;
+        let (status, observation) = match verification {
+            media_integrations::plex::PlexVerification::Matched { .. } => (
+                media_contract::PlexReconcileStatus::Matched,
+                Some(media_contract::PlexObservationDto {
+                    path: request.path,
+                    canonical_id: request.canonical_id,
+                    season: request.season,
+                    episode: request.episode,
+                }),
+            ),
+            media_integrations::plex::PlexVerification::NotFound => {
+                (media_contract::PlexReconcileStatus::Pending, None)
+            }
+            media_integrations::plex::PlexVerification::Mismatch(_) => {
+                (media_contract::PlexReconcileStatus::Mismatch, None)
+            }
+        };
+        Ok(media_contract::PlexReconcileResponse {
+            status,
+            observation,
+        })
+    }
+}
+
 impl std::fmt::Debug for PreparedService {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("PreparedService { router: [REDACTED], notifications: [REDACTED] }")
@@ -425,10 +581,61 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
         .map(|notification| prepare_notification_dispatcher(database.clone(), notification))
         .transpose()?;
     let operations = Arc::new(StorageOperationCompletionAdapter::new(
-        SeaOrmOperationReceiptRepository::new(database),
+        SeaOrmOperationReceiptRepository::new(database.clone()),
     ));
-    let state = ApiState::new(jobs, leases, clients, idempotency, operations, readiness)
-        .with_tracking(tracking);
+    let mut state = ApiState::new(
+        jobs.clone(),
+        leases,
+        clients,
+        idempotency,
+        operations,
+        readiness,
+    )
+    .with_tracking(tracking);
+    if config.rezka().is_some() || config.prowlarr().is_some() {
+        let rezka = config
+            .rezka()
+            .map(prepare_rezka_session)
+            .transpose()
+            .map_err(|_| ServiceError::Bootstrap)?;
+        let prowlarr = config
+            .prowlarr()
+            .map(|config| {
+                let config = media_integrations::prowlarr::ProwlarrConfig::new(
+                    config.base_url().clone(),
+                    config.api_key().clone(),
+                    Duration::from_secs(30),
+                )
+                .map_err(|_| ServiceError::Bootstrap)?;
+                media_integrations::prowlarr::ProwlarrClient::new(config)
+                    .map_err(|_| ServiceError::Bootstrap)
+            })
+            .transpose()?;
+        let persistence = Arc::new(StorageSearchPersistence::new(
+            media_storage::SeaOrmSearchRepository::new(database.clone()),
+        ));
+        let provider = Arc::new(ConcreteSearchProvider::new(rezka, prowlarr));
+        state = state.with_search(Arc::new(DurableSearchService::new(
+            persistence,
+            provider,
+            jobs,
+        )));
+    }
+    if let Some(config) = config.plex() {
+        let plex_config = media_integrations::plex::PlexConfig::new(
+            config.base_url().clone(),
+            config.token().clone(),
+            Duration::from_secs(30),
+        )
+        .map_err(|_| ServiceError::Bootstrap)?;
+        let client = media_integrations::plex::PlexClient::new(plex_config)
+            .map_err(|_| ServiceError::Bootstrap)?;
+        state = state.with_plex(Arc::new(PlexReconcileAdapter::new(
+            client,
+            config.tv_section(),
+            config.movies_section(),
+        )));
+    }
 
     Ok(PreparedService {
         router: media_api::router(state),

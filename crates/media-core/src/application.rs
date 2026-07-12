@@ -54,6 +54,16 @@ impl JobApplication {
         let owner_id = actor
             .require_user()
             .map_err(|_| ApplicationError::Forbidden)?;
+        self.create_job_for_owner(owner_id, operation, command)
+            .await
+    }
+
+    pub async fn create_job_for_owner(
+        &self,
+        owner_id: crate::UserId,
+        operation: OperationKey,
+        command: NewJobCommand,
+    ) -> Result<Job, ApplicationError> {
         let job = NewJob::new(
             JobId::new(),
             owner_id,

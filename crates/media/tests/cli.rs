@@ -20,10 +20,36 @@ fn help_keeps_existing_commands_and_exposes_runtime_commands() {
         "jobs",
         "queue",
         "tracking",
+        "search",
+        "download",
+        "runner",
         "healthcheck",
         "migrate",
         "serve",
     ] {
         assert!(stdout.contains(command), "help did not include {command}");
+    }
+}
+
+#[test]
+fn user_commands_reject_identity_flags_at_parse_time() {
+    for args in [
+        vec!["search", "rezka", "Movie", "--requested-by", "other"],
+        vec![
+            "download",
+            "--session",
+            "s",
+            "--result",
+            "r",
+            "--owner-id",
+            "other",
+        ],
+    ] {
+        let output = assert_cmd::cargo::cargo_bin_cmd!("media")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument"));
     }
 }

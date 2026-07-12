@@ -9,7 +9,7 @@ use support::{TestDatabase, assert_rejected, execute, query};
 const PRIMARY_ID: &str = "00000000-0000-0000-0000-000000000001";
 const SECONDARY_ID: &str = "00000000-0000-0000-0000-000000000002";
 
-const APPLICATION_TABLES: [&str; 18] = [
+const APPLICATION_TABLES: [&str; 20] = [
     "api_clients",
     "episode_provider_mappings",
     "episodes",
@@ -24,6 +24,8 @@ const APPLICATION_TABLES: [&str; 18] = [
     "notification_outbox",
     "operation_receipts",
     "outbox_events",
+    "search_executions",
+    "search_sessions",
     "seasons",
     "tracking_discoveries",
     "tracking_subscriptions",
@@ -100,7 +102,11 @@ async fn migrations_apply_seed_fixed_users_and_reverse_cleanly() {
     .collect::<BTreeSet<_>>();
     assert_eq!(
         uuid_id_tables,
-        APPLICATION_TABLES.into_iter().map(str::to_owned).collect()
+        APPLICATION_TABLES
+            .into_iter()
+            .filter(|table| *table != "search_executions")
+            .map(str::to_owned)
+            .collect()
     );
 
     let non_timestamptz_timestamps = query(
@@ -144,6 +150,8 @@ async fn migrations_apply_seed_fixed_users_and_reverse_cleanly() {
         "operation_receipts.result_snapshot",
         "notification_outbox.payload",
         "outbox_events.payload",
+        "search_executions.payload",
+        "search_sessions.payload",
         "seasons.metadata_snapshot",
         "tracking_subscriptions.known_episodes",
     ]

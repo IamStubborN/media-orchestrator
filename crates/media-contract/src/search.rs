@@ -1,0 +1,164 @@
+use crate::ProviderDto;
+
+pub const MAX_SEARCH_RESULTS_PER_PAGE: usize = 5;
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartSearchRequest {
+    pub source: ProviderDto,
+    pub query: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub season: Option<u16>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preferred_qualities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preferred_languages: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preferred_codecs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preferred_release_groups: Vec<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContinueSearchRequest {
+    pub continuation: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectResultRequest {
+    pub session_id: String,
+    pub result_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub translation_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub season: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub episode: Option<u32>,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaKindDto {
+    Movie,
+    Series,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RezkaTranslationDto {
+    pub id: u64,
+    pub name: String,
+    pub premium: bool,
+    pub director: bool,
+    pub camrip: bool,
+    pub has_ads: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SeasonAvailabilityDto {
+    pub season: u32,
+    pub episodes: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TrackingPromptDto {
+    pub title: String,
+    pub latest_season: u32,
+    pub latest_episode: u32,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SeriesAvailabilityDto {
+    pub incomplete: bool,
+    pub seasons: Vec<SeasonAvailabilityDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracking_prompt: Option<TrackingPromptDto>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ProwlarrRankingDto {
+    pub exact_title: bool,
+    pub exact_season: bool,
+    pub quality_preference: usize,
+    pub language_preference: usize,
+    pub seeders: i32,
+    pub size_bytes: u64,
+    pub codec_preference: usize,
+    pub release_group_preference: usize,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum SearchResultDto {
+    Rezka {
+        result_id: String,
+        title: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        original_title: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        year: Option<u16>,
+        media_kind: MediaKindDto,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thumbnail_url: Option<String>,
+        translations: Vec<RezkaTranslationDto>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        availability: Option<SeriesAvailabilityDto>,
+    },
+    Prowlarr {
+        result_id: String,
+        title: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        indexer: Option<String>,
+        size_bytes: u64,
+        seeders: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        release_group: Option<String>,
+        ranking: ProwlarrRankingDto,
+    },
+}
+
+impl SearchResultDto {
+    #[must_use]
+    pub fn result_id(&self) -> &str {
+        match self {
+            Self::Rezka { result_id, .. } | Self::Prowlarr { result_id, .. } => result_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SearchPageDto {
+    pub api_version: String,
+    pub session_id: String,
+    pub source: ProviderDto,
+    pub expires_at: String,
+    pub results: Vec<SearchResultDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum ExecutionSelectionDto {
+    Rezka {
+        locator: String,
+        title_id: u64,
+        media_kind: MediaKindDto,
+        translation_id: u64,
+        director: bool,
+        camrip: bool,
+        has_ads: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        season: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        episode: Option<u32>,
+        title: String,
+    },
+    Prowlarr {
+        source_identity: String,
+        info_hash: String,
+        uri: String,
+        title: String,
+    },
+}

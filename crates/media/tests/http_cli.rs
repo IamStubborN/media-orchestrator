@@ -397,6 +397,102 @@ async fn jobs_get_and_queue_status_use_the_expected_paths() {
 }
 
 #[tokio::test]
+async fn search_continue_and_download_use_stable_json_and_exact_selection() {
+    let router = Router::new()
+        .route(
+            "/v1/searches",
+            any(|request: Request| async move {
+                let valid = request.method() == Method::POST
+                    && request.headers().contains_key("authorization")
+                    && request.headers().contains_key("x-request-id")
+                    && request.headers().contains_key("idempotency-key");
+                let body = to_bytes(request.into_body(), 64 * 1024).await.unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                if valid && body["source"] == "prowlarr" && body["query"] == "Movie" {
+                    json_response(StatusCode::CREATED, r#"{
+                        "api_version":"v1","session_id":"session-1","source":"prowlarr",
+                        "expires_at":"2026-07-13T12:00:00Z","continuation":"session-1:5",
+                        "results":[{"source":"prowlarr","result_id":"result-1","title":"Movie",
+                        "size_bytes":100,"seeders":2,"ranking":{"exact_title":true,"exact_season":true,
+                        "quality_preference":0,"language_preference":0,"seeders":2,"size_bytes":100,
+                        "codec_preference":0,"release_group_preference":0}}]
+                    }"#)
+                } else { json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#) }
+            }),
+        )
+        .route(
+            "/v1/searches/continue",
+            any(|request: Request| async move {
+                let body = to_bytes(request.into_body(), 64 * 1024).await.unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                if body == serde_json::json!({"continuation":"session-1:5"}) {
+                    json_response(StatusCode::OK, r#"{"api_version":"v1","session_id":"session-1","source":"prowlarr","expires_at":"2026-07-13T12:00:00Z","results":[]}"#)
+                } else { json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#) }
+            }),
+        )
+        .route(
+            "/v1/selections",
+            any(|request: Request| async move {
+                let body = to_bytes(request.into_body(), 64 * 1024).await.unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                if body == serde_json::json!({"session_id":"session-1","result_id":"result-1"}) {
+                    json_response(StatusCode::CREATED, r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","provider":"prowlarr","result_ref":"selection:one","state":"queued","notify_scope":"initiator"}"#)
+                } else { json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#) }
+            }),
+        );
+    let server = TestServer::start(router).await;
+    let token_file = SecretFile::new("cli-secret");
+
+    let first = command_output(command(
+        &server,
+        &token_file,
+        ["search", "prowlarr", "Movie", "--json"],
+    ))
+    .await
+    .unwrap();
+    let next = command_output(command(
+        &server,
+        &token_file,
+        ["search", "prowlarr", "--continue", "session-1:5", "--json"],
+    ))
+    .await
+    .unwrap();
+    let selected = command_output(command(
+        &server,
+        &token_file,
+        [
+            "download",
+            "--session",
+            "session-1",
+            "--result",
+            "result-1",
+            "--json",
+        ],
+    ))
+    .await
+    .unwrap();
+    server.stop().await;
+
+    for output in [&first, &next, &selected] {
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(!value.to_string().contains("magnet:"));
+    }
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&first.stdout).unwrap()["continuation"],
+        "session-1:5"
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&selected.stdout).unwrap()["result_ref"],
+        "selection:one"
+    );
+}
+
+#[tokio::test]
 async fn jobs_list_show_and_cancel_use_json_http_contracts() {
     let router = Router::new()
         .route(

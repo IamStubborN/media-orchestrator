@@ -1,0 +1,75 @@
+use media_contract::{
+    ContinueSearchRequest, ExecutionSelectionDto, JobDto, SearchPageDto, SelectResultRequest,
+    StartSearchRequest,
+};
+use media_core::{OperationKey, UserId};
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
+pub enum SearchError {
+    #[error("search request is invalid")]
+    InvalidRequest,
+    #[error("search operation is forbidden")]
+    Forbidden,
+    #[error("search resource was not found")]
+    NotFound,
+    #[error("search operation conflicts with current state")]
+    Conflict,
+    #[error("media provider failed")]
+    Provider,
+    #[error("search infrastructure failed")]
+    Infrastructure,
+}
+
+#[async_trait::async_trait]
+pub trait SearchService: Send + Sync {
+    async fn start(
+        &self,
+        owner: UserId,
+        request: StartSearchRequest,
+    ) -> Result<SearchPageDto, SearchError>;
+
+    async fn continue_search(
+        &self,
+        owner: UserId,
+        request: ContinueSearchRequest,
+    ) -> Result<SearchPageDto, SearchError>;
+
+    async fn select(
+        &self,
+        owner: UserId,
+        operation: OperationKey,
+        request: SelectResultRequest,
+    ) -> Result<JobDto, SearchError>;
+
+    async fn execution_for(&self, result_ref: &str) -> Result<ExecutionSelectionDto, SearchError>;
+}
+
+pub(crate) struct UnavailableSearchService;
+
+#[async_trait::async_trait]
+impl SearchService for UnavailableSearchService {
+    async fn start(&self, _: UserId, _: StartSearchRequest) -> Result<SearchPageDto, SearchError> {
+        Err(SearchError::Infrastructure)
+    }
+
+    async fn continue_search(
+        &self,
+        _: UserId,
+        _: ContinueSearchRequest,
+    ) -> Result<SearchPageDto, SearchError> {
+        Err(SearchError::Infrastructure)
+    }
+
+    async fn select(
+        &self,
+        _: UserId,
+        _: OperationKey,
+        _: SelectResultRequest,
+    ) -> Result<JobDto, SearchError> {
+        Err(SearchError::Infrastructure)
+    }
+
+    async fn execution_for(&self, _: &str) -> Result<ExecutionSelectionDto, SearchError> {
+        Err(SearchError::NotFound)
+    }
+}

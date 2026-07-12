@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use media_contract::{
-    CreateJobRequest, CreateTrackingRequest, EpisodeSnapshotDto, NotifyScopeDto, ProviderDto,
-    TrackingScopeDto,
+    ContinueSearchRequest, CreateJobRequest, CreateTrackingRequest, EpisodeSnapshotDto,
+    NotifyScopeDto, ProviderDto, SelectResultRequest, StartSearchRequest, TrackingScopeDto,
 };
 use secrecy::{ExposeSecret, SecretString};
 
@@ -99,6 +99,15 @@ impl HttpClient {
         .await
     }
 
+    pub async fn search(&self, request: StartSearchRequest) -> Result<String, ClientError> {
+        self.execute(
+            self.request(reqwest::Method::POST, "v1/searches")?
+                .header(IDEMPOTENCY_KEY_HEADER, generated_identifier())
+                .json(&request),
+        )
+        .await
+    }
+
     pub async fn list_tracking(&self) -> Result<String, ClientError> {
         self.execute(self.request(reqwest::Method::GET, "v1/tracking")?)
             .await
@@ -109,6 +118,24 @@ impl HttpClient {
         self.execute(
             self.request(reqwest::Method::DELETE, &path)?
                 .header(IDEMPOTENCY_KEY_HEADER, generated_identifier()),
+        )
+        .await
+    }
+
+    pub async fn continue_search(&self, continuation: String) -> Result<String, ClientError> {
+        self.execute(
+            self.request(reqwest::Method::POST, "v1/searches/continue")?
+                .header(IDEMPOTENCY_KEY_HEADER, generated_identifier())
+                .json(&ContinueSearchRequest { continuation }),
+        )
+        .await
+    }
+
+    pub async fn select(&self, request: SelectResultRequest) -> Result<String, ClientError> {
+        self.execute(
+            self.request(reqwest::Method::POST, "v1/selections")?
+                .header(IDEMPOTENCY_KEY_HEADER, generated_identifier())
+                .json(&request),
         )
         .await
     }

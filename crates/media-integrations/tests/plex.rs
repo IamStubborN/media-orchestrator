@@ -123,6 +123,44 @@ async fn mismatch_is_reported_without_any_mutating_followup() {
     assert_eq!(requests[0].method.as_str(), "GET");
 }
 
+#[tokio::test]
+async fn path_verification_finds_the_exact_scanned_episode_without_a_rating_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/library/sections/7/all"))
+        .and(query_param("includeGuids", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "MediaContainer": {"Metadata": [{
+                "ratingKey": "321", "guid": "plex://episode/abcdef", "type": "episode",
+                "parentIndex": 2, "index": 4, "Guid": [{"id": "rezka://42"}],
+                "Media": [{"Part": [{"file": "/plex/tv/Show/Season 02/Show - S02E04.mkv"}]}]
+            }]}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let verification = PlexClient::new(config(&server))
+        .unwrap()
+        .verify_path(
+            7,
+            std::path::Path::new("/plex/tv/Show/Season 02/Show - S02E04.mkv"),
+            "rezka://42",
+            Some(2),
+            Some(4),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        verification,
+        PlexVerification::Matched {
+            rating_key: 321,
+            plex_guid: "plex://episode/abcdef".to_owned(),
+        }
+    );
+}
+
 #[test]
 fn token_is_redacted_from_config_debug() {
     let config = PlexConfig::new(

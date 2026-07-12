@@ -67,5 +67,10 @@ name = "tracking_notification_repository"
 path = "tests/tracking_notification_repository.rs"
 required-features = ["integration-tests"]
 
+[[test]]
+name = "search_repository"
+path = "tests/search_repository.rs"
+required-features = ["integration-tests"]
+
 [lints]
 workspace = true

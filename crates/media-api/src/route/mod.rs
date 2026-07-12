@@ -2,6 +2,7 @@ mod health;
 mod jobs;
 mod queue;
 mod runner;
+mod search;
 mod tracking;
 
 use axum::Router;
@@ -17,4 +18,5 @@ pub(crate) fn protected_routes() -> Router<ApiState> {
         .merge(queue::routes())
         .merge(runner::routes())
         .merge(tracking::routes())
+        .merge(search::routes())
 }
