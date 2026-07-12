@@ -106,6 +106,55 @@ async fn qbittorrent_5_2_pending_add_response_is_accepted() {
 }
 
 #[tokio::test]
+async fn an_existing_exact_torrent_is_reused_without_duplicate_submission() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/app/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("v5.2.3"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/info"))
+        .and(query_param(
+            "hashes",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ))
+        .and(query_param("category", "media-tv"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+            "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "name": "Selected release",
+            "category": "media-tv",
+            "state": "downloading",
+            "progress": 0.25,
+            "amount_left": 300,
+            "content_path": "/downloads/media-tv/release",
+            "save_path": "/downloads/media-tv",
+            "completion_on": -1
+        }])))
+        .mount(&server)
+        .await;
+
+    let client = QbittorrentClient::connect(config(&server)).await.unwrap();
+    let selection = ExplicitTorrentSelection::new(
+        "prowlarr:3:indexer-guid-a",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    )
+    .unwrap();
+
+    let handle = client.submit_selected(selection).await.unwrap();
+    assert_eq!(handle.category, "media-tv");
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.url.path() != "/api/v2/torrents/add")
+    );
+}
+
+#[tokio::test]
 async fn only_explicit_selection_is_submitted_to_the_configured_category() {
     let server = MockServer::start().await;
     mount_login(&server).await;

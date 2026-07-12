@@ -316,6 +316,16 @@ impl QbittorrentClient {
         selection: ExplicitTorrentSelection,
         category: String,
     ) -> Result<TorrentHandle, QbittorrentError> {
+        let handle = TorrentHandle {
+            source_identity: selection.source_identity.clone(),
+            hash: selection.info_hash.clone(),
+            category: category.clone(),
+        };
+        match self.monitor(&handle).await {
+            Ok(_) => return Ok(handle),
+            Err(QbittorrentError::TorrentNotFound) => {}
+            Err(error) => return Err(error),
+        }
         let form = reqwest::multipart::Form::new()
             .text("urls", selection.uri.as_str().to_owned())
             .text("category", category.clone());
@@ -345,11 +355,7 @@ impl QbittorrentClient {
         if !add_response_accepted(status, &body) {
             return Err(QbittorrentError::ProviderResponse { status });
         }
-        Ok(TorrentHandle {
-            source_identity: selection.source_identity,
-            hash: selection.info_hash,
-            category,
-        })
+        Ok(handle)
     }
 
     async fn ensure_category_exists(&self, category: &str) -> Result<(), QbittorrentError> {
