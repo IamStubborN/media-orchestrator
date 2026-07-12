@@ -1,5 +1,6 @@
 /.worktrees/
 /target/
+/dist/
 /.superpowers/
 .DS_Store
 .env

@@ -8,7 +8,7 @@ fn binary_reports_its_version() {
 }
 
 #[test]
-fn help_keeps_existing_commands_and_exposes_service_commands() {
+fn help_keeps_existing_commands_and_exposes_runtime_commands() {
     let output = assert_cmd::cargo::cargo_bin_cmd!("media")
         .arg("--help")
         .output()
@@ -16,7 +16,7 @@ fn help_keeps_existing_commands_and_exposes_service_commands() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    for command in ["jobs", "queue", "migrate", "serve"] {
+    for command in ["jobs", "queue", "healthcheck", "migrate", "serve"] {
         assert!(stdout.contains(command), "help did not include {command}");
     }
 }
