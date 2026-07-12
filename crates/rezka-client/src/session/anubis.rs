@@ -15,10 +15,13 @@ use crate::{
 const CHALLENGE_SELECTOR: &str = "#anubis_challenge";
 const PASS_CHALLENGE_PATH: &str = "/.within.website/x/cmd/anubis/api/pass-challenge";
 const MAX_DIFFICULTY: u8 = 32;
-// Real Anubis deployments use tiny difficulties; a low parse-time ceiling rejects an unreachable
-// challenge before it forces a full 0..=max_nonce SHA-256 sweep. `MAX_DIFFICULTY` stays as the
-// solver's secondary bound.
-const MAX_ACCEPTED_DIFFICULTY: u8 = 8;
+// Difficulty counts leading zero *nibbles* (see `has_leading_zero_nibbles`), so difficulty D needs
+// ~2^(4D) expected SHA-256 hashes. The production `anubis_max_nonce` is 5_000_000 (~2^22), so only
+// difficulty <= 5 (~2^20 ~= 1M) is comfortably solvable; difficulty 6 (~2^24 ~= 16M) is not. A
+// parse-time ceiling rejects unreachable difficulties as `ProviderResponseInvalid` before they burn
+// the full 0..=max_nonce sweep under the process-global proof semaphore. `MAX_DIFFICULTY` stays as
+// the solver's secondary bound.
+const MAX_ACCEPTED_DIFFICULTY: u8 = 5;
 // Provider values are short opaque tokens; generous caps bound retained state and per-nonce hashing.
 const MAX_CHALLENGE_ID_BYTES: usize = 1_024;
 const MAX_RANDOM_DATA_BYTES: usize = 4_096;

@@ -13,6 +13,10 @@ const PROVIDER_RESPONSE_BODY_OVERFLOW_BYTES: usize = MAX_PROVIDER_RESPONSE_BODY_
 const X_REQUESTED_WITH: HeaderName = HeaderName::from_static("x-requested-with");
 const XML_HTTP_REQUEST: HeaderValue = HeaderValue::from_static("XMLHttpRequest");
 const TITLE_ACCEPTED_TERMINAL_STATUSES: [StatusCode; 2] = [StatusCode::NOT_FOUND, StatusCode::GONE];
+// Mirrors the DLE session cookie (`session::dle`): its presence on the selected origin is what marks
+// the jar as carrying an authenticated session. Kept here because the failover export guard lives in
+// this module and must not clear on an anonymous (cookie-less) success after a failover.
+const DLE_SESSION_COOKIE: &str = "PHPSESSID";
 use time::Duration;
 use url::Url;
 
@@ -62,10 +66,15 @@ pub struct Transport {
     mirrors: MirrorSet,
     jar: SessionJar,
     max_retries: u8,
-    // Set when a failover replaces the jar with an empty one bound to a new origin, and cleared once
-    // any request on the selected origin succeeds. While set, the current empty jar is a transient
-    // failover artifact, so exporting it would overwrite a previously persisted session with nothing.
+    // Set when a failover replaces the jar with an empty one bound to a new origin. Cleared only when
+    // the selected origin is safely confirmed (see `confirm_current_origin`): while set, the current
+    // jar is a transient failover artifact, so exporting it would overwrite a previously persisted
+    // session. An anonymous (e.g. pre-login probe) success on the new origin does not clear it.
     session_reset_by_failover: bool,
+    // Latches true once an authenticated jar (DLE session cookie on the selected origin) has been
+    // held. A failover empties the jar but this memory persists, so an anonymous success on the new
+    // origin cannot lift the export guard until the session is re-authenticated.
+    held_authenticated_session: bool,
 }
 
 #[derive(Copy, Clone)]
@@ -109,6 +118,11 @@ impl Transport {
             jar.bind_to(mirrors.selected_origin())?;
         }
 
+        // An imported snapshot may already carry an authenticated session that a later failover must
+        // protect from being overwritten by an anonymous jar.
+        let held_authenticated_session =
+            jar.contains_cookie_for_url(mirrors.selected_origin(), DLE_SESSION_COOKIE);
+
         let client = Client::builder()
             .redirect(Policy::none())
             .timeout(request_timeout)
@@ -124,6 +138,7 @@ impl Transport {
             jar,
             max_retries,
             session_reset_by_failover: false,
+            held_authenticated_session,
         })
     }
 
@@ -364,8 +379,7 @@ impl Transport {
             error: transport_error(),
         })?;
         let response = self.process_response(response, status_policy).await?;
-        // The selected origin answered: its jar state is now authoritative and safe to export.
-        self.session_reset_by_failover = false;
+        self.confirm_current_origin();
         Ok(response)
     }
 
@@ -395,6 +409,9 @@ impl Transport {
             .jar
             .store_response_cookies_with_names(cookie_headers, &url)
             .map_err(AttemptFailure::terminal)?;
+        if !self.held_authenticated_session && self.jar_is_authenticated() {
+            self.held_authenticated_session = true;
+        }
 
         if status == StatusCode::TOO_MANY_REQUESTS {
             return Err(AttemptFailure::terminal(RezkaError::RateLimited {
@@ -454,6 +471,22 @@ impl Transport {
             location,
             stored_cookie_names,
         })
+    }
+
+    fn jar_is_authenticated(&self) -> bool {
+        self.jar
+            .contains_cookie_for_url(self.mirrors.selected_origin(), DLE_SESSION_COOKIE)
+    }
+
+    fn confirm_current_origin(&mut self) {
+        // The selected origin answered. Clear the failover guard only when the resulting jar is safe
+        // to persist: either it is authenticated again on this origin, or no authenticated session
+        // was ever held (so there is nothing an anonymous jar could overwrite). Otherwise a partial
+        // failover (old origin down, new one serving anonymous pages) would drop the guard on the
+        // pre-login probe success and let a later export overwrite a saved authenticated snapshot.
+        if self.jar_is_authenticated() || !self.held_authenticated_session {
+            self.session_reset_by_failover = false;
+        }
     }
 
     fn guard_selected_origin(&self, request_url: &Url) -> Result<(), RezkaError> {

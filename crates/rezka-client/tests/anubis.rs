@@ -82,7 +82,7 @@ fn rejects_empty_values_and_out_of_range_difficulties_without_raw_json() {
         r#"{"challenge":{"id":"","randomData":"secret-random-data"},"rules":{"difficulty":3}}"#,
         r#"{"challenge":{"id":"secret-id","randomData":""},"rules":{"difficulty":3}}"#,
         r#"{"challenge":{"id":"secret-id","randomData":"secret-random-data"},"rules":{"difficulty":0}}"#,
-        r#"{"challenge":{"id":"secret-id","randomData":"secret-random-data"},"rules":{"difficulty":9}}"#,
+        r#"{"challenge":{"id":"secret-id","randomData":"secret-random-data"},"rules":{"difficulty":6}}"#,
         r#"{"challenge":{"id":"secret-id","randomData":"secret-random-data"},"rules":{"difficulty":33}}"#,
     ] {
         let html = format!(r#"<script id="anubis_challenge">{raw_json}</script>"#);
@@ -98,9 +98,15 @@ fn rejects_empty_values_and_out_of_range_difficulties_without_raw_json() {
         assert!(!rendered.contains("secret-random-data"));
     }
 
-    // Real Anubis difficulties are tiny; the accepted ceiling is 8 and rejects unreachable work.
-    let upper_bound = r#"<script id="anubis_challenge">{"challenge":{"id":"id","randomData":"data"},"rules":{"difficulty":8}}</script>"#;
-    assert_eq!(parse_challenge(upper_bound).unwrap().difficulty, 8);
+    // Difficulty counts leading zero nibbles, so the accepted ceiling is 5 (~2^20 ~= 1M expected
+    // hashes, solvable under the production 5M nonce budget); 6 (~2^24 ~= 16M) is unreachable.
+    let upper_bound = r#"<script id="anubis_challenge">{"challenge":{"id":"id","randomData":"data"},"rules":{"difficulty":5}}</script>"#;
+    assert_eq!(parse_challenge(upper_bound).unwrap().difficulty, 5);
+    let above_ceiling = r#"<script id="anubis_challenge">{"challenge":{"id":"id","randomData":"data"},"rules":{"difficulty":6}}</script>"#;
+    assert_eq!(
+        parse_challenge(above_ceiling).unwrap_err().code(),
+        rezka_client::RezkaErrorCode::ProviderResponseInvalid
+    );
 }
 
 #[test]

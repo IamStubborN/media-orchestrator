@@ -614,6 +614,91 @@ async fn failed_failover_refuses_to_export_an_empty_session_over_a_saved_one() {
     assert!(transport.export_session().is_err());
 }
 
+#[tokio::test]
+async fn partial_failover_refuses_export_until_authenticated_session_is_reestablished() {
+    use rezka_client::transport::Transport;
+    use std::net::TcpListener;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use time::Duration;
+    use wiremock::{
+        Mock, MockServer, Request, Respond, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    // Old origin is unreachable; the new origin is healthy but only serves anonymous pages until a
+    // later request re-establishes an authenticated (PHPSESSID) session.
+    let down_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let first_origin =
+        Url::parse(&format!("http://{}", down_listener.local_addr().unwrap())).unwrap();
+    drop(down_listener);
+
+    #[derive(Clone)]
+    struct AnonymousThenAuthenticated {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Respond for AnonymousThenAuthenticated {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            match self.calls.fetch_add(1, Ordering::SeqCst) {
+                0 => ResponseTemplate::new(200).set_body_string("anonymous"),
+                _ => ResponseTemplate::new(200)
+                    .insert_header("set-cookie", "PHPSESSID=reauthenticated; Path=/; HttpOnly")
+                    .set_body_string("authenticated"),
+            }
+        }
+    }
+
+    let second = MockServer::start().await;
+    let second_origin = Url::parse(&second.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .respond_with(AnonymousThenAuthenticated {
+            calls: Arc::new(AtomicUsize::new(0)),
+        })
+        .mount(&second)
+        .await;
+
+    // Saved authenticated snapshot bound to the old origin.
+    let mut jar = SessionJar::empty();
+    jar.store_response_cookies(
+        ["PHPSESSID=saved-auth; Path=/; HttpOnly"].into_iter(),
+        &first_origin,
+    );
+    let snapshot = jar.export().unwrap();
+
+    let mut transport = Transport::from_snapshot(
+        MirrorSet::new(vec![first_origin.clone(), second_origin.clone()]).unwrap(),
+        &snapshot,
+        "media-orchestrator-test".to_owned(),
+        Duration::seconds(2),
+        1,
+    )
+    .unwrap();
+
+    // Partial failover: the old origin is down, the new one answers anonymously. The anonymous
+    // success must NOT lift the export guard, or saving would overwrite the persisted authenticated
+    // snapshot with a cookie-less jar.
+    transport
+        .get_first_with_failover(first_origin.join("/account/probe").unwrap(), None)
+        .await
+        .unwrap();
+    assert_eq!(transport.selected_origin(), &second_origin);
+    assert!(transport.export_session().is_err());
+
+    // Re-authenticating on the new origin re-establishes a session, so exporting is allowed again
+    // and persists the new origin's authenticated jar (never the old origin's cookies).
+    transport
+        .get_first_with_failover(second_origin.join("/account/probe").unwrap(), None)
+        .await
+        .unwrap();
+    let restored = SessionJar::import(&transport.export_session().unwrap()).unwrap();
+    assert!(restored.contains_cookie_for_url(&second_origin, "PHPSESSID"));
+    assert!(!restored.contains_cookie_for_url(&first_origin, "PHPSESSID"));
+}
+
 #[test]
 fn snapshot_origin_absent_from_configured_mirrors_fails_closed() {
     use rezka_client::session::{RezkaClient, RezkaClientConfig};

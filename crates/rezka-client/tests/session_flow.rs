@@ -120,8 +120,11 @@ struct ExpensiveChallenge;
 
 impl Respond for ExpensiveChallenge {
     fn respond(&self, _request: &Request) -> ResponseTemplate {
+        // Difficulty 5 sits at the accepted parse ceiling and still forces a large sweep: this
+        // random_data has no solution below the 1_000_000 nonce budget used here, so the proof runs
+        // the full sweep on a blocking thread and exhausts into ChallengeFailed deterministically.
         ResponseTemplate::new(200).set_body_string(
-            r#"<script id="anubis_challenge">{"challenge":{"id":"expensive","randomData":"deliberately-expensive-proof"},"rules":{"difficulty":8}}</script>"#,
+            r#"<script id="anubis_challenge">{"challenge":{"id":"expensive","randomData":"deliberately-expensive-proof-that-never-resolves"},"rules":{"difficulty":5}}</script>"#,
         )
     }
 }
