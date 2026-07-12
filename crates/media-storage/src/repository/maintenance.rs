@@ -11,6 +11,8 @@ pub struct MaintenanceReport {
     pub jobs_deleted: u64,
     pub notifications_deleted: u64,
     pub outbox_events_deleted: u64,
+    pub idempotency_records_deleted: u64,
+    pub operation_receipts_deleted: u64,
 }
 
 #[derive(Clone)]
@@ -59,6 +61,7 @@ impl SeaOrmMaintenanceStore {
                      WHERE (notification.lease_expires_at IS NULL \
                             OR notification.lease_expires_at <= $2) \
                        AND (notification.delivered_at <= $1 \
+                        OR notification.dead_at <= $1 \
                         OR (notification.aggregate_type = 'job' AND EXISTS ( \
                             SELECT 1 FROM jobs AS job \
                             WHERE job.id = notification.aggregate_id \
@@ -124,12 +127,30 @@ impl SeaOrmMaintenanceStore {
                 ))
                 .await?;
 
+            let idempotency_records = transaction
+                .execute_raw(Statement::from_sql_and_values(
+                    DatabaseBackend::Postgres,
+                    "DELETE FROM idempotency_records WHERE expires_at <= $1",
+                    [now.into()],
+                ))
+                .await?;
+
+            let operation_receipts = transaction
+                .execute_raw(Statement::from_sql_and_values(
+                    DatabaseBackend::Postgres,
+                    "DELETE FROM operation_receipts WHERE created_at <= $1",
+                    [job_cutoff.into()],
+                ))
+                .await?;
+
             Ok::<_, sea_orm::DbErr>(MaintenanceReport {
                 search_sessions_deleted: sessions.rows_affected(),
                 search_executions_deleted: executions.rows_affected(),
                 jobs_deleted: jobs.rows_affected(),
                 notifications_deleted: notifications.rows_affected(),
                 outbox_events_deleted: outbox_events.rows_affected(),
+                idempotency_records_deleted: idempotency_records.rows_affected(),
+                operation_receipts_deleted: operation_receipts.rows_affected(),
             })
         }
         .await;

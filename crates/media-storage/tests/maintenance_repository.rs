@@ -50,6 +50,8 @@ async fn run_removes_expired_sessions_and_only_unreferenced_executions() {
             jobs_deleted: 0,
             notifications_deleted: 0,
             outbox_events_deleted: 0,
+            idempotency_records_deleted: 0,
+            operation_receipts_deleted: 0,
         }
     );
     assert_eq!(
@@ -280,5 +282,105 @@ async fn run_prunes_old_delivered_and_job_notifications_without_touching_recent_
         query(database.connection(), "SELECT id FROM outbox_events")
             .await
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn run_removes_expired_idempotency_records_and_old_operation_receipts() {
+    let database = TestDatabase::start_migrated().await;
+    let now = OffsetDateTime::from_unix_timestamp(2_000_000_000).unwrap();
+    let expired = timestamp(now - Duration::minutes(1));
+    let future = timestamp(now + Duration::hours(1));
+    let old = timestamp(now - Duration::days(91));
+    let recent = timestamp(now - Duration::days(89));
+
+    database
+        .connection()
+        .execute_unprepared(&format!(
+            "INSERT INTO api_clients (id, name, role, credential_digest) VALUES
+             ('00000000-0000-0000-0002-000000000001', 'runner', 'runner', decode(repeat('ef', 32), 'hex'));
+             INSERT INTO idempotency_records
+               (id, client_id, idempotency_key, request_hash, generation, status, expires_at)
+             VALUES
+               ('90000000-0000-0000-0000-000000000001', '00000000-0000-0000-0002-000000000001',
+                'expired', decode(repeat('11', 32), 'hex'), '90000000-0000-0000-0001-000000000001',
+                'in_progress', '{expired}'),
+               ('90000000-0000-0000-0000-000000000002', '00000000-0000-0000-0002-000000000001',
+                'fresh', decode(repeat('22', 32), 'hex'), '90000000-0000-0000-0001-000000000002',
+                'in_progress', '{future}');
+             INSERT INTO operation_receipts
+               (id, operation_key, operation_kind, result_kind, created_at, updated_at)
+             VALUES
+               ('a0000000-0000-0000-0000-000000000001', decode(repeat('33', 32), 'hex'),
+                'heartbeat', 'none', '{old}', '{old}'),
+               ('a0000000-0000-0000-0000-000000000002', decode(repeat('44', 32), 'hex'),
+                'heartbeat', 'none', '{recent}', '{recent}')"
+        ))
+        .await
+        .unwrap();
+
+    let store = SeaOrmMaintenanceStore::new(database.connection().clone());
+    let report = store.run(now).await.unwrap();
+
+    assert_eq!(report.idempotency_records_deleted, 1);
+    assert_eq!(report.operation_receipts_deleted, 1);
+    let records = query(
+        database.connection(),
+        "SELECT idempotency_key FROM idempotency_records",
+    )
+    .await;
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].try_get::<String>("", "idempotency_key").unwrap(),
+        "fresh"
+    );
+    let receipts = query(database.connection(), "SELECT id FROM operation_receipts").await;
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(
+        receipts[0].try_get::<uuid::Uuid>("", "id").unwrap(),
+        uuid::Uuid::parse_str("a0000000-0000-0000-0000-000000000002").unwrap()
+    );
+    assert_eq!(store.run(now).await.unwrap(), MaintenanceReport::default());
+}
+
+#[tokio::test]
+async fn run_prunes_dead_letters_after_the_retention_window() {
+    let database = TestDatabase::start_migrated().await;
+    let now = OffsetDateTime::from_unix_timestamp(2_000_000_000).unwrap();
+    let old = timestamp(now - Duration::days(91));
+    let recent = timestamp(now - Duration::days(1));
+
+    database
+        .connection()
+        .execute_unprepared(&format!(
+            "INSERT INTO notification_outbox
+               (id, aggregate_type, aggregate_id, event_type, recipient, source_dedupe_key,
+                payload, dead_at, last_error_code, created_at)
+             VALUES
+               ('50000000-0000-0000-0000-000000000010', 'tracking',
+                '60000000-0000-0000-0000-000000000010', 'future-episode-found', 'primary',
+                decode('10', 'hex'), '{{\"message\":\"old dead\"}}', '{old}', 'webhook_rejected', '{old}'),
+               ('50000000-0000-0000-0000-000000000011', 'tracking',
+                '60000000-0000-0000-0000-000000000011', 'future-episode-found', 'primary',
+                decode('11', 'hex'), '{{\"message\":\"recent dead\"}}', '{recent}', 'webhook_rejected', '{recent}')"
+        ))
+        .await
+        .unwrap();
+
+    let report = SeaOrmMaintenanceStore::new(database.connection().clone())
+        .run(now)
+        .await
+        .unwrap();
+
+    assert_eq!(report.notifications_deleted, 1);
+    let remaining = query(
+        database.connection(),
+        "SELECT payload->>'message' AS message FROM notification_outbox",
+    )
+    .await;
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(
+        remaining[0].try_get::<String>("", "message").unwrap(),
+        "recent dead"
     );
 }
