@@ -56,6 +56,8 @@ pub fn build_hls_ingest_command(
             "-loglevel".to_owned(),
             "error".to_owned(),
             "-y".to_owned(),
+            "-rw_timeout".to_owned(),
+            "30000000".to_owned(),
             "-i".to_owned(),
             input.as_url().as_str().to_owned(),
             "-map".to_owned(),
@@ -64,6 +66,8 @@ pub fn build_hls_ingest_command(
             "0:a?".to_owned(),
             "-c".to_owned(),
             "copy".to_owned(),
+            "-f".to_owned(),
+            "matroska".to_owned(),
             output.to_owned(),
         ],
     })
