@@ -18,6 +18,7 @@ async fn cleanup_removes_only_marked_terminal_directories_after_retention() {
     mark_terminal(root.path(), "old", UNIX_EPOCH + Duration::from_secs(10))
         .await
         .unwrap();
+    assert!(!old.join(".terminal-at.tmp").exists());
     mark_terminal(root.path(), "recent", UNIX_EPOCH + Duration::from_secs(100))
         .await
         .unwrap();

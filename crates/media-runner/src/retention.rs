@@ -6,6 +6,7 @@ use std::{
 use thiserror::Error;
 
 const TERMINAL_MARKER: &str = ".terminal-at";
+const TERMINAL_MARKER_TEMP: &str = ".terminal-at.tmp";
 
 #[derive(Debug, Error)]
 pub enum StagingRetentionError {
@@ -29,7 +30,9 @@ pub async fn mark_terminal(
         .map_err(|_| StagingRetentionError::Clock)?
         .as_secs()
         .to_string();
-    tokio::fs::write(job_directory.join(TERMINAL_MARKER), timestamp).await?;
+    let temporary = job_directory.join(TERMINAL_MARKER_TEMP);
+    tokio::fs::write(&temporary, timestamp).await?;
+    tokio::fs::rename(temporary, job_directory.join(TERMINAL_MARKER)).await?;
     Ok(())
 }
 
