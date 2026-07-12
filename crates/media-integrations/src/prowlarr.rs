@@ -1,11 +1,15 @@
 use std::{cmp::Reverse, fmt, time::Duration};
 
+use futures_util::StreamExt;
 use reqwest::StatusCode;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
+use sha1::{Digest, Sha1};
 use url::Url;
 
 pub const RESULTS_PER_PAGE: u32 = 5;
+const MAX_TORRENT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_BENCODE_DEPTH: usize = 128;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ProwlarrErrorCode {
@@ -304,16 +308,11 @@ impl ProwlarrClient {
                 MediaKind::Movie => "movie",
                 MediaKind::Series { .. } => "tvsearch",
             };
-            let category = match request.session.query.kind {
-                MediaKind::Movie => "2000",
-                MediaKind::Series { .. } => "5000",
-            };
             endpoint
                 .query_pairs_mut()
                 .append_pair("query", &request.session.query.title)
                 .append_pair("type", search_type)
                 .append_pair("indexerIds", "-2")
-                .append_pair("categories", category)
                 .append_pair("limit", "5")
                 .append_pair("offset", &request.offset.to_string());
             let response = self
@@ -343,6 +342,18 @@ impl ProwlarrClient {
 
         results.sort_by_key(ranking_key);
         results.truncate(RESULTS_PER_PAGE as usize);
+        let mut resolved = Vec::with_capacity(results.len());
+        for mut result in results {
+            if result.source.info_hash.is_none()
+                && let Some(download_url) = result.source.download_url.as_deref()
+            {
+                let Some(info_hash) = self.resolve_info_hash(download_url).await else {
+                    continue;
+                };
+                result.source.info_hash = Some(info_hash);
+            }
+            resolved.push(result);
+        }
         let continuation = (raw_count >= RESULTS_PER_PAGE as usize).then(|| SearchPageRequest {
             session: request.session.clone(),
             offset: request.offset + RESULTS_PER_PAGE,
@@ -350,10 +361,134 @@ impl ProwlarrClient {
         Ok(SearchPage {
             session: request.session,
             offset: request.offset,
-            results,
+            results: resolved,
             continuation,
         })
     }
+
+    async fn resolve_info_hash(&self, download_url: &str) -> Option<String> {
+        let url = Url::parse(download_url).ok()?;
+        if !same_origin(&self.config.base_url, &url) {
+            return None;
+        }
+        let response = self
+            .client
+            .get(url)
+            .header("X-Api-Key", self.config.api_key.expose_secret())
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success()
+            || response
+                .content_length()
+                .is_some_and(|length| length > MAX_TORRENT_BYTES as u64)
+        {
+            return None;
+        }
+
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.ok()?;
+            if body.len().saturating_add(chunk.len()) > MAX_TORRENT_BYTES {
+                return None;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let info = torrent_info_bytes(&body)?;
+        Some(hex::encode(Sha1::digest(info)))
+    }
+}
+
+fn same_origin(left: &Url, right: &Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+fn torrent_info_bytes(value: &[u8]) -> Option<&[u8]> {
+    if value.first() != Some(&b'd') {
+        return None;
+    }
+    let mut position = 1;
+    let mut info_range = None;
+    while value.get(position) != Some(&b'e') {
+        let (key, next) = parse_bytes(value, position)?;
+        position = next;
+        let start = position;
+        position = skip_bencode(value, position, 1)?;
+        if key == b"info" {
+            if value.get(start) != Some(&b'd') || info_range.is_some() {
+                return None;
+            }
+            info_range = Some(start..position);
+        }
+    }
+    position += 1;
+    if position != value.len() {
+        return None;
+    }
+    info_range.map(|range| &value[range])
+}
+
+fn skip_bencode(value: &[u8], position: usize, depth: usize) -> Option<usize> {
+    if depth > MAX_BENCODE_DEPTH {
+        return None;
+    }
+    match value.get(position)? {
+        b'0'..=b'9' => parse_bytes(value, position).map(|(_, next)| next),
+        b'i' => skip_integer(value, position),
+        b'l' => skip_collection(value, position, depth, false),
+        b'd' => skip_collection(value, position, depth, true),
+        _ => None,
+    }
+}
+
+fn skip_collection(value: &[u8], position: usize, depth: usize, dictionary: bool) -> Option<usize> {
+    let mut position = position + 1;
+    while value.get(position) != Some(&b'e') {
+        if dictionary {
+            position = parse_bytes(value, position)?.1;
+        }
+        position = skip_bencode(value, position, depth + 1)?;
+    }
+    Some(position + 1)
+}
+
+fn skip_integer(value: &[u8], position: usize) -> Option<usize> {
+    let start = position + 1;
+    let end = value.get(start..)?.iter().position(|byte| *byte == b'e')? + start;
+    let digits = value.get(start..end)?;
+    let digits = digits.strip_prefix(b"-").unwrap_or(digits);
+    if digits.is_empty()
+        || !digits.iter().all(u8::is_ascii_digit)
+        || (digits.len() > 1 && digits.first() == Some(&b'0'))
+    {
+        return None;
+    }
+    Some(end + 1)
+}
+
+fn parse_bytes(value: &[u8], position: usize) -> Option<(&[u8], usize)> {
+    let colon = value
+        .get(position..)?
+        .iter()
+        .position(|byte| *byte == b':')?
+        + position;
+    let length_bytes = value.get(position..colon)?;
+    if length_bytes.is_empty()
+        || !length_bytes.iter().all(u8::is_ascii_digit)
+        || (length_bytes.len() > 1 && length_bytes.first() == Some(&b'0'))
+    {
+        return None;
+    }
+    let length = std::str::from_utf8(length_bytes)
+        .ok()?
+        .parse::<usize>()
+        .ok()?;
+    let start = colon + 1;
+    let end = start.checked_add(length)?;
+    Some((value.get(start..end)?, end))
 }
 
 #[derive(Deserialize)]

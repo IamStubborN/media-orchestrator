@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+futures-util.workspace = true
 hex.workspace = true
 hmac.workspace = true
 media-contract = { path = "../media-contract", version = "=0.1.0" }
@@ -15,6 +16,7 @@ reqwest = { workspace = true, features = ["form", "multipart"] }
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha1.workspace = true
 thiserror.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }

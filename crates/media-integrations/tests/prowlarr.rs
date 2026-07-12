@@ -10,6 +10,9 @@ use wiremock::{
     matchers::{header, method, path, query_param},
 };
 
+const TORRENT_INFO_HASH: &str = "d2939e5af6d595ecdfd4d11563f16986535b6b98";
+const TORRENT_BYTES: &[u8] = b"d8:announce14:http://tracker4:infod6:lengthi5e4:name8:file.txt12:piece lengthi16384e6:pieces20:12345678901234567890ee";
+
 fn config(server: &MockServer) -> ProwlarrConfig {
     ProwlarrConfig::new(
         Url::parse(&server.uri()).unwrap(),
@@ -92,7 +95,6 @@ async fn series_search_sends_exact_five_item_page_and_returns_stable_cursor() {
         .and(query_param("query", "Example Show"))
         .and(query_param("type", "tvsearch"))
         .and(query_param("indexerIds", "-2"))
-        .and(query_param("categories", "5000"))
         .and(query_param("limit", "5"))
         .and(query_param("offset", "5"))
         .respond_with(ResponseTemplate::new(200).set_body_json(releases()))
@@ -120,6 +122,10 @@ async fn series_search_sends_exact_five_item_page_and_returns_stable_cursor() {
     assert_eq!(page.results.len(), 4, "non-torrent results are excluded");
     assert_eq!(page.results[0].identity.indexer_id, 3);
     assert_eq!(page.results[0].identity.guid, "indexer-guid-a");
+    assert_eq!(
+        page.results[0].source.info_hash.as_deref(),
+        Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    );
     assert_eq!(page.results[1].identity.guid, "indexer-guid-b");
     assert_eq!(page.results[3].identity.guid, "wrong-season");
     let debug = format!("{page:?}");
@@ -139,7 +145,6 @@ async fn movie_search_uses_movie_type_and_never_submits_a_result() {
         .and(query_param("query", "Example Movie"))
         .and(query_param("type", "movie"))
         .and(query_param("indexerIds", "-2"))
-        .and(query_param("categories", "2000"))
         .and(query_param("limit", "5"))
         .and(query_param("offset", "0"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
@@ -162,6 +167,186 @@ async fn movie_search_uses_movie_type_and_never_submits_a_result() {
         .search(request)
         .await
         .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .url
+            .query_pairs()
+            .all(|(name, _)| name != "categories")
+    );
+}
+
+#[tokio::test]
+async fn download_url_is_resolved_to_exact_v1_info_hash() {
+    let server = MockServer::start().await;
+    let download_url = format!("{}/download/one?apikey=provider-secret", server.uri());
+    Mock::given(method("GET"))
+        .and(path("/api/v1/search"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "id": 1,
+                "guid": "download-only",
+                "indexerId": 9,
+                "title": "Example Movie 1080p",
+                "size": 5,
+                "seeders": 10,
+                "protocol": "torrent",
+                "downloadUrl": download_url
+            }])),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/download/one"))
+        .and(header("x-api-key", "prowlarr-secret"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(TORRENT_BYTES))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let request = SearchPageRequest::new(
+        SearchSession::new("download-only", MediaQuery::movie("Example Movie")).unwrap(),
+        0,
+    )
+    .unwrap();
+    let page = ProwlarrClient::new(config(&server))
+        .unwrap()
+        .search(request)
+        .await
+        .unwrap();
+
+    assert_eq!(page.results.len(), 1);
+    assert_eq!(
+        page.results[0].source.info_hash.as_deref(),
+        Some(TORRENT_INFO_HASH)
+    );
+    assert_eq!(
+        page.results[0].source.download_url.as_deref(),
+        Some(download_url.as_str())
+    );
+}
+
+#[tokio::test]
+async fn malformed_torrent_is_rejected_without_leaking_download_url() {
+    let server = MockServer::start().await;
+    let secret = "never-print-provider-key";
+    let download_url = format!("{}/download/bad?apikey={secret}", server.uri());
+    Mock::given(method("GET"))
+        .and(path("/api/v1/search"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "id": 2,
+                "guid": "malformed",
+                "indexerId": 9,
+                "title": "Example Movie 1080p",
+                "protocol": "torrent",
+                "downloadUrl": download_url
+            }])),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/download/bad"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"not-bencoded"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let request = SearchPageRequest::new(
+        SearchSession::new("malformed", MediaQuery::movie("Example Movie")).unwrap(),
+        0,
+    )
+    .unwrap();
+    let page = ProwlarrClient::new(config(&server))
+        .unwrap()
+        .search(request)
+        .await
+        .unwrap();
+
+    assert!(page.results.is_empty());
+    let debug = format!("{page:?}");
+    assert!(!debug.contains(secret));
+}
+
+#[tokio::test]
+async fn valid_bencode_without_torrent_info_is_rejected() {
+    let server = MockServer::start().await;
+    let download_url = format!("{}/download/not-torrent", server.uri());
+    Mock::given(method("GET"))
+        .and(path("/api/v1/search"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "id": 4,
+                "guid": "not-torrent",
+                "indexerId": 9,
+                "title": "Example Movie 1080p",
+                "protocol": "torrent",
+                "downloadUrl": download_url
+            }])),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/download/not-torrent"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"d4:name8:not-filee"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let request = SearchPageRequest::new(
+        SearchSession::new("not-torrent", MediaQuery::movie("Example Movie")).unwrap(),
+        0,
+    )
+    .unwrap();
+    let page = ProwlarrClient::new(config(&server))
+        .unwrap()
+        .search(request)
+        .await
+        .unwrap();
+
+    assert!(page.results.is_empty());
+}
+
+#[tokio::test]
+async fn oversized_torrent_is_rejected() {
+    let server = MockServer::start().await;
+    let download_url = format!("{}/download/large", server.uri());
+    Mock::given(method("GET"))
+        .and(path("/api/v1/search"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "id": 3,
+                "guid": "oversized",
+                "indexerId": 9,
+                "title": "Example Movie 1080p",
+                "protocol": "torrent",
+                "downloadUrl": download_url
+            }])),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/download/large"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'x'; 8 * 1024 * 1024 + 1]))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let request = SearchPageRequest::new(
+        SearchSession::new("oversized", MediaQuery::movie("Example Movie")).unwrap(),
+        0,
+    )
+    .unwrap();
+    let page = ProwlarrClient::new(config(&server))
+        .unwrap()
+        .search(request)
+        .await
+        .unwrap();
+
+    assert!(page.results.is_empty());
 }
 
 #[tokio::test]
