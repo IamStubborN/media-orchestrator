@@ -339,9 +339,10 @@ impl ProwlarrClient {
             let body = read_capped(response, MAX_SEARCH_RESPONSE_BYTES)
                 .await
                 .ok_or(ProwlarrError::ProviderResponse { status })?;
-            let raw: Vec<RawRelease> = serde_json::from_slice(&body)
+            let raw: Vec<serde_json::Value> = serde_json::from_slice(&body)
                 .map_err(|_| ProwlarrError::ProviderResponse { status })?;
             raw.into_iter()
+                .filter_map(|release| serde_json::from_value::<RawRelease>(release).ok())
                 .filter(|release| release.protocol == "torrent")
                 .filter_map(|release| ProwlarrResult::from_raw(release, &request.session.query))
                 .collect::<Vec<_>>()
@@ -394,8 +395,7 @@ impl ProwlarrClient {
             return None;
         }
         let body = read_capped(response, MAX_TORRENT_BYTES).await?;
-        let info = torrent_info_bytes(&body)?;
-        Some(hex::encode(Sha1::digest(info)))
+        torrent_info_hash(&body)
     }
 }
 
@@ -403,7 +403,7 @@ impl ProwlarrClient {
 /// advertised `Content-Length` short-circuits an oversized body, and the stream
 /// is also measured chunk by chunk so a response that lies about (or omits) its
 /// length cannot exhaust memory.
-async fn read_capped(response: reqwest::Response, cap: usize) -> Option<Vec<u8>> {
+pub(crate) async fn read_capped(response: reqwest::Response, cap: usize) -> Option<Vec<u8>> {
     if response
         .content_length()
         .is_some_and(|length| length > cap as u64)
@@ -451,6 +451,10 @@ fn torrent_info_bytes(value: &[u8]) -> Option<&[u8]> {
         return None;
     }
     info_range.map(|range| &value[range])
+}
+
+pub(crate) fn torrent_info_hash(value: &[u8]) -> Option<String> {
+    torrent_info_bytes(value).map(|info| hex::encode(Sha1::digest(info)))
 }
 
 fn skip_bencode(value: &[u8], position: usize, depth: usize) -> Option<usize> {

@@ -13,6 +13,8 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use url::Url;
 
+const MAX_TORRENT_BYTES: usize = 8 * 1024 * 1024;
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum QbittorrentErrorCode {
     Configuration,
@@ -326,9 +328,41 @@ impl QbittorrentClient {
             Err(QbittorrentError::TorrentNotFound) => {}
             Err(error) => return Err(error),
         }
-        let form = reqwest::multipart::Form::new()
-            .text("urls", selection.uri.as_str().to_owned())
-            .text("category", category.clone());
+        let form = if matches!(selection.uri.scheme(), "http" | "https") {
+            let response = self
+                .client
+                .get(selection.uri.clone())
+                .send()
+                .await
+                .map_err(|_| QbittorrentError::Transport)?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(QbittorrentError::ProviderResponse { status });
+            }
+            let torrent = crate::prowlarr::read_capped(response, MAX_TORRENT_BYTES)
+                .await
+                .ok_or(QbittorrentError::ProviderResponse { status })?;
+            let info_hash = crate::prowlarr::torrent_info_hash(&torrent)
+                .ok_or(QbittorrentError::ProviderResponse { status })?;
+            if !info_hash.eq_ignore_ascii_case(&selection.info_hash) {
+                return Err(QbittorrentError::IdentityMismatch);
+            }
+            reqwest::multipart::Form::new()
+                .part(
+                    "torrents",
+                    reqwest::multipart::Part::bytes(torrent)
+                        .file_name("selected.torrent")
+                        .mime_str("application/x-bittorrent")
+                        .map_err(|_| QbittorrentError::Configuration {
+                            message: "torrent MIME type is invalid",
+                        })?,
+                )
+                .text("category", category.clone())
+        } else {
+            reqwest::multipart::Form::new()
+                .text("urls", selection.uri.as_str().to_owned())
+                .text("category", category.clone())
+        };
         let mut request = self
             .client
             .post(endpoint(&self.config.base_url, "api/v2/torrents/add")?)
@@ -506,7 +540,10 @@ fn add_response_accepted(status: StatusCode, body: &str) -> bool {
     }
     serde_json::from_str::<AddResponse>(body).is_ok_and(|response| {
         response.failure_count == 0
-            && response.pending_count.saturating_add(response.success_count) > 0
+            && response
+                .pending_count
+                .saturating_add(response.success_count)
+                > 0
     })
 }
 

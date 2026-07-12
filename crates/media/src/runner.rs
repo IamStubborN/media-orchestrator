@@ -694,17 +694,28 @@ impl MediaJobExecutor {
             })?;
         control.stage_completed(0, "torrent_submit", 0).await?;
         control.stage_started(0, "torrent_monitor", 1).await?;
+        // qBittorrent 5.2 can acknowledge an add request before the torrent is
+        // visible through /torrents/info. Keep that visibility grace bounded.
+        let visibility_deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         loop {
             if control.is_cancelled() {
                 return Ok(ExecutionOutcome::Cancelled);
             }
-            let snapshot = client
-                .monitor(&handle)
-                .await
-                .map_err(|error| {
+            let snapshot = match client.monitor(&handle).await {
+                Ok(snapshot) => snapshot,
+                Err(error)
+                    if error.code()
+                        == media_integrations::qbittorrent::QbittorrentErrorCode::TorrentNotFound
+                        && tokio::time::Instant::now() < visibility_deadline =>
+                {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+                Err(error) => {
                     tracing::warn!(error_code = ?error.code(), "qBittorrent monitor failed");
-                    RunnerError::Execution
-                })?;
+                    return Err(RunnerError::Execution);
+                }
+            };
             match snapshot.state {
                 media_integrations::qbittorrent::TorrentState::Complete => break,
                 media_integrations::qbittorrent::TorrentState::Error => {

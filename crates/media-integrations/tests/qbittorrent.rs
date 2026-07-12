@@ -10,6 +10,9 @@ use wiremock::{
     matchers::{body_string_contains, header, method, path, query_param},
 };
 
+const TORRENT_INFO_HASH: &str = "d2939e5af6d595ecdfd4d11563f16986535b6b98";
+const TORRENT_BYTES: &[u8] = b"d8:announce14:http://tracker4:infod6:lengthi5e4:name8:file.txt12:piece lengthi16384e6:pieces20:12345678901234567890ee";
+
 fn config(server: &MockServer) -> QbittorrentConfig {
     QbittorrentConfig::new(
         Url::parse(&server.uri()).unwrap(),
@@ -106,6 +109,45 @@ async fn qbittorrent_5_2_pending_add_response_is_accepted() {
 }
 
 #[tokio::test]
+async fn http_torrent_is_fetched_verified_and_uploaded_as_bytes() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/app/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("v5.2.3"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/info"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/selected.torrent"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(TORRENT_BYTES))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/add"))
+        .and(body_string_contains("selected.torrent"))
+        .and(body_string_contains("media-tv"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("Ok."))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = QbittorrentClient::connect(config(&server)).await.unwrap();
+    let selection = ExplicitTorrentSelection::new(
+        "prowlarr:3:indexer-guid-a",
+        TORRENT_INFO_HASH,
+        format!("{}/selected.torrent", server.uri()),
+    )
+    .unwrap();
+
+    client.submit_selected(selection).await.unwrap();
+}
+
+#[tokio::test]
 async fn an_existing_exact_torrent_is_reused_without_duplicate_submission() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -120,17 +162,19 @@ async fn an_existing_exact_torrent_is_reused_without_duplicate_submission() {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ))
         .and(query_param("category", "media-tv"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([{
-            "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "name": "Selected release",
-            "category": "media-tv",
-            "state": "downloading",
-            "progress": 0.25,
-            "amount_left": 300,
-            "content_path": "/downloads/media-tv/release",
-            "save_path": "/downloads/media-tv",
-            "completion_on": -1
-        }])))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "name": "Selected release",
+                "category": "media-tv",
+                "state": "downloading",
+                "progress": 0.25,
+                "amount_left": 300,
+                "content_path": "/downloads/media-tv/release",
+                "save_path": "/downloads/media-tv",
+                "completion_on": -1
+            }])),
+        )
         .mount(&server)
         .await;
 

@@ -214,6 +214,49 @@ async fn search_accepts_null_release_ids_from_prowlarr() {
 }
 
 #[tokio::test]
+async fn malformed_release_does_not_hide_valid_results() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {
+                "id": 1,
+                "guid": "valid-release",
+                "indexerId": 7,
+                "title": "Example Movie 1080p",
+                "size": 2000,
+                "seeders": 10,
+                "protocol": "torrent",
+                "infoHash": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            },
+            {
+                "id": 2,
+                "guid": "malformed-release",
+                "indexerId": "not-an-integer",
+                "title": "Broken provider row",
+                "protocol": "torrent"
+            }
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let request = SearchPageRequest::new(
+        SearchSession::new("mixed-results", MediaQuery::movie("Example Movie")).unwrap(),
+        0,
+    )
+    .unwrap();
+    let page = ProwlarrClient::new(config(&server))
+        .unwrap()
+        .search(request)
+        .await
+        .unwrap();
+
+    assert_eq!(page.results.len(), 1);
+    assert_eq!(page.results[0].identity.guid, "valid-release");
+}
+
+#[tokio::test]
 async fn download_url_is_resolved_to_exact_v1_info_hash() {
     let server = MockServer::start().await;
     let download_url = format!("{}/download/one?apikey=provider-secret", server.uri());
