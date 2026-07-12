@@ -147,7 +147,11 @@ impl EpisodePipeline {
                 .as_ref()
                 .ok_or(RunnerPortError::InvalidWork)?;
             let source_bytes = match work.source_kind {
-                VideoSourceKind::Mp4 => self.http.probe_video_size(source_url).await?,
+                VideoSourceKind::Mp4 => self
+                    .http
+                    .probe_video_size(source_url)
+                    .await
+                    .unwrap_or(HLS_SOURCE_ESTIMATE_BYTES),
                 VideoSourceKind::Hls => HLS_SOURCE_ESTIMATE_BYTES,
             };
             self.filesystem
