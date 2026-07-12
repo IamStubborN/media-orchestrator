@@ -467,19 +467,41 @@ no test asserts the absence of Serde on `PlaybackManifest`/secret URL types.
 `docs/superpowers/reviews/2026-07-12-rezka-catalog-playback-verification.md`
 does not exist. The steps below are left unticked accordingly.
 
-- [ ] **Step 1: Write live negative guard first**
+**Closure note (2026-07-12 verification pass):** Steps 1-3 are now done; see
+`docs/superpowers/reviews/2026-07-12-rezka-catalog-playback-verification.md`.
+`explicit_catalog_playback_live_probe` and
+`playback_manifest_and_secret_url_types_have_no_serde_impls` were added to
+`live_probe.rs`, and `media_core_and_contract_cannot_reach_rezka_client` to
+`architecture.rs`. The direct type-level serde-absence assertion lives in the
+`rezka-client` test binary rather than `architecture.rs` because `media` does
+not depend on `serde` directly (a crate-metadata "no serde dep" check would be
+false — rezka-client legitimately uses serde); `architecture.rs` instead guards
+the complementary crate boundary. Steps 4-5 stay unticked: the Docker-dependent
+matrix targets were not re-run and no commit was made (per task constraints).
+
+- [x] **Step 1: Write live negative guard first**
 
 Without `REZKA_LIVE_PROBE=1`, explicit ignored probe fails before DNS/network. Require caller query/title/target and secret-file credentials. Output only counts, IDs, labels, kinds, language codes, and redacted values.
 
-Not done: no catalog/title/playback live probe exists in `live_probe.rs`.
+Done: `explicit_catalog_playback_live_probe` panics on the opt-in `expect`
+before any network access (verified with `env -u REZKA_LIVE_PROBE ... --ignored
+--exact`), takes caller query/title from env, reads secret-file credentials,
+and asserts only structural invariants with a redacted counts/ids/kinds/
+language-codes summary.
 
-- [ ] **Step 2: Extend architecture tests**
+- [x] **Step 2: Extend architecture tests**
 
 Prove no workspace dependency, no provider types in core/contract, and no Serde implementation on manifest/secret URL source definitions.
 
-Not done: `architecture.rs` has no test for the Serde-absence assertion.
+Done: no-workspace-dependency remains covered by
+`rezka_client_has_no_workspace_dependencies`; the new
+`media_core_and_contract_cannot_reach_rezka_client` proves provider types cannot
+reach the serializable domain/contract crates; and
+`playback_manifest_and_secret_url_types_have_no_serde_impls` (in `live_probe.rs`,
+where serde is nameable) asserts `PlaybackManifest`, `SecretMediaUrl`, and
+`SecretSubtitleUrl` implement neither `Serialize` nor `Deserialize`.
 
-- [ ] **Step 3: Run focused guardrails**
+- [x] **Step 3: Run focused guardrails**
 
 ```bash
 cargo nextest run -p rezka-client --test live_probe
@@ -489,8 +511,11 @@ env -u REZKA_LIVE_PROBE cargo test -p rezka-client --test live_probe -- --ignore
 
 Expected: normal tests pass; explicit probe exits non-zero with opt-in message before network.
 
-Not done: the third command's named test does not exist (see Step 1). The
-first two commands pass as written but only exercise Phase 3 coverage.
+Done: `mise exec -- cargo nextest run -p rezka-client` reports 167 passed, 2
+skipped (both `#[ignore]` live probes); `... -p media -E 'binary(architecture)'`
+reports 11 passed; and the `env -u REZKA_LIVE_PROBE ... --ignored --exact
+explicit_catalog_playback_live_probe` command exits non-zero, panicking at the
+opt-in `expect` (`live_probe.rs:77`) before network.
 
 - [ ] **Step 4: Run full matrix**
 
@@ -505,10 +530,12 @@ mise run build
 git diff --check
 ```
 
-Not verified in this documentation pass: `mise run test` (Docker-independent)
-passes for the relevant crates, spot-checked directly with `cargo test`; the
-Docker-dependent `test-integration`, `audit`, and `build` targets were not
-re-run here.
+Partially done (left unticked): `mise run check` and `mise run lint` PASS in the
+2026-07-12 verification pass (only the pre-existing `proc-macro-error2 v2.0.1`
+warning); focused `rezka-client` and `media` architecture suites PASS. Not
+re-run: `mise run format`, `mise run test` (full), and the Docker-dependent
+`test-integration`, `audit`, and `build` targets — other agents were modifying
+the workspace concurrently.
 
 - [ ] **Step 5: Record exact evidence and commit**
 
@@ -517,7 +544,10 @@ git add crates/rezka-client crates/media/tests/architecture.rs docs/superpowers/
 git commit -m "test: verify rezka catalog and playback"
 ```
 
-Not done: no such review document or commit exists; `git log` has no commit
+Partially done (left unticked): the review document
+`docs/superpowers/reviews/2026-07-12-rezka-catalog-playback-verification.md` now
+exists and records exact evidence, but no commit was made — committing is outside
+this verification pass's task constraints, so `git log` still has no commit
 matching this message.
 
 ---

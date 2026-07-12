@@ -212,6 +212,31 @@ fn media_runner_has_no_storage_api_or_database_dependencies() {
 }
 
 #[test]
+fn media_core_and_contract_cannot_reach_rezka_client() {
+    // Phase 4 boundary guard. The domain playback manifest and the ephemeral
+    // secret CDN/subtitle URL wrappers deliberately implement no Serde (asserted
+    // directly at the type level in `rezka-client`'s `live_probe` test, where
+    // serde is a nameable dependency). This test enforces the complementary
+    // crate-boundary invariant that cargo metadata can express honestly: the
+    // serializable domain (`media-core`) and wire-contract (`media-contract`)
+    // crates cannot reach `rezka-client` at all, so no provider type — Serde or
+    // not — can ever be embedded in a serialized domain or wire payload. A naive
+    // "rezka-client does not depend on serde" check would be false, because
+    // rezka-client legitimately uses serde for its custom JSON deserializers and
+    // for session-cookie persistence.
+    let metadata = workspace_metadata();
+    let rezka = workspace_package_id(&metadata, "rezka-client");
+
+    for domain_crate in ["media-core", "media-contract"] {
+        let source = workspace_package_id(&metadata, domain_crate);
+        assert!(
+            !resolved_dependency_reachable(&metadata, source, rezka),
+            "{domain_crate} must not reach rezka-client through the resolved dependency graph",
+        );
+    }
+}
+
+#[test]
 fn media_runner_depends_only_on_rezka_client_workspace_crate_in_phase_3() {
     let metadata = workspace_metadata();
     let runner = workspace_package_id(&metadata, "media-runner");
