@@ -7,13 +7,14 @@ use std::{
 
 use reqwest::{
     StatusCode,
-    header::{COOKIE, REFERER, SET_COOKIE},
+    header::{COOKIE, LOCATION, REFERER, SET_COOKIE},
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use url::Url;
 
 const MAX_TORRENT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_SOURCE_REDIRECTS: u8 = 5;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum QbittorrentErrorCode {
@@ -328,26 +329,14 @@ impl QbittorrentClient {
             Err(QbittorrentError::TorrentNotFound) => {}
             Err(error) => return Err(error),
         }
-        let form = if matches!(selection.uri.scheme(), "http" | "https") {
-            let response = self
-                .client
-                .get(selection.uri.clone())
-                .send()
-                .await
-                .map_err(|_| QbittorrentError::Transport)?;
-            let status = response.status();
-            if !status.is_success() {
-                return Err(QbittorrentError::ProviderResponse { status });
-            }
-            let torrent = crate::prowlarr::read_capped(response, MAX_TORRENT_BYTES)
-                .await
-                .ok_or(QbittorrentError::ProviderResponse { status })?;
-            let info_hash = crate::prowlarr::torrent_info_hash(&torrent)
-                .ok_or(QbittorrentError::ProviderResponse { status })?;
-            if !info_hash.eq_ignore_ascii_case(&selection.info_hash) {
-                return Err(QbittorrentError::IdentityMismatch);
-            }
-            reqwest::multipart::Form::new()
+        let source = if matches!(selection.uri.scheme(), "http" | "https") {
+            self.resolve_http_source(selection.uri.clone(), &selection.info_hash)
+                .await?
+        } else {
+            ResolvedTorrentSource::Magnet(selection.uri)
+        };
+        let form = match source {
+            ResolvedTorrentSource::Torrent(torrent) => reqwest::multipart::Form::new()
                 .part(
                     "torrents",
                     reqwest::multipart::Part::bytes(torrent)
@@ -357,11 +346,10 @@ impl QbittorrentClient {
                             message: "torrent MIME type is invalid",
                         })?,
                 )
-                .text("category", category.clone())
-        } else {
-            reqwest::multipart::Form::new()
-                .text("urls", selection.uri.as_str().to_owned())
-                .text("category", category.clone())
+                .text("category", category.clone()),
+            ResolvedTorrentSource::Magnet(uri) => reqwest::multipart::Form::new()
+                .text("urls", uri.as_str().to_owned())
+                .text("category", category.clone()),
         };
         let mut request = self
             .client
@@ -390,6 +378,60 @@ impl QbittorrentClient {
             return Err(QbittorrentError::ProviderResponse { status });
         }
         Ok(handle)
+    }
+
+    async fn resolve_http_source(
+        &self,
+        mut url: Url,
+        expected_hash: &str,
+    ) -> Result<ResolvedTorrentSource, QbittorrentError> {
+        let mut last_redirect = StatusCode::FOUND;
+        for _ in 0..=MAX_SOURCE_REDIRECTS {
+            let response = self
+                .client
+                .get(url.clone())
+                .send()
+                .await
+                .map_err(|_| QbittorrentError::Transport)?;
+            let status = response.status();
+            if status.is_redirection() {
+                last_redirect = status;
+                let location = response
+                    .headers()
+                    .get(LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .ok_or(QbittorrentError::ProviderResponse { status })?;
+                let next = Url::parse(location)
+                    .or_else(|_| url.join(location))
+                    .map_err(|_| QbittorrentError::ProviderResponse { status })?;
+                if next.scheme() == "magnet" {
+                    if !magnet_matches_hash(&next, expected_hash) {
+                        return Err(QbittorrentError::IdentityMismatch);
+                    }
+                    return Ok(ResolvedTorrentSource::Magnet(next));
+                }
+                if !matches!(next.scheme(), "http" | "https") {
+                    return Err(QbittorrentError::ProviderResponse { status });
+                }
+                url = next;
+                continue;
+            }
+            if !status.is_success() {
+                return Err(QbittorrentError::ProviderResponse { status });
+            }
+            let torrent = crate::prowlarr::read_capped(response, MAX_TORRENT_BYTES)
+                .await
+                .ok_or(QbittorrentError::ProviderResponse { status })?;
+            let info_hash = crate::prowlarr::torrent_info_hash(&torrent)
+                .ok_or(QbittorrentError::ProviderResponse { status })?;
+            if !info_hash.eq_ignore_ascii_case(expected_hash) {
+                return Err(QbittorrentError::IdentityMismatch);
+            }
+            return Ok(ResolvedTorrentSource::Torrent(torrent));
+        }
+        Err(QbittorrentError::ProviderResponse {
+            status: last_redirect,
+        })
     }
 
     async fn ensure_category_exists(&self, category: &str) -> Result<(), QbittorrentError> {
@@ -522,6 +564,20 @@ impl QbittorrentClient {
         }
         Ok(())
     }
+}
+
+enum ResolvedTorrentSource {
+    Magnet(Url),
+    Torrent(Vec<u8>),
+}
+
+fn magnet_matches_hash(uri: &Url, expected_hash: &str) -> bool {
+    uri.query_pairs().any(|(name, value)| {
+        name.eq_ignore_ascii_case("xt")
+            && value
+                .strip_prefix("urn:btih:")
+                .is_some_and(|hash| hash.eq_ignore_ascii_case(expected_hash))
+    })
 }
 
 #[derive(Deserialize)]

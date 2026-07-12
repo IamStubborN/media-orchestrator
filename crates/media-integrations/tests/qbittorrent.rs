@@ -148,6 +148,48 @@ async fn http_torrent_is_fetched_verified_and_uploaded_as_bytes() {
 }
 
 #[tokio::test]
+async fn prowlarr_redirect_to_matching_magnet_is_submitted() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/app/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("v5.2.3"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/info"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/prowlarr/download"))
+        .respond_with(ResponseTemplate::new(301).insert_header(
+            "Location",
+            format!("magnet:?xt=urn:btih:{TORRENT_INFO_HASH}"),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/add"))
+        .and(body_string_contains(TORRENT_INFO_HASH))
+        .and(body_string_contains("media-tv"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("Ok."))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = QbittorrentClient::connect(config(&server)).await.unwrap();
+    let selection = ExplicitTorrentSelection::new(
+        "prowlarr:3:indexer-guid-a",
+        TORRENT_INFO_HASH,
+        format!("{}/prowlarr/download", server.uri()),
+    )
+    .unwrap();
+
+    client.submit_selected(selection).await.unwrap();
+}
+
+#[tokio::test]
 async fn an_existing_exact_torrent_is_reused_without_duplicate_submission() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
