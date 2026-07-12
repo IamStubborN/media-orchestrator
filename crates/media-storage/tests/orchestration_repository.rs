@@ -340,7 +340,7 @@ async fn session_refresh_emits_only_session_lifecycle_notifications() {
     let (test_db, jobs, leases) = setup().await;
     jobs.create(
         operation_key(),
-        new_job("session-refresh:018f3f86-7b4c-7b4f-9b6a-6d62f45bb111"),
+        new_job("selection:session-refresh:018f3f86-7b4c-7b4f-9b6a-6d62f45bb111"),
     )
     .await
     .unwrap();

@@ -235,7 +235,9 @@ async fn insert_notification_outbox(
 
 fn notifications_for_event(job: &Job, event: &JobEvent) -> Vec<(&'static str, String)> {
     let id = job.id();
-    let session_refresh = job.result_ref().starts_with("session-refresh:");
+    let session_refresh = job
+        .result_ref()
+        .starts_with("selection:session-refresh:");
     match event.kind() {
         JobEventKind::Started if session_refresh => {
             vec![("started", format!("Rezka session refresh {id} started."))]
