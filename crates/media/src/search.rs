@@ -471,7 +471,10 @@ impl ConcreteSearchProvider {
                     .map_err(|_| SearchError::InvalidRequest)?,
             )
             .await
-            .map_err(|_| SearchError::Provider)?;
+            .map_err(|error| {
+                tracing::warn!(error_code = ?error.code(), "Prowlarr search failed");
+                SearchError::Provider
+            })?;
         let provider_continuation = page
             .continuation
             .as_ref()

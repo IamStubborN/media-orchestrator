@@ -790,7 +790,7 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
                 let config = media_integrations::prowlarr::ProwlarrConfig::new(
                     config.base_url().clone(),
                     config.api_key().clone(),
-                    Duration::from_secs(30),
+                    Duration::from_secs(120),
                 )
                 .map_err(|_| ServiceError::Bootstrap)?;
                 media_integrations::prowlarr::ProwlarrClient::new(config)
