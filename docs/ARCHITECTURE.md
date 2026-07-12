@@ -147,9 +147,17 @@ Owns process composition and user-facing commands:
 media serve
 media runner
 media migrate
-media search ... --json
-media jobs ... --json
-media tracking ... --json
+media healthcheck
+media search ... [--json]
+media download ... [--json]      (alias: media select)
+media jobs create ... [--json]
+media jobs list [--json]
+media jobs show JOB_ID [--json]  (aliases: get, status)
+media jobs cancel JOB_ID [--json]
+media queue status [--json]
+media tracking add ... [--json]
+media tracking list [--json]
+media tracking remove TRACKING_ID [--json]
 ```
 
 It parses configuration once, creates concrete clients and repositories, wires use cases, starts the requested runtime, and maps terminal errors to exit codes.
@@ -160,18 +168,36 @@ Architecture invariant: `anyhow` is allowed here for final process context. Libr
 
 ```text
 media-core             media-contract             rezka-client
-    ^                        ^                          ^
-    |                        |                          |
-media-storage          media-api                 media-integrations
-    ^                    ^   ^                       ^
-    |                    |   |                       |
-    +--------------------+ media-runner -------------+
-              \              /
-               \            /
-                    media
+    ^                    ^     ^                          ^
+    |                    |     |                          |
+media-storage        media-api                       media-runner
+    ^                    ^     ^
+    |                    |     |
+    |              media-integrations
+    |                    ^
+    |                    |
+    +--------------------+---------------------------------+
+                          |
+                        media
 ```
 
-The diagram is conceptual; the checked Cargo graph is authoritative. Every normal dependency must follow a directed acyclic graph.
+Direct workspace-crate edges, for precision the ASCII above cannot fully
+express:
+
+```text
+media-storage       -> media-core
+media-api            -> media-core, media-contract
+media-integrations   -> media-core, media-contract
+media-runner         -> rezka-client
+media                -> media-api, media-contract, media-core,
+                         media-integrations, media-runner, media-storage,
+                         rezka-client
+```
+
+Notably, `media-runner` depends on `rezka-client` only; it does not depend on
+`media-storage`, `media-api`, or `media-integrations`. The diagram is
+conceptual; the checked Cargo graph is authoritative. Every normal dependency
+must follow a directed acyclic graph.
 
 ## Cycle Prevention
 

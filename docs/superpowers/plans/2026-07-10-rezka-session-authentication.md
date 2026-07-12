@@ -253,7 +253,7 @@ Every task below must preserve these invariants:
 - Produces architecture tests that fail until the crates and dependency edges exist.
 - Later tasks fill the modules without changing crate ownership.
 
-- [ ] **Step 1: Write failing architecture tests**
+- [x] **Step 1: Write failing architecture tests**
 
 Add these tests to `crates/media/tests/architecture.rs`:
 
@@ -309,7 +309,7 @@ fn media_runner_depends_only_on_rezka_client_workspace_crate_in_phase_3() {
 }
 ```
 
-- [ ] **Step 2: Run the focused failing test**
+- [x] **Step 2: Run the focused failing test**
 
 Run:
 
@@ -319,7 +319,7 @@ cargo test -p media --test architecture rezka_client_has_no_workspace_dependenci
 
 Expected: FAIL because workspace package `rezka-client` was not found.
 
-- [ ] **Step 3: Add workspace members and pinned dependencies**
+- [x] **Step 3: Add workspace members and pinned dependencies**
 
 Update the root `Cargo.toml`:
 
@@ -340,7 +340,7 @@ resolver = "3"
 Add the dependency pins from "Dependency Pin Recommendations" to
 `[workspace.dependencies]`.
 
-- [ ] **Step 4: Create the `rezka-client` manifest and module skeleton**
+- [x] **Step 4: Create the `rezka-client` manifest and module skeleton**
 
 Use this manifest:
 
@@ -394,7 +394,7 @@ not re-export any type until the task that defines it:
 // Module body intentionally starts minimal; behavior lands behind failing tests in later tasks.
 ```
 
-- [ ] **Step 5: Create the `media-runner` manifest and module skeleton**
+- [x] **Step 5: Create the `media-runner` manifest and module skeleton**
 
 Use this manifest:
 
@@ -430,7 +430,7 @@ Create `crates/media-runner/src/lib.rs`:
 pub mod rezka_session_store;
 ```
 
-- [ ] **Step 6: Add composition dependencies to `media`**
+- [x] **Step 6: Add composition dependencies to `media`**
 
 Add to `crates/media/Cargo.toml`:
 
@@ -444,7 +444,7 @@ url.workspace = true
 If `tracing = "=0.1.44"` already exists as a crate-local dependency, replace it
 with `tracing.workspace = true` after the workspace pin is added.
 
-- [ ] **Step 7: Update and inspect `Cargo.lock`, then prove Task 1 builds**
+- [x] **Step 7: Update and inspect `Cargo.lock`, then prove Task 1 builds**
 
 The manifest edits introduce new workspace packages and dependencies, so the
 first post-edit Cargo command MUST run without `--locked`:
@@ -466,7 +466,7 @@ manifests, and metadata exits 0 with the refreshed lockfile. If unrelated
 packages changed, correct the manifest pins and rerun `cargo check --workspace`;
 do not hand-edit `Cargo.lock`.
 
-- [ ] **Step 8: Run the focused architecture tests**
+- [x] **Step 8: Run the focused architecture tests**
 
 Run:
 
@@ -478,7 +478,7 @@ cargo test -p media --test architecture media_runner_depends_only_on_rezka_clien
 
 Expected: PASS.
 
-- [ ] **Step 9: Run task verification**
+- [x] **Step 9: Run task verification**
 
 Run:
 
@@ -490,7 +490,7 @@ mise run test
 
 Expected: PASS.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add Cargo.toml Cargo.lock crates/rezka-client crates/media-runner crates/media/Cargo.toml crates/media/tests/architecture.rs
@@ -532,7 +532,7 @@ pub enum RezkaError {
 }
 ```
 
-- [ ] **Step 1: Write failing redaction tests**
+- [x] **Step 1: Write failing redaction tests**
 
 Create `crates/rezka-client/tests/redaction.rs`:
 
@@ -592,7 +592,7 @@ fn error_display_and_debug_never_include_provider_secret_material() {
 }
 ```
 
-- [ ] **Step 2: Run the focused failing test**
+- [x] **Step 2: Run the focused failing test**
 
 Run:
 
@@ -602,7 +602,7 @@ cargo test -p rezka-client --test redaction --locked
 
 Expected: FAIL because the redaction API does not exist yet.
 
-- [ ] **Step 3: Implement minimal redaction and typed errors**
+- [x] **Step 3: Implement minimal redaction and typed errors**
 
 Implement `crates/rezka-client/src/redaction.rs`:
 
@@ -743,7 +743,7 @@ After the types compile, add their first root re-export to
 pub use error::{RezkaError, RezkaErrorCode};
 ```
 
-- [ ] **Step 4: Run the focused test**
+- [x] **Step 4: Run the focused test**
 
 Run:
 
@@ -753,7 +753,7 @@ cargo test -p rezka-client --test redaction --locked
 
 Expected: PASS.
 
-- [ ] **Step 5: Run task verification**
+- [x] **Step 5: Run task verification**
 
 Run:
 
@@ -765,7 +765,7 @@ mise run test
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/rezka-client/src/lib.rs crates/rezka-client/src/error.rs crates/rezka-client/src/redaction.rs crates/rezka-client/tests/redaction.rs
@@ -837,7 +837,7 @@ impl Transport {
 }
 ```
 
-- [ ] **Step 1: Write failing mirror and cookie-origin tests**
+- [x] **Step 1: Write failing mirror and cookie-origin tests**
 
 Create `crates/rezka-client/tests/mirror_cookie_origin.rs`:
 
@@ -1090,7 +1090,7 @@ async fn zero_retry_budget_never_contacts_or_selects_second_mirror() {
 }
 ```
 
-- [ ] **Step 2: Run the focused failing test**
+- [x] **Step 2: Run the focused failing test**
 
 Run:
 
@@ -1100,7 +1100,7 @@ cargo test -p rezka-client --test mirror_cookie_origin --locked
 
 Expected: FAIL because mirror and cookie APIs do not exist yet.
 
-- [ ] **Step 3: Implement `MirrorSet`**
+- [x] **Step 3: Implement `MirrorSet`**
 
 Implement the validation rules:
 
@@ -1118,7 +1118,7 @@ Implement the validation rules:
 Return `RezkaError::Configuration { message: "invalid mirror origin" }` for
 invalid mirrors.
 
-- [ ] **Step 4: Implement `SessionJar` and `SessionSnapshot`**
+- [x] **Step 4: Implement `SessionJar` and `SessionSnapshot`**
 
 Implementation requirements:
 
@@ -1131,7 +1131,7 @@ Implementation requirements:
 6. Keep the jar's request-value function private to `Transport`; do not add any helper that copies site cookies to another origin.
 ```
 
-- [ ] **Step 5: Implement minimal `Transport`**
+- [x] **Step 5: Implement minimal `Transport`**
 
 Implementation requirements:
 
@@ -1165,7 +1165,7 @@ pub use session::cookie::SessionSnapshot;
 
 Do not add catalog, playback, subtitle, or CDN-specific methods.
 
-- [ ] **Step 6: Run the focused test**
+- [x] **Step 6: Run the focused test**
 
 Run:
 
@@ -1175,7 +1175,7 @@ cargo test -p rezka-client --test mirror_cookie_origin --locked
 
 Expected: PASS.
 
-- [ ] **Step 7: Run task verification**
+- [x] **Step 7: Run task verification**
 
 Run:
 
@@ -1187,7 +1187,7 @@ mise run test
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/rezka-client/src/lib.rs crates/rezka-client/src/mirror.rs crates/rezka-client/src/session/mod.rs crates/rezka-client/src/session/cookie.rs crates/rezka-client/src/transport.rs crates/rezka-client/tests/mirror_cookie_origin.rs crates/rezka-client/tests/support/mod.rs
@@ -1224,7 +1224,7 @@ pub fn solve_challenge(challenge: &AnubisChallenge, max_nonce: u64) -> Result<An
 pub async fn submit_challenge(transport: &mut Transport, challenge: &AnubisChallenge, proof: &AnubisProof, redir: url::Url, elapsed_ms: u128) -> Result<(), RezkaError>;
 ```
 
-- [ ] **Step 1: Add Anubis fixtures**
+- [x] **Step 1: Add Anubis fixtures**
 
 Create `crates/rezka-client/tests/fixtures/anubis_challenge.html`:
 
@@ -1252,7 +1252,7 @@ Create `crates/rezka-client/tests/fixtures/anubis_malformed.html`:
 </html>
 ```
 
-- [ ] **Step 2: Write failing Anubis tests**
+- [x] **Step 2: Write failing Anubis tests**
 
 Create `crates/rezka-client/tests/anubis.rs`:
 
@@ -1299,7 +1299,7 @@ fn malformed_challenge_and_excessive_work_are_sanitized_failures() {
 }
 ```
 
-- [ ] **Step 3: Run the focused failing test**
+- [x] **Step 3: Run the focused failing test**
 
 Run:
 
@@ -1309,7 +1309,7 @@ cargo test -p rezka-client --test anubis --locked
 
 Expected: FAIL because Anubis parsing and proof-of-work do not exist yet.
 
-- [ ] **Step 4: Implement challenge detection and parsing**
+- [x] **Step 4: Implement challenge detection and parsing**
 
 Implementation requirements:
 
@@ -1320,7 +1320,7 @@ Implementation requirements:
 4. Use sanitized ProviderResponseInvalid or ChallengeFailed errors.
 ```
 
-- [ ] **Step 5: Implement bounded proof-of-work**
+- [x] **Step 5: Implement bounded proof-of-work**
 
 Implementation requirements:
 
@@ -1331,7 +1331,7 @@ Implementation requirements:
 4. Return ChallengeFailed when no nonce is found within max_nonce.
 ```
 
-- [ ] **Step 6: Add pass-submission mock test**
+- [x] **Step 6: Add pass-submission mock test**
 
 Extend `crates/rezka-client/tests/anubis.rs` with a `wiremock` async test:
 
@@ -1402,7 +1402,7 @@ Expose the module only after its implementation compiles:
 pub mod anubis;
 ```
 
-- [ ] **Step 7: Run the focused tests**
+- [x] **Step 7: Run the focused tests**
 
 Run:
 
@@ -1412,7 +1412,7 @@ cargo test -p rezka-client --test anubis --locked
 
 Expected: PASS.
 
-- [ ] **Step 8: Run task verification**
+- [x] **Step 8: Run task verification**
 
 Run:
 
@@ -1424,7 +1424,7 @@ mise run test
 
 Expected: PASS.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add crates/rezka-client/src/session/anubis.rs crates/rezka-client/src/session/mod.rs crates/rezka-client/tests/anubis.rs crates/rezka-client/tests/fixtures/anubis_challenge.html crates/rezka-client/tests/fixtures/anubis_malformed.html
@@ -1496,7 +1496,7 @@ impl RezkaClient {
 }
 ```
 
-- [ ] **Step 1: Add DLE fixtures**
+- [x] **Step 1: Add DLE fixtures**
 
 Create `crates/rezka-client/tests/fixtures/dle_login_success.json`:
 
@@ -1510,7 +1510,7 @@ Create `crates/rezka-client/tests/fixtures/dle_login_failed.json`:
 {"success":false}
 ```
 
-- [ ] **Step 2: Write failing session-flow tests**
+- [x] **Step 2: Write failing session-flow tests**
 
 Create `crates/rezka-client/tests/session_flow.rs` with mock-server tests for
 the full auth state machine:
@@ -1951,7 +1951,7 @@ Use the public `SessionJar` snapshot path for tests that need prepared cookies;
 do not expose a public manual browser-cookie import API on `RezkaClient` or the
 CLI.
 
-- [ ] **Step 3: Run the focused failing test**
+- [x] **Step 3: Run the focused failing test**
 
 Run:
 
@@ -1962,7 +1962,7 @@ cargo test -p rezka-client --test session_flow --locked
 Expected: FAIL because `RezkaClient`, DLE login, and validation APIs do not
 exist yet.
 
-- [ ] **Step 4: Implement `RezkaCredentials` and secret-safe debug**
+- [x] **Step 4: Implement `RezkaCredentials` and secret-safe debug**
 
 Implementation requirements:
 
@@ -1973,7 +1973,7 @@ Implementation requirements:
 4. Use ExposeSecret only at the request-building boundary.
 ```
 
-- [ ] **Step 5: Implement caller-supplied validation**
+- [x] **Step 5: Implement caller-supplied validation**
 
 Implementation requirements:
 
@@ -1987,7 +1987,7 @@ Implementation requirements:
 7. Do not treat premium CSS or premium labels as authentication proof.
 ```
 
-- [ ] **Step 6: Implement DLE login**
+- [x] **Step 6: Implement DLE login**
 
 Implementation requirements:
 
@@ -2006,7 +2006,7 @@ Implementation requirements:
 12. DLE code must not query the jar to decide login success. It may inspect only status, sanitized body classification, and the current response's cookie-name set; cookie values remain confined to the secret jar.
 ```
 
-- [ ] **Step 7: Implement `RezkaClient::ensure_authenticated`**
+- [x] **Step 7: Implement `RezkaClient::ensure_authenticated`**
 
 State machine (three probe fetches in the full Anubis + login path, with no
 duplicate validation GET at any state):
@@ -2040,7 +2040,7 @@ pub use session::{
 This proves automatic re-authentication against the test's deployment-supplied
 probe contract without treating `probe.url` as a universal provider endpoint.
 
-- [ ] **Step 8: Run focused session tests**
+- [x] **Step 8: Run focused session tests**
 
 Run:
 
@@ -2050,7 +2050,7 @@ cargo test -p rezka-client --test session_flow --locked
 
 Expected: PASS.
 
-- [ ] **Step 9: Run task verification**
+- [x] **Step 9: Run task verification**
 
 Run:
 
@@ -2062,7 +2062,7 @@ mise run test
 
 Expected: PASS.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add crates/rezka-client/src/lib.rs crates/rezka-client/src/session/dle.rs crates/rezka-client/src/session/validation.rs crates/rezka-client/src/session/mod.rs crates/rezka-client/src/transport.rs crates/rezka-client/tests/session_flow.rs crates/rezka-client/tests/fixtures/dle_login_failed.json crates/rezka-client/tests/fixtures/dle_login_success.json
@@ -2111,7 +2111,7 @@ Use AAD:
 media-orchestrator:rezka-session:v1
 ```
 
-- [ ] **Step 1: Write failing encrypted-store tests**
+- [x] **Step 1: Write failing encrypted-store tests**
 
 Create `crates/media-runner/tests/rezka_session_store.rs`:
 
@@ -2219,7 +2219,7 @@ fn encrypted_store_uses_restrictive_unix_permissions() {
 }
 ```
 
-- [ ] **Step 2: Run the focused failing test**
+- [x] **Step 2: Run the focused failing test**
 
 Run:
 
@@ -2229,7 +2229,7 @@ cargo test -p media-runner --test rezka_session_store --locked
 
 Expected: FAIL because encrypted store APIs do not exist yet.
 
-- [ ] **Step 3: Implement encrypted store**
+- [x] **Step 3: Implement encrypted store**
 
 Implementation requirements:
 
@@ -2281,7 +2281,7 @@ pub use rezka_session_store::{
 };
 ```
 
-- [ ] **Step 4: Run focused store tests**
+- [x] **Step 4: Run focused store tests**
 
 Run:
 
@@ -2291,7 +2291,7 @@ cargo test -p media-runner --test rezka_session_store --locked
 
 Expected: PASS.
 
-- [ ] **Step 5: Run task verification**
+- [x] **Step 5: Run task verification**
 
 Run:
 
@@ -2303,7 +2303,7 @@ mise run test
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/media-runner/src/lib.rs crates/media-runner/src/rezka_session_store.rs crates/media-runner/tests/rezka_session_store.rs
@@ -2390,7 +2390,7 @@ MEDIA_REZKA_PASSWORD_FILE: non-empty UTF-8 after one final newline trim, max 102
 MEDIA_REZKA_COOKIE_KEY_FILE: base64 for exactly 32 decoded bytes after one final newline trim.
 ```
 
-- [ ] **Step 1: Write failing config tests**
+- [x] **Step 1: Write failing config tests**
 
 Extend `crates/media/tests/config.rs`:
 
@@ -2507,7 +2507,7 @@ fn valid_runner_source() -> FakeSource {
 }
 ```
 
-- [ ] **Step 2: Run the focused failing config tests**
+- [x] **Step 2: Run the focused failing config tests**
 
 Run:
 
@@ -2517,7 +2517,7 @@ cargo test -p media --test config runner_config_ --locked
 
 Expected: FAIL because `RunnerConfig` and Rezka config do not exist yet.
 
-- [ ] **Step 3: Implement config loading**
+- [x] **Step 3: Implement config loading**
 
 Implementation requirements:
 
@@ -2535,7 +2535,7 @@ Implementation requirements:
 11. Implement every getter declared in the Task 7 interface with the exact return type shown there; tests and `prepare_runner_session` use getters exclusively and never access private fields directly.
 ```
 
-- [ ] **Step 4: Write failing composition construction test**
+- [x] **Step 4: Write failing composition construction test**
 
 Create `crates/media/tests/rezka_composition.rs`:
 
@@ -2604,7 +2604,7 @@ fn composition_constructs_rezka_session_dependencies_without_running_provider_ca
 }
 ```
 
-- [ ] **Step 5: Run the focused failing composition test**
+- [x] **Step 5: Run the focused failing composition test**
 
 Run:
 
@@ -2614,7 +2614,7 @@ cargo test -p media --test rezka_composition --locked
 
 Expected: FAIL because `prepare_runner_session` does not exist yet.
 
-- [ ] **Step 6: Implement construction-only composition**
+- [x] **Step 6: Implement construction-only composition**
 
 Implementation requirements:
 
@@ -2627,7 +2627,7 @@ Implementation requirements:
 6. Implement Debug for PreparedRunnerSession manually and redact all fields.
 ```
 
-- [ ] **Step 7: Run focused config and composition tests**
+- [x] **Step 7: Run focused config and composition tests**
 
 Run:
 
@@ -2638,7 +2638,7 @@ cargo test -p media --test rezka_composition --locked
 
 Expected: PASS.
 
-- [ ] **Step 8: Run task verification**
+- [x] **Step 8: Run task verification**
 
 Run:
 
@@ -2650,7 +2650,7 @@ mise run test
 
 Expected: PASS.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add crates/media/src/config.rs crates/media/src/composition.rs crates/media/tests/config.rs crates/media/tests/rezka_composition.rs
@@ -2669,7 +2669,7 @@ git commit -m "feat: wire rezka session secrets in composition"
 - Produces an opt-in live probe that is never part of normal CI.
 - Strengthens fixture/mock security coverage before Phase 3 closes.
 
-- [ ] **Step 1: Add the ignored live probe**
+- [x] **Step 1: Add the ignored live probe**
 
 Create `crates/rezka-client/tests/live_probe.rs`:
 
@@ -2771,7 +2771,7 @@ REZKA_LIVE_PASSWORD_FILE=/run/secrets/rezka_password \
 cargo test -p rezka-client --test live_probe -- --ignored --nocapture
 ```
 
-- [ ] **Step 2: Add bounded-flow and encrypted-store regressions**
+- [x] **Step 2: Add bounded-flow and encrypted-store regressions**
 
 Add these exact tests to `crates/rezka-client/tests/session_flow.rs` using the
 `config`, `credentials`, and `probe` helpers from Task 5:
@@ -2866,7 +2866,7 @@ for forbidden in ["rezka-user", "rezka-password", "opaque-a", "opaque-b"] {
 }
 ```
 
-- [ ] **Step 3: Run focused security tests**
+- [x] **Step 3: Run focused security tests**
 
 Run:
 
@@ -2882,7 +2882,7 @@ cargo test -p media --test rezka_composition --locked
 
 Expected: PASS.
 
-- [ ] **Step 4: Prove the live probe remains excluded from normal test runs**
+- [x] **Step 4: Prove the live probe remains excluded from normal test runs**
 
 Run:
 
@@ -2900,7 +2900,7 @@ env -u REZKA_LIVE_PROBE cargo test -p rezka-client --test live_probe -- --ignore
 Expected: FAIL with `explicit live probe requires REZKA_LIVE_PROBE=1`. This
 negative command is a local contract check and MUST NOT be added to normal CI.
 
-- [ ] **Step 5: Run final workspace verification**
+- [x] **Step 5: Run final workspace verification**
 
 Run:
 
@@ -2912,7 +2912,7 @@ mise run test
 
 Expected: PASS.
 
-- [ ] **Step 6: Confirm Phase 3 scope did not expand**
+- [x] **Step 6: Confirm Phase 3 scope did not expand**
 
 Run:
 
@@ -2925,7 +2925,7 @@ Expected: no new Phase 4+ behavior in `rezka-client`, `media-runner`, or
 code. If a match points to a new Phase 3 file, remove the behavior and replace
 it with a narrower session/auth-only interface.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/rezka-client/tests/live_probe.rs crates/rezka-client/tests/session_flow.rs crates/rezka-client/tests/redaction.rs crates/media-runner/tests/rezka_session_store.rs

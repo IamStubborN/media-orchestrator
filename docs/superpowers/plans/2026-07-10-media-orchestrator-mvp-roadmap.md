@@ -67,7 +67,7 @@ tracing output.
 
 ### Phase 4: Rezka Discovery and Playback
 
-**Focused plan name:** `2026-07-10-rezka-catalog-playback.md`
+**Focused plan name:** `2026-07-12-rezka-catalog-playback.md`
 
 **Produces:** Rezka search, title metadata, translations, seasons, episodes,
 stream qualities, subtitle discovery, provider snapshots, five-result
@@ -81,6 +81,10 @@ subtitle tracks.
 
 **Focused plan name:** `2026-07-10-job-leasing-recovery.md`
 
+Status: implemented without a focused plan document (delivered 2026-07; see
+`crates/media-core`, `crates/media-storage`, `crates/media-api`, and their
+tests for job leasing, heartbeat, checkpoints, retry, and outbox behavior).
+
 **Produces:** Job creation after explicit selection, lease and heartbeat API,
 stage checkpoints, three-attempt retry policy, cooperative cancellation,
 resume/restart semantics, `needs_action` reasons, outbox records, and one-active
@@ -92,6 +96,10 @@ unfinished work without duplicate state transitions or events.
 ### Phase 6: Rezka Runner and Plex Publication
 
 **Focused plan name:** `2026-07-10-rezka-runner-publication.md`
+
+Status: implemented without a focused plan document (delivered 2026-07; see
+`crates/media-runner` and its tests for the ffprobe/ffmpeg VAAPI pipeline,
+staging, and Plex publication behavior).
 
 **Produces:** Dedicated staging, 20 GiB storage guard, one-episode processing,
 range-aware download recovery, ffprobe validation, HEVC VAAPI encoding,
@@ -107,6 +115,10 @@ published files.
 
 **Focused plan name:** `2026-07-10-prowlarr-qbittorrent.md`
 
+Status: implemented without a focused plan document (delivered 2026-07; see
+`crates/media-integrations` and its tests for Prowlarr ranking/pagination and
+qBittorrent submission/monitoring).
+
 **Produces:** Prowlarr ranking and pagination, explicit result submission,
 existing category selection, qBittorrent monitoring, path discovery, and Plex
 verification without torrent mutation.
@@ -118,6 +130,11 @@ changes the seeding lifecycle of torrent data.
 ### Phase 8: Tracking and Notifications
 
 **Focused plan name:** `2026-07-10-tracking-notifications.md`
+
+Status: implemented without a focused plan document (delivered 2026-07; see
+tracking and notification-outbox behavior in `crates/media-core`,
+`crates/media-storage`, and the signed `deliver_only` Hermes webhook client in
+`crates/media-integrations`, plus their tests).
 
 **Produces:** Personal/family tracking, ongoing-series prompts, future episode
 discovery without auto-download, transactional outbox dispatch, signed
@@ -131,6 +148,10 @@ is needed to deliver a prepared notification.
 
 **Focused plan name:** `2026-07-10-hermes-home-integration.md`
 
+Status: implemented without a focused plan document in this repository; the
+work lives in the separate private `hermes-home` repository (pinned Hermes
+image, installed `media` CLI, isolated profiles, and Telegram credentials).
+
 **Produces:** Pinned derived Hermes image, installed `media` CLI, shared media
 skill, isolated Primary and Secondary profiles, Telegram credentials, separate
 memory/browser/Vaultwarden volumes, and narrow Bitwarden wrappers.
@@ -142,6 +163,12 @@ job status, and tracking flows through the CLI without `curl` or Docker access.
 ### Phase 10: Homelab Deployment and E2E
 
 **Focused plan name:** `2026-07-10-homelab-media-deployment.md`
+
+Status: implemented without a focused plan document. This repository provides
+the versioned images and the local-only `compose.yaml` development stack
+(`README.md`'s "Container Packaging" section); the actual
+`/srv/homelab/media/compose.yml` wiring lives in the separate
+`homelab` repository.
 
 **Produces:** `/srv/homelab/media/compose.yml` integration for
 PostgreSQL, service, runner, dedicated Gluetun, immutable image versions,

@@ -64,11 +64,11 @@ crates/rezka-client/tests/fixtures/{catalog,title,episodes,playback}_*
 - Produces `ProviderFailureReason`, new `RezkaError` variants/codes, `SecretMediaUrl`, `SecretSubtitleUrl`, and `PublicImageUrl`.
 - Secret wrappers expose `with_url<R>(&self, impl FnOnce(&Url) -> R) -> R` and exact redacted formatting.
 
-- [ ] **Step 1: Write failing error-code and redaction tests**
+- [x] **Step 1: Write failing error-code and redaction tests**
 
 Cover `ChallengeRequired`, `TitleNotFound`, `TranslationUnavailable`, `EpisodeUnavailable`, `QualityUnavailable`, and `StreamExpired`. Construct every variant and assert `Debug` and `Display` contain no title, URL, host, IP, token, cookie, or provider message.
 
-- [ ] **Step 2: Write failing secret URL boundary tests**
+- [x] **Step 2: Write failing secret URL boundary tests**
 
 Accept signed public HTTPS URLs. Reject HTTP, credentials, fragments, localhost, `.localhost`, and non-global literal IPv4/IPv6. Assert:
 
@@ -77,7 +77,7 @@ assert_eq!(format!("{url:?}"), "SecretMediaUrl([REDACTED])");
 assert_eq!(format!("{url}"), "[REDACTED]");
 ```
 
-- [ ] **Step 3: Run RED**
+- [x] **Step 3: Run RED**
 
 ```bash
 cargo nextest run -p rezka-client --test secret_url --test redaction
@@ -85,11 +85,11 @@ cargo nextest run -p rezka-client --test secret_url --test redaction
 
 Expected: compile failure because the new types do not exist.
 
-- [ ] **Step 4: Implement minimal values**
+- [x] **Step 4: Implement minimal values**
 
 Use private fields and constructors. `ProviderFailureReason::Display` emits static phrases only. Public image URLs expose a read-only URL accessor but use redacted `Debug`; stream/subtitle URLs use closure-only access and have no Serde implementation.
 
-- [ ] **Step 5: Run GREEN and regressions**
+- [x] **Step 5: Run GREEN and regressions**
 
 ```bash
 cargo nextest run -p rezka-client --test secret_url --test redaction
@@ -97,7 +97,7 @@ cargo nextest run -p rezka-client --test session_flow --test mirror_cookie_origi
 git diff --check
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/rezka-client
@@ -121,15 +121,15 @@ git commit -m "feat: add rezka playback security values"
 - Produces `CatalogQuery`, `TitleLocator`, `CatalogContinuation`, `CatalogEntry`, and `CatalogPage`.
 - Produces pure `parse_catalog_page(html, query, selected_origin)`.
 
-- [ ] **Step 1: Write failing constructor tests**
+- [x] **Step 1: Write failing constructor tests**
 
 Cover exact 200-scalar/512-byte query and 2,048-byte locator/continuation boundaries. Reject blank/control query text, locator query/fragment/backslash, encoded or decoded dot segments, non-`.html` paths, and foreign origins.
 
-- [ ] **Step 2: Write failing fixture tests**
+- [x] **Step 2: Write failing fixture tests**
 
 Require the exact item selector, title, and locator. Prove 64 entries pass, 65 fail atomically, an empty valid page returns zero, and malformed containers fail.
 
-- [ ] **Step 3: Write failing continuation tests**
+- [x] **Step 3: Write failing continuation tests**
 
 Accept exactly:
 
@@ -140,17 +140,17 @@ Accept exactly:
 
 Reject page 0/1, duplicate/unknown keys, query mismatch, foreign origins, dot segments, malformed page paths, and two different next links. Identical normalized links are accepted.
 
-- [ ] **Step 4: Run RED**
+- [x] **Step 4: Run RED**
 
 ```bash
 cargo nextest run -p rezka-client --test catalog
 ```
 
-- [ ] **Step 5: Implement bounded values and parser**
+- [x] **Step 5: Implement bounded values and parser**
 
 Keep fields private, expose slices/accessors, preserve provider order, collapse display whitespace, and return sanitized structural errors without query/title/URL content.
 
-- [ ] **Step 6: Run GREEN and commit**
+- [x] **Step 6: Run GREEN and commit**
 
 ```bash
 cargo nextest run -p rezka-client --test catalog
@@ -174,25 +174,25 @@ git commit -m "feat: parse rezka catalog pages"
 - Adds crate-private `get_first_with_failover_accepting` with a fixed 404/410 allowlist.
 - Adds `RezkaClient::search`, `search_next`, and internal bounded catalog fetch.
 
-- [ ] **Step 1: Write failing mock HTTP tests**
+- [x] **Step 1: Write failing mock HTTP tests**
 
 Assert exact initial GET path/query, one-request continuation, mirror rewriting, cookie retention, Anubis/login detection, and redacted failures.
 
-- [ ] **Step 2: Write failing status-policy tests**
+- [x] **Step 2: Write failing status-policy tests**
 
 Title policy receives bounded 404/410. Generic GET, probe, DLE, and Anubis still reject them. 429 and eligible 502/503/504 retain precedence.
 
-- [ ] **Step 3: Run RED**
+- [x] **Step 3: Run RED**
 
 ```bash
 cargo nextest run -p rezka-client --test catalog --test mirror_cookie_origin
 ```
 
-- [ ] **Step 4: Implement response policy and facade**
+- [x] **Step 4: Implement response policy and facade**
 
 Thread an internal policy through `send_first`/`process_response`. Only title code passes `[404, 410]`; cookie capture, body cap, failover promotion, and origin checks stay unchanged. Add a narrow crate-private `RezkaClient::transport_mut()` accessor so sibling facade modules do not expose the transport or its field publicly.
 
-- [ ] **Step 5: Run GREEN and commit**
+- [x] **Step 5: Run GREEN and commit**
 
 ```bash
 cargo nextest run -p rezka-client --test catalog --test mirror_cookie_origin --test session_flow
@@ -220,33 +220,33 @@ git commit -m "feat: add rezka catalog transport operations"
 - Produces `RezkaMediaKind`, IDs, `TranslationKey`, `Translation`, `TitleDetails`, `TitlePlaybackRef`, and `SelectedTranslation`.
 - Adds `RezkaClient::title` and `TitleDetails::select_translation`.
 
-- [ ] **Step 1: Write failing title-state tests**
+- [x] **Step 1: Write failing title-state tests**
 
 Cover exact Anubis, `Sign In`, `Verify`, restricted block, 404, 410, malformed HTTP 200, and cross-origin redirects.
 
-- [ ] **Step 2: Write failing ID-source tests**
+- [x] **Step 2: Write failing ID-source tests**
 
 Exercise all six specified ID sources. Equal candidates pass; conflict, zero, overflow, or absence fails.
 
-- [ ] **Step 3: Write failing translation identity tests**
+- [x] **Step 3: Write failing translation identity tests**
 
 Movie translations with one ID/different flags remain distinct; an exact duplicate movie key fails; duplicate series IDs fail. Ambiguous movie default is `None`; unique defaults resolve. Test 128/129 translation boundary.
 
-- [ ] **Step 4: Write failing capability tests**
+- [x] **Step 4: Write failing capability tests**
 
 Only a key present in the same `TitleDetails` can produce `SelectedTranslation`. A foreign key returns `TranslationUnavailable`. Wrong media-kind capability methods fail before network.
 
-- [ ] **Step 5: Run RED**
+- [x] **Step 5: Run RED**
 
 ```bash
 cargo nextest run -p rezka-client --test title
 ```
 
-- [ ] **Step 6: Implement title parsing/capabilities**
+- [x] **Step 6: Implement title parsing/capabilities**
 
 Parse every known ID source before selecting. Use media-kind-specific `TranslationKey`; define capability values in `playback.rs`, keep their constructors private, and let `TitleDetails` invoke a crate-private constructor only after membership validation.
 
-- [ ] **Step 7: Run GREEN and commit**
+- [x] **Step 7: Run GREEN and commit**
 
 ```bash
 cargo nextest run -p rezka-client --test title --test catalog
@@ -272,25 +272,25 @@ git commit -m "feat: parse rezka titles and translations"
 - Produces `SeriesAvailability`, `SeasonAvailability`, `EpisodeAvailability`, `SelectedEpisode`, and `ResolvedTarget`.
 - Adds `RezkaClient::series_availability`, `SeriesAvailability::select_episode`, and `SelectedEpisode::playback_request`.
 
-- [ ] **Step 1: Write failing parser tests**
+- [x] **Step 1: Write failing parser tests**
 
 Parse `success`, `seasons`, and `episodes`; sort numeric values; reject duplicates, orphan episodes, zero/overflow, missing/wrong fields. Test 256 seasons, 4,096 per season, and 16,384 total boundaries.
 
-- [ ] **Step 2: Write failing AJAX tests**
+- [x] **Step 2: Write failing AJAX tests**
 
 Assert exact `id`, `translator_id`, `action=get_episodes`, title referer, XHR header, cookies, and rejection of movie selections.
 
-- [ ] **Step 3: Write failing selection tests**
+- [x] **Step 3: Write failing selection tests**
 
 Absent season/episode returns `EpisodeUnavailable`; valid selection binds original title/translation and cannot be publicly forged.
 
-- [ ] **Step 4: Run RED**
+- [x] **Step 4: Run RED**
 
 ```bash
 cargo nextest run -p rezka-client --test series_availability
 ```
 
-- [ ] **Step 5: Implement and run GREEN**
+- [x] **Step 5: Implement and run GREEN**
 
 ```bash
 cargo nextest run -p rezka-client --test series_availability --test title
@@ -317,29 +317,29 @@ git commit -m "feat: resolve rezka series availability"
 - Produces `AdvertisedQuality`, `QualityTier`, `StreamKind`, `StreamEndpoint`, `StreamVariant`.
 - Produces pure `parse_stream_variants`.
 
-- [ ] **Step 1: Add `base64.workspace = true` and write failing decoder tests**
+- [x] **Step 1: Add `base64.workspace = true` and write failing decoder tests**
 
 Test plain/obfuscated equivalence, all known salts, fixed-16 fallback, 60/61 markers, invalid base64/UTF-8, one-MiB limit, trailing garbage, and panic-free malformed inputs.
 
-- [ ] **Step 2: Write failing endpoint tests**
+- [x] **Step 2: Write failing endpoint tests**
 
 Cover modern marked HLS, ordinary M3U8, MP4, legacy two-MP4 positional semantics, malformed/HTTP/local URLs, de-duplication, and four/five endpoint limit.
 
-- [ ] **Step 3: Write failing quality tests**
+- [x] **Step 3: Write failing quality tests**
 
 Normalize HTML premium labels. Merge by `(label, tier)`, keep standard/premium separate, and sort by vertical hint, tier, then label independent of input order.
 
-- [ ] **Step 4: Run RED**
+- [x] **Step 4: Run RED**
 
 ```bash
 cargo nextest run -p rezka-client --test quality
 ```
 
-- [ ] **Step 5: Implement strict decoder/ranking**
+- [x] **Step 5: Implement strict decoder/ranking**
 
 Use Base64 STANDARD after bounded salt removal. Parse the complete listing, validate every endpoint through `SecretMediaUrl`, then compute preferred index zero.
 
-- [ ] **Step 6: Run GREEN, audit, and commit**
+- [x] **Step 6: Run GREEN, audit, and commit**
 
 ```bash
 cargo nextest run -p rezka-client --test quality --test secret_url
@@ -362,29 +362,29 @@ git commit -m "feat: normalize rezka stream qualities"
 - Produces `SubtitleTrackId`, `SubtitleLanguage`, and `SubtitleTrack`.
 - Produces duplicate-aware `parse_subtitle_fields(wrapper_json: &str)` and internal parsed field values reusable by playback JSON.
 
-- [ ] **Step 1: Write failing empty-form tests**
+- [x] **Step 1: Write failing empty-form tests**
 
 Accept `false`, `null`, and `""` subtitle data; accept `false`, `null`, `""`, and `{}` maps. Reject other non-empty wrong types.
 
-- [ ] **Step 2: Write failing identity/alternative tests**
+- [x] **Step 2: Write failing identity/alternative tests**
 
 Preserve duplicate labels/languages as separate ordinal IDs. Preserve alternatives in order, de-duplicate exact URLs within a track, and test four/five plus 64/65 limits.
 
-- [ ] **Step 3: Write failing language tests**
+- [x] **Step 3: Write failing language tests**
 
 Test ASCII trim, underscore-to-hyphen, lowercase, exact 1-35 byte grammar, opaque `ua`, invalid values, and ignored unmatched map key.
 
-- [ ] **Step 4: Run RED**
+- [x] **Step 4: Run RED**
 
 ```bash
 cargo nextest run -p rezka-client --test subtitles
 ```
 
-- [ ] **Step 5: Implement with duplicate-aware JSON map visitor**
+- [x] **Step 5: Implement with duplicate-aware JSON map visitor**
 
 Use a custom wrapper/object visitor before conversion to `serde_json::Value` so duplicate language-map keys remain observable and fail. Reject any malformed non-empty alternative atomically. Do not fetch WEBVTT.
 
-- [ ] **Step 6: Run GREEN and commit**
+- [x] **Step 6: Run GREEN and commit**
 
 ```bash
 cargo nextest run -p rezka-client --test subtitles --test secret_url
@@ -411,29 +411,29 @@ git commit -m "feat: parse rezka subtitle tracks"
 - Produces non-serializable `PlaybackManifest` and `PlaybackRequest`.
 - Adds `RezkaClient::resolve` and crate-private idempotent form failover.
 
-- [ ] **Step 1: Write failing form tests**
+- [x] **Step 1: Write failing form tests**
 
 Movie form includes `id`, `translator_id`, all three `0|1` flags, and `action=get_movie`. Episode form includes IDs/numbers and `action=get_stream` with no movie flags. Both use exact AJAX path, rewritten title referer, XHR, and cookies.
 
-- [ ] **Step 2: Write failing manifest tests**
+- [x] **Step 2: Write failing manifest tests**
 
 Require boolean `success` and non-empty string `url`. Parse every variant/track, preserve key/target, map allowlisted failure reasons, and prove formatting/serialization cannot leak URLs.
 
-- [ ] **Step 3: Write failing POST failover tests**
+- [x] **Step 3: Write failing POST failover tests**
 
 Prove bounded non-wrapping A/B/C behavior, promotion, endpoint/referer rewriting, cookie reset/isolation, terminal 429, and next-operation recovery.
 
-- [ ] **Step 4: Run RED**
+- [x] **Step 4: Run RED**
 
 ```bash
 cargo nextest run -p rezka-client --test playback --test mirror_cookie_origin
 ```
 
-- [ ] **Step 5: Implement facade and shared failover loop**
+- [x] **Step 5: Implement facade and shared failover loop**
 
 Share internal GET/idempotent-form retry logic without changing public non-idempotent POST. Parse JSON once, then delegate stream/subtitle parsing.
 
-- [ ] **Step 6: Run GREEN and commit**
+- [x] **Step 6: Run GREEN and commit**
 
 ```bash
 cargo nextest run -p rezka-client
@@ -455,13 +455,29 @@ git commit -m "feat: resolve rezka playback manifests"
 - Adds ignored exact-opt-in search/title/playback live tests.
 - Preserves zero workspace dependencies and records reproducible evidence.
 
+**Verification note (2026-07-12 documentation pass):** Tasks 1-8 are
+implemented and their tests pass, but this task's own deliverables were not
+found in the repository. `crates/rezka-client/tests/live_probe.rs` only
+contains the Phase 3 session-authentication live probe; it has no
+`explicit_catalog_playback_live_probe` or other search/title/playback live
+guard. `crates/media/tests/architecture.rs` still only has the Phase 3
+dependency-boundary tests (`rezka_client_has_no_workspace_dependencies`,
+`media_runner_depends_only_on_rezka_client_workspace_crate_in_phase_3`, etc.);
+no test asserts the absence of Serde on `PlaybackManifest`/secret URL types.
+`docs/superpowers/reviews/2026-07-12-rezka-catalog-playback-verification.md`
+does not exist. The steps below are left unticked accordingly.
+
 - [ ] **Step 1: Write live negative guard first**
 
 Without `REZKA_LIVE_PROBE=1`, explicit ignored probe fails before DNS/network. Require caller query/title/target and secret-file credentials. Output only counts, IDs, labels, kinds, language codes, and redacted values.
 
+Not done: no catalog/title/playback live probe exists in `live_probe.rs`.
+
 - [ ] **Step 2: Extend architecture tests**
 
 Prove no workspace dependency, no provider types in core/contract, and no Serde implementation on manifest/secret URL source definitions.
+
+Not done: `architecture.rs` has no test for the Serde-absence assertion.
 
 - [ ] **Step 3: Run focused guardrails**
 
@@ -472,6 +488,9 @@ env -u REZKA_LIVE_PROBE cargo test -p rezka-client --test live_probe -- --ignore
 ```
 
 Expected: normal tests pass; explicit probe exits non-zero with opt-in message before network.
+
+Not done: the third command's named test does not exist (see Step 1). The
+first two commands pass as written but only exercise Phase 3 coverage.
 
 - [ ] **Step 4: Run full matrix**
 
@@ -486,12 +505,20 @@ mise run build
 git diff --check
 ```
 
+Not verified in this documentation pass: `mise run test` (Docker-independent)
+passes for the relevant crates, spot-checked directly with `cargo test`; the
+Docker-dependent `test-integration`, `audit`, and `build` targets were not
+re-run here.
+
 - [ ] **Step 5: Record exact evidence and commit**
 
 ```bash
 git add crates/rezka-client crates/media/tests/architecture.rs docs/superpowers/reviews
 git commit -m "test: verify rezka catalog and playback"
 ```
+
+Not done: no such review document or commit exists; `git log` has no commit
+matching this message.
 
 ---
 
@@ -501,13 +528,33 @@ git commit -m "test: verify rezka catalog and playback"
 - Modify only files required by validated findings.
 - Update: `docs/superpowers/reviews/2026-07-12-rezka-catalog-playback-verification.md`
 
+**Verification note (2026-07-12 documentation pass):** `git log` shows real
+fix commits consistent with review remediation (e.g. `93d55c2 fix: close
+rezka catalog validation gaps`, `c9b23ec fix: harden rezka catalog
+validation`, `ece882a fix: harden rezka title parsing`, `e7a5eb1 fix:
+recognize exact rezka player calls`, `623af31 fix: parse rezka player
+initialization ast`, `12e15d7 fix: reject non-global rezka IPv6 URLs`), but
+there is no dedicated review document (unlike Phase 3's
+`docs/superpowers/reviews/2026-07-11-rezka-session-phase-3-verification.md`),
+so the formal four-review process cannot be confirmed. The branch was merged
+to `main` locally as commit `d2a2d96` (a two-parent merge commit with no
+GitHub PR reference), and `feat/rezka-catalog-playback` was never pushed to
+`origin` (only `feat/rezka-session-authentication` and
+`feat/postgres-api-foundation` exist there) — there was no GitHub PR or CI run
+for this branch.
+
 - [ ] **Step 1: Run four reviews**
 
 Review exact spec/plan coverage, security/redaction/SSRF/budgets, Rust architecture/API invariants, and simplification/maintainability.
 
+Not verified: no review document exists to confirm this happened formally.
+
 - [ ] **Step 2: Remediate each actionable finding with a failing test**
 
 Do not accept suggestions that weaken approved security or scope boundaries. Commit named remediation changes.
+
+Partially evidenced by fix commits (see note above), but not tied to a
+recorded review, so left unticked.
 
 - [ ] **Step 3: Re-run the full matrix**
 
@@ -522,6 +569,8 @@ mise run build
 git diff --check
 ```
 
+Not verified in this documentation pass (see Task 9 Step 4 note).
+
 - [ ] **Step 4: Push, open PR, watch CI, and merge**
 
 ```bash
@@ -529,5 +578,8 @@ git push -u origin feat/rezka-catalog-playback
 gh pr create --base main --head feat/rezka-catalog-playback --title "feat: resolve Rezka catalog and playback" --body "Implements the approved Phase 4 Rezka catalog and playback specification with typed capability selections, strict bounded parsing, ephemeral redacted playback URLs, complete subtitle discovery, and fixture/mock/live-guard verification."
 gh pr checks --watch --interval 10
 ```
+
+Not done: the branch merged locally (commit `d2a2d96`) rather than through a
+pushed branch, GitHub PR, and CI run.
 
 Merge only after every GitHub check and final reviewer passes. Fetch `origin/main` and verify the merge commit before starting the next vertical slice.

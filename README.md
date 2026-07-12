@@ -121,13 +121,22 @@ mise exec -- cargo run -p media -- jobs get JOB_ID --json
 mise exec -- cargo run -p media -- queue status --json
 ```
 
+CLI output is always JSON; the `--json` flag is accepted on every subcommand
+for compatibility but has no effect on the emitted format.
+
 > **Warning:** `media serve` has no public route or public-ingress security
 > contract. Bind it to loopback or a private container network only; do not
 > expose it to the internet.
 
-The current Rust foundation includes pure domain types, versioned transport
-DTOs, explicit PostgreSQL migrations and repositories, the authenticated HTTP
-service and CLI, and executable architecture checks. Network providers,
-filesystem access, ffmpeg, and other runtime behavior remain scoped to later
-plans in the
-[MVP roadmap](docs/superpowers/plans/2026-07-10-media-orchestrator-mvp-roadmap.md).
+The Rust foundation now covers the full MVP delivery sequence: pure domain
+types, versioned transport DTOs, explicit PostgreSQL migrations and
+repositories, and the authenticated HTTP service and CLI sit alongside durable
+job orchestration (leasing, heartbeat, checkpoints, retry, and the
+notification outbox), the complete Rezka runner pipeline with real ffprobe and
+ffmpeg/VAAPI adapters, Prowlarr/qBittorrent/Plex/Gluetun integrations, signed
+`deliver_only` Hermes notifications, and five-result-paginated search
+sessions. Hermes profile wiring and homelab deployment composition are tracked
+separately in the `hermes-home` and `homelab` repositories. See the
+[MVP roadmap](docs/superpowers/plans/2026-07-10-media-orchestrator-mvp-roadmap.md)
+for the phase-by-phase delivery history and executable architecture checks
+that enforce these boundaries.
