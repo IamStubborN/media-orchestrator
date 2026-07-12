@@ -349,7 +349,10 @@ impl MediaJobExecutor {
             .credential_broker
             .resolve(credential_request_id)
             .await
-            .map_err(|_| RunnerError::Execution)?;
+            .map_err(|error| {
+                tracing::warn!(error = %error, "Rezka credential resolution failed");
+                RunnerError::Execution
+            })?;
         let credentials = rezka_client::RezkaCredentials {
             username: secrecy::SecretString::from(credentials.username),
             password: credentials.password,
@@ -364,11 +367,18 @@ impl MediaJobExecutor {
         client
             .ensure_authenticated(&credentials, probe)
             .await
-            .map_err(|_| RunnerError::Execution)?;
-        let snapshot = client
-            .export_session()
-            .map_err(|_| RunnerError::Execution)?;
-        store.save(&snapshot).map_err(|_| RunnerError::Execution)?;
+            .map_err(|error| {
+                tracing::warn!(error_code = ?error.code(), "Rezka authentication failed");
+                RunnerError::Execution
+            })?;
+        let snapshot = client.export_session().map_err(|error| {
+            tracing::warn!(error_code = ?error.code(), "Rezka session export failed");
+            RunnerError::Execution
+        })?;
+        store.save(&snapshot).map_err(|error| {
+            tracing::warn!(error = %error, "Rezka session persistence failed");
+            RunnerError::Execution
+        })?;
         Ok(ExecutionOutcome::Completed)
     }
 
