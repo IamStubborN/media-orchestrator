@@ -34,7 +34,7 @@ Unit tests or a healthy container do not satisfy a live-verification gate.
 ## Workstream 1: Real VPN Lifecycle
 
 **Priority:** Critical  
-**Current state:** Sticky network namespace is deployed; true between-job endpoint rotation is not implemented.
+**Current state:** Implemented and deployed. Two consecutive session-refresh jobs live-verified sticky per-job IPs and successful between-job rotation. The explicit durable VPN lifecycle blocking reason remains pending.
 
 ### Implementation
 
@@ -126,6 +126,8 @@ Unit tests or a healthy container do not satisfy a live-verification gate.
 ## Workstream 5: Notification Semantics
 
 **Priority:** High
+
+**Current state:** Job-kind-aware session-refresh notifications are implemented, deployed, and live-verified for Primary with outbox deduplication. Secondary and family routing live gates remain pending.
 
 ### Implementation
 
@@ -299,4 +301,3 @@ The goal is complete only when:
 6. Subtitle partial recovery, runner restart recovery, storage blocking, and ambiguous numbering are demonstrated.
 7. The local deployment and rollback commands are verified on the Docker host.
 8. Existing documentation accurately distinguishes implemented, deployed, and live-verified behavior.
-
