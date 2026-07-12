@@ -2,8 +2,8 @@ use std::{path::PathBuf, sync::Arc};
 
 use crate::{
     Cancellation, FileSystemPort, GIB, HttpPort, MediaProbe, PeakEstimate, PlexCheck,
-    PlexExpectation, ProcessPort, RunnerPortError, RunnerServicePort, StoragePreflight,
-    build_rezka_vaapi_command, validate_plex_observation, validate_webvtt,
+    PlexExpectation, ProcessPort, RunnerPortError, RunnerServicePort, StageReporter,
+    StoragePreflight, build_rezka_vaapi_command, validate_plex_observation, validate_webvtt,
 };
 
 const DEFAULT_RESERVE_BYTES: u64 = 20 * GIB;
@@ -120,6 +120,7 @@ impl EpisodePipeline {
         &self,
         work: &EpisodeWork,
         cancellation: &dyn Cancellation,
+        reporter: &dyn StageReporter,
     ) -> Result<EpisodeOutcome, RunnerPortError> {
         self.validate_work(work)?;
         if cancellation.is_cancelled() {
@@ -199,6 +200,9 @@ impl EpisodePipeline {
                 &source_probe,
             )
             .map_err(|_| RunnerPortError::Process)?;
+            // Milestone marking the start of the VAAPI/ffmpeg transcode; drives
+            // the "transcoding started" notification. Best-effort progress only.
+            reporter.stage_started("transcode").await;
             if let Err(error) = self.process.run(&command, cancellation).await {
                 return cancellation_outcome(error);
             }
@@ -241,10 +245,11 @@ impl EpisodePipeline {
         &self,
         work_items: &[EpisodeWork],
         cancellation: &dyn Cancellation,
+        reporter: &dyn StageReporter,
     ) -> Result<Vec<EpisodeOutcome>, RunnerPortError> {
         let mut outcomes = Vec::with_capacity(work_items.len());
         for work in work_items {
-            let outcome = self.run(work, cancellation).await?;
+            let outcome = self.run(work, cancellation, reporter).await?;
             let cancelled = outcome == EpisodeOutcome::Cancelled;
             outcomes.push(outcome);
             if cancelled {

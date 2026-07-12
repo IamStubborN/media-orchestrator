@@ -3,7 +3,9 @@
 pub enum NotificationEventTypeDto {
     Started,
     ChoiceNeeded,
+    DownloadingStarted,
     Downloaded,
+    TranscodingStarted,
     EncodingComplete,
     PlexAdded,
     Partial,

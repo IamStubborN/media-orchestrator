@@ -8,8 +8,20 @@ use async_trait::async_trait;
 use media_runner::{
     Cancellation, EpisodeOutcome, EpisodePipeline, EpisodeWork, FileSystemPort, GIB, HttpPort,
     MediaProbe, PlexCheck, PlexExpectation, PlexObservation, ProcessCommand, ProcessPort,
-    ProviderKind, RunnerPortError, RunnerServicePort, SensitiveUrl, SubtitleTrack,
+    ProviderKind, RunnerPortError, RunnerServicePort, SensitiveUrl, StageReporter, SubtitleTrack,
 };
+
+#[derive(Default)]
+struct RecordingReporter {
+    stages: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl StageReporter for RecordingReporter {
+    async fn stage_started(&self, stage_name: &str) {
+        self.stages.lock().unwrap().push(stage_name.to_owned());
+    }
+}
 
 #[derive(Default)]
 struct NeverCancelled;
@@ -283,7 +295,7 @@ async fn rezka_episode_runs_one_pipeline_and_publishes_video_last() {
     });
     let pipeline = EpisodePipeline::new(filesystem.clone(), http.clone(), process.clone(), service);
 
-    let outcome = pipeline.run(&work, &NeverCancelled).await.unwrap();
+    let outcome = pipeline.run(&work, &NeverCancelled, &()).await.unwrap();
 
     assert_eq!(outcome, EpisodeOutcome::Completed);
     assert_eq!(process.commands.lock().unwrap().len(), 1);
@@ -312,7 +324,7 @@ async fn storage_preflight_uses_the_probed_source_size() {
     let pipeline = EpisodePipeline::new(filesystem, http.clone(), process, service);
 
     assert_eq!(
-        pipeline.run(&work, &NeverCancelled).await.unwrap(),
+        pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
         EpisodeOutcome::BlockedStorage
     );
     assert!(http.video_offsets.lock().unwrap().is_empty());
@@ -339,14 +351,14 @@ async fn failed_subtitle_is_partial_and_retry_fetches_only_that_track() {
     let pipeline = EpisodePipeline::new(filesystem, http.clone(), process, service);
 
     assert_eq!(
-        pipeline.run(&work, &NeverCancelled).await.unwrap(),
+        pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
         EpisodeOutcome::Partial {
             missing_subtitles: vec!["uk".to_owned()]
         }
     );
     http.subtitle_requests.lock().unwrap().clear();
     assert_eq!(
-        pipeline.run(&work, &NeverCancelled).await.unwrap(),
+        pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
         EpisodeOutcome::Completed
     );
     assert_eq!(http.subtitle_requests.lock().unwrap().as_slice(), &["uk"]);
@@ -380,11 +392,79 @@ async fn existing_publication_skips_download_and_transcode_but_reconciles_plex()
     let pipeline = EpisodePipeline::new(filesystem, http.clone(), process.clone(), service);
 
     assert_eq!(
-        pipeline.run(&work, &NeverCancelled).await.unwrap(),
+        pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
         EpisodeOutcome::PlexPending
     );
     assert!(http.video_offsets.lock().unwrap().is_empty());
     assert!(process.commands.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn rezka_transcode_emits_a_transcode_stage_start() {
+    let work = work();
+    let filesystem = Arc::new(FakeFs::with_available(30 * GIB));
+    let http = Arc::new(FakeHttp::default());
+    let process = Arc::new(FakeProcess {
+        probes: Mutex::new(VecDeque::from([probe("h264"), probe("hevc")])),
+        commands: Mutex::default(),
+        filesystem: filesystem.clone(),
+    });
+    let service = Arc::new(FakeService {
+        checks: Mutex::new(VecDeque::from([matched(&work.plex)])),
+        scans: Mutex::default(),
+    });
+    let pipeline = EpisodePipeline::new(filesystem, http, process, service);
+    let reporter = RecordingReporter::default();
+
+    assert_eq!(
+        pipeline
+            .run(&work, &NeverCancelled, &reporter)
+            .await
+            .unwrap(),
+        EpisodeOutcome::Completed
+    );
+    // Exactly one "transcode" milestone fires when the ffmpeg step runs.
+    assert_eq!(
+        reporter.stages.lock().unwrap().as_slice(),
+        &["transcode".to_owned()]
+    );
+}
+
+#[tokio::test]
+async fn skipped_transcode_emits_no_transcode_stage_start() {
+    let work = work();
+    let filesystem = Arc::new(FakeFs::with_available(30 * GIB));
+    // The episode is already published, so download and transcode are skipped.
+    filesystem
+        .files
+        .lock()
+        .unwrap()
+        .insert(work.final_video.clone(), b"published".to_vec());
+    for subtitle in &work.subtitles {
+        filesystem.files.lock().unwrap().insert(
+            subtitle.final_path.clone(),
+            b"WEBVTT\n\n00 --> 01\ntext".to_vec(),
+        );
+    }
+    let http = Arc::new(FakeHttp::default());
+    let process = Arc::new(FakeProcess {
+        probes: Mutex::default(),
+        commands: Mutex::default(),
+        filesystem: filesystem.clone(),
+    });
+    let service = Arc::new(FakeService {
+        checks: Mutex::new(VecDeque::from([matched(&work.plex)])),
+        scans: Mutex::default(),
+    });
+    let pipeline = EpisodePipeline::new(filesystem, http, process, service);
+    let reporter = RecordingReporter::default();
+
+    pipeline
+        .run(&work, &NeverCancelled, &reporter)
+        .await
+        .unwrap();
+
+    assert!(reporter.stages.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -414,7 +494,7 @@ async fn complete_partial_skips_download_but_still_transcodes_and_publishes() {
     let pipeline = EpisodePipeline::new(filesystem.clone(), http.clone(), process.clone(), service);
 
     assert_eq!(
-        pipeline.run(&work, &NeverCancelled).await.unwrap(),
+        pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
         EpisodeOutcome::Completed
     );
     // The download was skipped because the partial already spanned the source.
@@ -446,7 +526,7 @@ async fn torrent_work_never_touches_download_transcode_or_publication() {
     let pipeline = EpisodePipeline::new(filesystem.clone(), http.clone(), process.clone(), service);
 
     assert_eq!(
-        pipeline.run(&work, &NeverCancelled).await.unwrap(),
+        pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
         EpisodeOutcome::NeedsActionPlexMismatch
     );
     assert!(filesystem.published.lock().unwrap().is_empty());
@@ -474,7 +554,7 @@ async fn cancellation_from_a_port_stops_before_transcode_and_publication() {
     let pipeline = EpisodePipeline::new(filesystem.clone(), http, process.clone(), service);
 
     assert_eq!(
-        pipeline.run(&work, &NeverCancelled).await.unwrap(),
+        pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
         EpisodeOutcome::Cancelled
     );
     assert!(process.commands.lock().unwrap().is_empty());
@@ -516,7 +596,7 @@ async fn job_runner_processes_episode_work_items_sequentially() {
 
     assert_eq!(
         pipeline
-            .run_all(&[first, second], &NeverCancelled)
+            .run_all(&[first, second], &NeverCancelled, &())
             .await
             .unwrap(),
         vec![EpisodeOutcome::Completed, EpisodeOutcome::Completed]

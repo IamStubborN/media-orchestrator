@@ -97,6 +97,16 @@ pub struct QueueStatus {
     pub active: bool,
 }
 
+/// A job together with its currently running processing stage, if any. This is a
+/// read model for the client-facing detail endpoint; `current_stage` is the name
+/// of the running stage (for example the download or transcode phase) and is
+/// `None` when no stage is in progress.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct JobDetail {
+    pub job: Job,
+    pub current_stage: Option<String>,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct JobLease {
     lease_id: LeaseId,

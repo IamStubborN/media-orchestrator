@@ -24,6 +24,20 @@ pub trait Cancellation: Send + Sync {
     fn is_cancelled(&self) -> bool;
 }
 
+/// Reports the start of a named pipeline sub-stage. These are best-effort
+/// progress milestones with no percentage data; the composition root implements
+/// this to forward them to the runner service as stage-start events.
+#[async_trait]
+pub trait StageReporter: Send + Sync {
+    async fn stage_started(&self, stage_name: &str);
+}
+
+/// No-op reporter for callers (such as tests) that do not surface progress.
+#[async_trait]
+impl StageReporter for () {
+    async fn stage_started(&self, _stage_name: &str) {}
+}
+
 #[async_trait]
 pub trait FileSystemPort: Send + Sync {
     async fn available_bytes(&self, path: &Path) -> Result<u64, RunnerPortError>;

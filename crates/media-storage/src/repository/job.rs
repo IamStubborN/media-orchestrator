@@ -92,6 +92,35 @@ impl JobStore for SeaOrmJobStore {
             .map_err(map_mapping_error)
     }
 
+    async fn find_detail_for_owner(
+        &self,
+        id: JobId,
+        owner: UserId,
+    ) -> Result<Option<media_core::JobDetail>, PortError> {
+        let Some(job) = self.find_for_owner(id, owner).await? else {
+            return Ok(None);
+        };
+        // The running stage, preferring the latest task and stage, answers "how is
+        // my movie doing?" with the phase the runner is currently executing. No
+        // running stage (queued, publishing, terminal) yields no stage.
+        let current_stage = self
+            .database
+            .query_one_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "SELECT s.name FROM job_stages s \
+                 JOIN job_tasks t ON s.task_id = t.id \
+                 WHERE t.job_id = $1 AND s.state = 'running' \
+                 ORDER BY t.ordinal DESC, s.ordinal DESC LIMIT 1",
+                [id.into_uuid().into()],
+            ))
+            .await
+            .map_err(map_database_error)?
+            .map(|row| row.try_get::<String>("", "name"))
+            .transpose()
+            .map_err(map_database_error)?;
+        Ok(Some(media_core::JobDetail { job, current_stage }))
+    }
+
     async fn list_for_owner(&self, owner: UserId) -> Result<Vec<Job>, PortError> {
         job::Entity::find()
             .filter(job::Column::OwnerId.eq(owner.into_uuid()))

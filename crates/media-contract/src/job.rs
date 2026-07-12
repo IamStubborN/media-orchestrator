@@ -44,6 +44,19 @@ pub struct JobDto {
     pub notify_scope: NotifyScopeDto,
 }
 
+/// The job detail response for `GET /v1/jobs/{id}`. It carries every [`JobDto`]
+/// field plus the currently running processing stage, so a client can report how
+/// far along an in-progress job is. `current_stage` is omitted when no stage is
+/// running.
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct JobDetailDto {
+    #[serde(flatten)]
+    pub job: JobDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_stage: Option<String>,
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct QueueStatusDto {
@@ -67,7 +80,8 @@ pub struct JobListDto {
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateJobRequest, JobDto, JobStateDto, JobSummaryDto, NeedsActionReasonDto, QueueStatusDto,
+        CreateJobRequest, JobDetailDto, JobDto, JobStateDto, JobSummaryDto, NeedsActionReasonDto,
+        QueueStatusDto,
     };
     use crate::{NotifyScopeDto, ProviderDto, PublicId};
 
@@ -177,6 +191,63 @@ mod tests {
             }),
         );
         assert_eq!(serde_json::from_value::<JobDto>(value).unwrap(), dto);
+    }
+
+    #[test]
+    fn job_detail_flattens_job_fields_and_exposes_the_running_stage() {
+        let dto = JobDetailDto {
+            job: JobDto {
+                id: PublicId::parse("018f3f86-7b4c-7b4f-9b6a-6d62f45bb111").unwrap(),
+                provider: ProviderDto::Rezka,
+                result_ref: "rezka:series:42:season:1".to_owned(),
+                state: JobStateDto::Running,
+                needs_action_reason: None,
+                notify_scope: NotifyScopeDto::Initiator,
+            },
+            current_stage: Some("transcode".to_owned()),
+        };
+
+        let value = serde_json::to_value(&dto).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "id": "018f3f86-7b4c-7b4f-9b6a-6d62f45bb111",
+                "provider": "rezka",
+                "result_ref": "rezka:series:42:season:1",
+                "state": "running",
+                "notify_scope": "initiator",
+                "current_stage": "transcode"
+            }),
+        );
+        assert_eq!(serde_json::from_value::<JobDetailDto>(value).unwrap(), dto);
+    }
+
+    #[test]
+    fn job_detail_omits_the_stage_when_no_stage_is_running() {
+        let dto = JobDetailDto {
+            job: JobDto {
+                id: PublicId::parse("018f3f86-7b4c-7b4f-9b6a-6d62f45bb111").unwrap(),
+                provider: ProviderDto::Prowlarr,
+                result_ref: "prowlarr:result:7".to_owned(),
+                state: JobStateDto::Queued,
+                needs_action_reason: None,
+                notify_scope: NotifyScopeDto::Family,
+            },
+            current_stage: None,
+        };
+
+        let value = serde_json::to_value(&dto).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "id": "018f3f86-7b4c-7b4f-9b6a-6d62f45bb111",
+                "provider": "prowlarr",
+                "result_ref": "prowlarr:result:7",
+                "state": "queued",
+                "notify_scope": "family"
+            }),
+        );
+        assert_eq!(serde_json::from_value::<JobDetailDto>(value).unwrap(), dto);
     }
 
     #[test]

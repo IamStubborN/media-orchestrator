@@ -274,7 +274,13 @@ async fn rezka_runner_events_create_each_success_notification_once() {
         .collect::<Vec<_>>();
     assert_eq!(
         event_types,
-        vec!["downloaded", "encoding-complete", "plex-added", "started"]
+        vec![
+            "downloaded",
+            "downloading-started",
+            "encoding-complete",
+            "plex-added",
+            "started",
+        ]
     );
     for row in &notifications {
         assert_eq!(row.try_get::<String>("", "recipient").unwrap(), "primary");
@@ -379,9 +385,129 @@ async fn different_source_events_dedupe_the_same_job_notification_type() {
             .collect::<Vec<_>>(),
         vec![
             ("downloaded".to_owned(), 1),
+            ("downloading-started".to_owned(), 1),
             ("encoding-complete".to_owned(), 1),
             ("started".to_owned(), 1),
         ]
+    );
+}
+
+#[tokio::test]
+async fn progress_notifications_fire_once_per_phase_across_retries_and_to_initiator_only() {
+    let (test_db, jobs, leases) = setup().await;
+    jobs.create(operation_key(), new_job("rezka://progress-dedupe"))
+        .await
+        .unwrap();
+
+    // First lease: downloading starts, then fails retryably. The stage start
+    // produces one "downloading-started" notification; the retry must not add a
+    // second one.
+    let first = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::stage_started(JobEventId::new(), 0, "download".to_owned(), 0).unwrap(),
+        JobEvent::stage_failed(
+            JobEventId::new(),
+            0,
+            "download".to_owned(),
+            0,
+            true,
+            "network_timeout".to_owned(),
+        )
+        .unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), first.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    // Recovered lease: the download stage restarts (a retry, deduped), completes,
+    // and transcoding begins and restarts once (also deduped).
+    let second = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::stage_started(JobEventId::new(), 0, "download".to_owned(), 0).unwrap(),
+        JobEvent::stage_completed(
+            JobEventId::new(),
+            0,
+            "download".to_owned(),
+            0,
+            Default::default(),
+        )
+        .unwrap(),
+        JobEvent::stage_started(JobEventId::new(), 0, "transcode".to_owned(), 1).unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), second.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    let counts = query(
+        test_db.connection(),
+        "SELECT event_type, recipient, count(*)::bigint AS count FROM notification_outbox \
+         WHERE event_type IN ('downloading-started', 'transcoding-started') \
+         GROUP BY event_type, recipient ORDER BY event_type, recipient",
+    )
+    .await;
+    assert_eq!(
+        counts
+            .iter()
+            .map(|row| (
+                row.try_get::<String>("", "event_type").unwrap(),
+                row.try_get::<String>("", "recipient").unwrap(),
+                row.try_get::<i64>("", "count").unwrap(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("downloading-started".to_owned(), "primary".to_owned(), 1),
+            ("transcoding-started".to_owned(), "primary".to_owned(), 1),
+        ],
+        "each phase notifies its initiator exactly once, even across retries",
+    );
+
+    let progress = query(
+        test_db.connection(),
+        "SELECT event_type, payload FROM notification_outbox \
+         WHERE event_type IN ('downloading-started', 'transcoding-started') \
+         ORDER BY event_type",
+    )
+    .await;
+    for row in &progress {
+        assert_sanitized_message(row, &["progress-dedupe", "rezka"]);
+    }
+    assert!(
+        progress[0]
+            .try_get::<serde_json::Value>("", "payload")
+            .unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .contains("started downloading")
+    );
+    assert!(
+        progress[1]
+            .try_get::<serde_json::Value>("", "payload")
+            .unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .contains("started transcoding")
     );
 }
 
@@ -438,6 +564,8 @@ async fn storage_block_notifies_both_family_recipients_once() {
         vec![
             ("blocked-storage".to_owned(), "primary".to_owned()),
             ("blocked-storage".to_owned(), "secondary".to_owned()),
+            ("downloading-started".to_owned(), "primary".to_owned()),
+            ("downloading-started".to_owned(), "secondary".to_owned()),
             ("started".to_owned(), "primary".to_owned()),
             ("started".to_owned(), "secondary".to_owned()),
         ]
@@ -1018,5 +1146,75 @@ async fn active_cancel_is_cooperative_and_runner_acknowledgement_releases_the_le
         query(test_db.connection(), "SELECT id FROM job_leases")
             .await
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn job_detail_reports_the_running_stage_and_clears_it_when_idle() {
+    let (_test_db, jobs, leases) = setup().await;
+    let created = jobs
+        .create(operation_key(), new_job("rezka://detail-stage"))
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::stage_started(JobEventId::new(), 0, "download".to_owned(), 0).unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    let detail = jobs
+        .find_detail_for_owner(created.id(), PRIMARY_USER_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.current_stage.as_deref(), Some("download"));
+    assert_eq!(detail.job.state(), JobState::Running);
+
+    // Owner isolation still applies to the detail read.
+    assert!(
+        jobs.find_detail_for_owner(created.id(), SECONDARY_USER_ID)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    leases
+        .report_event(
+            operation_key(),
+            lease.lease_id(),
+            RUNNER_CLIENT_ID,
+            JobEvent::stage_completed(
+                JobEventId::new(),
+                0,
+                "download".to_owned(),
+                0,
+                Default::default(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let idle = jobs
+        .find_detail_for_owner(created.id(), PRIMARY_USER_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        idle.current_stage, None,
+        "a completed stage leaves no running stage to report",
     );
 }

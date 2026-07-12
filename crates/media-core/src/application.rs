@@ -87,6 +87,21 @@ impl JobApplication {
             .ok_or(ApplicationError::NotFound)
     }
 
+    pub async fn get_job_detail(
+        &self,
+        actor: &Actor,
+        id: JobId,
+    ) -> Result<crate::JobDetail, ApplicationError> {
+        let owner_id = actor
+            .require_user()
+            .map_err(|_| ApplicationError::Forbidden)?;
+
+        self.store
+            .find_detail_for_owner(id, owner_id)
+            .await?
+            .ok_or(ApplicationError::NotFound)
+    }
+
     pub async fn list_jobs(&self, actor: &Actor) -> Result<Vec<Job>, ApplicationError> {
         let owner_id = actor
             .require_user()

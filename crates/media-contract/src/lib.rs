@@ -18,8 +18,8 @@ pub use error::{ApiError, ApiErrorCode};
 pub use execution::{CheckpointValueDto, RunnerEventDto, RunnerEventRequest, RunnerEventResponse};
 pub use id::PublicId;
 pub use job::{
-    CreateJobRequest, JobDto, JobListDto, JobStateDto, JobSummaryDto, NeedsActionReasonDto,
-    QueueStatusDto,
+    CreateJobRequest, JobDetailDto, JobDto, JobListDto, JobStateDto, JobSummaryDto,
+    NeedsActionReasonDto, QueueStatusDto,
 };
 pub use lease::LeaseDto;
 pub use notification::{HermesDeliverOnlyWebhook, NotificationEventTypeDto};

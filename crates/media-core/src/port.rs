@@ -1,7 +1,7 @@
 use crate::{
     Actor, BootstrapClient, CanonicalEpisode, CanonicalMedia, CanonicalSeason, ClientId,
-    CredentialDigest, EpisodeProviderMapping, ExternalNamespace, Job, JobEvent, JobId, JobLease,
-    LeaseId, MediaExternalReference, NewJob, OperationKey, QueueStatus, UserId,
+    CredentialDigest, EpisodeProviderMapping, ExternalNamespace, Job, JobDetail, JobEvent, JobId,
+    JobLease, LeaseId, MediaExternalReference, NewJob, OperationKey, QueueStatus, UserId,
 };
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
@@ -24,6 +24,20 @@ pub trait JobStore: Send + Sync {
     async fn create(&self, operation: OperationKey, job: NewJob) -> Result<Job, PortError>;
 
     async fn find_for_owner(&self, id: JobId, owner: UserId) -> Result<Option<Job>, PortError>;
+
+    /// Loads a job together with its currently running stage for the detail view.
+    /// The default implementation exposes no stage; storage adapters override it
+    /// with a real lookup.
+    async fn find_detail_for_owner(
+        &self,
+        id: JobId,
+        owner: UserId,
+    ) -> Result<Option<JobDetail>, PortError> {
+        Ok(self.find_for_owner(id, owner).await?.map(|job| JobDetail {
+            job,
+            current_stage: None,
+        }))
+    }
 
     async fn list_for_owner(&self, owner: UserId) -> Result<Vec<Job>, PortError>;
 

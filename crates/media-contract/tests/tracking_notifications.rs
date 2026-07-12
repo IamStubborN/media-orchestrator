@@ -39,7 +39,15 @@ fn notification_event_types_are_stable_and_complete() {
     let cases = [
         (NotificationEventTypeDto::Started, "started"),
         (NotificationEventTypeDto::ChoiceNeeded, "choice-needed"),
+        (
+            NotificationEventTypeDto::DownloadingStarted,
+            "downloading-started",
+        ),
         (NotificationEventTypeDto::Downloaded, "downloaded"),
+        (
+            NotificationEventTypeDto::TranscodingStarted,
+            "transcoding-started",
+        ),
         (
             NotificationEventTypeDto::EncodingComplete,
             "encoding-complete",

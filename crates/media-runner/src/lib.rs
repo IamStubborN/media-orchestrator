@@ -23,7 +23,7 @@ pub use pipeline::{
 pub use plex::{PlexExpectation, PlexMismatch, PlexObservation, validate_plex_observation};
 pub use ports::{
     Cancellation, FileSystemPort, HttpPort, PlexCheck, ProcessPort, RunnerPortError,
-    RunnerServicePort,
+    RunnerServicePort, StageReporter,
 };
 
 pub use retention::{StagingRetentionError, cleanup_terminal_staging, mark_terminal};

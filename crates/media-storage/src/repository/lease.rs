@@ -224,6 +224,30 @@ fn notifications_for_event(job: &Job, event: &JobEvent) -> Vec<(&'static str, St
     let id = job.id();
     match event.kind() {
         JobEventKind::Started => vec![("started", format!("Media job {id} started."))],
+        // Intermediate progress. A stage start marks the beginning of a phase, so
+        // it maps to a "started" notification. Deduplication on
+        // (source_dedupe_key, recipient) collapses stage retries and per-episode
+        // repeats into a single notification per (job, phase). The runner carries
+        // no percent data, so these are milestones only, never progress fractions.
+        JobEventKind::StageStarted(stage)
+            if matches!(
+                stage.name(),
+                "download" | "torrent_monitor" | "media_pipeline"
+            ) =>
+        {
+            vec![(
+                "downloading-started",
+                format!("Media job {id} started downloading."),
+            )]
+        }
+        JobEventKind::StageStarted(stage)
+            if matches!(stage.name(), "encode" | "encoding" | "transcode") =>
+        {
+            vec![(
+                "transcoding-started",
+                format!("Media job {id} started transcoding."),
+            )]
+        }
         JobEventKind::StageCompleted { stage, .. }
             if matches!(stage.name(), "download" | "torrent_monitor") =>
         {

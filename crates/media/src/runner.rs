@@ -162,6 +162,31 @@ impl media_runner::Cancellation for RunnerControl {
     }
 }
 
+/// Stable stage ordinal for the transcode sub-stage reported from inside the
+/// Rezka pipeline. It sorts after the `media_pipeline` umbrella (ordinal 1) it
+/// runs under; the service keys the stage row on (task, name), so this only
+/// needs to stay constant across retries of the same episode.
+const TRANSCODE_STAGE_ORDINAL: u32 = 2;
+
+/// Adapts [`RunnerControl`] to the pipeline's [`media_runner::StageReporter`]
+/// port, binding each reported sub-stage to the current episode's task ordinal.
+struct ControlStageReporter<'a> {
+    control: &'a RunnerControl,
+    task_ordinal: u32,
+}
+
+#[async_trait::async_trait]
+impl media_runner::StageReporter for ControlStageReporter<'_> {
+    async fn stage_started(&self, stage_name: &str) {
+        // stage_started is already best-effort (it logs and swallows delivery
+        // errors), so pipeline progress can never fail the job.
+        let _ = self
+            .control
+            .stage_started(self.task_ordinal, stage_name, TRANSCODE_STAGE_ORDINAL)
+            .await;
+    }
+}
+
 pub struct MediaJobExecutor {
     rezka: tokio::sync::Mutex<crate::composition::PreparedRunnerSession>,
     pipeline: media_runner::EpisodePipeline,
@@ -416,9 +441,13 @@ impl MediaJobExecutor {
             control
                 .stage_started(task_ordinal, "media_pipeline", 1)
                 .await?;
+            let reporter = ControlStageReporter {
+                control,
+                task_ordinal,
+            };
             let outcome = self
                 .pipeline
-                .run(&work, control)
+                .run(&work, control, &reporter)
                 .await
                 .map_err(|_| RunnerError::Execution)?;
             control
@@ -630,9 +659,11 @@ impl MediaJobExecutor {
                     episode,
                 },
             };
+            // Torrent work reconciles Plex without a transcode step, so no
+            // pipeline sub-stage is reported.
             let outcome = self
                 .pipeline
-                .run(&work, control)
+                .run(&work, control, &())
                 .await
                 .map_err(|_| RunnerError::Execution)?;
             control

@@ -1,13 +1,13 @@
 use media_contract::{
-    CheckpointValueDto, CreateJobRequest, CreateTrackingRequest, EpisodeSnapshotDto, JobDto,
-    JobStateDto, LeaseDto, NeedsActionReasonDto, NotifyScopeDto, ProviderDto, PublicId,
+    CheckpointValueDto, CreateJobRequest, CreateTrackingRequest, EpisodeSnapshotDto, JobDetailDto,
+    JobDto, JobStateDto, LeaseDto, NeedsActionReasonDto, NotifyScopeDto, ProviderDto, PublicId,
     QueueStatusDto, RunnerEventDto, RunnerEventRequest, TrackingDto, TrackingScopeDto,
     TrackingStateDto,
 };
 use media_core::{
-    CheckpointValue, EpisodeSnapshot, Job, JobEvent, JobEventId, JobEventValidationError, JobLease,
-    JobState, NeedsActionReason, NewJobCommand, NewTrackingCommand, NotifyScope, Provider,
-    QueueStatus, TrackingScope, TrackingSubscription,
+    CheckpointValue, EpisodeSnapshot, Job, JobDetail, JobEvent, JobEventId,
+    JobEventValidationError, JobLease, JobState, NeedsActionReason, NewJobCommand,
+    NewTrackingCommand, NotifyScope, Provider, QueueStatus, TrackingScope, TrackingSubscription,
 };
 use time::format_description::well_known::Rfc3339;
 
@@ -204,6 +204,14 @@ pub(crate) fn job(job: &Job) -> JobDto {
             NotifyScope::Initiator => NotifyScopeDto::Initiator,
             NotifyScope::Family => NotifyScopeDto::Family,
         },
+    }
+}
+
+#[must_use]
+pub(crate) fn job_detail(detail: &JobDetail) -> JobDetailDto {
+    JobDetailDto {
+        job: job(&detail.job),
+        current_stage: detail.current_stage.clone(),
     }
 }
 

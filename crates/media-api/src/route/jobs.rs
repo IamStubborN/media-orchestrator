@@ -72,8 +72,8 @@ async fn get_job(
     let Ok(job_id) = job_id.parse::<JobId>() else {
         return ApiError::invalid_request(&request_id, "job ID is invalid").into_response();
     };
-    match state.jobs().get_job(&actor, job_id).await {
-        Ok(job) => Json(convert::job(&job)).into_response(),
+    match state.jobs().get_job_detail(&actor, job_id).await {
+        Ok(detail) => Json(convert::job_detail(&detail)).into_response(),
         Err(error) => application_error(error, &request_id),
     }
 }

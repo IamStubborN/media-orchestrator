@@ -12,7 +12,9 @@ pub enum NotificationRecipient {
 pub enum NotificationEventType {
     Started,
     ChoiceNeeded,
+    DownloadingStarted,
     Downloaded,
+    TranscodingStarted,
     EncodingComplete,
     PlexAdded,
     Partial,
