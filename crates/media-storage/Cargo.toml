@@ -53,6 +53,11 @@ path = "tests/maintenance_repository.rs"
 required-features = ["integration-tests"]
 
 [[test]]
+name = "metrics_repository"
+path = "tests/metrics_repository.rs"
+required-features = ["integration-tests"]
+
+[[test]]
 name = "orchestration_repository"
 path = "tests/orchestration_repository.rs"
 required-features = ["integration-tests"]

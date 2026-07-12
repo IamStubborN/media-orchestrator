@@ -18,8 +18,8 @@ use media_core::{
 use media_storage::{
     ReservationGeneration as StorageReservationGeneration, ReservationHandle, ReservationRecord,
     SeaOrmClientStore, SeaOrmIdempotencyRepository, SeaOrmJobStore, SeaOrmLeaseStore,
-    SeaOrmMaintenanceStore, SeaOrmNotificationOutbox, SeaOrmOperationReceiptRepository,
-    SeaOrmReadiness, SeaOrmTrackingStore, StoredResponseRecord,
+    SeaOrmMaintenanceStore, SeaOrmMetricsSource, SeaOrmNotificationOutbox,
+    SeaOrmOperationReceiptRepository, SeaOrmReadiness, SeaOrmTrackingStore, StoredResponseRecord,
 };
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
@@ -719,7 +719,8 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
         operations,
         readiness,
     )
-    .with_tracking(tracking);
+    .with_tracking(tracking)
+    .with_metrics_source(Arc::new(SeaOrmMetricsSource::new(database.clone())));
     let mut tracking_runtime = None;
     if config.rezka().is_some() || config.prowlarr().is_some() {
         let rezka = config

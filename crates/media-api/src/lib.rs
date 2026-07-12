@@ -4,6 +4,7 @@ mod auth;
 mod convert;
 mod error;
 mod idempotency;
+mod metrics;
 mod plex;
 mod request_id;
 mod route;
@@ -13,8 +14,11 @@ use std::{sync::Arc, time::Duration};
 
 use axum::{Router, extract::DefaultBodyLimit, middleware};
 use media_core::{
-    ClientStore, JobApplication, LeaseApplication, ReadinessPort, TrackingApplication,
+    ClientStore, JobApplication, LeaseApplication, MetricsSource, ReadinessPort,
+    TrackingApplication,
 };
+
+use crate::metrics::MetricsRecorder;
 
 pub use error::ApiError;
 pub use idempotency::{
@@ -46,6 +50,8 @@ pub struct ApiState {
     pub(crate) tracking: Option<Arc<TrackingApplication>>,
     pub(crate) search: Arc<dyn SearchService>,
     pub(crate) plex: Arc<dyn PlexReconcileService>,
+    pub(crate) metrics: Arc<MetricsRecorder>,
+    pub(crate) metrics_source: Option<Arc<dyn MetricsSource>>,
 }
 
 impl ApiState {
@@ -68,6 +74,8 @@ impl ApiState {
             tracking: None,
             search: Arc::new(search::UnavailableSearchService),
             plex: Arc::new(plex::UnavailablePlexService),
+            metrics: Arc::new(MetricsRecorder::default()),
+            metrics_source: None,
         }
     }
 
@@ -75,6 +83,17 @@ impl ApiState {
     pub fn with_tracking(mut self, tracking: Arc<TrackingApplication>) -> Self {
         self.tracking = Some(tracking);
         self
+    }
+
+    #[must_use]
+    pub fn with_metrics_source(mut self, source: Arc<dyn MetricsSource>) -> Self {
+        self.metrics_source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn metrics_source(&self) -> Option<&dyn MetricsSource> {
+        self.metrics_source.as_deref()
     }
 
     #[must_use]
@@ -149,9 +168,16 @@ pub fn build_router_with_request_timeout(
         protected
     };
 
+    let metrics_state = state.clone();
     route::public_routes()
         .merge(protected)
         .with_state(state)
+        // Innermost custom layer: runs after routing so the matched route pattern
+        // is available, and measures handler execution including authentication.
+        .layer(middleware::from_fn_with_state(
+            metrics_state,
+            metrics::record_http_metrics,
+        ))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .layer(middleware::from_fn(error::enforce_request_limits))
         .layer(middleware::from_fn_with_state(

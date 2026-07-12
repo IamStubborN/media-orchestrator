@@ -8,6 +8,7 @@ mod application;
 mod id;
 mod identity;
 mod job;
+mod metrics;
 mod notification;
 mod operation;
 mod orchestration;
@@ -35,6 +36,7 @@ pub use job::{
     Job, JobDetail, JobLease, JobState, JobTransitionError, JobValidationError,
     MAX_RESULT_REF_BYTES, NewJob, NotifyScope, Provider, QueueStatus,
 };
+pub use metrics::{MetricsSnapshot, MetricsSource};
 pub use notification::{
     NotificationDelivery, NotificationDeliveryFailure, NotificationDispatchResult,
     NotificationDispatcher, NotificationEventType, NotificationOutboxPort, NotificationRecipient,
