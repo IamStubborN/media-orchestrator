@@ -87,7 +87,7 @@ fn releases() -> serde_json::Value {
 }
 
 #[tokio::test]
-async fn series_search_sends_exact_five_item_page_and_returns_stable_cursor() {
+async fn series_search_sends_exact_five_item_page_and_ranks_valid_results() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/v1/search"))
@@ -96,7 +96,7 @@ async fn series_search_sends_exact_five_item_page_and_returns_stable_cursor() {
         .and(query_param("type", "tvsearch"))
         .and(query_param("indexerIds", "-2"))
         .and(query_param("limit", "5"))
-        .and(query_param("offset", "5"))
+        .and(query_param("offset", "0"))
         .respond_with(ResponseTemplate::new(200).set_body_json(releases()))
         .expect(1)
         .mount(&server)
@@ -113,12 +113,12 @@ async fn series_search_sends_exact_five_item_page_and_returns_stable_cursor() {
     .unwrap();
     let page = ProwlarrClient::new(config(&server))
         .unwrap()
-        .search(SearchPageRequest::new(session.clone(), 5).unwrap())
+        .search(SearchPageRequest::new(session.clone(), 0).unwrap())
         .await
         .unwrap();
 
     assert_eq!(page.session, session);
-    assert_eq!(page.offset, 5);
+    assert_eq!(page.offset, 0);
     assert_eq!(page.results.len(), 4, "non-torrent results are excluded");
     assert_eq!(page.results[0].identity.indexer_id, 3);
     assert_eq!(page.results[0].identity.guid, "indexer-guid-a");
@@ -131,10 +131,7 @@ async fn series_search_sends_exact_five_item_page_and_returns_stable_cursor() {
     let debug = format!("{page:?}");
     assert!(!debug.contains("never-print-provider-key"));
     assert!(debug.contains("[REDACTED]"));
-    assert_eq!(
-        page.continuation.unwrap(),
-        SearchPageRequest::new(session, 10).unwrap()
-    );
+    assert!(page.continuation.is_none());
 }
 
 #[tokio::test]
@@ -494,4 +491,42 @@ async fn provider_over_return_is_truncated_to_five_ranked_results() {
         page.continuation,
         Some(SearchPageRequest::new(session, 5).unwrap())
     );
+}
+
+#[tokio::test]
+async fn later_pages_are_sliced_locally_from_the_full_ranked_result_set() {
+    let server = MockServer::start().await;
+    let releases = (0..6)
+        .map(|id| {
+            serde_json::json!({
+                "id": id + 1,
+                "guid": format!("guid-{id}"),
+                "indexerId": 1,
+                "title": format!("Movie 1080p release-{id}"),
+                "size": 1000 + id,
+                "seeders": id,
+                "protocol": "torrent",
+                "infoHash": format!("{id:040x}"),
+                "magnetUrl": format!("magnet:?xt=urn:btih:{id:040x}")
+            })
+        })
+        .collect::<Vec<_>>();
+    Mock::given(method("GET"))
+        .and(path("/api/v1/search"))
+        .and(query_param("offset", "0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(releases))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let session = SearchSession::new("second-page", MediaQuery::movie("Movie")).unwrap();
+    let page = ProwlarrClient::new(config(&server))
+        .unwrap()
+        .search(SearchPageRequest::new(session, 5).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(page.results.len(), 1);
+    assert_eq!(page.results[0].identity.guid, "guid-0");
+    assert!(page.continuation.is_none());
 }

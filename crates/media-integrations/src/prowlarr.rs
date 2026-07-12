@@ -297,7 +297,6 @@ impl ProwlarrClient {
     }
 
     pub async fn search(&self, request: SearchPageRequest) -> Result<SearchPage, ProwlarrError> {
-        let raw_count;
         let mut results = {
             let mut endpoint = self.config.base_url.join("api/v1/search").map_err(|_| {
                 ProwlarrError::Configuration {
@@ -314,7 +313,7 @@ impl ProwlarrClient {
                 .append_pair("type", search_type)
                 .append_pair("indexerIds", "-2")
                 .append_pair("limit", "5")
-                .append_pair("offset", &request.offset.to_string());
+                .append_pair("offset", "0");
             let response = self
                 .client
                 .get(endpoint)
@@ -333,7 +332,6 @@ impl ProwlarrClient {
                 .json()
                 .await
                 .map_err(|_| ProwlarrError::ProviderResponse { status })?;
-            raw_count = raw.len();
             raw.into_iter()
                 .filter(|release| release.protocol == "torrent")
                 .filter_map(|release| ProwlarrResult::from_raw(release, &request.session.query))
@@ -341,7 +339,11 @@ impl ProwlarrClient {
         };
 
         results.sort_by_key(ranking_key);
-        results.truncate(RESULTS_PER_PAGE as usize);
+        let total_results = results.len();
+        let results = results
+            .into_iter()
+            .skip(request.offset as usize)
+            .take(RESULTS_PER_PAGE as usize);
         let mut resolved = Vec::with_capacity(results.len());
         for mut result in results {
             if result.source.info_hash.is_none()
@@ -354,10 +356,11 @@ impl ProwlarrClient {
             }
             resolved.push(result);
         }
-        let continuation = (raw_count >= RESULTS_PER_PAGE as usize).then(|| SearchPageRequest {
-            session: request.session.clone(),
-            offset: request.offset + RESULTS_PER_PAGE,
-        });
+        let continuation = ((request.offset as usize + RESULTS_PER_PAGE as usize) < total_results)
+            .then(|| SearchPageRequest {
+                session: request.session.clone(),
+                offset: request.offset + RESULTS_PER_PAGE,
+            });
         Ok(SearchPage {
             session: request.session,
             offset: request.offset,
