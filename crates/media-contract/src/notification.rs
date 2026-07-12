@@ -8,6 +8,7 @@ pub enum NotificationEventTypeDto {
     TranscodingStarted,
     EncodingComplete,
     PlexAdded,
+    SessionRefreshed,
     Partial,
     Failed,
     FutureEpisodeFound,

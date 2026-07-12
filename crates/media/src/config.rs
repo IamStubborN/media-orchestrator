@@ -60,6 +60,7 @@ const STAGING_ROOT: &str = "MEDIA_STAGING_ROOT";
 const TV_ROOT: &str = "MEDIA_TV_ROOT";
 const MOVIES_ROOT: &str = "MEDIA_MOVIES_ROOT";
 const VAAPI_DEVICE: &str = "MEDIA_VAAPI_DEVICE";
+const RUNNER_EXIT_AFTER_JOB: &str = "MEDIA_RUNNER_EXIT_AFTER_JOB";
 const PLEX_URL: &str = "MEDIA_PLEX_URL";
 const PLEX_TOKEN: &str = "MEDIA_PLEX_TOKEN";
 const PLEX_TOKEN_FILE: &str = "MEDIA_PLEX_TOKEN_FILE";
@@ -450,6 +451,7 @@ pub struct RunnerConfig {
     qbittorrent: Option<QbittorrentCompositionConfig>,
     gluetun: Option<GluetunCompositionConfig>,
     credential_broker: CredentialBrokerCompositionConfig,
+    exit_after_job: bool,
 }
 
 impl RunnerConfig {
@@ -485,6 +487,7 @@ impl RunnerConfig {
                 .map(|_| load_gluetun_config(source))
                 .transpose()?,
             credential_broker: load_credential_broker_config(source)?,
+            exit_after_job: optional_boolean_environment(source, RUNNER_EXIT_AFTER_JOB, false)?,
         })
     }
 
@@ -512,6 +515,9 @@ impl RunnerConfig {
     }
     pub const fn credential_broker(&self) -> &CredentialBrokerCompositionConfig {
         &self.credential_broker
+    }
+    pub const fn exit_after_job(&self) -> bool {
+        self.exit_after_job
     }
 }
 
@@ -817,6 +823,7 @@ impl std::fmt::Debug for RunnerConfig {
                 &self.qbittorrent.as_ref().map(|_| "[REDACTED]"),
             )
             .field("gluetun", &self.gluetun.as_ref().map(|_| "[REDACTED]"))
+            .field("exit_after_job", &self.exit_after_job)
             .finish()
     }
 }
@@ -1129,6 +1136,19 @@ fn optional_environment(
                 .map_err(|_| ConfigError::InvalidEnvironment { name })
         })
         .transpose()
+}
+
+fn optional_boolean_environment(
+    source: &impl ConfigSource,
+    name: &'static str,
+    default: bool,
+) -> Result<bool, ConfigError> {
+    match optional_environment(source, name)?.as_deref() {
+        None => Ok(default),
+        Some("true") => Ok(true),
+        Some("false") => Ok(false),
+        Some(_) => Err(ConfigError::InvalidEnvironment { name }),
+    }
 }
 
 fn required_environment(

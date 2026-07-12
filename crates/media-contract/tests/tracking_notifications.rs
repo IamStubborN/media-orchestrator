@@ -53,6 +53,10 @@ fn notification_event_types_are_stable_and_complete() {
             "encoding-complete",
         ),
         (NotificationEventTypeDto::PlexAdded, "plex-added"),
+        (
+            NotificationEventTypeDto::SessionRefreshed,
+            "session-refreshed",
+        ),
         (NotificationEventTypeDto::Partial, "partial"),
         (NotificationEventTypeDto::Failed, "failed"),
         (

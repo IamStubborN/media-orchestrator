@@ -834,7 +834,7 @@ impl SearchService for DurableSearchService {
         {
             return Err(SearchError::InvalidRequest);
         }
-        let result_ref = format!("selection:{}", uuid::Uuid::new_v4());
+        let result_ref = format!("session-refresh:{}", uuid::Uuid::new_v4());
         self.persistence
             .insert_execution(
                 result_ref.clone(),

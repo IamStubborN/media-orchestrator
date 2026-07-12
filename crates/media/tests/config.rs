@@ -415,6 +415,7 @@ fn runner_config_loads_rezka_secret_files_getters_defaults_and_redacts_debug() {
     source.set_secret("MEDIA_TOKEN_FILE", b"runner-token\n");
     source.set_secret("MEDIA_REZKA_USERNAME_FILE", b"rezka-user\r\n");
     source.set_secret("MEDIA_REZKA_PASSWORD_FILE", b"rezka-password\n");
+    source.set_env("MEDIA_RUNNER_EXIT_AFTER_JOB", "true");
 
     let config = RunnerConfig::load_from(&source).unwrap();
     let debug = format!("{config:?}");
@@ -445,6 +446,7 @@ fn runner_config_loads_rezka_secret_files_getters_defaults_and_redacts_debug() {
         config.rezka().user_agent(),
         "media-orchestrator/0.1 rezka-session"
     );
+    assert!(config.exit_after_job());
     assert!(debug.contains("[REDACTED]"));
     for forbidden in [
         "media.internal.example",

@@ -325,6 +325,7 @@ async fn run_loop_survives_a_transient_iteration_error_and_keeps_working() {
         api.clone(),
         executor.clone(),
         Duration::from_millis(1),
+        false,
     ));
 
     // The first iteration errors on lease_next; the loop backs off and the
@@ -342,6 +343,35 @@ async fn run_loop_survives_a_transient_iteration_error_and_keeps_working() {
             .iter()
             .any(|event| matches!(event, RunnerEventDto::Started))
     );
+}
+
+#[tokio::test]
+async fn run_loop_exits_cleanly_after_one_processed_job_when_configured() {
+    let api = Arc::new(FlakyLeaseApi {
+        remaining_errors: AtomicUsize::new(0),
+        lease: Mutex::new(Some(lease())),
+        events: Mutex::default(),
+    });
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let executor = Arc::new(SignalingExecutor {
+        done: Mutex::new(Some(sender)),
+    });
+    let handle = tokio::spawn(run_loop(
+        api,
+        executor,
+        Duration::from_millis(1),
+        true,
+    ));
+
+    tokio::time::timeout(Duration::from_secs(30), receiver)
+        .await
+        .expect("job should be processed")
+        .expect("executor should signal completion");
+    tokio::time::timeout(Duration::from_secs(30), handle)
+        .await
+        .expect("runner should exit after the processed job")
+        .expect("runner task should join")
+        .expect("runner should exit successfully");
 }
 
 /// Fails only stage progress events, keeping terminal transitions reliable.

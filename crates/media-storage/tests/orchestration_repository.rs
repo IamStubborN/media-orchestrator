@@ -336,6 +336,58 @@ async fn partial_completion_creates_plex_and_partial_notifications_once() {
 }
 
 #[tokio::test]
+async fn session_refresh_emits_only_session_lifecycle_notifications() {
+    let (test_db, jobs, leases) = setup().await;
+    jobs.create(
+        operation_key(),
+        new_job("session-refresh:018f3f86-7b4c-7b4f-9b6a-6d62f45bb111"),
+    )
+    .await
+    .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::stage_started(JobEventId::new(), 0, "execution".to_owned(), 1).unwrap(),
+        JobEvent::stage_completed(
+            JobEventId::new(),
+            0,
+            "execution".to_owned(),
+            1,
+            Default::default(),
+        )
+        .unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::Publishing, None).unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::PlexPending, None).unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::Completed, None).unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    let notifications = notification_rows(&test_db).await;
+    assert_eq!(
+        notifications
+            .iter()
+            .map(|row| row.try_get::<String>("", "event_type").unwrap())
+            .collect::<Vec<_>>(),
+        vec!["session-refreshed", "started"],
+    );
+    for row in &notifications {
+        assert_sanitized_message(row, &["plex", "download", "encoding"]);
+    }
+}
+
+#[tokio::test]
 async fn different_source_events_dedupe_the_same_job_notification_type() {
     let (test_db, jobs, leases) = setup().await;
     jobs.create(operation_key(), new_job("semantic-notification-dedupe"))

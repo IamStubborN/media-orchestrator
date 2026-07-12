@@ -166,7 +166,13 @@ pub async fn run_runner(config: RunnerConfig) -> Result<(), RunnerError> {
         config.vaapi_device().to_owned(),
     ));
     let api = Arc::new(crate::runner::HttpRunnerApi::new(config.service().clone())?);
-    crate::runner::run_loop(api, executor, Duration::from_secs(20)).await
+    crate::runner::run_loop(
+        api,
+        executor,
+        Duration::from_secs(20),
+        config.exit_after_job(),
+    )
+    .await
 }
 
 pub struct PreparedRunnerSession {

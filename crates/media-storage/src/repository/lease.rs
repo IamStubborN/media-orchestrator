@@ -235,7 +235,11 @@ async fn insert_notification_outbox(
 
 fn notifications_for_event(job: &Job, event: &JobEvent) -> Vec<(&'static str, String)> {
     let id = job.id();
+    let session_refresh = job.result_ref().starts_with("session-refresh:");
     match event.kind() {
+        JobEventKind::Started if session_refresh => {
+            vec![("started", format!("Rezka session refresh {id} started."))]
+        }
         JobEventKind::Started => vec![("started", format!("Media job {id} started."))],
         // Intermediate progress. A stage start marks the beginning of a phase, so
         // it maps to a "started" notification. Deduplication on
@@ -277,6 +281,15 @@ fn notifications_for_event(job: &Job, event: &JobEvent) -> Vec<(&'static str, St
                 format!("Media job {id} finished encoding."),
             )]
         }
+        JobEventKind::StageFailed { error_code, .. }
+            if session_refresh && job.state() == JobState::Failed =>
+        {
+            let error_code = sanitized_error_code(error_code);
+            vec![(
+                "failed",
+                format!("Rezka session refresh {id} failed ({error_code})."),
+            )]
+        }
         JobEventKind::StageFailed { error_code, .. } if job.state() == JobState::Failed => {
             let error_code = sanitized_error_code(error_code);
             vec![("failed", format!("Media job {id} failed ({error_code})."))]
@@ -290,6 +303,7 @@ fn notifications_for_event(job: &Job, event: &JobEvent) -> Vec<(&'static str, St
                 "blocked-storage",
                 format!("Media job {id} is blocked because storage space is insufficient."),
             )],
+            JobState::Publishing if session_refresh => Vec::new(),
             JobState::Publishing => {
                 let mut notifications = vec![(
                     "downloaded",
@@ -310,6 +324,10 @@ fn notifications_for_event(job: &Job, event: &JobEvent) -> Vec<(&'static str, St
                     format!("Media job {id} completed with partial results."),
                 ),
             ],
+            JobState::Completed if session_refresh => vec![(
+                "session-refreshed",
+                format!("Rezka session refresh {id} completed and was saved."),
+            )],
             JobState::Completed => {
                 vec![("plex-added", format!("Media job {id} was added to Plex."))]
             }

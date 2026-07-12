@@ -1208,6 +1208,7 @@ pub async fn run_loop(
     api: Arc<dyn RunnerApi>,
     executor: Arc<dyn JobExecutor>,
     heartbeat_interval: Duration,
+    exit_after_job: bool,
 ) -> Result<(), RunnerError> {
     let mut next_maintenance = tokio::time::Instant::now();
     let mut backoff = RUN_LOOP_INITIAL_BACKOFF;
@@ -1237,6 +1238,9 @@ pub async fn run_loop(
                 tracing::warn!("staging retention pass failed");
             }
             next_maintenance = tokio::time::Instant::now() + Duration::from_secs(60 * 60);
+        }
+        if worked && exit_after_job {
+            return Ok(());
         }
         if !worked {
             tokio::time::sleep(Duration::from_secs(1)).await;
