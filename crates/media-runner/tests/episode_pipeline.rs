@@ -249,6 +249,7 @@ fn work() -> EpisodeWork {
         encoded_partial: PathBuf::from("/staging/job-1/s01e01/encoded.partial.mkv"),
         final_video: PathBuf::from("/plex/tv/Show/Season 01/Show - S01E01.mkv"),
         vaapi_device: PathBuf::from("/dev/dri/renderD128"),
+        expected_duration_seconds: None,
         subtitles: vec![
             SubtitleTrack {
                 id: "en".to_owned(),

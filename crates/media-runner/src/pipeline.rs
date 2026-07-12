@@ -86,6 +86,7 @@ pub struct EpisodeWork {
     pub encoded_partial: PathBuf,
     pub final_video: PathBuf,
     pub vaapi_device: PathBuf,
+    pub expected_duration_seconds: Option<f64>,
     pub subtitles: Vec<SubtitleTrack>,
     pub plex: PlexExpectation,
 }
@@ -215,6 +216,7 @@ impl EpisodePipeline {
                 Ok(probe) => probe,
                 Err(error) => return cancellation_outcome(error),
             };
+            validate_source_duration(&source_probe, work.expected_duration_seconds)?;
             let command = build_rezka_vaapi_command(
                 &work.source_partial,
                 &work.encoded_partial,
@@ -365,6 +367,19 @@ impl EpisodePipeline {
             PlexCheck::Matched(_) | PlexCheck::Mismatch => EpisodeOutcome::NeedsActionPlexMismatch,
         })
     }
+}
+
+fn validate_source_duration(
+    source: &crate::MediaProbe,
+    expected_duration_seconds: Option<f64>,
+) -> Result<(), RunnerPortError> {
+    let Some(expected) = expected_duration_seconds else {
+        return Ok(());
+    };
+    if !expected.is_finite() || expected <= 0.0 || source.duration_seconds < expected * 0.8 {
+        return Err(RunnerPortError::Process);
+    }
+    Ok(())
 }
 
 fn cancellation_outcome(error: RunnerPortError) -> Result<EpisodeOutcome, RunnerPortError> {

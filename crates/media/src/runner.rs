@@ -414,6 +414,14 @@ impl MediaJobExecutor {
         if details.id().get() != title_id {
             return Err(RunnerError::Execution);
         }
+        let premium_status = client
+            .premium_status()
+            .await
+            .map_err(|_| RunnerError::Execution)?;
+        tracing::info!(premium = ?premium_status, "resolved Rezka account status");
+        let expected_duration_seconds = details
+            .duration_minutes()
+            .map(|minutes| f64::from(minutes) * 60.0);
         let translation_id =
             rezka_client::TranslationId::new(translation_id).map_err(|_| RunnerError::Execution)?;
         let key = match media_kind {
@@ -508,7 +516,15 @@ impl MediaJobExecutor {
                 .stage_completed(task_ordinal, "resolve_manifest", 0)
                 .await?;
 
-            let work = self.rezka_work(lease, &manifest, title, season, episode)?;
+            let work = self.rezka_work(
+                lease,
+                &manifest,
+                title,
+                season,
+                episode,
+                premium_status,
+                expected_duration_seconds,
+            )?;
             control
                 .stage_started(task_ordinal, "media_pipeline", 1)
                 .await?;
@@ -542,6 +558,8 @@ impl MediaJobExecutor {
         title: &str,
         season: Option<u32>,
         episode: Option<u32>,
+        premium_status: rezka_client::PremiumStatus,
+        expected_duration_seconds: Option<f64>,
     ) -> Result<media_runner::EpisodeWork, RunnerError> {
         let safe_title = safe_name(title);
         let episode_id = season
@@ -562,8 +580,25 @@ impl MediaJobExecutor {
                     .join(format!("{safe_title} - S{s:02}E{e:02}.mkv"))
             },
         );
-        let endpoint = manifest
-            .preferred_variant()
+        let variant = match premium_status {
+            rezka_client::PremiumStatus::Active => manifest.preferred_variant(),
+            rezka_client::PremiumStatus::Inactive => manifest
+                .variants()
+                .iter()
+                .find(|variant| {
+                    variant
+                        .advertised_quality()
+                        .vertical_hint()
+                        .is_some_and(|height| height <= 720)
+                })
+                .ok_or(RunnerError::Execution)?,
+        };
+        tracing::info!(
+            advertised_height = variant.advertised_quality().vertical_hint(),
+            premium = ?premium_status,
+            "selected Rezka stream quality"
+        );
+        let endpoint = variant
             .endpoints()
             .iter()
             .find(|endpoint| endpoint.kind() == rezka_client::StreamKind::Mp4)
@@ -616,6 +651,7 @@ impl MediaJobExecutor {
             encoded_partial: staging.join("encoded.partial.mkv"),
             final_video: final_video.clone(),
             vaapi_device: self.vaapi_device.clone(),
+            expected_duration_seconds,
             subtitles,
             plex: media_runner::PlexExpectation {
                 path: final_video,
@@ -735,6 +771,7 @@ impl MediaJobExecutor {
                 encoded_partial: staging.join("unused.encoded"),
                 final_video: final_video.clone(),
                 vaapi_device: self.vaapi_device.clone(),
+                expected_duration_seconds: None,
                 subtitles: Vec::new(),
                 plex: media_runner::PlexExpectation {
                     path: final_video,
