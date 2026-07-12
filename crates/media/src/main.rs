@@ -14,10 +14,17 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    Healthcheck(HealthcheckArgs),
     Jobs(JobsArgs),
     Queue(QueueArgs),
     Migrate,
     Serve,
+}
+
+#[derive(Debug, Args)]
+struct HealthcheckArgs {
+    #[arg(long, default_value = "http://127.0.0.1:8080/v1/health")]
+    url: reqwest::Url,
 }
 
 #[derive(Debug, Args)]
@@ -88,6 +95,8 @@ enum RunError {
     Config(#[from] ConfigError),
     #[error(transparent)]
     Client(#[from] ClientError),
+    #[error("media service healthcheck failed")]
+    Healthcheck,
     #[error(transparent)]
     Service(#[from] ServiceError),
 }
@@ -103,6 +112,7 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<(), RunError> {
     match cli.command {
+        Command::Healthcheck(args) => run_healthcheck(args).await,
         Command::Jobs(args) => run_jobs(args).await,
         Command::Queue(args) => run_queue(args).await,
         Command::Migrate => {
@@ -116,6 +126,21 @@ async fn run(cli: Cli) -> Result<(), RunError> {
             Ok(())
         }
     }
+}
+
+async fn run_healthcheck(args: HealthcheckArgs) -> Result<(), RunError> {
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|_| RunError::Healthcheck)?
+        .get(args.url)
+        .send()
+        .await
+        .map_err(|_| RunError::Healthcheck)?;
+    if !response.status().is_success() {
+        return Err(RunError::Healthcheck);
+    }
+    Ok(())
 }
 
 async fn run_jobs(args: JobsArgs) -> Result<(), RunError> {

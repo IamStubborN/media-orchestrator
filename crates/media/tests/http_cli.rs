@@ -429,3 +429,40 @@ async fn cli_preserves_http_error_status_and_body_on_stderr() {
         "HTTP 409 Conflict: {\"code\":\"conflict\",\"message\":\"queue unavailable\",\"request_id\":\"req-server\"}\n",
     );
 }
+
+#[tokio::test]
+async fn healthcheck_uses_the_unauthenticated_health_endpoint() {
+    let router = Router::new().route(
+        "/v1/health",
+        any(|request: Request| async move {
+            if request.method() == Method::GET
+                && !request.headers().contains_key("authorization")
+                && !request.headers().contains_key("x-request-id")
+            {
+                json_response(StatusCode::OK, r#"{"status":"ok"}"#)
+            } else {
+                json_response(StatusCode::BAD_REQUEST, r#"{"status":"invalid"}"#)
+            }
+        }),
+    );
+    let server = TestServer::start(router).await;
+    let token_file = SecretFile::new("unused-token");
+    let url = format!("{}/v1/health", server.service_url);
+
+    let output = command_output(command(
+        &server,
+        &token_file,
+        ["healthcheck", "--url", &url],
+    ))
+    .await;
+    server.stop().await;
+    let output = output.expect("CLI subprocess must finish before the harness timeout");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
