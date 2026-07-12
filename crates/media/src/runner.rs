@@ -400,12 +400,7 @@ impl MediaJobExecutor {
         title: &str,
     ) -> Result<ExecutionOutcome, RunnerError> {
         let mut prepared = self.rezka.lock().await;
-        let crate::composition::PreparedRunnerSession {
-            client,
-            probe,
-            store: _,
-            ..
-        } = &mut *prepared;
+        let crate::composition::PreparedRunnerSession { client, probe, .. } = &mut *prepared;
         client
             .validate_session(probe)
             .await

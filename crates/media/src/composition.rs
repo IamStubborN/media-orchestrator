@@ -11,15 +11,17 @@ use media_api::{
 };
 use media_core::{
     PRIMARY_CLIENT_ID, PRIMARY_USER_ID, BootstrapClient, ClientRole, ClientStore, CredentialDigest,
-    EpisodeDiscoveryPort, JobApplication, LeaseApplication, NotificationDispatcher, NotificationId,
-    OperationKey, PortError, RUNNER_CLIENT_ID, ReadinessPort, TrackingApplication, TrackingRuntime,
+    EpisodeDiscoveryPort, JobApplication, LIFECYCLE_CLIENT_ID, LeaseApplication,
+    NotificationDispatcher, NotificationId, OperationKey, PortError, RUNNER_CLIENT_ID,
+    ReadinessPort, RunnerLifecycleApplication, TrackingApplication, TrackingRuntime,
     SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
 };
 use media_storage::{
     ReservationGeneration as StorageReservationGeneration, ReservationHandle, ReservationRecord,
     SeaOrmClientStore, SeaOrmIdempotencyRepository, SeaOrmJobStore, SeaOrmLeaseStore,
     SeaOrmMaintenanceStore, SeaOrmMetricsSource, SeaOrmNotificationOutbox,
-    SeaOrmOperationReceiptRepository, SeaOrmReadiness, SeaOrmTrackingStore, StoredResponseRecord,
+    SeaOrmOperationReceiptRepository, SeaOrmReadiness, SeaOrmRunnerLifecycleStore,
+    SeaOrmTrackingStore, StoredResponseRecord,
 };
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
@@ -753,6 +755,9 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
         readiness,
     )
     .with_tracking(tracking)
+    .with_lifecycle(Arc::new(RunnerLifecycleApplication::new(Arc::new(
+        SeaOrmRunnerLifecycleStore::new(database.clone()),
+    ))))
     .with_metrics_source(Arc::new(SeaOrmMetricsSource::new(database.clone())));
     let mut tracking_runtime = None;
     if config.rezka().is_some() || config.prowlarr().is_some() {
@@ -887,6 +892,13 @@ async fn bootstrap_clients(
             ClientRole::Runner,
             None,
             digest(config.runner_token()),
+        ),
+        BootstrapClient::new(
+            LIFECYCLE_CLIENT_ID,
+            "lifecycle".to_owned(),
+            ClientRole::Lifecycle,
+            None,
+            digest(config.lifecycle_token()),
         ),
     ] {
         store

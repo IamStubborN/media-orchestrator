@@ -1,7 +1,8 @@
 use crate::{
     Actor, BootstrapClient, CanonicalEpisode, CanonicalMedia, CanonicalSeason, ClientId,
     CredentialDigest, EpisodeProviderMapping, ExternalNamespace, Job, JobDetail, JobEvent, JobId,
-    JobLease, LeaseId, MediaExternalReference, NewJob, OperationKey, QueueStatus, UserId,
+    JobLease, LeaseId, MediaExternalReference, NewJob, OperationKey, QueueStatus, RunnerLifecycle,
+    RunnerLifecycleUpdate, UserId,
 };
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
@@ -80,6 +81,12 @@ pub trait LeaseStore: Send + Sync {
 #[async_trait::async_trait]
 pub trait ReadinessPort: Send + Sync {
     async fn is_ready(&self) -> Result<bool, PortError>;
+}
+
+#[async_trait::async_trait]
+pub trait RunnerLifecycleStore: Send + Sync {
+    async fn get(&self) -> Result<RunnerLifecycle, PortError>;
+    async fn update(&self, update: RunnerLifecycleUpdate) -> Result<RunnerLifecycle, PortError>;
 }
 
 #[async_trait::async_trait]

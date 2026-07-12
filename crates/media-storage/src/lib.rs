@@ -11,6 +11,6 @@ pub use repository::{
     ReservationRecord, SeaOrmClientStore, SeaOrmIdempotencyRepository, SeaOrmIdentityStore,
     SeaOrmJobStore, SeaOrmLeaseStore, SeaOrmMaintenanceStore, SeaOrmMetricsSource,
     SeaOrmNotificationOutbox, SeaOrmOperationReceiptRepository, SeaOrmReadiness,
-    SeaOrmSearchRepository, SeaOrmTrackingStore, SearchSessionRecord, StoredResponseError,
-    StoredResponseRecord,
+    SeaOrmRunnerLifecycleStore, SeaOrmSearchRepository, SeaOrmTrackingStore, SearchSessionRecord,
+    StoredResponseError, StoredResponseRecord,
 };

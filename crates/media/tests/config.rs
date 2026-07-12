@@ -39,6 +39,7 @@ impl FakeSource {
         source.set_secret("MEDIA_PRIMARY_TOKEN_FILE", b"primary-secret\n");
         source.set_secret("MEDIA_SECONDARY_TOKEN_FILE", b"secondary-secret\r\n");
         source.set_secret("MEDIA_RUNNER_TOKEN_FILE", b"runner-secret");
+        source.set_secret("MEDIA_LIFECYCLE_TOKEN_FILE", b"lifecycle-secret");
         source
     }
 }

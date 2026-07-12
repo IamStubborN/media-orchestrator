@@ -9,7 +9,7 @@ use support::{TestDatabase, assert_rejected, execute, query};
 const PRIMARY_ID: &str = "00000000-0000-0000-0000-000000000001";
 const SECONDARY_ID: &str = "00000000-0000-0000-0000-000000000002";
 
-const APPLICATION_TABLES: [&str; 20] = [
+const APPLICATION_TABLES: [&str; 21] = [
     "api_clients",
     "episode_provider_mappings",
     "episodes",
@@ -24,6 +24,7 @@ const APPLICATION_TABLES: [&str; 20] = [
     "notification_outbox",
     "operation_receipts",
     "outbox_events",
+    "runner_lifecycle",
     "search_executions",
     "search_sessions",
     "seasons",
@@ -104,7 +105,7 @@ async fn migrations_apply_seed_fixed_users_and_reverse_cleanly() {
         uuid_id_tables,
         APPLICATION_TABLES
             .into_iter()
-            .filter(|table| *table != "search_executions")
+            .filter(|table| !matches!(*table, "search_executions" | "runner_lifecycle"))
             .map(str::to_owned)
             .collect()
     );
@@ -223,7 +224,8 @@ async fn migrations_apply_seed_fixed_users_and_reverse_cleanly() {
              'seasons', 'episodes', 'episode_provider_mappings', 'jobs',
              'job_tasks', 'job_stages', 'idempotency_records', 'job_leases'
              , 'operation_receipts', 'job_events', 'outbox_events'
-             , 'tracking_subscriptions', 'tracking_discoveries', 'notification_outbox'
+             , 'tracking_subscriptions', 'tracking_discoveries', 'notification_outbox',
+             'runner_lifecycle'
            ])",
     )
     .await;

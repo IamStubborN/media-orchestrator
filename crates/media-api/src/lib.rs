@@ -15,7 +15,7 @@ use std::{sync::Arc, time::Duration};
 use axum::{Router, extract::DefaultBodyLimit, middleware};
 use media_core::{
     ClientStore, JobApplication, LeaseApplication, MetricsSource, ReadinessPort,
-    TrackingApplication,
+    RunnerLifecycleApplication, TrackingApplication,
 };
 
 use crate::metrics::MetricsRecorder;
@@ -48,6 +48,7 @@ pub struct ApiState {
     pub(crate) operations: Arc<dyn OperationCompletionStore>,
     pub(crate) readiness: Arc<dyn ReadinessPort>,
     pub(crate) tracking: Option<Arc<TrackingApplication>>,
+    pub(crate) lifecycle: Option<Arc<RunnerLifecycleApplication>>,
     pub(crate) search: Arc<dyn SearchService>,
     pub(crate) plex: Arc<dyn PlexReconcileService>,
     pub(crate) metrics: Arc<MetricsRecorder>,
@@ -72,11 +73,23 @@ impl ApiState {
             operations,
             readiness,
             tracking: None,
+            lifecycle: None,
             search: Arc::new(search::UnavailableSearchService),
             plex: Arc::new(plex::UnavailablePlexService),
             metrics: Arc::new(MetricsRecorder::default()),
             metrics_source: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_lifecycle(mut self, lifecycle: Arc<RunnerLifecycleApplication>) -> Self {
+        self.lifecycle = Some(lifecycle);
+        self
+    }
+
+    #[must_use]
+    pub fn lifecycle(&self) -> Option<&RunnerLifecycleApplication> {
+        self.lifecycle.as_deref()
     }
 
     #[must_use]

@@ -219,6 +219,7 @@ fn server_config(url: &str, listen_addr: SocketAddr) -> ServerConfig {
     source.set_secret("MEDIA_PRIMARY_TOKEN_FILE", "primary-token-task-8b");
     source.set_secret("MEDIA_SECONDARY_TOKEN_FILE", "secondary-token-task-8b");
     source.set_secret("MEDIA_RUNNER_TOKEN_FILE", "runner-token-task-8b");
+    source.set_secret("MEDIA_LIFECYCLE_TOKEN_FILE", "lifecycle-token-task-8b");
     source.set_environment("MEDIA_LISTEN_ADDR", listen_addr.to_string());
     ServerConfig::load_from(&source).expect("server config must load")
 }
@@ -648,6 +649,7 @@ async fn serve_process_emits_json_tracing_and_gracefully_handles_int_and_term() 
     let primary = SecretFile::new("json-primary-token");
     let secondary = SecretFile::new("json-secondary-token");
     let runner = SecretFile::new("json-runner-token");
+    let lifecycle = SecretFile::new("json-lifecycle-token");
 
     for signal in ["INT", "TERM"] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -661,6 +663,7 @@ async fn serve_process_emits_json_tracing_and_gracefully_handles_int_and_term() 
             .env("MEDIA_PRIMARY_TOKEN_FILE", &primary.0)
             .env("MEDIA_SECONDARY_TOKEN_FILE", &secondary.0)
             .env("MEDIA_RUNNER_TOKEN_FILE", &runner.0)
+            .env("MEDIA_LIFECYCLE_TOKEN_FILE", &lifecycle.0)
             .env("MEDIA_LISTEN_ADDR", address.to_string())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

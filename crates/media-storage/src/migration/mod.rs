@@ -11,6 +11,7 @@ mod m20260712_000010_search_scope;
 mod m20260712_000011_notification_dead_letter;
 mod m20260712_000012_progress_notifications;
 mod m20260712_000013_session_refresh_notification;
+mod m20260712_000014_runner_lifecycle;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseTransaction;
@@ -34,6 +35,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260712_000011_notification_dead_letter::Migration),
             Box::new(m20260712_000012_progress_notifications::Migration),
             Box::new(m20260712_000013_session_refresh_notification::Migration),
+            Box::new(m20260712_000014_runner_lifecycle::Migration),
         ]
     }
 }

@@ -21,6 +21,7 @@ async fn actor_identity(Extension(actor): Extension<Actor>) -> Json<serde_json::
         "role": match actor.role() {
             ClientRole::Hermes => "hermes",
             ClientRole::Runner => "runner",
+            ClientRole::Lifecycle => "lifecycle",
         },
     }))
 }

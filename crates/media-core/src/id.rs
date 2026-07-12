@@ -67,6 +67,8 @@ pub const SECONDARY_CLIENT_ID: ClientId =
     ClientId::from_uuid(uuid::Uuid::from_u128(0x00000000000000000001000000000002));
 pub const RUNNER_CLIENT_ID: ClientId =
     ClientId::from_uuid(uuid::Uuid::from_u128(0x00000000000000000002000000000001));
+pub const LIFECYCLE_CLIENT_ID: ClientId =
+    ClientId::from_uuid(uuid::Uuid::from_u128(0x00000000000000000003000000000001));
 
 #[cfg(test)]
 mod tests {

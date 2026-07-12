@@ -13,6 +13,13 @@ use tokio::sync::Barrier;
 
 async fn setup() -> (TestDatabase, SeaOrmJobStore, SeaOrmLeaseStore) {
     let test_db = TestDatabase::start_migrated().await;
+    test_db
+        .connection()
+        .execute_unprepared(
+            "UPDATE runner_lifecycle SET state = 'ready', reason = NULL WHERE singleton = true",
+        )
+        .await
+        .unwrap();
     SeaOrmClientStore::new(test_db.connection().clone())
         .upsert_client(
             BootstrapClient::new(
@@ -29,6 +36,32 @@ async fn setup() -> (TestDatabase, SeaOrmJobStore, SeaOrmLeaseStore) {
     let jobs = SeaOrmJobStore::new(test_db.connection().clone());
     let leases = SeaOrmLeaseStore::new(test_db.connection().clone());
     (test_db, jobs, leases)
+}
+
+#[tokio::test]
+async fn non_ready_lifecycle_denies_new_leases_without_mutating_the_job() {
+    let (test_db, jobs, leases) = setup().await;
+    let job = jobs
+        .create(operation_key(), new_job("selection:lifecycle-gate"))
+        .await
+        .unwrap();
+    test_db
+        .connection()
+        .execute_unprepared(
+            "UPDATE runner_lifecycle SET state = 'blocked', reason = 'vpn_rotation_failed' WHERE singleton = true",
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        leases
+            .lease_next(operation_key(), RUNNER_CLIENT_ID, time::Duration::seconds(60))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let stored = jobs.find_for_owner(job.id(), PRIMARY_USER_ID).await.unwrap().unwrap();
+    assert_eq!(stored.state(), JobState::Queued);
 }
 
 fn new_job(reference: &str) -> NewJob {

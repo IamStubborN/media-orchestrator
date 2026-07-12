@@ -235,9 +235,7 @@ async fn insert_notification_outbox(
 
 fn notifications_for_event(job: &Job, event: &JobEvent) -> Vec<(&'static str, String)> {
     let id = job.id();
-    let session_refresh = job
-        .result_ref()
-        .starts_with("selection:session-refresh:");
+    let session_refresh = job.result_ref().starts_with("selection:session-refresh:");
     match event.kind() {
         JobEventKind::Started if session_refresh => {
             vec![("started", format!("Rezka session refresh {id} started."))]
@@ -794,6 +792,17 @@ async fn lease_next_in_transaction(
         ))
         .await?
         .ok_or_else(|| sea_orm::DbErr::Custom("advisory lock query failed".to_owned()))?;
+
+    let lifecycle = transaction
+        .query_one_raw(Statement::from_string(
+            DatabaseBackend::Postgres,
+            "SELECT state FROM runner_lifecycle WHERE singleton = true FOR SHARE".to_owned(),
+        ))
+        .await?
+        .ok_or_else(|| sea_orm::DbErr::Custom("runner lifecycle is missing".to_owned()))?;
+    if lifecycle.try_get::<String>("", "state")? != "ready" {
+        return Ok(None);
+    }
 
     if let Some(existing) = transaction
         .query_one_raw(Statement::from_string(

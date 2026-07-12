@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use crate::{
     Actor, Job, JobEvent, JobId, JobLease, JobStore, JobValidationError, LeaseId, LeaseStore,
-    NewJob, NotifyScope, OperationKey, PortError, Provider, QueueStatus,
+    NewJob, NotifyScope, OperationKey, PortError, Provider, QueueStatus, RunnerLifecycle,
+    RunnerLifecycleStore, RunnerLifecycleUpdate,
 };
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -10,6 +11,35 @@ pub struct NewJobCommand {
     pub provider: Provider,
     pub result_ref: String,
     pub notify_scope: NotifyScope,
+}
+
+pub struct RunnerLifecycleApplication {
+    store: Arc<dyn RunnerLifecycleStore>,
+}
+
+impl RunnerLifecycleApplication {
+    #[must_use]
+    pub fn new(store: Arc<dyn RunnerLifecycleStore>) -> Self {
+        Self { store }
+    }
+
+    pub async fn get(&self, actor: &Actor) -> Result<RunnerLifecycle, ApplicationError> {
+        actor
+            .require_user()
+            .map_err(|_| ApplicationError::Forbidden)?;
+        self.store.get().await.map_err(Into::into)
+    }
+
+    pub async fn update(
+        &self,
+        actor: &Actor,
+        update: RunnerLifecycleUpdate,
+    ) -> Result<RunnerLifecycle, ApplicationError> {
+        actor
+            .require_lifecycle()
+            .map_err(|_| ApplicationError::Forbidden)?;
+        self.store.update(update).await.map_err(Into::into)
+    }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]

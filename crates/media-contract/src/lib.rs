@@ -8,6 +8,7 @@ mod execution;
 mod id;
 mod job;
 mod lease;
+mod lifecycle;
 mod notification;
 mod plex;
 mod search;
@@ -22,6 +23,7 @@ pub use job::{
     NeedsActionReasonDto, QueueStatusDto,
 };
 pub use lease::LeaseDto;
+pub use lifecycle::{RunnerLifecycleDto, RunnerLifecycleStateDto, UpdateRunnerLifecycleRequest};
 pub use notification::{HermesDeliverOnlyWebhook, NotificationEventTypeDto};
 pub use plex::{
     PlexObservationDto, PlexReconcileRequest, PlexReconcileResponse, PlexReconcileStatus,

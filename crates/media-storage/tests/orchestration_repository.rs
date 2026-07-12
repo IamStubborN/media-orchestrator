@@ -13,6 +13,13 @@ use support::{TestDatabase, operation_key, query};
 
 async fn setup() -> (TestDatabase, SeaOrmJobStore, SeaOrmLeaseStore) {
     let test_db = TestDatabase::start_migrated().await;
+    test_db
+        .connection()
+        .execute_unprepared(
+            "UPDATE runner_lifecycle SET state = 'ready', reason = NULL WHERE singleton = true",
+        )
+        .await
+        .unwrap();
     SeaOrmClientStore::new(test_db.connection().clone())
         .upsert_client(
             BootstrapClient::new(

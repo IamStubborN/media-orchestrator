@@ -287,6 +287,7 @@ fn server_config(url: &str, listen_addr: SocketAddr) -> ServerConfig {
     source.set_secret("MEDIA_PRIMARY_TOKEN_FILE", PRIMARY_TOKEN);
     source.set_secret("MEDIA_SECONDARY_TOKEN_FILE", SECONDARY_TOKEN);
     source.set_secret("MEDIA_RUNNER_TOKEN_FILE", RUNNER_TOKEN);
+    source.set_secret("MEDIA_LIFECYCLE_TOKEN_FILE", "lifecycle-token");
     source.set_environment("MEDIA_LISTEN_ADDR", listen_addr.to_string());
     ServerConfig::load_from(&source).expect("server config must load")
 }

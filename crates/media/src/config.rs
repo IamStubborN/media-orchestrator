@@ -17,6 +17,8 @@ const SECONDARY_TOKEN: &str = "MEDIA_SECONDARY_TOKEN";
 const SECONDARY_TOKEN_FILE: &str = "MEDIA_SECONDARY_TOKEN_FILE";
 const RUNNER_TOKEN: &str = "MEDIA_RUNNER_TOKEN";
 const RUNNER_TOKEN_FILE: &str = "MEDIA_RUNNER_TOKEN_FILE";
+const LIFECYCLE_TOKEN: &str = "MEDIA_LIFECYCLE_TOKEN";
+const LIFECYCLE_TOKEN_FILE: &str = "MEDIA_LIFECYCLE_TOKEN_FILE";
 const PRIMARY_WEBHOOK_HMAC: &str = "MEDIA_PRIMARY_WEBHOOK_HMAC";
 const PRIMARY_WEBHOOK_HMAC_FILE: &str = "MEDIA_PRIMARY_WEBHOOK_HMAC_FILE";
 const SECONDARY_WEBHOOK_HMAC: &str = "MEDIA_SECONDARY_WEBHOOK_HMAC";
@@ -174,6 +176,7 @@ pub struct ServerConfig {
     primary_token: SecretString,
     secondary_token: SecretString,
     runner_token: SecretString,
+    lifecycle_token: SecretString,
     lease_ttl: time::Duration,
     notifications: Option<NotificationConfig>,
     rezka: Option<RezkaCompositionConfig>,
@@ -231,6 +234,12 @@ impl ServerConfig {
                 SecretKind::Token,
             )?,
             runner_token: read_secret(source, RUNNER_TOKEN, RUNNER_TOKEN_FILE, SecretKind::Token)?,
+            lifecycle_token: read_secret(
+                source,
+                LIFECYCLE_TOKEN,
+                LIFECYCLE_TOKEN_FILE,
+                SecretKind::Token,
+            )?,
             lease_ttl: time::Duration::seconds(lease_ttl_seconds),
             notifications: NotificationConfig::load_optional(source)?,
             rezka,
@@ -262,6 +271,11 @@ impl ServerConfig {
     #[must_use]
     pub const fn runner_token(&self) -> &SecretString {
         &self.runner_token
+    }
+
+    #[must_use]
+    pub const fn lifecycle_token(&self) -> &SecretString {
+        &self.lifecycle_token
     }
 
     #[must_use]
@@ -298,6 +312,7 @@ impl std::fmt::Debug for ServerConfig {
             .field("primary_token", &"[REDACTED]")
             .field("secondary_token", &"[REDACTED]")
             .field("runner_token", &"[REDACTED]")
+            .field("lifecycle_token", &"[REDACTED]")
             .field("lease_ttl", &self.lease_ttl)
             .field(
                 "notifications",

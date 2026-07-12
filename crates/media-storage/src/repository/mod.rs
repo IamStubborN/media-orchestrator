@@ -3,6 +3,7 @@ mod idempotency;
 mod identity;
 mod job;
 mod lease;
+mod lifecycle;
 mod maintenance;
 mod metrics;
 mod operation;
@@ -18,6 +19,7 @@ pub use idempotency::{
 pub use identity::SeaOrmIdentityStore;
 pub use job::SeaOrmJobStore;
 pub use lease::SeaOrmLeaseStore;
+pub use lifecycle::SeaOrmRunnerLifecycleStore;
 pub use maintenance::{MaintenanceReport, SeaOrmMaintenanceStore};
 pub use metrics::SeaOrmMetricsSource;
 pub use operation::SeaOrmOperationReceiptRepository;

@@ -23,6 +23,7 @@ impl TryFrom<api_client::Model> for Actor {
         let role = match model.role.as_str() {
             "hermes" => ClientRole::Hermes,
             "runner" => ClientRole::Runner,
+            "lifecycle" => ClientRole::Lifecycle,
             _ => return Err(MappingError::InvalidPersistedValue),
         };
         Actor::new(
@@ -52,6 +53,7 @@ pub(crate) const fn client_role_value(role: ClientRole) -> &'static str {
     match role {
         ClientRole::Hermes => "hermes",
         ClientRole::Runner => "runner",
+        ClientRole::Lifecycle => "lifecycle",
     }
 }
 

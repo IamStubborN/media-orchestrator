@@ -1,5 +1,6 @@
 mod health;
 mod jobs;
+mod lifecycle;
 mod metrics;
 mod queue;
 mod runner;
@@ -17,6 +18,7 @@ pub(crate) fn public_routes() -> Router<ApiState> {
 pub(crate) fn protected_routes() -> Router<ApiState> {
     jobs::routes()
         .merge(queue::routes())
+        .merge(lifecycle::routes())
         .merge(runner::routes())
         .merge(tracking::routes())
         .merge(search::routes())

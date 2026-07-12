@@ -1,6 +1,7 @@
 use media_core::{
     PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, BootstrapClient, ClientRole, ClientStore,
-    CredentialDigest, PortError, RUNNER_CLIENT_ID, SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
+    CredentialDigest, LIFECYCLE_CLIENT_ID, PortError, RUNNER_CLIENT_ID, SECONDARY_CLIENT_ID,
+    SECONDARY_USER_ID,
 };
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, sea_query::OnConflict};
 
@@ -75,5 +76,6 @@ fn is_fixed_client(client: &BootstrapClient) -> bool {
                 Some(SECONDARY_USER_ID)
             )
             | (RUNNER_CLIENT_ID, ClientRole::Runner, None)
+            | (LIFECYCLE_CLIENT_ID, ClientRole::Lifecycle, None)
     )
 }

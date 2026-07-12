@@ -1,12 +1,13 @@
 use crate::{
-    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, ClientId, RUNNER_CLIENT_ID, UserId, SECONDARY_CLIENT_ID,
-    SECONDARY_USER_ID,
+    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, ClientId, LIFECYCLE_CLIENT_ID, RUNNER_CLIENT_ID, UserId,
+    SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
 };
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum ClientRole {
     Hermes,
     Runner,
+    Lifecycle,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -26,6 +27,8 @@ pub enum ActorError {
     UserAccessForbidden,
     #[error("this operation requires a runner client")]
     RunnerAccessRequired,
+    #[error("this operation requires a lifecycle client")]
+    LifecycleAccessRequired,
 }
 
 impl Actor {
@@ -37,6 +40,7 @@ impl Actor {
         match (role, user_id) {
             (ClientRole::Hermes, None) => Err(ActorError::HermesUserRequired),
             (ClientRole::Runner, Some(_)) => Err(ActorError::RunnerCannotHaveUser),
+            (ClientRole::Lifecycle, Some(_)) => Err(ActorError::RunnerCannotHaveUser),
             _ => Ok(Self {
                 client_id,
                 user_id,
@@ -50,6 +54,7 @@ impl Actor {
             (ClientRole::Hermes, Some(user_id)) => Ok(user_id),
             (ClientRole::Hermes, None) => Err(ActorError::HermesUserRequired),
             (ClientRole::Runner, _) => Err(ActorError::UserAccessForbidden),
+            (ClientRole::Lifecycle, _) => Err(ActorError::UserAccessForbidden),
         }
     }
 
@@ -58,6 +63,15 @@ impl Actor {
             (ClientRole::Runner, None) => Ok(self.client_id),
             (ClientRole::Runner, Some(_)) => Err(ActorError::RunnerCannotHaveUser),
             (ClientRole::Hermes, _) => Err(ActorError::RunnerAccessRequired),
+            (ClientRole::Lifecycle, _) => Err(ActorError::RunnerAccessRequired),
+        }
+    }
+
+    pub fn require_lifecycle(&self) -> Result<ClientId, ActorError> {
+        match (self.role, self.user_id) {
+            (ClientRole::Lifecycle, None) => Ok(self.client_id),
+            (ClientRole::Lifecycle, Some(_)) => Err(ActorError::RunnerCannotHaveUser),
+            _ => Err(ActorError::LifecycleAccessRequired),
         }
     }
 
@@ -181,6 +195,7 @@ fn is_fixed_bootstrap_identity(actor: &Actor) -> bool {
                 Some(SECONDARY_USER_ID)
             )
             | (RUNNER_CLIENT_ID, ClientRole::Runner, None)
+            | (LIFECYCLE_CLIENT_ID, ClientRole::Lifecycle, None)
     )
 }
 
