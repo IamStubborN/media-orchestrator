@@ -4,6 +4,11 @@
 **Scope:** `media-orchestrator`, `hermes-home`, and `homelab`  
 **Goal:** Fully implement, deploy, and live-verify the agreed personal media system. A capability is complete only when its implementation, deployment, and live evidence are all recorded.
 
+This document is the canonical execution plan for the active Codex goal. The
+goal must remain active until every item in the Completion Gate is satisfied;
+partial implementation, passing unit tests, or a successful deployment alone
+must not close it.
+
 ## Status Model
 
 Every workstream must track three independent states:
@@ -109,7 +114,11 @@ Subtitle-present and pagination live gates remain pending.
 ## Workstream 4: Prowlarr and qBittorrent E2E
 
 **Priority:** Critical  
-**Current state:** Integrations are implemented but the full live path is not recorded.
+**Current state:** Real Prowlarr search and ranking are live-verified. Support
+for slow provider responses, partially usable result pages, qBittorrent 5.2
+asynchronous add responses, and idempotent reuse of an exact existing torrent
+is implemented. The latest images are built but still require deployment and a
+recorded TV and movie completion through qBittorrent and Plex.
 
 ### Implementation and Verification
 
