@@ -276,27 +276,29 @@ impl ConcreteSearchProvider {
             .store
             .save(&snapshot)
             .map_err(|_| SearchError::Infrastructure)?;
-        let query = rezka_client::CatalogQuery::new(&request.query)
-            .map_err(|_| SearchError::InvalidRequest)?;
-        let page = match continuation {
-            Some(value) => {
-                let continuation = rezka_client::CatalogContinuation::new(value, &request.query)
-                    .map_err(|_| SearchError::InvalidRequest)?;
-                prepared.client.search_next(&continuation).await
-            }
-            None => prepared.client.search(&query).await,
+        let offset = continuation.map_or(Ok(0), |value| {
+            value
+                .strip_prefix("quick:")
+                .ok_or(SearchError::InvalidRequest)?
+                .parse::<usize>()
+                .map_err(|_| SearchError::InvalidRequest)
+        })?;
+        if !offset.is_multiple_of(MAX_SEARCH_RESULTS_PER_PAGE) {
+            return Err(SearchError::InvalidRequest);
         }
-        .map_err(|error| {
-            tracing::warn!(stage = "catalog", error_code = ?error.code(), error = %error, "Rezka search failed");
+        let query = rezka_client::QuickSearchQuery::new(&request.query)
+            .map_err(|_| SearchError::InvalidRequest)?;
+        let entries = prepared.client.quick_search(&query).await.map_err(|error| {
+            tracing::warn!(stage = "quick_search", error_code = ?error.code(), error = %error, "Rezka search failed");
             SearchError::Provider
         })?;
-        let provider_continuation = page.continuation().map(|value| value.as_str().to_owned());
+        if offset > entries.len() {
+            return Err(SearchError::InvalidRequest);
+        }
+        let end = (offset + MAX_SEARCH_RESULTS_PER_PAGE).min(entries.len());
+        let provider_continuation = (end < entries.len()).then(|| format!("quick:{end}"));
         let mut results = Vec::new();
-        for entry in page
-            .entries()
-            .iter()
-            .take(media_contract::MAX_SEARCH_RESULTS_PER_PAGE)
-        {
+        for entry in &entries[offset..end] {
             let details = prepared
                 .client
                 .title(entry.locator())
