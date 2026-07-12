@@ -430,20 +430,7 @@ fn parse_scope(value: &str) -> Result<TrackingScope, PortError> {
     }
 }
 fn parse_event(value: &str) -> Result<NotificationEventType, PortError> {
-    match value {
-        "started" => Ok(NotificationEventType::Started),
-        "choice-needed" => Ok(NotificationEventType::ChoiceNeeded),
-        "downloading-started" => Ok(NotificationEventType::DownloadingStarted),
-        "downloaded" => Ok(NotificationEventType::Downloaded),
-        "transcoding-started" => Ok(NotificationEventType::TranscodingStarted),
-        "encoding-complete" => Ok(NotificationEventType::EncodingComplete),
-        "plex-added" => Ok(NotificationEventType::PlexAdded),
-        "partial" => Ok(NotificationEventType::Partial),
-        "blocked-storage" => Ok(NotificationEventType::BlockedStorage),
-        "failed" => Ok(NotificationEventType::Failed),
-        "future-episode-found" => Ok(NotificationEventType::FutureEpisodeFound),
-        _ => Err(PortError::Infrastructure),
-    }
+    NotificationEventType::from_wire(value).ok_or(PortError::Infrastructure)
 }
 fn notification_recipients(
     owner: UserId,

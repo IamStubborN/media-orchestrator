@@ -385,6 +385,20 @@ async fn session_refresh_emits_only_session_lifecycle_notifications() {
     for row in &notifications {
         assert_sanitized_message(row, &["plex", "download", "encoding"]);
     }
+
+    let deliveries = SeaOrmNotificationOutbox::new(test_db.connection().clone())
+        .lease_pending(
+            NotificationId::new(),
+            time::OffsetDateTime::now_utc() + time::Duration::seconds(1),
+            time::Duration::seconds(30),
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(deliveries.len(), 2);
+    assert!(deliveries.iter().any(|delivery| {
+        delivery.event_type() == NotificationEventType::SessionRefreshed
+    }));
 }
 
 #[tokio::test]
