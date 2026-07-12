@@ -43,12 +43,14 @@ pub(crate) async fn login(
         return Err(invalid_response());
     }
 
-    let parsed: LoginResponse =
-        serde_json::from_str(&response.body).map_err(|_| invalid_response())?;
-    if !parsed.success {
-        return Err(RezkaError::AuthenticationFailed {
-            context: sanitize_provider_text("DLE login rejected"),
-        });
+    if !response.body.trim().eq_ignore_ascii_case("redirect") {
+        let parsed: LoginResponse =
+            serde_json::from_str(&response.body).map_err(|_| invalid_response())?;
+        if !parsed.success {
+            return Err(RezkaError::AuthenticationFailed {
+                context: sanitize_provider_text("DLE login rejected"),
+            });
+        }
     }
 
     stored_session_cookie

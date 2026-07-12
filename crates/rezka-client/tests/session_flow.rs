@@ -426,6 +426,60 @@ async fn dle_http_200_success_with_session_cookie_reaches_final_valid_probe() {
 }
 
 #[tokio::test]
+async fn dle_http_200_redirect_with_session_cookie_reaches_final_valid_probe() {
+    #[derive(Clone)]
+    struct InvalidThenValid {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Respond for InvalidThenValid {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            match self.calls.fetch_add(1, Ordering::SeqCst) {
+                0 => ResponseTemplate::new(200).set_body_string("<input name=\"login_name\">"),
+                1 => {
+                    let cookie = request.headers.get("cookie").unwrap().to_str().unwrap();
+                    assert!(cookie.contains("PHPSESSID=from-redirect"));
+                    ResponseTemplate::new(200)
+                        .set_body_string("<html data-authenticated=\"true\"></html>")
+                }
+                _ => panic!("probe fetched more than twice"),
+            }
+        }
+    }
+
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .respond_with(InvalidThenValid {
+            calls: Arc::clone(&calls),
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/ajax/login/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("set-cookie", "PHPSESSID=from-redirect; Path=/; HttpOnly")
+                .set_body_string("Redirect"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut client = RezkaClient::new(config(base.clone())).unwrap();
+    let result = client
+        .ensure_authenticated(&credentials(), &probe(&base))
+        .await
+        .unwrap();
+
+    assert_eq!(result, SessionValidation::Valid);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn dle_http_200_success_without_session_cookie_is_rejected() {
     let server = MockServer::start().await;
     let base = Url::parse(&server.uri()).unwrap();
