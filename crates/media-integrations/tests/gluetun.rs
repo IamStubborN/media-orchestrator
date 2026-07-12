@@ -101,6 +101,94 @@ async fn rotation_between_jobs_uses_only_vpn_control_and_observation_routes() {
     );
 }
 
+#[tokio::test]
+async fn rotation_polls_through_transitional_states_until_running() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/publicip/ip"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "public_ip": "203.0.113.20"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/v1/vpn/status"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "running"})),
+        )
+        .mount(&server)
+        .await;
+    // The first status read reports a transitional state; wiremock serves the
+    // earliest-registered matching mock, so this one responds before the
+    // steady-state `running` mock below and only once.
+    Mock::given(method("GET"))
+        .and(path("/v1/vpn/status"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "stopping"})),
+        )
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/vpn/status"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "running"})),
+        )
+        .mount(&server)
+        .await;
+
+    let client = GluetunClient::new(config(&server)).unwrap();
+    let rotation = client.rotate_between_jobs().await.unwrap();
+    assert_eq!(rotation.current_public_ip.as_deref(), Some("203.0.113.20"));
+
+    let status_reads = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| {
+            request.method.as_str() == "GET" && request.url.path() == "/v1/vpn/status"
+        })
+        .count();
+    assert_eq!(
+        status_reads, 2,
+        "the transitional read is retried until running"
+    );
+}
+
+#[tokio::test]
+async fn rotation_fails_after_deadline_when_tunnel_never_reports_running() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/publicip/ip"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "public_ip": "203.0.113.30"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/v1/vpn/status"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "running"})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/vpn/status"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "stopping"})),
+        )
+        .mount(&server)
+        .await;
+
+    let client = GluetunClient::new(config(&server)).unwrap();
+    let error = client
+        .rotate_between_jobs_within(Duration::from_millis(300))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), GluetunErrorCode::UnexpectedVpnState);
+}
+
 #[test]
 fn api_key_is_redacted_from_config_debug() {
     let config = GluetunConfig::new(

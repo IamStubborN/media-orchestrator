@@ -3,8 +3,16 @@ use std::{fmt, net::IpAddr, time::Duration};
 use reqwest::StatusCode;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::{
+    sync::Mutex,
+    time::{Instant, sleep},
+};
 use url::Url;
+
+/// Maximum time to wait for the tunnel to report `running` after a rotation.
+const ROTATION_RUNNING_DEADLINE: Duration = Duration::from_secs(30);
+const ROTATION_POLL_INITIAL: Duration = Duration::from_millis(200);
+const ROTATION_POLL_MAX: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum GluetunErrorCode {
@@ -184,6 +192,18 @@ impl GluetunClient {
     }
 
     pub async fn rotate_between_jobs(&self) -> Result<VpnRotation, GluetunError> {
+        self.rotate_between_jobs_within(ROTATION_RUNNING_DEADLINE)
+            .await
+    }
+
+    /// Rotates the VPN, waiting up to `running_deadline` for the tunnel to come
+    /// back up. Gluetun briefly reports transitional states while the tunnel
+    /// re-establishes, so the running state is polled with bounded backoff
+    /// rather than required on the first read.
+    pub async fn rotate_between_jobs_within(
+        &self,
+        running_deadline: Duration,
+    ) -> Result<VpnRotation, GluetunError> {
         let state = self.sticky.lock().await;
         if state.active.is_some() {
             return Err(GluetunError::StickyJobActive);
@@ -192,15 +212,28 @@ impl GluetunClient {
         let previous_public_ip = self.public_ip().await?;
         self.set_status(VpnStatus::Stopped).await?;
         self.set_status(VpnStatus::Running).await?;
-        if self.status().await? != VpnStatus::Running {
-            return Err(GluetunError::UnexpectedVpnState);
-        }
+        self.await_running(running_deadline).await?;
         let current_public_ip = self.public_ip().await?;
         drop(state);
         Ok(VpnRotation {
             previous_public_ip: Some(previous_public_ip),
             current_public_ip: Some(current_public_ip),
         })
+    }
+
+    async fn await_running(&self, deadline: Duration) -> Result<(), GluetunError> {
+        let start = Instant::now();
+        let mut delay = ROTATION_POLL_INITIAL;
+        loop {
+            if self.status().await? == VpnStatusReport::Running {
+                return Ok(());
+            }
+            if start.elapsed() + delay >= deadline {
+                return Err(GluetunError::UnexpectedVpnState);
+            }
+            sleep(delay).await;
+            delay = (delay * 2).min(ROTATION_POLL_MAX);
+        }
     }
 
     async fn public_ip(&self) -> Result<String, GluetunError> {
@@ -217,7 +250,7 @@ impl GluetunClient {
         Ok(payload.public_ip)
     }
 
-    async fn status(&self) -> Result<VpnStatus, GluetunError> {
+    async fn status(&self) -> Result<VpnStatusReport, GluetunError> {
         let response = self.get("v1/vpn/status").await?;
         let status = response.status();
         response
@@ -267,11 +300,24 @@ struct PublicIp {
     public_ip: String,
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "lowercase")]
 enum VpnStatus {
     Running,
     Stopped,
+}
+
+/// The status Gluetun reports back. Beyond the terminal `running`/`stopped`
+/// states it also emits transitional values (for example while the tunnel is
+/// coming up); any unrecognized status is treated as transitional rather than
+/// failing deserialization.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Deserialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+enum VpnStatusReport {
+    Running,
+    Stopped,
+    #[serde(other)]
+    Transitional,
 }
 
 fn endpoint(base_url: &Url, path: &str) -> Result<Url, GluetunError> {
