@@ -179,9 +179,26 @@ pub async fn run_runner(config: RunnerConfig) -> Result<(), RunnerError> {
 
 pub struct PreparedRunnerSession {
     pub client: rezka_client::RezkaClient,
+    client_config: rezka_client::RezkaClientConfig,
     pub credentials: Option<rezka_client::RezkaCredentials>,
     pub probe: rezka_client::SessionValidationProbe,
     pub store: media_runner::EncryptedRezkaSessionStore,
+}
+
+impl PreparedRunnerSession {
+    pub fn reload_session(&mut self) -> Result<(), RunnerCompositionError> {
+        let Some(snapshot) = self
+            .store
+            .load()
+            .map_err(|_| RunnerCompositionError::Store)?
+        else {
+            return Ok(());
+        };
+        self.client =
+            rezka_client::RezkaClient::from_snapshot(self.client_config.clone(), &snapshot)
+                .map_err(|_| RunnerCompositionError::Client)?;
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for PreparedRunnerSession {
@@ -242,13 +259,14 @@ fn prepare_rezka_session_inner(
         .map_err(|_| RunnerCompositionError::Store)?;
     let snapshot = store.load().map_err(|_| RunnerCompositionError::Store)?;
     let client = match snapshot.as_ref() {
-        Some(snapshot) => rezka_client::RezkaClient::from_snapshot(client_config, snapshot),
-        None => rezka_client::RezkaClient::new(client_config),
+        Some(snapshot) => rezka_client::RezkaClient::from_snapshot(client_config.clone(), snapshot),
+        None => rezka_client::RezkaClient::new(client_config.clone()),
     }
     .map_err(|_| RunnerCompositionError::Client)?;
 
     Ok(PreparedRunnerSession {
         client,
+        client_config,
         credentials,
         probe,
         store,

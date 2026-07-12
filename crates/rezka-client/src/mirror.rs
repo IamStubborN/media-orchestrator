@@ -2,6 +2,7 @@ use url::Url;
 
 use crate::RezkaError;
 
+#[derive(Clone)]
 pub struct MirrorSet {
     origins: Vec<Url>,
     selected: usize,

@@ -28,6 +28,7 @@ pub mod validation;
 
 pub use validation::{ProbeResponse, SessionValidation, SessionValidationProbe};
 
+#[derive(Clone)]
 pub struct RezkaClientConfig {
     pub mirrors: MirrorSet,
     pub user_agent: String,

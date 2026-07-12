@@ -252,6 +252,9 @@ impl ConcreteSearchProvider {
         let mut state = state.lock().await;
         let prepared = &mut *state;
         prepared
+            .reload_session()
+            .map_err(|_| SearchError::Infrastructure)?;
+        prepared
             .client
             .ensure_authenticated(
                 prepared
