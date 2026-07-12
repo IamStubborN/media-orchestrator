@@ -124,6 +124,31 @@ async fn duplicate_event_id_does_not_duplicate_transition_event_or_outbox() {
         .len(),
         1,
     );
+    let notifications = query(
+        test_db.connection(),
+        "SELECT event_type, recipient, payload FROM notification_outbox",
+    )
+    .await;
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(
+        notifications[0]
+            .try_get::<String>("", "event_type")
+            .unwrap(),
+        "started"
+    );
+    assert_eq!(
+        notifications[0].try_get::<String>("", "recipient").unwrap(),
+        "primary"
+    );
+    let payload = notifications[0]
+        .try_get::<serde_json::Value>("", "payload")
+        .unwrap();
+    assert_eq!(
+        payload.as_object().unwrap().keys().collect::<Vec<_>>(),
+        vec!["message"]
+    );
+    assert!(!payload.to_string().contains("rezka"));
+    assert!(!payload.to_string().contains("http"));
 }
 
 #[tokio::test]

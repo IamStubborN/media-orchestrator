@@ -62,5 +62,10 @@ name = "readiness"
 path = "tests/readiness.rs"
 required-features = ["integration-tests"]
 
+[[test]]
+name = "tracking_notification_repository"
+path = "tests/tracking_notification_repository.rs"
+required-features = ["integration-tests"]
+
 [lints]
 workspace = true

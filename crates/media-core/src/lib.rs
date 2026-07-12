@@ -8,6 +8,7 @@ mod application;
 mod id;
 mod identity;
 mod job;
+mod notification;
 mod operation;
 mod orchestration;
 mod port;
@@ -33,6 +34,9 @@ pub use identity::{
 pub use job::{
     Job, JobLease, JobState, JobTransitionError, JobValidationError, MAX_RESULT_REF_BYTES, NewJob,
     NotifyScope, Provider, QueueStatus,
+};
+pub use notification::{
+    NotificationDelivery, NotificationEventType, NotificationRecipient, NotificationValidationError,
 };
 pub use operation::OperationKey;
 pub use orchestration::{
