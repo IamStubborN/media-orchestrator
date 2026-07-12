@@ -822,6 +822,22 @@ async fn replayed_completed_wrapper_stage_can_fail_and_requeue() {
             .await
             .unwrap();
     }
+    let replayed_stage = query(
+        test_db.connection(),
+        "SELECT state, attempt_count FROM job_stages WHERE name = 'execution'",
+    )
+    .await;
+    assert_eq!(
+        replayed_stage[0].try_get::<String>("", "state").unwrap(),
+        "running"
+    );
+    assert_eq!(
+        replayed_stage[0]
+            .try_get::<i32>("", "attempt_count")
+            .unwrap(),
+        1,
+        "successful Plex-pending replays must not consume failure attempts"
+    );
     let requeued = leases
         .report_event(
             operation_key(),

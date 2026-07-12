@@ -498,10 +498,12 @@ async fn start_stage(
              (id, task_id, name, ordinal, state, attempt_count, started_at) \
              VALUES ($1, $2, $3, $4, 'running', 1, now()) \
              ON CONFLICT (task_id, name) DO UPDATE SET state = 'running', \
-             attempt_count = job_stages.attempt_count + 1, completed_at = NULL, \
+             attempt_count = CASE WHEN job_stages.state = 'completed' \
+                 THEN job_stages.attempt_count ELSE job_stages.attempt_count + 1 END, \
+             completed_at = NULL, \
              started_at = COALESCE(job_stages.started_at, now()), updated_at = now() \
              WHERE job_stages.state IN ('pending', 'completed') \
-             AND job_stages.attempt_count < 3 \
+             AND (job_stages.state = 'completed' OR job_stages.attempt_count < 3) \
              AND job_stages.ordinal = EXCLUDED.ordinal RETURNING attempt_count",
             [
                 Uuid::new_v4().into(),
