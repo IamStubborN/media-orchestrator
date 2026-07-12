@@ -64,6 +64,7 @@ FROM runtime-common AS runner-packages
 RUN apt-get update && \
     apt-get install --yes --no-install-recommends \
       ffmpeg=7:5.1.9-0+deb12u1 \
+      intel-media-va-driver=23.1.1+dfsg1-1 \
       libva-drm2=2.17.0-1 \
       libva2=2.17.0-1 && \
     rm -rf /var/lib/apt/lists/*
