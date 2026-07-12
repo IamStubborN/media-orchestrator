@@ -11,6 +11,7 @@ mod lease;
 mod lifecycle;
 mod notification;
 mod plex;
+mod release;
 mod search;
 mod tracking;
 
@@ -28,6 +29,7 @@ pub use notification::{HermesDeliverOnlyWebhook, NotificationEventTypeDto};
 pub use plex::{
     PlexObservationDto, PlexReconcileRequest, PlexReconcileResponse, PlexReconcileStatus,
 };
+pub use release::*;
 pub use search::{
     ContinueSearchRequest, ExecutionSelectionDto, MAX_SEARCH_RESULTS_PER_PAGE, MediaKindDto,
     ProwlarrRankingDto, RezkaSessionRefreshRequest, RezkaTranslationDto, SearchPageDto,

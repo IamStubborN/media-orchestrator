@@ -20,6 +20,7 @@ fn help_keeps_existing_commands_and_exposes_runtime_commands() {
         "jobs",
         "queue",
         "tracking",
+        "release",
         "search",
         "download",
         "runner",

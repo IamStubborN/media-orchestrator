@@ -192,3 +192,32 @@ async fn search_renders_human_table_by_default() {
     assert!(rendered.contains("SEEDERS"));
     assert!(rendered.contains("More results: search prowlarr --continue session-1:5"));
 }
+
+#[tokio::test]
+async fn release_query_renders_next_episode_and_source() {
+    let router = Router::new().route(
+        "/v1/releases/query",
+        any(|| async {
+            json_response(
+                StatusCode::OK,
+                r#"{"status":"matched","source":"tvmaze","fetched_at":"2026-07-13T12:00:00Z","show":{"source_id":10,"title":"Severance","original_title":null,"year":2022,"lifecycle":"ongoing"},"precision":"date_time","lifecycle":"ongoing","released_episodes":19,"expected_episodes":20,"next_episode":{"source_id":200,"season":3,"episode":1,"title":"Future","air_at":"2027-01-01T14:00:00Z","precision":"date_time"},"schedule":[]}"#,
+            )
+        }),
+    );
+    let server = TestServer::start(router).await;
+    let token_file = SecretFile::new("cli-secret");
+
+    let output = command_output(command(
+        &server,
+        &token_file,
+        ["release", "--title", "Severance", "--year", "2022"],
+    ))
+    .await;
+    server.stop().await;
+
+    let rendered = stdout(&output);
+    assert!(rendered.contains("Severance"));
+    assert!(rendered.contains("S03E01"));
+    assert!(rendered.contains("tvmaze"));
+    assert!(rendered.contains("schedule metadata, not Rezka availability"));
+}

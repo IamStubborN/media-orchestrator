@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use media_contract::{
     ContinueSearchRequest, CreateJobRequest, CreateTrackingRequest, EpisodeSnapshotDto,
-    NotifyScopeDto, ProviderDto, SelectResultRequest, StartSearchRequest, TrackingScopeDto,
+    NotifyScopeDto, ProviderDto, ReleaseQueryRequest, SelectResultRequest, StartSearchRequest,
+    TrackingScopeDto,
 };
 use secrecy::{ExposeSecret, SecretString};
 
@@ -73,6 +74,14 @@ impl HttpClient {
     pub async fn queue_status(&self) -> Result<String, ClientError> {
         self.execute(self.request(reqwest::Method::GET, "v1/queue/status")?)
             .await
+    }
+
+    pub async fn query_release(&self, request: ReleaseQueryRequest) -> Result<String, ClientError> {
+        self.execute(
+            self.request(reqwest::Method::POST, "v1/releases/query")?
+                .json(&request),
+        )
+        .await
     }
 
     pub async fn add_tracking(

@@ -773,6 +773,18 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
         readiness,
     )
     .with_tracking(tracking)
+    .with_release_metadata(Arc::new(media_core::ReleaseMetadataService::new(Arc::new(
+        media_integrations::tvmaze::TvmazeClient::new(
+            media_integrations::tvmaze::TvmazeConfig::new(
+                config.tvmaze().base_url().clone(),
+                Duration::from_secs(15),
+                config.tvmaze().user_agent().to_owned(),
+                2,
+            )
+            .map_err(|_| ServiceError::Bootstrap)?,
+        )
+        .map_err(|_| ServiceError::Bootstrap)?,
+    ))))
     .with_lifecycle(Arc::new(RunnerLifecycleApplication::new(Arc::new(
         SeaOrmRunnerLifecycleStore::new(database.clone()),
     ))))

@@ -216,6 +216,73 @@ pub fn tracking_list(value: &Value) -> String {
     table(&columns, &rows)
 }
 
+#[must_use]
+pub fn release(value: &Value) -> String {
+    let source = get_str(value, "source").unwrap_or_else(|| "unknown".to_owned());
+    if get_str(value, "status").as_deref() == Some("choice_needed") {
+        let candidates = array(value, "candidates");
+        if candidates.is_empty() {
+            return format!("No release metadata match found ({source}).");
+        }
+        let rows = candidates
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| {
+                vec![
+                    Some((index + 1).to_string()),
+                    get_u64(candidate, "source_id").map(|id| id.to_string()),
+                    get_str(candidate, "title"),
+                    get_u64(candidate, "year").map(|year| year.to_string()),
+                    get_str(candidate, "lifecycle"),
+                ]
+            })
+            .collect::<Vec<_>>();
+        return format!(
+            "Release choice needed ({source})\n\n{}",
+            table(
+                &[
+                    Column::always("#"),
+                    Column::always("SOURCE ID"),
+                    Column::always("TITLE"),
+                    Column::optional("YEAR"),
+                    Column::optional("LIFECYCLE"),
+                ],
+                &rows
+            ),
+        );
+    }
+
+    let show = value.get("show").unwrap_or(&Value::Null);
+    let title = get_str(show, "title").unwrap_or_else(|| "<unknown>".to_owned());
+    let mut pairs = Vec::new();
+    push_pair(&mut pairs, "Source", Some(source));
+    push_pair(&mut pairs, "Lifecycle", get_str(value, "lifecycle"));
+    let counts = match (
+        get_u64(value, "released_episodes"),
+        get_u64(value, "expected_episodes"),
+    ) {
+        (Some(released), Some(expected)) => Some(format!("{released}/{expected}")),
+        (Some(released), None) => Some(released.to_string()),
+        _ => None,
+    };
+    push_pair(&mut pairs, "Released / expected", counts);
+    if let Some(next) = value.get("next_episode").filter(|next| !next.is_null()) {
+        let episode = match (get_u64(next, "season"), get_u64(next, "episode")) {
+            (Some(season), Some(episode)) => Some(format!(
+                "S{season:02}E{episode:02} {}",
+                get_str(next, "title").unwrap_or_default()
+            )),
+            _ => None,
+        };
+        push_pair(&mut pairs, "Next episode", episode);
+        push_pair(&mut pairs, "Air time", get_str(next, "air_at"));
+        push_pair(&mut pairs, "Precision", get_str(next, "precision"));
+    }
+    let mut output = key_value_block(&format!("Release schedule for {title}"), &pairs);
+    output.push_str("\n\nTVmaze provides schedule metadata, not Rezka availability.");
+    output
+}
+
 // --- Formatting primitives -------------------------------------------------
 
 /// A table column. `always` columns render even when every cell is empty;
@@ -418,7 +485,7 @@ fn array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
 
 #[cfg(test)]
 mod tests {
-    use super::{job, job_list, queue_status, search_page, tracking, tracking_list};
+    use super::{job, job_list, queue_status, release, search_page, tracking, tracking_list};
     use serde_json::json;
 
     #[test]
@@ -681,5 +748,34 @@ mod tests {
             "results": []
         }));
         assert!(rendered.ends_with("No results."));
+    }
+
+    #[test]
+    fn release_human_output_does_not_expand_full_schedule() {
+        let schedule = (1..=1_000)
+            .map(|episode| {
+                json!({
+                    "source_id": episode,
+                    "season": 1,
+                    "episode": episode,
+                    "title": format!("Episode {episode}"),
+                    "air_at": "2099-01-01",
+                    "precision": "date"
+                })
+            })
+            .collect::<Vec<_>>();
+        let rendered = release(&json!({
+            "status": "matched",
+            "source": "tvmaze",
+            "show": { "title": "Long Show" },
+            "lifecycle": "ongoing",
+            "released_episodes": 10,
+            "expected_episodes": 1000,
+            "next_episode": null,
+            "schedule": schedule
+        }));
+
+        assert!(rendered.len() < 500);
+        assert!(!rendered.contains("Episode 1000"));
     }
 }

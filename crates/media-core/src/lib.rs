@@ -14,6 +14,7 @@ mod notification;
 mod operation;
 mod orchestration;
 mod port;
+mod release;
 mod tracking;
 
 pub use action::NeedsActionReason;
@@ -54,6 +55,7 @@ pub use port::{
     ClientStore, IdentityStore, JobStore, LeaseStore, PortError, ReadinessPort,
     RunnerLifecycleStore,
 };
+pub use release::*;
 pub use tracking::{
     EpisodeDiscoveryPort, EpisodeSnapshot, EpisodeSnapshotError, NewTrackingCommand,
     NewTrackingSubscription, TrackingApplication, TrackingApplicationError, TrackingRunResult,

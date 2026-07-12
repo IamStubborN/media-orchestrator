@@ -1,15 +1,90 @@
 use media_contract::{
     CheckpointValueDto, CreateJobRequest, CreateTrackingRequest, EpisodeSnapshotDto, JobDetailDto,
     JobDto, JobStateDto, LeaseDto, NeedsActionReasonDto, NotifyScopeDto, ProviderDto, PublicId,
-    QueueStatusDto, RunnerEventDto, RunnerEventRequest, TrackingDto, TrackingScopeDto,
-    TrackingStateDto,
+    QueueStatusDto, ReleaseCandidateDto, ReleaseLifecycleDto, ReleasePrecisionDto,
+    ReleaseQueryResponse, RunnerEventDto, RunnerEventRequest, ScheduledEpisodeDto, TrackingDto,
+    TrackingScopeDto, TrackingStateDto,
 };
 use media_core::{
     CheckpointValue, EpisodeSnapshot, Job, JobDetail, JobEvent, JobEventId,
     JobEventValidationError, JobLease, JobState, NeedsActionReason, NewJobCommand,
-    NewTrackingCommand, NotifyScope, Provider, QueueStatus, TrackingScope, TrackingSubscription,
+    NewTrackingCommand, NotifyScope, Provider, QueueStatus, ReleaseCandidate, ReleaseLifecycle,
+    ReleaseMetadataResult, ReleasePrecision, ScheduledEpisode, TrackingScope, TrackingSubscription,
 };
 use time::format_description::well_known::Rfc3339;
+
+pub(crate) fn release_result(result: ReleaseMetadataResult) -> ReleaseQueryResponse {
+    match result {
+        ReleaseMetadataResult::Matched {
+            source,
+            fetched_at,
+            show,
+            precision,
+            lifecycle,
+            released_episodes,
+            expected_episodes,
+            next_episode,
+            schedule,
+        } => ReleaseQueryResponse::Matched {
+            source,
+            fetched_at,
+            show: release_candidate(show),
+            precision: release_precision(precision),
+            lifecycle: release_lifecycle(lifecycle),
+            released_episodes,
+            expected_episodes,
+            next_episode: next_episode.map(scheduled_episode),
+            schedule: schedule.into_iter().map(scheduled_episode).collect(),
+        },
+        ReleaseMetadataResult::ChoiceNeeded {
+            source,
+            fetched_at,
+            candidates,
+        } => ReleaseQueryResponse::ChoiceNeeded {
+            source,
+            fetched_at,
+            candidates: candidates.into_iter().map(release_candidate).collect(),
+        },
+    }
+}
+
+fn release_candidate(value: ReleaseCandidate) -> ReleaseCandidateDto {
+    ReleaseCandidateDto {
+        source_id: value.source_id,
+        title: value.title,
+        original_title: value.original_title,
+        year: value.year,
+        lifecycle: release_lifecycle(value.lifecycle),
+    }
+}
+
+fn scheduled_episode(value: ScheduledEpisode) -> ScheduledEpisodeDto {
+    ScheduledEpisodeDto {
+        source_id: value.source_id,
+        season: value.season,
+        episode: value.episode,
+        title: value.title,
+        air_at: value.air_at,
+        precision: release_precision(value.precision),
+    }
+}
+
+const fn release_lifecycle(value: ReleaseLifecycle) -> ReleaseLifecycleDto {
+    match value {
+        ReleaseLifecycle::Ongoing => ReleaseLifecycleDto::Ongoing,
+        ReleaseLifecycle::Ended => ReleaseLifecycleDto::Ended,
+        ReleaseLifecycle::Upcoming => ReleaseLifecycleDto::Upcoming,
+        ReleaseLifecycle::Unknown => ReleaseLifecycleDto::Unknown,
+    }
+}
+
+const fn release_precision(value: ReleasePrecision) -> ReleasePrecisionDto {
+    match value {
+        ReleasePrecision::Date => ReleasePrecisionDto::Date,
+        ReleasePrecision::DateTime => ReleasePrecisionDto::DateTime,
+        ReleasePrecision::Unknown => ReleasePrecisionDto::Unknown,
+    }
+}
 
 #[must_use]
 pub(crate) fn new_job_command(request: CreateJobRequest) -> NewJobCommand {

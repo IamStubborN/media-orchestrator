@@ -15,7 +15,7 @@ use std::{sync::Arc, time::Duration};
 use axum::{Router, extract::DefaultBodyLimit, middleware};
 use media_core::{
     ClientStore, JobApplication, LeaseApplication, MetricsSource, ReadinessPort,
-    RunnerLifecycleApplication, TrackingApplication,
+    ReleaseMetadataService, RunnerLifecycleApplication, TrackingApplication,
 };
 
 use crate::metrics::MetricsRecorder;
@@ -48,6 +48,7 @@ pub struct ApiState {
     pub(crate) operations: Arc<dyn OperationCompletionStore>,
     pub(crate) readiness: Arc<dyn ReadinessPort>,
     pub(crate) tracking: Option<Arc<TrackingApplication>>,
+    pub(crate) release_metadata: Option<Arc<ReleaseMetadataService>>,
     pub(crate) lifecycle: Option<Arc<RunnerLifecycleApplication>>,
     pub(crate) search: Arc<dyn SearchService>,
     pub(crate) plex: Arc<dyn PlexReconcileService>,
@@ -73,6 +74,7 @@ impl ApiState {
             operations,
             readiness,
             tracking: None,
+            release_metadata: None,
             lifecycle: None,
             search: Arc::new(search::UnavailableSearchService),
             plex: Arc::new(plex::UnavailablePlexService),
@@ -96,6 +98,17 @@ impl ApiState {
     pub fn with_tracking(mut self, tracking: Arc<TrackingApplication>) -> Self {
         self.tracking = Some(tracking);
         self
+    }
+
+    #[must_use]
+    pub fn with_release_metadata(mut self, release_metadata: Arc<ReleaseMetadataService>) -> Self {
+        self.release_metadata = Some(release_metadata);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn release_metadata(&self) -> Option<&ReleaseMetadataService> {
+        self.release_metadata.as_deref()
     }
 
     #[must_use]

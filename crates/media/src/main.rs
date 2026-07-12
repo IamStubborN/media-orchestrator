@@ -19,6 +19,7 @@ enum Command {
     Jobs(JobsArgs),
     Queue(QueueArgs),
     Tracking(TrackingArgs),
+    Release(ReleaseArgs),
     Search(SearchArgs),
     #[command(visible_alias = "select")]
     Download(DownloadArgs),
@@ -65,6 +66,18 @@ struct HealthcheckArgs {
 struct TrackingArgs {
     #[command(subcommand)]
     command: TrackingCommand,
+}
+
+#[derive(Debug, Args)]
+struct ReleaseArgs {
+    #[arg(long)]
+    title: String,
+    #[arg(long)]
+    original_title: Option<String>,
+    #[arg(long)]
+    year: Option<i32>,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -250,6 +263,7 @@ async fn run(cli: Cli) -> Result<(), RunError> {
         Command::Jobs(args) => run_jobs(args).await,
         Command::Queue(args) => run_queue(args).await,
         Command::Tracking(args) => run_tracking(args).await,
+        Command::Release(args) => run_release(args).await,
         Command::Search(args) => run_search(args).await,
         Command::Download(args) => run_download(args).await,
         Command::Rezka(args) => run_rezka(args).await,
@@ -353,6 +367,19 @@ async fn run_tracking(args: TrackingArgs) -> Result<(), RunError> {
             });
         }
     }
+    Ok(())
+}
+
+async fn run_release(args: ReleaseArgs) -> Result<(), RunError> {
+    let client = HttpClient::new(ClientConfig::load()?)?;
+    let output = client
+        .query_release(media_contract::ReleaseQueryRequest {
+            title: args.title,
+            original_title: args.original_title,
+            year: args.year,
+        })
+        .await?;
+    emit(&output, args.json, render::release);
     Ok(())
 }
 

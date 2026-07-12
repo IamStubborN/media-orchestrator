@@ -163,6 +163,17 @@ fn notification_webhooks_are_optional_but_both_hmac_secrets_are_atomic() {
 }
 
 #[test]
+fn server_config_uses_public_tvmaze_defaults_without_a_key() {
+    let config = ServerConfig::load_from(&FakeSource::valid_server()).unwrap();
+
+    assert_eq!(
+        config.tvmaze().base_url().as_str(),
+        "https://api.tvmaze.com/"
+    );
+    assert!(config.tvmaze().user_agent().contains("media-orchestrator"));
+}
+
+#[test]
 fn database_config_accepts_direct_environment_and_prefers_file_override() {
     let mut direct = FakeSource::default();
     direct.set_env("MEDIA_DATABASE_URL", "postgres://direct");

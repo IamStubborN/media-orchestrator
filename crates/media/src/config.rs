@@ -49,6 +49,8 @@ const CREDENTIAL_BROKER_PRIVATE_HTTP_HOSTS: &str =
 const PROWLARR_URL: &str = "MEDIA_PROWLARR_URL";
 const PROWLARR_API_KEY: &str = "MEDIA_PROWLARR_API_KEY";
 const PROWLARR_API_KEY_FILE: &str = "MEDIA_PROWLARR_API_KEY_FILE";
+const TVMAZE_URL: &str = "MEDIA_TVMAZE_URL";
+const TVMAZE_USER_AGENT: &str = "MEDIA_TVMAZE_USER_AGENT";
 const QBITTORRENT_URL: &str = "MEDIA_QBITTORRENT_URL";
 const QBITTORRENT_TV_CATEGORY: &str = "MEDIA_QBITTORRENT_TV_CATEGORY";
 const QBITTORRENT_MOVIES_CATEGORY: &str = "MEDIA_QBITTORRENT_MOVIES_CATEGORY";
@@ -70,6 +72,8 @@ const PLEX_TV_SECTION: &str = "MEDIA_PLEX_TV_SECTION";
 const PLEX_MOVIES_SECTION: &str = "MEDIA_PLEX_MOVIES_SECTION";
 const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:8080";
 const DEFAULT_REZKA_USER_AGENT: &str = "media-orchestrator/0.1 rezka-session";
+const DEFAULT_TVMAZE_URL: &str = "https://api.tvmaze.com/";
+const DEFAULT_TVMAZE_USER_AGENT: &str = "media-orchestrator/0.1 release-metadata";
 const DEFAULT_LEASE_TTL_SECONDS: i64 = 60;
 const DEFAULT_PRIMARY_WEBHOOK_URL: &str = "http://hermes-primary:8644/webhooks/media-notify";
 const DEFAULT_SECONDARY_WEBHOOK_URL: &str = "http://hermes-secondary:8644/webhooks/media-notify";
@@ -181,6 +185,7 @@ pub struct ServerConfig {
     notifications: Option<NotificationConfig>,
     rezka: Option<RezkaCompositionConfig>,
     prowlarr: Option<ProwlarrCompositionConfig>,
+    tvmaze: TvmazeCompositionConfig,
     plex: Option<PlexCompositionConfig>,
 }
 
@@ -223,6 +228,7 @@ impl ServerConfig {
             .var_os(PLEX_URL)
             .map(|_| load_plex_config(source))
             .transpose()?;
+        let tvmaze = load_tvmaze_config(source)?;
         Ok(Self {
             database_url: database.database_url,
             listen_addr,
@@ -244,6 +250,7 @@ impl ServerConfig {
             notifications: NotificationConfig::load_optional(source)?,
             rezka,
             prowlarr,
+            tvmaze,
             plex,
         })
     }
@@ -298,6 +305,11 @@ impl ServerConfig {
         self.prowlarr.as_ref()
     }
 
+    #[must_use]
+    pub const fn tvmaze(&self) -> &TvmazeCompositionConfig {
+        &self.tvmaze
+    }
+
     pub const fn plex(&self) -> Option<&PlexCompositionConfig> {
         self.plex.as_ref()
     }
@@ -320,6 +332,7 @@ impl std::fmt::Debug for ServerConfig {
             )
             .field("rezka", &self.rezka.as_ref().map(|_| "[REDACTED]"))
             .field("prowlarr", &self.prowlarr.as_ref().map(|_| "[REDACTED]"))
+            .field("tvmaze", &self.tvmaze)
             .field("plex", &self.plex.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
@@ -559,6 +572,30 @@ pub struct ProwlarrCompositionConfig {
     api_key: SecretString,
 }
 
+pub struct TvmazeCompositionConfig {
+    base_url: url::Url,
+    user_agent: String,
+}
+
+impl TvmazeCompositionConfig {
+    pub const fn base_url(&self) -> &url::Url {
+        &self.base_url
+    }
+    pub fn user_agent(&self) -> &str {
+        &self.user_agent
+    }
+}
+
+impl std::fmt::Debug for TvmazeCompositionConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TvmazeCompositionConfig")
+            .field("base_url", &self.base_url)
+            .field("user_agent", &self.user_agent)
+            .finish()
+    }
+}
+
 impl ProwlarrCompositionConfig {
     #[must_use]
     pub const fn base_url(&self) -> &url::Url {
@@ -659,6 +696,33 @@ fn load_prowlarr_config(
             PROWLARR_API_KEY_FILE,
             SecretKind::Token,
         )?,
+    })
+}
+
+fn load_tvmaze_config(source: &impl ConfigSource) -> Result<TvmazeCompositionConfig, ConfigError> {
+    let value =
+        optional_environment(source, TVMAZE_URL)?.unwrap_or_else(|| DEFAULT_TVMAZE_URL.to_owned());
+    let base_url = value
+        .parse::<url::Url>()
+        .map_err(|_| ConfigError::InvalidEnvironment { name: TVMAZE_URL })?;
+    if base_url.host_str().is_none()
+        || !base_url.username().is_empty()
+        || base_url.password().is_some()
+        || base_url.query().is_some()
+        || base_url.fragment().is_some()
+    {
+        return Err(ConfigError::InvalidEnvironment { name: TVMAZE_URL });
+    }
+    let user_agent = optional_environment(source, TVMAZE_USER_AGENT)?
+        .unwrap_or_else(|| DEFAULT_TVMAZE_USER_AGENT.to_owned());
+    if user_agent.trim().is_empty() {
+        return Err(ConfigError::InvalidEnvironment {
+            name: TVMAZE_USER_AGENT,
+        });
+    }
+    Ok(TvmazeCompositionConfig {
+        base_url,
+        user_agent,
     })
 }
 
