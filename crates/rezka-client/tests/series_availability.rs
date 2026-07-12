@@ -229,3 +229,42 @@ async fn movie_selection_is_rejected_without_network() {
         .unwrap_err();
     assert_eq!(error.code(), RezkaErrorCode::TranslationUnavailable);
 }
+
+#[tokio::test]
+async fn series_availability_fails_over_to_the_next_mirror() {
+    let first = MockServer::start().await;
+    let first_origin = Url::parse(&first.uri()).unwrap();
+    Mock::given(method("POST"))
+        .and(path("/ajax/get_cdn_series/"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&first)
+        .await;
+
+    let second = MockServer::start().await;
+    let second_origin = Url::parse(&second.uri()).unwrap();
+    Mock::given(method("POST"))
+        .and(path("/ajax/get_cdn_series/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(include_str!("fixtures/episodes_success.json")),
+        )
+        .expect(1)
+        .mount(&second)
+        .await;
+
+    let config = RezkaClientConfig {
+        mirrors: MirrorSet::new(vec![first_origin, second_origin]).unwrap(),
+        user_agent: "media-orchestrator-test".to_owned(),
+        request_timeout: Duration::seconds(2),
+        max_retries: 1,
+        anubis_max_nonce: 1,
+    };
+    let mut client = RezkaClient::new(config).unwrap();
+
+    let availability = client
+        .series_availability(&selected_series())
+        .await
+        .unwrap();
+    assert_eq!(availability.seasons().len(), 2);
+}

@@ -121,7 +121,7 @@ struct ExpensiveChallenge;
 impl Respond for ExpensiveChallenge {
     fn respond(&self, _request: &Request) -> ResponseTemplate {
         ResponseTemplate::new(200).set_body_string(
-            r#"<script id="anubis_challenge">{"challenge":{"id":"expensive","randomData":"deliberately-expensive-proof"},"rules":{"difficulty":32}}</script>"#,
+            r#"<script id="anubis_challenge">{"challenge":{"id":"expensive","randomData":"deliberately-expensive-proof"},"rules":{"difficulty":8}}</script>"#,
         )
     }
 }

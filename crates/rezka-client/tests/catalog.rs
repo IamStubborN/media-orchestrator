@@ -169,6 +169,22 @@ fn fixture_page_preserves_provider_order_and_normalizes_display_fields() {
 }
 
 #[test]
+fn invalid_optional_thumbnail_degrades_to_none_without_failing_the_page() {
+    let html = r#"<div class="b-content__inline_items">
+        <div class="b-content__inline_item">
+          <div class="b-content__inline_item-link"><a href="/films/1-title.html">Title</a></div>
+          <img src="http://images.example.invalid/posters/1.jpg" alt="poster">
+        </div>
+    </div>"#;
+
+    let page = parse_catalog_page(html, &query(), &origin()).unwrap();
+
+    assert_eq!(page.entries().len(), 1);
+    assert_eq!(page.entries()[0].title(), "Title");
+    assert!(page.entries()[0].thumbnail().is_none());
+}
+
+#[test]
 fn empty_fixture_is_a_valid_empty_catalog_page() {
     let page = parse_catalog_page(
         include_str!("fixtures/catalog_empty.html"),

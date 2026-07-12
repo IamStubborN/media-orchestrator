@@ -372,7 +372,7 @@ impl RezkaClient {
         ];
         let response = self
             .transport_mut()
-            .post_form_first(endpoint, Some(referer), &form)
+            .post_form_with_failover(endpoint, Some(referer), &form)
             .await?;
         parser::parse_series_availability(&response.body, selection.clone())
     }

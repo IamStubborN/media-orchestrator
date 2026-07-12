@@ -131,7 +131,9 @@ pub fn parse_stream_variants(payload: &str) -> Result<Vec<StreamVariant>, RezkaE
             .get(close + 1..)
             .ok_or_else(|| invalid_playback("stream alternatives missing"))?;
         let quality = normalize_quality(raw_label)?;
-        let endpoints = parse_endpoints(alternatives)?;
+        let Some(endpoints) = parse_endpoints(alternatives)? else {
+            continue;
+        };
 
         if let Some(existing) = variants.iter_mut().find(|variant| {
             variant.advertised_quality.label == quality.label
@@ -200,7 +202,10 @@ fn decode_stream_payload(payload: &str) -> Result<String, RezkaError> {
     for part in parts {
         let salt_len = known_salt_prefix_len(part).or_else(|| (part.len() >= 16).then_some(16));
         let salt_len = salt_len.ok_or_else(|| invalid_playback("stream salt is malformed"))?;
-        cleaned.push_str(&part[salt_len..]);
+        let payload = part
+            .get(salt_len..)
+            .ok_or_else(|| invalid_playback("stream salt is malformed"))?;
+        cleaned.push_str(payload);
         if cleaned.len() > MAX_STREAM_PAYLOAD_BYTES {
             return Err(invalid_playback("stream payload exceeds limit"));
         }
@@ -276,7 +281,10 @@ fn normalize_quality(raw: &str) -> Result<AdvertisedQuality, RezkaError> {
     })
 }
 
-fn parse_endpoints(alternatives: &str) -> Result<Vec<StreamEndpoint>, RezkaError> {
+// Returns `Ok(None)` when a variant carries a non-public or insecure stream URL: such a variant is
+// skipped so a single degraded alternative does not fail the whole manifest. Structural malformation
+// (bad separators, unknown endpoint kinds, exceeded budgets) still fails with `Err`.
+fn parse_endpoints(alternatives: &str) -> Result<Option<Vec<StreamEndpoint>>, RezkaError> {
     let raw = alternatives
         .split(" or ")
         .map(str::trim)
@@ -311,10 +319,11 @@ fn parse_endpoints(alternatives: &str) -> Result<Vec<StreamEndpoint>, RezkaError
         } else {
             return Err(invalid_playback("stream endpoint kind is invalid"));
         };
-        let endpoint = StreamEndpoint {
-            kind,
-            url: SecretMediaUrl::new(url)?,
+        let url = match SecretMediaUrl::new(url) {
+            Ok(url) => url,
+            Err(_) => return Ok(None),
         };
+        let endpoint = StreamEndpoint { kind, url };
         if !contains_endpoint(&endpoints, &endpoint) {
             endpoints.push(endpoint);
         }
@@ -326,7 +335,7 @@ fn parse_endpoints(alternatives: &str) -> Result<Vec<StreamEndpoint>, RezkaError
         StreamKind::Hls => 0,
         StreamKind::Mp4 => 1,
     });
-    Ok(endpoints)
+    Ok(Some(endpoints))
 }
 
 fn contains_endpoint(endpoints: &[StreamEndpoint], candidate: &StreamEndpoint) -> bool {

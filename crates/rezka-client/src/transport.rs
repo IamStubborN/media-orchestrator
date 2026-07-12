@@ -62,6 +62,10 @@ pub struct Transport {
     mirrors: MirrorSet,
     jar: SessionJar,
     max_retries: u8,
+    // Set when a failover replaces the jar with an empty one bound to a new origin, and cleared once
+    // any request on the selected origin succeeds. While set, the current empty jar is a transient
+    // failover artifact, so exporting it would overwrite a previously persisted session with nothing.
+    session_reset_by_failover: bool,
 }
 
 #[derive(Copy, Clone)]
@@ -119,6 +123,7 @@ impl Transport {
             mirrors,
             jar,
             max_retries,
+            session_reset_by_failover: false,
         })
     }
 
@@ -250,6 +255,7 @@ impl Transport {
                         return Err(failure.error);
                     }
                     self.jar = SessionJar::bound_empty(self.mirrors.selected_origin())?;
+                    self.session_reset_by_failover = true;
                 }
                 Err(failure) => {
                     self.mirrors.promote_selected();
@@ -318,6 +324,14 @@ impl Transport {
     }
 
     pub fn export_session(&self) -> Result<SessionSnapshot, RezkaError> {
+        if self.session_reset_by_failover {
+            // A failover discarded the previous origin's jar and no later request re-established a
+            // session, so the current jar is empty. Refuse to export it rather than let a caller
+            // overwrite a previously persisted, still-valid snapshot with an empty one.
+            return Err(RezkaError::Transport {
+                context: sanitize_provider_text("session reset by failover; snapshot preserved"),
+            });
+        }
         self.jar.export()
     }
 
@@ -349,7 +363,10 @@ impl Transport {
             eligible: eligible_request_failure(&error),
             error: transport_error(),
         })?;
-        self.process_response(response, status_policy).await
+        let response = self.process_response(response, status_policy).await?;
+        // The selected origin answered: its jar state is now authoritative and safe to export.
+        self.session_reset_by_failover = false;
+        Ok(response)
     }
 
     async fn process_response(

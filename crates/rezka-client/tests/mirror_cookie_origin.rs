@@ -569,6 +569,51 @@ async fn terminal_full_failover_promotes_last_attempt_for_the_next_operation() {
     assert!(!restored.contains_cookie_for_url(&third_origin, "C_session"));
 }
 
+#[tokio::test]
+async fn failed_failover_refuses_to_export_an_empty_session_over_a_saved_one() {
+    use rezka_client::transport::Transport;
+    use std::net::TcpListener;
+    use time::Duration;
+
+    let first_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let first_origin =
+        Url::parse(&format!("http://{}", first_listener.local_addr().unwrap())).unwrap();
+    drop(first_listener);
+    let second_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let second_origin =
+        Url::parse(&format!("http://{}", second_listener.local_addr().unwrap())).unwrap();
+    drop(second_listener);
+
+    let mut jar = SessionJar::empty();
+    jar.store_response_cookies(["auth_session=valid; Path=/"].into_iter(), &first_origin);
+    let snapshot = jar.export().unwrap();
+    assert!(
+        SessionJar::import(&snapshot)
+            .unwrap()
+            .contains_cookie_for_url(&first_origin, "auth_session")
+    );
+
+    let mut transport = Transport::from_snapshot(
+        MirrorSet::new(vec![first_origin.clone(), second_origin]).unwrap(),
+        &snapshot,
+        "media-orchestrator-test".to_owned(),
+        Duration::seconds(2),
+        1,
+    )
+    .unwrap();
+
+    let error = transport
+        .get_first_with_failover(first_origin.join("/account/probe").unwrap(), None)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), rezka_client::RezkaErrorCode::Transport);
+
+    // Both mirrors were unreachable, so failover reset the jar to empty. Exporting must be refused
+    // so the caller keeps the previously persisted, still-valid snapshot rather than overwriting it
+    // with nothing.
+    assert!(transport.export_session().is_err());
+}
+
 #[test]
 fn snapshot_origin_absent_from_configured_mirrors_fails_closed() {
     use rezka_client::session::{RezkaClient, RezkaClientConfig};

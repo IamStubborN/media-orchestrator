@@ -15,6 +15,10 @@ use crate::{
 const CHALLENGE_SELECTOR: &str = "#anubis_challenge";
 const PASS_CHALLENGE_PATH: &str = "/.within.website/x/cmd/anubis/api/pass-challenge";
 const MAX_DIFFICULTY: u8 = 32;
+// Real Anubis deployments use tiny difficulties; a low parse-time ceiling rejects an unreachable
+// challenge before it forces a full 0..=max_nonce SHA-256 sweep. `MAX_DIFFICULTY` stays as the
+// solver's secondary bound.
+const MAX_ACCEPTED_DIFFICULTY: u8 = 8;
 // Provider values are short opaque tokens; generous caps bound retained state and per-nonce hashing.
 const MAX_CHALLENGE_ID_BYTES: usize = 1_024;
 const MAX_RANDOM_DATA_BYTES: usize = 4_096;
@@ -99,7 +103,7 @@ pub(crate) fn parse_optional_challenge(html: &str) -> Result<Option<AnubisChalle
         || parsed.challenge.random_data.trim().is_empty()
         || parsed.challenge.id.len() > MAX_CHALLENGE_ID_BYTES
         || parsed.challenge.random_data.len() > MAX_RANDOM_DATA_BYTES
-        || !(1..=MAX_DIFFICULTY).contains(&parsed.rules.difficulty)
+        || !(1..=MAX_ACCEPTED_DIFFICULTY).contains(&parsed.rules.difficulty)
     {
         return Err(invalid_challenge("challenge fields invalid"));
     }

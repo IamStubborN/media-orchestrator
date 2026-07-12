@@ -69,6 +69,35 @@ fn decoder_enforces_marker_and_decoded_size_budgets() {
 }
 
 #[test]
+fn multibyte_salt_boundary_is_rejected_without_panicking() {
+    // The fixed-length salt fallback strips 16 bytes; when byte 16 of provider-controlled salt text
+    // is a UTF-8 continuation byte, a hard slice would panic. A checked slice must return an error.
+    let plain = include_str!("fixtures/stream_plain.txt").trim();
+    let encoded = STANDARD.encode(plain);
+    let midpoint = encoded.len() / 2;
+    let salt = format!("{}\u{e9}", "a".repeat(15)); // 15 ASCII bytes then 'é' (0xC3 0xA9)
+    let payload = format!(
+        "#h{}//_//{salt}{}",
+        &encoded[..midpoint],
+        &encoded[midpoint..]
+    );
+    assert_invalid(&payload);
+}
+
+#[test]
+fn insecure_variant_is_skipped_while_valid_variants_survive() {
+    let variants = parse_stream_variants(
+        "[720p]https://cdn.example.com/valid.mp4,[1080p]http://cdn.example.com/insecure.mp4",
+    )
+    .unwrap();
+    assert_eq!(variants.len(), 1);
+    assert_eq!(variants[0].advertised_quality().label(), "720p");
+
+    // A manifest whose every variant URL fails validation still fails as a whole.
+    assert_invalid("[1080p]http://cdn.example.com/insecure.mp4");
+}
+
+#[test]
 fn endpoint_classification_is_strict_ordered_and_duplicate_aware() {
     let modern = parse_stream_variants(
         "[720p]https://cdn.example.com/a.mp4:hls:manifest.m3u8 or https://cdn.example.com/a.mp4 or https://cdn.example.com/a.mp4",

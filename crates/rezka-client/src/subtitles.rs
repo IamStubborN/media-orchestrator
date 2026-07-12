@@ -109,7 +109,7 @@ fn parse_listing(
         return Ok(Vec::new());
     }
     let mut tracks = Vec::new();
-    for entry in listing.split(',') {
+    'tracks: for entry in listing.split(',') {
         let close = entry
             .find(']')
             .ok_or_else(|| invalid_playback("subtitle track is malformed"))?;
@@ -134,7 +134,12 @@ fn parse_listing(
                 existing.with_url(|left| left.as_str() == url.as_str())
             });
             if !duplicate {
-                alternatives.push(SecretSubtitleUrl::new(url)?);
+                // A non-public or insecure subtitle URL degrades the whole track: skip it and keep
+                // the remaining tracks rather than failing the entire manifest.
+                match SecretSubtitleUrl::new(url) {
+                    Ok(alternative) => alternatives.push(alternative),
+                    Err(_) => continue 'tracks,
+                }
             }
             if alternatives.len() > MAX_ALTERNATIVES_PER_TRACK {
                 return Err(invalid_playback("subtitle alternative limit exceeded"));

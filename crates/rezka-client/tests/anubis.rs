@@ -82,19 +82,25 @@ fn rejects_empty_values_and_out_of_range_difficulties_without_raw_json() {
         r#"{"challenge":{"id":"","randomData":"secret-random-data"},"rules":{"difficulty":3}}"#,
         r#"{"challenge":{"id":"secret-id","randomData":""},"rules":{"difficulty":3}}"#,
         r#"{"challenge":{"id":"secret-id","randomData":"secret-random-data"},"rules":{"difficulty":0}}"#,
+        r#"{"challenge":{"id":"secret-id","randomData":"secret-random-data"},"rules":{"difficulty":9}}"#,
         r#"{"challenge":{"id":"secret-id","randomData":"secret-random-data"},"rules":{"difficulty":33}}"#,
     ] {
         let html = format!(r#"<script id="anubis_challenge">{raw_json}</script>"#);
         let error = parse_challenge(&html).unwrap_err();
         let rendered = format!("{error:?}: {error}");
 
+        assert_eq!(
+            error.code(),
+            rezka_client::RezkaErrorCode::ProviderResponseInvalid
+        );
         assert!(!rendered.contains(raw_json));
         assert!(!rendered.contains("secret-id"));
         assert!(!rendered.contains("secret-random-data"));
     }
 
-    let upper_bound = r#"<script id="anubis_challenge">{"challenge":{"id":"id","randomData":"data"},"rules":{"difficulty":32}}</script>"#;
-    assert_eq!(parse_challenge(upper_bound).unwrap().difficulty, 32);
+    // Real Anubis difficulties are tiny; the accepted ceiling is 8 and rejects unreachable work.
+    let upper_bound = r#"<script id="anubis_challenge">{"challenge":{"id":"id","randomData":"data"},"rules":{"difficulty":8}}</script>"#;
+    assert_eq!(parse_challenge(upper_bound).unwrap().difficulty, 8);
 }
 
 #[test]

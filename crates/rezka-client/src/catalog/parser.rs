@@ -506,9 +506,9 @@ fn parse_title_thumbnail(
                 .next()
                 .and_then(|element| element.attr("src"))
         });
-    source
-        .map(|source| parse_thumbnail(source, selected_origin))
-        .transpose()
+    // Thumbnails are optional: a non-public or malformed cover URL degrades to None rather than
+    // failing the whole title page.
+    Ok(source.and_then(|source| parse_thumbnail(source, selected_origin).ok()))
 }
 
 fn required_element_text(
@@ -584,12 +584,13 @@ fn parse_entry(
         .map(|element| normalized_text(element.text()))
         .transpose()?
         .flatten();
+    // Thumbnails are optional: a non-public or malformed poster URL degrades to None rather than
+    // failing the whole catalog page.
     let thumbnail = item
         .select(image_selector)
         .next()
         .and_then(|image| image.attr("src"))
-        .map(|source| parse_thumbnail(source, selected_origin))
-        .transpose()?;
+        .and_then(|source| parse_thumbnail(source, selected_origin).ok());
 
     Ok(CatalogEntry::new(
         TitleLocator::new(href)?,

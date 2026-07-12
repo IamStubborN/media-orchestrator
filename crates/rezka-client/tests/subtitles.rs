@@ -41,9 +41,28 @@ fn duplicate_labels_and_languages_keep_distinct_ordinal_identity() {
 }
 
 #[test]
+fn track_with_an_insecure_alternative_is_skipped_while_valid_tracks_survive() {
+    let tracks = parse_subtitle_fields(
+        r#"{"subtitle":"[English]https://sub.example.com/a.vtt or http://sub.example.com/b.vtt,[Spanish]https://sub.example.com/c.vtt","subtitle_lns":{}}"#,
+    )
+    .unwrap();
+    assert_eq!(tracks.len(), 1);
+    assert_eq!(tracks[0].id().provider_label(), "Spanish");
+    assert_eq!(tracks[0].id().ordinal(), 0);
+
+    // When every track carries an invalid URL, the whole listing degrades to no tracks.
+    assert!(
+        parse_subtitle_fields(
+            r#"{"subtitle":"[English]http://sub.example.com/b.vtt","subtitle_lns":{}}"#,
+        )
+        .unwrap()
+        .is_empty()
+    );
+}
+
+#[test]
 fn malformed_alternatives_languages_and_duplicate_json_keys_fail_atomically() {
     for wrapper in [
-        r#"{"subtitle":"[English]https://sub.example.com/a.vtt or http://sub.example.com/b.vtt","subtitle_lns":{}}"#,
         r#"{"subtitle":"[English]https://sub.example.com/a.vtt","subtitle_lns":{"English":"-en"}}"#,
         r#"{"subtitle":"[English]https://sub.example.com/a.vtt","subtitle_lns":{"English":"en","English":"fr"}}"#,
         r#"{"subtitle":"","subtitle":"","subtitle_lns":{}}"#,
