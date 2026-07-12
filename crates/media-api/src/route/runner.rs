@@ -1,5 +1,6 @@
 use axum::{
     Json, Router,
+    body::to_bytes,
     extract::{Extension, Path, Request, State},
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -9,7 +10,10 @@ use media_contract::{PlexReconcileRequest, RunnerEventRequest, RunnerEventRespon
 use media_core::{Actor, ApplicationError, LeaseId};
 use serde::Deserialize;
 
-use crate::{ApiError, ApiState, PlexServiceError, RequestId, SearchError, convert, idempotency};
+use crate::{
+    ApiError, ApiState, MAX_REQUEST_BODY_BYTES, PlexServiceError, RequestId, SearchError, convert,
+    idempotency,
+};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,11 +31,22 @@ async fn reconcile_plex(
     State(state): State<ApiState>,
     Extension(actor): Extension<Actor>,
     Extension(request_id): Extension<RequestId>,
-    Json(request): Json<PlexReconcileRequest>,
+    request: Request,
 ) -> Response {
+    // Authorize before touching the body so a non-runner is rejected regardless of payload shape.
     if actor.require_runner().is_err() {
         return ApiError::forbidden(&request_id, "operation is forbidden").into_response();
     }
+    let body = match to_bytes(request.into_body(), MAX_REQUEST_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(_) => {
+            return ApiError::invalid_request(&request_id, "Plex request is invalid")
+                .into_response();
+        }
+    };
+    let Ok(request) = serde_json::from_slice::<PlexReconcileRequest>(&body) else {
+        return ApiError::invalid_request(&request_id, "Plex request is invalid").into_response();
+    };
     match state.plex().reconcile(request).await {
         Ok(response) => Json(response).into_response(),
         Err(PlexServiceError::InvalidRequest) => {

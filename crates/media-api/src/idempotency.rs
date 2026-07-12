@@ -291,7 +291,10 @@ where
         return ApiError::internal(&request_id).into_response();
     };
 
-    if response.status().is_server_error() {
+    if !response.status().is_success() {
+        // Only 2xx responses are durable idempotent outcomes. Any non-2xx (5xx, but also transient
+        // 409/404) aborts the reservation so a client retrying the same key re-executes instead of
+        // being pinned to a stale error forever.
         if state
             .idempotency()
             .abort_in_progress(&handle)

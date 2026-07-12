@@ -315,7 +315,7 @@ async fn every_post_requires_a_valid_visible_ascii_idempotency_key() {
 }
 
 #[tokio::test]
-async fn deterministic_client_error_is_persisted_and_replayed_exactly() {
+async fn client_error_is_not_persisted_and_reexecutes_on_retry() {
     let jobs = FakeJobStore::default();
     let app = app(jobs.clone());
     let invalid = r#"{"provider":"rezka","result_ref":"selection","notify_scope":"initiator","owner_id":"spoof"}"#;
@@ -324,18 +324,18 @@ async fn deterministic_client_error_is_persisted_and_replayed_exactly() {
         .oneshot(request("stored-400", invalid, "stored-error"))
         .await
         .unwrap();
-    let first_status = first.status();
-    let first_content_type = first.headers()[header::CONTENT_TYPE].clone();
-    let first_body = body_bytes(first).await;
+    assert_eq!(first.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(first.headers()["x-request-id"], "stored-error");
 
-    let replay = app
+    // Only 2xx outcomes are durable. The client error aborted its reservation, so the same key
+    // re-executes and answers with the retry's own request id instead of replaying the first error.
+    let retry = app
         .oneshot(request("stored-400", invalid, "different-request-id"))
         .await
         .unwrap();
-    assert_eq!(replay.status(), first_status);
-    assert_eq!(replay.headers()[header::CONTENT_TYPE], first_content_type);
-    assert_eq!(replay.headers()["x-request-id"], "stored-error");
-    assert_eq!(body_bytes(replay).await, first_body);
+    assert_eq!(retry.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(retry.headers()["x-request-id"], "different-request-id");
+    assert_eq!(error(retry).await.request_id, "different-request-id");
     assert_eq!(jobs.create_calls(), 0);
 }
 

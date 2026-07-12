@@ -337,3 +337,40 @@ async fn runner_reconciles_plex_but_user_cannot_call_the_runner_port() {
         .unwrap();
     assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn plex_reconcile_authorizes_before_body_and_shapes_malformed_body_as_api_error() {
+    let malformed = "{ this is not valid json";
+
+    // A non-runner with a malformed body is rejected as forbidden before the body is parsed.
+    let non_runner = app_with_plex()
+        .oneshot(post(
+            "/v1/runner/plex/reconcile",
+            VALID_TOKEN,
+            "plex-malformed-user",
+            "plex-malformed-user-request",
+            Body::from(malformed),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(non_runner.status(), StatusCode::FORBIDDEN);
+    let body = error(non_runner).await;
+    assert_eq!(body.code, ApiErrorCode::Forbidden);
+    assert_eq!(body.request_id, "plex-malformed-user-request");
+
+    // A runner with a malformed body gets the stable ApiError contract, not an axum JSON rejection.
+    let runner_malformed = app_with_plex()
+        .oneshot(post(
+            "/v1/runner/plex/reconcile",
+            RUNNER_TOKEN,
+            "plex-malformed-runner",
+            "plex-malformed-runner-request",
+            Body::from(malformed),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(runner_malformed.status(), StatusCode::BAD_REQUEST);
+    let body = error(runner_malformed).await;
+    assert_eq!(body.code, ApiErrorCode::InvalidRequest);
+    assert_eq!(body.request_id, "plex-malformed-runner-request");
+}
