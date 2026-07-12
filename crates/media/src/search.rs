@@ -923,7 +923,7 @@ impl SearchService for DurableSearchService {
         let offset = offset
             .parse::<usize>()
             .map_err(|_| SearchError::InvalidRequest)?;
-        if offset == 0 || !offset.is_multiple_of(MAX_SEARCH_RESULTS_PER_PAGE) {
+        if offset == 0 {
             return Err(SearchError::InvalidRequest);
         }
         let session = self

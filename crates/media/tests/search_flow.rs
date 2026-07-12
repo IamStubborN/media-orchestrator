@@ -341,6 +341,41 @@ async fn prowlarr_paginates_five_and_runner_gets_only_the_exact_selected_result(
 }
 
 #[tokio::test]
+async fn prowlarr_continues_after_a_partially_usable_provider_page() {
+    let service = service(HashMap::from([(
+        ProviderDto::Prowlarr,
+        vec![
+            ProviderPage {
+                results: (0..4).map(prowlarr_result).collect(),
+                provider_continuation: Some("5".to_owned()),
+            },
+            ProviderPage {
+                results: vec![prowlarr_result(4)],
+                provider_continuation: None,
+            },
+        ],
+    )]));
+
+    let first = service
+        .start(PRIMARY_USER_ID, request(ProviderDto::Prowlarr))
+        .await
+        .unwrap();
+    assert_eq!(first.results.len(), 4);
+    let second = service
+        .continue_search(
+            PRIMARY_USER_ID,
+            ContinueSearchRequest {
+                continuation: first.continuation.unwrap(),
+                scope: telegram_scope("default", None),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.results.len(), 1);
+    assert_eq!(second.results[0].result_id(), "torrent-4");
+}
+
+#[tokio::test]
 async fn search_session_rejects_the_same_owner_from_another_chat_or_thread() {
     let mut start = request(ProviderDto::Prowlarr);
     start.scope = telegram_scope("chat-a", Some("thread-a"));
