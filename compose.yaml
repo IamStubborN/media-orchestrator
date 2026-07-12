@@ -1,0 +1,111 @@
+name: media-orchestrator
+
+x-runtime-security: &runtime-security
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+
+services:
+  postgres:
+    image: ${MEDIA_POSTGRES_IMAGE:-postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193}
+    environment:
+      POSTGRES_DB: media_orchestrator
+      POSTGRES_USER: media
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+    secrets: [postgres-password]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U media -d media_orchestrator]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    <<: *runtime-security
+    image: ${MEDIA_SERVICE_IMAGE:-media-orchestrator-service:local}
+    command: [migrate]
+    environment:
+      MEDIA_DATABASE_URL_FILE: /run/secrets/database-url
+    secrets: [database-url]
+    networks: [backend]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: no
+
+  service:
+    <<: *runtime-security
+    image: ${MEDIA_SERVICE_IMAGE:-media-orchestrator-service:local}
+    environment:
+      MEDIA_DATABASE_URL_FILE: /run/secrets/database-url
+      MEDIA_PRIMARY_TOKEN_FILE: /run/secrets/primary-token
+      MEDIA_SECONDARY_TOKEN_FILE: /run/secrets/secondary-token
+      MEDIA_RUNNER_TOKEN_FILE: /run/secrets/runner-token
+      MEDIA_LISTEN_ADDR: 0.0.0.0:8080
+    secrets: [database-url, primary-token, secondary-token, runner-token]
+    networks: [backend]
+    ports:
+      - ${MEDIA_BIND_ADDRESS:-127.0.0.1}:${MEDIA_PORT:-8080}:8080
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  runner:
+    <<: *runtime-security
+    profiles: [runner]
+    image: ${MEDIA_RUNNER_IMAGE:-media-orchestrator-runner:local}
+    environment:
+      MEDIA_SERVICE_URL: http://service:8080
+      MEDIA_TOKEN_FILE: /run/secrets/runner-token
+      MEDIA_REZKA_MIRRORS: ${MEDIA_REZKA_MIRRORS:-https://rezka.example.invalid}
+      MEDIA_REZKA_SESSION_PROBE_URL: ${MEDIA_REZKA_SESSION_PROBE_URL:-https://rezka.example.invalid/}
+      MEDIA_REZKA_SESSION_VALID_MARKERS_JSON: ${MEDIA_REZKA_SESSION_VALID_MARKERS_JSON:-["logout"]}
+      MEDIA_REZKA_SESSION_INVALID_MARKERS_JSON: ${MEDIA_REZKA_SESSION_INVALID_MARKERS_JSON:-["login"]}
+      MEDIA_REZKA_USERNAME_FILE: /run/secrets/rezka-username
+      MEDIA_REZKA_PASSWORD_FILE: /run/secrets/rezka-password
+      MEDIA_REZKA_COOKIE_KEY_FILE: /run/secrets/rezka-cookie-key
+      MEDIA_REZKA_SESSION_STORE_FILE: /var/lib/media/rezka-session.bin
+    secrets: [runner-token, rezka-username, rezka-password, rezka-cookie-key]
+    volumes:
+      - runner-state:/var/lib/media
+      - ${MEDIA_LIBRARY_ROOT:-./.local/media}:/media
+    devices:
+      - ${MEDIA_DRI_DEVICE:-/dev/dri}:/dev/dri
+    networks: [backend, runner-egress]
+    depends_on:
+      service:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  backend:
+    internal: true
+  runner-egress: {}
+
+volumes:
+  postgres-data: {}
+  runner-state: {}
+
+secrets:
+  postgres-password:
+    file: ${MEDIA_EXAMPLE_SECRETS_DIR:-./deploy/compose/secrets/example}/postgres-password
+  database-url:
+    file: ${MEDIA_EXAMPLE_SECRETS_DIR:-./deploy/compose/secrets/example}/database-url
+  primary-token:
+    file: ${MEDIA_EXAMPLE_SECRETS_DIR:-./deploy/compose/secrets/example}/primary-token
+  secondary-token:
+    file: ${MEDIA_EXAMPLE_SECRETS_DIR:-./deploy/compose/secrets/example}/secondary-token
+  runner-token:
+    file: ${MEDIA_EXAMPLE_SECRETS_DIR:-./deploy/compose/secrets/example}/runner-token
+  rezka-username:
+    file: ${MEDIA_EXAMPLE_SECRETS_DIR:-./deploy/compose/secrets/example}/rezka-username
+  rezka-password:
+    file: ${MEDIA_EXAMPLE_SECRETS_DIR:-./deploy/compose/secrets/example}/rezka-password
+  rezka-cookie-key:
+    file: ${MEDIA_EXAMPLE_SECRETS_DIR:-./deploy/compose/secrets/example}/rezka-cookie-key

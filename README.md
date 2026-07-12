@@ -35,6 +35,10 @@ mise run test
 mise run test-integration
 mise run audit
 mise run build
+mise run docker-lint
+mise run docker-build
+mise run docker-smoke
+mise run extract-linux-cli
 ```
 
 `mise run test` uses default Cargo features and is Docker-independent.
@@ -42,6 +46,28 @@ mise run build
 the opt-in `integration-tests` features. It runs the full
 PostgreSQL/Testcontainers suite once with the repository's pinned PostgreSQL 17
 Alpine image. Provider and live-network tests are not part of either gate.
+
+## Container Packaging
+
+`Dockerfile` builds the same locked `media` binary into separate `service` and
+`runner` runtime targets. The service target contains only CA certificates;
+the runner additionally contains ffmpeg/ffprobe with VAAPI support. Both run
+as UID/GID 65532 and support a read-only root filesystem.
+
+`compose.yaml` is a local-only stack with pinned PostgreSQL, example secrets,
+private service/database networking, and an opt-in runner profile. Override
+`MEDIA_SERVICE_IMAGE`, `MEDIA_RUNNER_IMAGE`, and `MEDIA_POSTGRES_IMAGE` when
+testing homelab image references. The runner requires a Linux `/dev/dri` host:
+
+```bash
+docker compose up --detach --wait service
+# Available when the media runner subcommand is present in the application release.
+docker compose --profile runner up --detach runner
+```
+
+`mise run extract-linux-cli` writes a pinned Linux binary and SHA-256 file to
+`dist/` for consumption by `hermes-home`. `MEDIA_CLI_PLATFORM`,
+`MEDIA_CLI_ARCH`, and `MEDIA_CLI_OUTPUT_DIR` control the target and output.
 
 ## Local PostgreSQL Service
 

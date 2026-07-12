@@ -40,3 +40,15 @@ run = "cargo deny check && cargo audit"
 
 [tasks.build]
 run = "cargo build --workspace --all-targets --all-features --locked"
+
+[tasks.docker-build]
+run = "./scripts/docker-build.sh"
+
+[tasks.docker-smoke]
+run = "./scripts/docker-smoke.sh"
+
+[tasks.docker-lint]
+run = "ruby ./scripts/test-packaging.rb && docker compose config --quiet"
+
+[tasks.extract-linux-cli]
+run = "./scripts/extract-linux-cli.sh"

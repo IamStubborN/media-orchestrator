@@ -1,0 +1,9 @@
+.git
+.github
+.worktrees
+.superpowers
+target
+dist
+docs
+*.env
+.DS_Store
