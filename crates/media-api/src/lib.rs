@@ -6,6 +6,7 @@ mod error;
 mod idempotency;
 mod request_id;
 mod route;
+mod search;
 
 use std::{sync::Arc, time::Duration};
 
@@ -18,6 +19,7 @@ pub use idempotency::{
     IdempotencyStore, OperationCompletionStore, Reservation, StoredHttpResponse,
 };
 pub use request_id::RequestId;
+pub use search::{SearchError, SearchService};
 
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 // Conservative application-level budgets, independent of proxy/server defaults.
@@ -37,6 +39,7 @@ pub struct ApiState {
     pub(crate) idempotency: Arc<dyn IdempotencyStore>,
     pub(crate) operations: Arc<dyn OperationCompletionStore>,
     pub(crate) readiness: Arc<dyn ReadinessPort>,
+    pub(crate) search: Arc<dyn SearchService>,
 }
 
 impl ApiState {
@@ -56,7 +59,14 @@ impl ApiState {
             idempotency,
             operations,
             readiness,
+            search: Arc::new(search::UnavailableSearchService),
         }
+    }
+
+    #[must_use]
+    pub fn with_search(mut self, search: Arc<dyn SearchService>) -> Self {
+        self.search = search;
+        self
     }
 
     #[must_use]
@@ -77,6 +87,11 @@ impl ApiState {
     #[must_use]
     pub fn operations(&self) -> &dyn OperationCompletionStore {
         self.operations.as_ref()
+    }
+
+    #[must_use]
+    pub fn search(&self) -> &dyn SearchService {
+        self.search.as_ref()
     }
 }
 

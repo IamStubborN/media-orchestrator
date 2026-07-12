@@ -23,7 +23,10 @@ use sea_orm_migration::MigratorTrait;
 use secrecy::{ExposeSecret, SecretBox};
 use sha2::{Digest, Sha256};
 
-use crate::config::{DatabaseConfig, RunnerConfig, ServerConfig};
+use crate::{
+    config::{DatabaseConfig, RezkaCompositionConfig, RunnerConfig, ServerConfig},
+    search::{ConcreteSearchProvider, DurableSearchService, StorageSearchPersistence},
+};
 
 const IDEMPOTENCY_TTL: time::Duration = time::Duration::hours(24);
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -58,6 +61,78 @@ pub enum RunnerCompositionError {
     Store,
 }
 
+pub type RunnerError = crate::runner::RunnerError;
+
+pub async fn run_runner(config: RunnerConfig) -> Result<(), RunnerError> {
+    let rezka = prepare_runner_session(&config).map_err(|_| RunnerError::Configuration)?;
+    let filesystem = Arc::new(media_runner::TokioFileSystem);
+    filesystem
+        .prepare_storage_roots(config.storage_roots())
+        .await
+        .map_err(|_| RunnerError::Configuration)?;
+    let http = Arc::new(
+        media_runner::ReqwestHttpAdapter::new(Duration::from_secs(30))
+            .map_err(|_| RunnerError::Configuration)?,
+    );
+    let process = Arc::new(media_runner::TokioProcessAdapter::new(
+        "ffprobe",
+        "ffmpeg",
+        Duration::from_secs(6 * 60 * 60),
+    ));
+    let (service_url, service_token) = config.service().cloned_parts();
+    let plex_service = Arc::new(
+        media_runner::HttpRunnerServiceAdapter::new(
+            service_url,
+            service_token,
+            Duration::from_secs(30),
+        )
+        .map_err(|_| RunnerError::Configuration)?,
+    );
+    let pipeline = media_runner::EpisodePipeline::new(filesystem, http, process, plex_service);
+    let qbittorrent = match config.qbittorrent() {
+        Some(config) => {
+            let config = media_integrations::qbittorrent::QbittorrentConfig::new(
+                config.base_url().clone(),
+                config.category(),
+                config.username(),
+                config.password().clone(),
+                Duration::from_secs(30),
+            )
+            .map_err(|_| RunnerError::Configuration)?;
+            Some(Arc::new(
+                media_integrations::qbittorrent::QbittorrentClient::connect(config)
+                    .await
+                    .map_err(|_| RunnerError::Configuration)?,
+            ))
+        }
+        None => None,
+    };
+    let gluetun = config
+        .gluetun()
+        .map(|config| {
+            let config = media_integrations::gluetun::GluetunConfig::new(
+                config.base_url().clone(),
+                config.api_key().clone(),
+                Duration::from_secs(30),
+            )
+            .map_err(|_| RunnerError::Configuration)?;
+            media_integrations::gluetun::GluetunClient::new(config)
+                .map(Arc::new)
+                .map_err(|_| RunnerError::Configuration)
+        })
+        .transpose()?;
+    let executor = Arc::new(crate::runner::MediaJobExecutor::new(
+        rezka,
+        pipeline,
+        qbittorrent,
+        gluetun,
+        config.storage_roots().clone(),
+        config.vaapi_device().to_owned(),
+    ));
+    let api = Arc::new(crate::runner::HttpRunnerApi::new(config.service().clone())?);
+    crate::runner::run_loop(api, executor, Duration::from_secs(20)).await
+}
+
 pub struct PreparedRunnerSession {
     pub client: rezka_client::RezkaClient,
     pub credentials: rezka_client::RezkaCredentials,
@@ -80,7 +155,12 @@ impl std::fmt::Debug for PreparedRunnerSession {
 pub fn prepare_runner_session(
     config: &RunnerConfig,
 ) -> Result<PreparedRunnerSession, RunnerCompositionError> {
-    let config = config.rezka();
+    prepare_rezka_session(config.rezka())
+}
+
+pub fn prepare_rezka_session(
+    config: &RezkaCompositionConfig,
+) -> Result<PreparedRunnerSession, RunnerCompositionError> {
     let mirrors = rezka_client::MirrorSet::new(config.mirrors().to_vec())
         .map_err(|_| RunnerCompositionError::Client)?;
     let client = rezka_client::RezkaClient::new(rezka_client::RezkaClientConfig {
@@ -351,9 +431,45 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
         SeaOrmIdempotencyRepository::new(database.clone()),
     ));
     let operations = Arc::new(StorageOperationCompletionAdapter::new(
-        SeaOrmOperationReceiptRepository::new(database),
+        SeaOrmOperationReceiptRepository::new(database.clone()),
     ));
-    let state = ApiState::new(jobs, leases, clients, idempotency, operations, readiness);
+    let mut state = ApiState::new(
+        jobs.clone(),
+        leases,
+        clients,
+        idempotency,
+        operations,
+        readiness,
+    );
+    if config.rezka().is_some() || config.prowlarr().is_some() {
+        let rezka = config
+            .rezka()
+            .map(prepare_rezka_session)
+            .transpose()
+            .map_err(|_| ServiceError::Bootstrap)?;
+        let prowlarr = config
+            .prowlarr()
+            .map(|config| {
+                let config = media_integrations::prowlarr::ProwlarrConfig::new(
+                    config.base_url().clone(),
+                    config.api_key().clone(),
+                    Duration::from_secs(30),
+                )
+                .map_err(|_| ServiceError::Bootstrap)?;
+                media_integrations::prowlarr::ProwlarrClient::new(config)
+                    .map_err(|_| ServiceError::Bootstrap)
+            })
+            .transpose()?;
+        let persistence = Arc::new(StorageSearchPersistence::new(
+            media_storage::SeaOrmSearchRepository::new(database),
+        ));
+        let provider = Arc::new(ConcreteSearchProvider::new(rezka, prowlarr));
+        state = state.with_search(Arc::new(DurableSearchService::new(
+            persistence,
+            provider,
+            jobs,
+        )));
+    }
 
     Ok(PreparedService {
         router: media_api::router(state),

@@ -85,6 +85,18 @@ pub struct CatalogContinuation {
 }
 
 impl CatalogContinuation {
+    pub fn new(value: &str, query: &str) -> Result<Self, RezkaError> {
+        let valid = value.starts_with('/')
+            && !value.starts_with("//")
+            && value.len() <= MAX_CATALOG_CONTINUATION_BYTES
+            && !value.contains(['\\', '#'])
+            && !value.chars().any(char::is_control);
+        if !valid {
+            return Err(invalid_catalog("invalid catalog continuation"));
+        }
+        Self::from_normalized(value.to_owned(), &CatalogQuery::new(query)?)
+    }
+
     pub(crate) fn from_normalized(value: String, query: &CatalogQuery) -> Result<Self, RezkaError> {
         if value.len() > MAX_CATALOG_CONTINUATION_BYTES {
             return Err(invalid_catalog("catalog continuation exceeds limit"));

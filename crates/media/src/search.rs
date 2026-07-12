@@ -1,0 +1,916 @@
+use std::{collections::BTreeMap, sync::Arc};
+
+use media_api::{SearchError, SearchService};
+use media_contract::{
+    ContinueSearchRequest, ExecutionSelectionDto, JobDto, JobStateDto, MAX_SEARCH_RESULTS_PER_PAGE,
+    MediaKindDto, NotifyScopeDto, ProviderDto, SearchPageDto, SearchResultDto, SelectResultRequest,
+    StartSearchRequest,
+};
+use media_core::{
+    Job, JobApplication, JobState, NewJobCommand, NotifyScope, OperationKey, Provider, UserId,
+};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+
+const SEARCH_TTL: time::Duration = time::Duration::hours(24);
+
+#[derive(Debug, Clone)]
+pub struct ProviderPage {
+    pub results: Vec<ProviderResult>,
+    pub provider_continuation: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderResult {
+    pub public: SearchResultDto,
+    private: PrivateResult,
+}
+
+#[derive(Debug, Clone)]
+enum PrivateResult {
+    Rezka {
+        locator: String,
+        title_id: u64,
+        translation_episodes: BTreeMap<u64, Vec<(u32, Vec<u32>)>>,
+    },
+    Prowlarr {
+        source_identity: String,
+        info_hash: String,
+        uri: String,
+    },
+}
+
+impl ProviderResult {
+    #[must_use]
+    pub fn rezka(public: SearchResultDto, locator: String, title_id: u64) -> Self {
+        let translation_episodes = match &public {
+            SearchResultDto::Rezka {
+                translations,
+                availability: Some(availability),
+                ..
+            } => translations
+                .iter()
+                .map(|translation| {
+                    (
+                        translation.id,
+                        availability
+                            .seasons
+                            .iter()
+                            .map(|season| (season.season, season.episodes.clone()))
+                            .collect(),
+                    )
+                })
+                .collect(),
+            _ => BTreeMap::new(),
+        };
+        Self {
+            public,
+            private: PrivateResult::Rezka {
+                locator,
+                title_id,
+                translation_episodes,
+            },
+        }
+    }
+
+    fn rezka_with_availability(
+        public: SearchResultDto,
+        locator: String,
+        title_id: u64,
+        translation_episodes: BTreeMap<u64, Vec<(u32, Vec<u32>)>>,
+    ) -> Self {
+        Self {
+            public,
+            private: PrivateResult::Rezka {
+                locator,
+                title_id,
+                translation_episodes,
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn prowlarr(
+        public: SearchResultDto,
+        source_identity: String,
+        info_hash: String,
+        uri: String,
+    ) -> Self {
+        Self {
+            public,
+            private: PrivateResult::Prowlarr {
+                source_identity,
+                info_hash,
+                uri,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredSearchSession {
+    pub id: String,
+    pub owner: UserId,
+    pub request: StartSearchRequest,
+    pub expires_at: OffsetDateTime,
+    pub results: Vec<ProviderResult>,
+    pub provider_continuation: Option<String>,
+}
+
+#[async_trait::async_trait]
+pub trait SearchPersistence: Send + Sync {
+    async fn insert_session(&self, session: StoredSearchSession) -> Result<(), SearchError>;
+    async fn session_for_owner(
+        &self,
+        id: &str,
+        owner: UserId,
+    ) -> Result<StoredSearchSession, SearchError>;
+    async fn update_session(&self, session: StoredSearchSession) -> Result<(), SearchError>;
+    async fn insert_execution(
+        &self,
+        result_ref: String,
+        execution: ExecutionSelectionDto,
+    ) -> Result<(), SearchError>;
+    async fn execution_for(&self, result_ref: &str) -> Result<ExecutionSelectionDto, SearchError>;
+}
+
+#[async_trait::async_trait]
+pub trait SearchProvider: Send + Sync {
+    async fn search(
+        &self,
+        request: &StartSearchRequest,
+        continuation: Option<&str>,
+    ) -> Result<ProviderPage, SearchError>;
+}
+
+pub struct ConcreteSearchProvider {
+    rezka: Option<tokio::sync::Mutex<crate::composition::PreparedRunnerSession>>,
+    prowlarr: Option<media_integrations::prowlarr::ProwlarrClient>,
+}
+
+impl ConcreteSearchProvider {
+    #[must_use]
+    pub fn new(
+        rezka: Option<crate::composition::PreparedRunnerSession>,
+        prowlarr: Option<media_integrations::prowlarr::ProwlarrClient>,
+    ) -> Self {
+        Self {
+            rezka: rezka.map(tokio::sync::Mutex::new),
+            prowlarr,
+        }
+    }
+
+    async fn search_rezka(
+        &self,
+        request: &StartSearchRequest,
+        continuation: Option<&str>,
+    ) -> Result<ProviderPage, SearchError> {
+        let state = self.rezka.as_ref().ok_or(SearchError::Provider)?;
+        let mut state = state.lock().await;
+        let prepared = &mut *state;
+        prepared
+            .client
+            .ensure_authenticated(&prepared.credentials, &prepared.probe)
+            .await
+            .map_err(|_| SearchError::Provider)?;
+        let snapshot = prepared
+            .client
+            .export_session()
+            .map_err(|_| SearchError::Provider)?;
+        prepared
+            .store
+            .save(&snapshot)
+            .map_err(|_| SearchError::Infrastructure)?;
+        let query = rezka_client::CatalogQuery::new(&request.query)
+            .map_err(|_| SearchError::InvalidRequest)?;
+        let page = match continuation {
+            Some(value) => {
+                let continuation = rezka_client::CatalogContinuation::new(value, &request.query)
+                    .map_err(|_| SearchError::InvalidRequest)?;
+                prepared.client.search_next(&continuation).await
+            }
+            None => prepared.client.search(&query).await,
+        }
+        .map_err(|_| SearchError::Provider)?;
+        let provider_continuation = page.continuation().map(|value| value.as_str().to_owned());
+        let mut results = Vec::new();
+        for entry in page.entries() {
+            let details = prepared
+                .client
+                .title(entry.locator())
+                .await
+                .map_err(|_| SearchError::Provider)?;
+            let media_kind = match details.kind() {
+                rezka_client::RezkaMediaKind::Movie => MediaKindDto::Movie,
+                rezka_client::RezkaMediaKind::Series => MediaKindDto::Series,
+            };
+            let translations = details
+                .translations()
+                .iter()
+                .map(|translation| media_contract::RezkaTranslationDto {
+                    id: translation.id().get(),
+                    name: translation.name().to_owned(),
+                    premium: translation.is_premium(),
+                    director: translation.is_director(),
+                    camrip: translation.is_camrip(),
+                    has_ads: translation.has_ads(),
+                })
+                .collect::<Vec<_>>();
+            let mut by_translation = BTreeMap::new();
+            if media_kind == MediaKindDto::Series {
+                let selections = details
+                    .translations()
+                    .iter()
+                    .map(|translation| {
+                        (
+                            translation.id().get(),
+                            details.select_translation(translation.key()),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                for (translation_id, selection) in selections {
+                    let availability = prepared
+                        .client
+                        .series_availability(&selection.map_err(|_| SearchError::Provider)?)
+                        .await
+                        .map_err(|_| SearchError::Provider)?;
+                    by_translation.insert(
+                        translation_id,
+                        availability
+                            .seasons()
+                            .iter()
+                            .map(|season| {
+                                (
+                                    season.number(),
+                                    season
+                                        .episodes()
+                                        .iter()
+                                        .map(|episode| episode.number())
+                                        .collect(),
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    );
+                }
+            }
+            let union = union_availability(&by_translation);
+            let availability = (media_kind == MediaKindDto::Series).then(|| {
+                let latest = union.iter().rev().find_map(|(season, episodes)| {
+                    episodes
+                        .iter()
+                        .max()
+                        .copied()
+                        .map(|episode| (*season, episode))
+                });
+                media_contract::SeriesAvailabilityDto {
+                    incomplete: true,
+                    seasons: union
+                        .into_iter()
+                        .map(|(season, episodes)| media_contract::SeasonAvailabilityDto {
+                            season,
+                            episodes,
+                        })
+                        .collect(),
+                    tracking_prompt: latest.map(|(latest_season, latest_episode)| {
+                        media_contract::TrackingPromptDto {
+                            title: details.title().to_owned(),
+                            latest_season,
+                            latest_episode,
+                        }
+                    }),
+                }
+            });
+            let public = SearchResultDto::Rezka {
+                result_id: format!("rezka:{}", details.id().get()),
+                title: details.title().to_owned(),
+                original_title: details.original_title().map(str::to_owned),
+                year: details.release_year(),
+                media_kind,
+                thumbnail_url: details
+                    .thumbnail()
+                    .map(|image| image.url().as_str().to_owned()),
+                translations,
+                availability,
+            };
+            results.push(ProviderResult::rezka_with_availability(
+                public,
+                details.locator().as_str().to_owned(),
+                details.id().get(),
+                by_translation,
+            ));
+        }
+        Ok(ProviderPage {
+            results,
+            provider_continuation,
+        })
+    }
+
+    async fn search_prowlarr(
+        &self,
+        request: &StartSearchRequest,
+        continuation: Option<&str>,
+    ) -> Result<ProviderPage, SearchError> {
+        let client = self.prowlarr.as_ref().ok_or(SearchError::Provider)?;
+        let kind = request
+            .season
+            .map_or(media_integrations::prowlarr::MediaKind::Movie, |season| {
+                media_integrations::prowlarr::MediaKind::Series { season }
+            });
+        let query = media_integrations::prowlarr::MediaQuery {
+            title: request.query.clone(),
+            kind,
+            preferred_qualities: request.preferred_qualities.clone(),
+            preferred_languages: request.preferred_languages.clone(),
+            preferred_codecs: request.preferred_codecs.clone(),
+            preferred_release_groups: request.preferred_release_groups.clone(),
+        };
+        let session = media_integrations::prowlarr::SearchSession::new(
+            uuid::Uuid::new_v4().to_string(),
+            query,
+        )
+        .map_err(|_| SearchError::InvalidRequest)?;
+        let offset = continuation.map_or(Ok(0), |value| {
+            value
+                .parse::<u32>()
+                .map_err(|_| SearchError::InvalidRequest)
+        })?;
+        let page = client
+            .search(
+                media_integrations::prowlarr::SearchPageRequest::new(session, offset)
+                    .map_err(|_| SearchError::InvalidRequest)?,
+            )
+            .await
+            .map_err(|_| SearchError::Provider)?;
+        let provider_continuation = page
+            .continuation
+            .as_ref()
+            .map(|next| next.offset.to_string());
+        let results = page
+            .results
+            .into_iter()
+            .filter_map(|result| {
+                let info_hash = result.source.info_hash?;
+                let uri = result.source.magnet_url.or(result.source.download_url)?;
+                let result_id = format!(
+                    "prowlarr:{}:{}",
+                    result.identity.indexer_id, result.identity.result_id
+                );
+                let source_identity = format!(
+                    "{}:{}:{}",
+                    result.identity.indexer_id, result.identity.guid, result.identity.result_id
+                );
+                let public = SearchResultDto::Prowlarr {
+                    result_id,
+                    title: result.title.clone(),
+                    indexer: result.indexer,
+                    size_bytes: result.size_bytes,
+                    seeders: result.seeders,
+                    release_group: result.release_group,
+                    ranking: media_contract::ProwlarrRankingDto {
+                        exact_title: result.ranking.exact_title,
+                        exact_season: result.ranking.exact_season,
+                        quality_preference: result.ranking.quality_preference,
+                        language_preference: result.ranking.language_preference,
+                        seeders: result.ranking.seeders,
+                        size_bytes: result.ranking.size_bytes,
+                        codec_preference: result.ranking.codec_preference,
+                        release_group_preference: result.ranking.release_group_preference,
+                    },
+                };
+                Some(ProviderResult::prowlarr(
+                    public,
+                    source_identity,
+                    info_hash,
+                    uri,
+                ))
+            })
+            .collect();
+        Ok(ProviderPage {
+            results,
+            provider_continuation,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl SearchProvider for ConcreteSearchProvider {
+    async fn search(
+        &self,
+        request: &StartSearchRequest,
+        continuation: Option<&str>,
+    ) -> Result<ProviderPage, SearchError> {
+        match request.source {
+            ProviderDto::Rezka => self.search_rezka(request, continuation).await,
+            ProviderDto::Prowlarr => self.search_prowlarr(request, continuation).await,
+        }
+    }
+}
+
+fn union_availability(
+    by_translation: &BTreeMap<u64, Vec<(u32, Vec<u32>)>>,
+) -> BTreeMap<u32, Vec<u32>> {
+    let mut union = BTreeMap::<u32, Vec<u32>>::new();
+    for seasons in by_translation.values() {
+        for (season, episodes) in seasons {
+            let values = union.entry(*season).or_default();
+            values.extend(episodes);
+            values.sort_unstable();
+            values.dedup();
+        }
+    }
+    union
+}
+
+#[derive(Clone)]
+pub struct StorageSearchPersistence {
+    repository: media_storage::SeaOrmSearchRepository,
+}
+
+impl StorageSearchPersistence {
+    #[must_use]
+    pub fn new(repository: media_storage::SeaOrmSearchRepository) -> Self {
+        Self { repository }
+    }
+}
+
+#[async_trait::async_trait]
+impl SearchPersistence for StorageSearchPersistence {
+    async fn insert_session(&self, session: StoredSearchSession) -> Result<(), SearchError> {
+        let id = uuid::Uuid::parse_str(&session.id).map_err(|_| SearchError::Infrastructure)?;
+        let payload = encode_session_payload(&session)?;
+        self.repository
+            .insert_session(media_storage::SearchSessionRecord {
+                id,
+                owner: session.owner,
+                payload,
+                expires_at: session.expires_at,
+            })
+            .await
+            .map_err(storage_error)
+    }
+
+    async fn session_for_owner(
+        &self,
+        id: &str,
+        owner: UserId,
+    ) -> Result<StoredSearchSession, SearchError> {
+        let id = uuid::Uuid::parse_str(id).map_err(|_| SearchError::InvalidRequest)?;
+        let record = self
+            .repository
+            .session_for_owner(id, owner)
+            .await
+            .map_err(storage_error)?
+            .ok_or(SearchError::NotFound)?;
+        let (request, results, provider_continuation) = decode_session_payload(record.payload)?;
+        Ok(StoredSearchSession {
+            id: record.id.to_string(),
+            owner: record.owner,
+            request,
+            expires_at: record.expires_at,
+            results,
+            provider_continuation,
+        })
+    }
+
+    async fn update_session(&self, session: StoredSearchSession) -> Result<(), SearchError> {
+        let id = uuid::Uuid::parse_str(&session.id).map_err(|_| SearchError::Infrastructure)?;
+        let payload = encode_session_payload(&session)?;
+        self.repository
+            .update_session(media_storage::SearchSessionRecord {
+                id,
+                owner: session.owner,
+                payload,
+                expires_at: session.expires_at,
+            })
+            .await
+            .map_err(storage_error)
+    }
+
+    async fn insert_execution(
+        &self,
+        result_ref: String,
+        execution: ExecutionSelectionDto,
+    ) -> Result<(), SearchError> {
+        let payload = serde_json::to_value(execution).map_err(|_| SearchError::Infrastructure)?;
+        self.repository
+            .insert_execution(&result_ref, payload)
+            .await
+            .map_err(storage_error)
+    }
+
+    async fn execution_for(&self, result_ref: &str) -> Result<ExecutionSelectionDto, SearchError> {
+        let payload = self
+            .repository
+            .execution_for(result_ref)
+            .await
+            .map_err(storage_error)?
+            .ok_or(SearchError::NotFound)?;
+        serde_json::from_value(payload).map_err(|_| SearchError::Infrastructure)
+    }
+}
+
+fn encode_session_payload(session: &StoredSearchSession) -> Result<serde_json::Value, SearchError> {
+    let results = session
+        .results
+        .iter()
+        .map(|result| {
+            let private = match &result.private {
+                PrivateResult::Rezka {
+                    locator,
+                    title_id,
+                    translation_episodes,
+                } => serde_json::json!({
+                    "kind": "rezka",
+                    "locator": locator,
+                    "title_id": title_id,
+                    "translation_episodes": translation_episodes,
+                }),
+                PrivateResult::Prowlarr {
+                    source_identity,
+                    info_hash,
+                    uri,
+                } => serde_json::json!({
+                    "kind": "prowlarr",
+                    "source_identity": source_identity,
+                    "info_hash": info_hash,
+                    "uri": uri,
+                }),
+            };
+            Ok(serde_json::json!({
+                "public": serde_json::to_value(&result.public)
+                    .map_err(|_| SearchError::Infrastructure)?,
+                "private": private,
+            }))
+        })
+        .collect::<Result<Vec<_>, SearchError>>()?;
+    Ok(serde_json::json!({
+        "request": serde_json::to_value(&session.request)
+            .map_err(|_| SearchError::Infrastructure)?,
+        "results": results,
+        "provider_continuation": session.provider_continuation,
+    }))
+}
+
+fn decode_session_payload(
+    value: serde_json::Value,
+) -> Result<(StartSearchRequest, Vec<ProviderResult>, Option<String>), SearchError> {
+    let object = value.as_object().ok_or(SearchError::Infrastructure)?;
+    let request = serde_json::from_value(
+        object
+            .get("request")
+            .cloned()
+            .ok_or(SearchError::Infrastructure)?,
+    )
+    .map_err(|_| SearchError::Infrastructure)?;
+    let provider_continuation = object
+        .get("provider_continuation")
+        .cloned()
+        .map(serde_json::from_value::<Option<String>>)
+        .transpose()
+        .map_err(|_| SearchError::Infrastructure)?
+        .flatten();
+    let values = object
+        .get("results")
+        .and_then(serde_json::Value::as_array)
+        .ok_or(SearchError::Infrastructure)?;
+    let mut results = Vec::with_capacity(values.len());
+    for value in values {
+        let value = value.as_object().ok_or(SearchError::Infrastructure)?;
+        let public = serde_json::from_value(
+            value
+                .get("public")
+                .cloned()
+                .ok_or(SearchError::Infrastructure)?,
+        )
+        .map_err(|_| SearchError::Infrastructure)?;
+        let private = value
+            .get("private")
+            .and_then(serde_json::Value::as_object)
+            .ok_or(SearchError::Infrastructure)?;
+        let string = |name| {
+            private
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .ok_or(SearchError::Infrastructure)
+        };
+        let private = match private.get("kind").and_then(serde_json::Value::as_str) {
+            Some("rezka") => PrivateResult::Rezka {
+                locator: string("locator")?,
+                title_id: private
+                    .get("title_id")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or(SearchError::Infrastructure)?,
+                translation_episodes: serde_json::from_value(
+                    private
+                        .get("translation_episodes")
+                        .cloned()
+                        .ok_or(SearchError::Infrastructure)?,
+                )
+                .map_err(|_| SearchError::Infrastructure)?,
+            },
+            Some("prowlarr") => PrivateResult::Prowlarr {
+                source_identity: string("source_identity")?,
+                info_hash: string("info_hash")?,
+                uri: string("uri")?,
+            },
+            _ => return Err(SearchError::Infrastructure),
+        };
+        results.push(ProviderResult { public, private });
+    }
+    Ok((request, results, provider_continuation))
+}
+
+fn storage_error(error: media_core::PortError) -> SearchError {
+    match error {
+        media_core::PortError::Conflict => SearchError::Conflict,
+        media_core::PortError::Infrastructure => SearchError::Infrastructure,
+    }
+}
+
+pub struct DurableSearchService {
+    persistence: Arc<dyn SearchPersistence>,
+    provider: Arc<dyn SearchProvider>,
+    jobs: Arc<JobApplication>,
+}
+
+impl DurableSearchService {
+    #[must_use]
+    pub fn new(
+        persistence: Arc<dyn SearchPersistence>,
+        provider: Arc<dyn SearchProvider>,
+        jobs: Arc<JobApplication>,
+    ) -> Self {
+        Self {
+            persistence,
+            provider,
+            jobs,
+        }
+    }
+
+    fn validate_request(request: &StartSearchRequest) -> Result<(), SearchError> {
+        if request.query.trim().is_empty()
+            || request.query.len() > 512
+            || request.query.chars().any(char::is_control)
+            || (request.source == ProviderDto::Rezka && request.season.is_some())
+            || request.season == Some(0)
+        {
+            return Err(SearchError::InvalidRequest);
+        }
+        Ok(())
+    }
+
+    async fn page(
+        &self,
+        mut session: StoredSearchSession,
+        offset: usize,
+    ) -> Result<SearchPageDto, SearchError> {
+        if session.expires_at <= OffsetDateTime::now_utc() {
+            return Err(SearchError::NotFound);
+        }
+        if offset > session.results.len() {
+            return Err(SearchError::InvalidRequest);
+        }
+        if offset == session.results.len() {
+            let continuation = session
+                .provider_continuation
+                .clone()
+                .ok_or(SearchError::NotFound)?;
+            let next = self
+                .provider
+                .search(&session.request, Some(&continuation))
+                .await?;
+            if next.results.is_empty() {
+                return Err(SearchError::NotFound);
+            }
+            session.results.extend(next.results);
+            session.provider_continuation = next.provider_continuation;
+            self.persistence.update_session(session.clone()).await?;
+        }
+        let end = (offset + MAX_SEARCH_RESULTS_PER_PAGE).min(session.results.len());
+        let continuation = (end < session.results.len() || session.provider_continuation.is_some())
+            .then(|| format!("{}:{end}", session.id));
+        Ok(SearchPageDto {
+            api_version: "v1".to_owned(),
+            session_id: session.id,
+            source: session.request.source,
+            expires_at: session
+                .expires_at
+                .format(&Rfc3339)
+                .map_err(|_| SearchError::Infrastructure)?,
+            results: session.results[offset..end]
+                .iter()
+                .map(|result| result.public.clone())
+                .collect(),
+            continuation,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl SearchService for DurableSearchService {
+    async fn start(
+        &self,
+        owner: UserId,
+        request: StartSearchRequest,
+    ) -> Result<SearchPageDto, SearchError> {
+        Self::validate_request(&request)?;
+        let provider_page = self.provider.search(&request, None).await?;
+        let session = StoredSearchSession {
+            id: uuid::Uuid::new_v4().to_string(),
+            owner,
+            request,
+            expires_at: OffsetDateTime::now_utc() + SEARCH_TTL,
+            results: provider_page.results,
+            provider_continuation: provider_page.provider_continuation,
+        };
+        self.persistence.insert_session(session.clone()).await?;
+        self.page(session, 0).await
+    }
+
+    async fn continue_search(
+        &self,
+        owner: UserId,
+        request: ContinueSearchRequest,
+    ) -> Result<SearchPageDto, SearchError> {
+        let (session_id, offset) = request
+            .continuation
+            .rsplit_once(':')
+            .ok_or(SearchError::InvalidRequest)?;
+        let offset = offset
+            .parse::<usize>()
+            .map_err(|_| SearchError::InvalidRequest)?;
+        if offset == 0 || !offset.is_multiple_of(MAX_SEARCH_RESULTS_PER_PAGE) {
+            return Err(SearchError::InvalidRequest);
+        }
+        let session = self
+            .persistence
+            .session_for_owner(session_id, owner)
+            .await?;
+        self.page(session, offset).await
+    }
+
+    async fn select(
+        &self,
+        owner: UserId,
+        operation: OperationKey,
+        request: SelectResultRequest,
+    ) -> Result<JobDto, SearchError> {
+        let session = self
+            .persistence
+            .session_for_owner(&request.session_id, owner)
+            .await?;
+        if session.expires_at <= OffsetDateTime::now_utc() {
+            return Err(SearchError::NotFound);
+        }
+        let result = session
+            .results
+            .iter()
+            .find(|result| result.public.result_id() == request.result_id)
+            .ok_or(SearchError::NotFound)?;
+        let execution = execution(result, &request)?;
+        let result_ref = format!("selection:{}", uuid::Uuid::new_v4());
+        self.persistence
+            .insert_execution(result_ref.clone(), execution)
+            .await?;
+        let provider = match session.request.source {
+            ProviderDto::Rezka => Provider::Rezka,
+            ProviderDto::Prowlarr => Provider::Prowlarr,
+        };
+        let job = self
+            .jobs
+            .create_job_for_owner(
+                owner,
+                operation,
+                NewJobCommand {
+                    provider,
+                    result_ref,
+                    notify_scope: NotifyScope::Initiator,
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                media_core::ApplicationError::Conflict => SearchError::Conflict,
+                media_core::ApplicationError::InvalidInput(_) => SearchError::InvalidRequest,
+                media_core::ApplicationError::Forbidden => SearchError::Forbidden,
+                media_core::ApplicationError::NotFound => SearchError::NotFound,
+                media_core::ApplicationError::Infrastructure => SearchError::Infrastructure,
+            })?;
+        Ok(job_dto(&job))
+    }
+
+    async fn execution_for(&self, result_ref: &str) -> Result<ExecutionSelectionDto, SearchError> {
+        self.persistence.execution_for(result_ref).await
+    }
+}
+
+fn execution(
+    result: &ProviderResult,
+    request: &SelectResultRequest,
+) -> Result<ExecutionSelectionDto, SearchError> {
+    match (&result.public, &result.private) {
+        (
+            SearchResultDto::Prowlarr { title, .. },
+            PrivateResult::Prowlarr {
+                source_identity,
+                info_hash,
+                uri,
+            },
+        ) => {
+            if request.translation_id.is_some()
+                || request.season.is_some()
+                || request.episode.is_some()
+            {
+                return Err(SearchError::InvalidRequest);
+            }
+            Ok(ExecutionSelectionDto::Prowlarr {
+                source_identity: source_identity.clone(),
+                info_hash: info_hash.clone(),
+                uri: uri.clone(),
+                title: title.clone(),
+            })
+        }
+        (
+            SearchResultDto::Rezka {
+                title,
+                media_kind,
+                translations,
+                ..
+            },
+            PrivateResult::Rezka {
+                locator,
+                title_id,
+                translation_episodes,
+            },
+        ) => {
+            let translation_id = request.translation_id.ok_or(SearchError::InvalidRequest)?;
+            let translation = translations
+                .iter()
+                .find(|item| item.id == translation_id)
+                .ok_or(SearchError::InvalidRequest)?;
+            match media_kind {
+                MediaKindDto::Movie if request.season.is_some() || request.episode.is_some() => {
+                    return Err(SearchError::InvalidRequest);
+                }
+                MediaKindDto::Series => {
+                    let (season, episode) = request
+                        .season
+                        .zip(request.episode)
+                        .ok_or(SearchError::InvalidRequest)?;
+                    let available =
+                        translation_episodes
+                            .get(&translation_id)
+                            .is_some_and(|seasons| {
+                                seasons.iter().any(|(candidate, episodes)| {
+                                    *candidate == season && episodes.contains(&episode)
+                                })
+                            });
+                    if !available {
+                        return Err(SearchError::InvalidRequest);
+                    }
+                }
+                MediaKindDto::Movie => {}
+            }
+            Ok(ExecutionSelectionDto::Rezka {
+                locator: locator.clone(),
+                title_id: *title_id,
+                media_kind: *media_kind,
+                translation_id,
+                director: translation.director,
+                camrip: translation.camrip,
+                has_ads: translation.has_ads,
+                season: request.season,
+                episode: request.episode,
+                title: title.clone(),
+            })
+        }
+        _ => Err(SearchError::Infrastructure),
+    }
+}
+
+fn job_dto(job: &Job) -> JobDto {
+    JobDto {
+        id: media_contract::PublicId::parse(&job.id().to_string())
+            .expect("validated job IDs are public UUIDs"),
+        provider: match job.provider() {
+            Provider::Rezka => ProviderDto::Rezka,
+            Provider::Prowlarr => ProviderDto::Prowlarr,
+        },
+        result_ref: job.result_ref().to_owned(),
+        state: match job.state() {
+            JobState::Queued => JobStateDto::Queued,
+            JobState::Leased => JobStateDto::Leased,
+            JobState::Running => JobStateDto::Running,
+            JobState::CancelRequested => JobStateDto::CancelRequested,
+            JobState::BlockedStorage => JobStateDto::BlockedStorage,
+            JobState::Publishing => JobStateDto::Publishing,
+            JobState::PlexPending => JobStateDto::PlexPending,
+            JobState::NeedsAction => JobStateDto::NeedsAction,
+            JobState::Partial => JobStateDto::Partial,
+            JobState::Completed => JobStateDto::Completed,
+            JobState::Failed => JobStateDto::Failed,
+            JobState::Cancelled => JobStateDto::Cancelled,
+        },
+        needs_action_reason: None,
+        notify_scope: NotifyScopeDto::Initiator,
+    }
+}

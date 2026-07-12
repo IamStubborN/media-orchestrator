@@ -25,6 +25,18 @@ const REZKA_PASSWORD_FILE: &str = "MEDIA_REZKA_PASSWORD_FILE";
 const REZKA_COOKIE_KEY_FILE: &str = "MEDIA_REZKA_COOKIE_KEY_FILE";
 const REZKA_SESSION_STORE_FILE: &str = "MEDIA_REZKA_SESSION_STORE_FILE";
 const REZKA_USER_AGENT: &str = "MEDIA_REZKA_USER_AGENT";
+const PROWLARR_URL: &str = "MEDIA_PROWLARR_URL";
+const PROWLARR_API_KEY_FILE: &str = "MEDIA_PROWLARR_API_KEY_FILE";
+const QBITTORRENT_URL: &str = "MEDIA_QBITTORRENT_URL";
+const QBITTORRENT_CATEGORY: &str = "MEDIA_QBITTORRENT_CATEGORY";
+const QBITTORRENT_USERNAME: &str = "MEDIA_QBITTORRENT_USERNAME";
+const QBITTORRENT_PASSWORD_FILE: &str = "MEDIA_QBITTORRENT_PASSWORD_FILE";
+const GLUETUN_URL: &str = "MEDIA_GLUETUN_URL";
+const GLUETUN_API_KEY_FILE: &str = "MEDIA_GLUETUN_API_KEY_FILE";
+const STAGING_ROOT: &str = "MEDIA_STAGING_ROOT";
+const TV_ROOT: &str = "MEDIA_TV_ROOT";
+const MOVIES_ROOT: &str = "MEDIA_MOVIES_ROOT";
+const VAAPI_DEVICE: &str = "MEDIA_VAAPI_DEVICE";
 const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:8080";
 const DEFAULT_REZKA_USER_AGENT: &str = "media-orchestrator/0.1 rezka-session";
 const DEFAULT_LEASE_TTL_SECONDS: i64 = 60;
@@ -127,6 +139,8 @@ pub struct ServerConfig {
     secondary_token: SecretString,
     runner_token: SecretString,
     lease_ttl: time::Duration,
+    rezka: Option<RezkaCompositionConfig>,
+    prowlarr: Option<ProwlarrCompositionConfig>,
 }
 
 impl ServerConfig {
@@ -156,6 +170,14 @@ impl ServerConfig {
             });
         }
 
+        let rezka = source
+            .var_os(REZKA_MIRRORS)
+            .map(|_| load_rezka_config(source))
+            .transpose()?;
+        let prowlarr = source
+            .var_os(PROWLARR_URL)
+            .map(|_| load_prowlarr_config(source))
+            .transpose()?;
         Ok(Self {
             database_url: database.database_url,
             listen_addr,
@@ -163,6 +185,8 @@ impl ServerConfig {
             secondary_token: read_secret(source, SECONDARY_TOKEN_FILE, SecretKind::Token)?,
             runner_token: read_secret(source, RUNNER_TOKEN_FILE, SecretKind::Token)?,
             lease_ttl: time::Duration::seconds(lease_ttl_seconds),
+            rezka,
+            prowlarr,
         })
     }
 
@@ -195,6 +219,16 @@ impl ServerConfig {
     pub const fn lease_ttl(&self) -> time::Duration {
         self.lease_ttl
     }
+
+    #[must_use]
+    pub const fn rezka(&self) -> Option<&RezkaCompositionConfig> {
+        self.rezka.as_ref()
+    }
+
+    #[must_use]
+    pub const fn prowlarr(&self) -> Option<&ProwlarrCompositionConfig> {
+        self.prowlarr.as_ref()
+    }
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -207,10 +241,13 @@ impl std::fmt::Debug for ServerConfig {
             .field("secondary_token", &"[REDACTED]")
             .field("runner_token", &"[REDACTED]")
             .field("lease_ttl", &self.lease_ttl)
+            .field("rezka", &self.rezka.as_ref().map(|_| "[REDACTED]"))
+            .field("prowlarr", &self.prowlarr.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
 }
 
+#[derive(Clone)]
 pub struct ClientConfig {
     service_url: reqwest::Url,
     token: SecretString,
@@ -248,6 +285,10 @@ impl ClientConfig {
     pub(crate) fn into_parts(self) -> (reqwest::Url, SecretString) {
         (self.service_url, self.token)
     }
+
+    pub(crate) fn cloned_parts(&self) -> (reqwest::Url, SecretString) {
+        (self.service_url.clone(), self.token.clone())
+    }
 }
 
 impl std::fmt::Debug for ClientConfig {
@@ -263,6 +304,10 @@ impl std::fmt::Debug for ClientConfig {
 pub struct RunnerConfig {
     service: ClientConfig,
     rezka: RezkaCompositionConfig,
+    storage_roots: media_runner::StorageRoots,
+    vaapi_device: PathBuf,
+    qbittorrent: Option<QbittorrentCompositionConfig>,
+    gluetun: Option<GluetunCompositionConfig>,
 }
 
 impl RunnerConfig {
@@ -272,42 +317,31 @@ impl RunnerConfig {
 
     pub fn load_from(source: &impl ConfigSource) -> Result<Self, ConfigError> {
         let service = ClientConfig::load_from(source)?;
-        let mirrors = parse_rezka_mirrors(&required_environment(source, REZKA_MIRRORS)?)?;
-
-        // The probe and marker contract is deployment supplied; it is not a generic provider API.
-        let session_probe_url =
-            parse_rezka_probe_url(&required_environment(source, REZKA_SESSION_PROBE_URL)?)?;
-        if !mirrors
-            .iter()
-            .any(|mirror| same_effective_origin(mirror, &session_probe_url))
-        {
-            return Err(ConfigError::InvalidConfiguration {
-                message: "Rezka session probe origin is not configured",
-            });
-        }
-        let session_valid_markers = parse_rezka_markers(&required_environment(
-            source,
-            REZKA_SESSION_VALID_MARKERS_JSON,
-        )?)?;
-        let session_invalid_markers = parse_rezka_markers(&required_environment(
-            source,
-            REZKA_SESSION_INVALID_MARKERS_JSON,
-        )?)?;
-
         Ok(Self {
             service,
-            rezka: RezkaCompositionConfig {
-                mirrors,
-                session_probe_url,
-                session_valid_markers,
-                session_invalid_markers,
-                username: read_secret(source, REZKA_USERNAME_FILE, SecretKind::RezkaUsername)?,
-                password: read_secret(source, REZKA_PASSWORD_FILE, SecretKind::RezkaPassword)?,
-                cookie_key: read_rezka_cookie_key(source)?,
-                session_store_path: required_path_environment(source, REZKA_SESSION_STORE_FILE)?,
-                user_agent: optional_environment(source, REZKA_USER_AGENT)?
-                    .unwrap_or_else(|| DEFAULT_REZKA_USER_AGENT.to_owned()),
-            },
+            rezka: load_rezka_config(source)?,
+            storage_roots: media_runner::StorageRoots::new(
+                optional_environment(source, STAGING_ROOT)?
+                    .unwrap_or_else(|| "/staging/rezka".to_owned()),
+                optional_environment(source, TV_ROOT)?.unwrap_or_else(|| "/plex/tv".to_owned()),
+                optional_environment(source, MOVIES_ROOT)?
+                    .unwrap_or_else(|| "/plex/movies".to_owned()),
+            )
+            .map_err(|_| ConfigError::InvalidConfiguration {
+                message: "runner storage roots are invalid",
+            })?,
+            vaapi_device: PathBuf::from(
+                optional_environment(source, VAAPI_DEVICE)?
+                    .unwrap_or_else(|| "/dev/dri/renderD128".to_owned()),
+            ),
+            qbittorrent: source
+                .var_os(QBITTORRENT_URL)
+                .map(|_| load_qbittorrent_config(source))
+                .transpose()?,
+            gluetun: source
+                .var_os(GLUETUN_URL)
+                .map(|_| load_gluetun_config(source))
+                .transpose()?,
         })
     }
 
@@ -320,6 +354,166 @@ impl RunnerConfig {
     pub const fn rezka(&self) -> &RezkaCompositionConfig {
         &self.rezka
     }
+
+    pub const fn storage_roots(&self) -> &media_runner::StorageRoots {
+        &self.storage_roots
+    }
+    pub fn vaapi_device(&self) -> &Path {
+        &self.vaapi_device
+    }
+    pub const fn qbittorrent(&self) -> Option<&QbittorrentCompositionConfig> {
+        self.qbittorrent.as_ref()
+    }
+    pub const fn gluetun(&self) -> Option<&GluetunCompositionConfig> {
+        self.gluetun.as_ref()
+    }
+}
+
+pub struct ProwlarrCompositionConfig {
+    base_url: url::Url,
+    api_key: SecretString,
+}
+
+impl ProwlarrCompositionConfig {
+    #[must_use]
+    pub const fn base_url(&self) -> &url::Url {
+        &self.base_url
+    }
+    #[must_use]
+    pub const fn api_key(&self) -> &SecretString {
+        &self.api_key
+    }
+}
+
+pub struct QbittorrentCompositionConfig {
+    base_url: url::Url,
+    category: String,
+    username: String,
+    password: SecretString,
+}
+
+impl QbittorrentCompositionConfig {
+    pub const fn base_url(&self) -> &url::Url {
+        &self.base_url
+    }
+    pub fn category(&self) -> &str {
+        &self.category
+    }
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+    pub const fn password(&self) -> &SecretString {
+        &self.password
+    }
+}
+
+pub struct GluetunCompositionConfig {
+    base_url: url::Url,
+    api_key: SecretString,
+}
+
+impl GluetunCompositionConfig {
+    pub const fn base_url(&self) -> &url::Url {
+        &self.base_url
+    }
+    pub const fn api_key(&self) -> &SecretString {
+        &self.api_key
+    }
+}
+
+impl std::fmt::Debug for ProwlarrCompositionConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .write_str("ProwlarrCompositionConfig { base_url: [REDACTED], api_key: [REDACTED] }")
+    }
+}
+
+fn load_prowlarr_config(
+    source: &impl ConfigSource,
+) -> Result<ProwlarrCompositionConfig, ConfigError> {
+    let base_url = required_environment(source, PROWLARR_URL)?
+        .parse::<url::Url>()
+        .map_err(|_| ConfigError::InvalidEnvironment { name: PROWLARR_URL })?;
+    if base_url.host_str().is_none()
+        || !base_url.username().is_empty()
+        || base_url.password().is_some()
+    {
+        return Err(ConfigError::InvalidEnvironment { name: PROWLARR_URL });
+    }
+    Ok(ProwlarrCompositionConfig {
+        base_url,
+        api_key: read_secret(source, PROWLARR_API_KEY_FILE, SecretKind::Token)?,
+    })
+}
+
+fn load_qbittorrent_config(
+    source: &impl ConfigSource,
+) -> Result<QbittorrentCompositionConfig, ConfigError> {
+    Ok(QbittorrentCompositionConfig {
+        base_url: parse_service_url(source, QBITTORRENT_URL)?,
+        category: required_environment(source, QBITTORRENT_CATEGORY)?,
+        username: required_environment(source, QBITTORRENT_USERNAME)?,
+        password: read_secret(source, QBITTORRENT_PASSWORD_FILE, SecretKind::Token)?,
+    })
+}
+
+fn load_gluetun_config(
+    source: &impl ConfigSource,
+) -> Result<GluetunCompositionConfig, ConfigError> {
+    Ok(GluetunCompositionConfig {
+        base_url: parse_service_url(source, GLUETUN_URL)?,
+        api_key: read_secret(source, GLUETUN_API_KEY_FILE, SecretKind::Token)?,
+    })
+}
+
+fn parse_service_url(
+    source: &impl ConfigSource,
+    name: &'static str,
+) -> Result<url::Url, ConfigError> {
+    let url = required_environment(source, name)?
+        .parse::<url::Url>()
+        .map_err(|_| ConfigError::InvalidEnvironment { name })?;
+    if url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(ConfigError::InvalidEnvironment { name });
+    }
+    Ok(url)
+}
+
+fn load_rezka_config(source: &impl ConfigSource) -> Result<RezkaCompositionConfig, ConfigError> {
+    let mirrors = parse_rezka_mirrors(&required_environment(source, REZKA_MIRRORS)?)?;
+    let session_probe_url =
+        parse_rezka_probe_url(&required_environment(source, REZKA_SESSION_PROBE_URL)?)?;
+    if !mirrors
+        .iter()
+        .any(|mirror| same_effective_origin(mirror, &session_probe_url))
+    {
+        return Err(ConfigError::InvalidConfiguration {
+            message: "Rezka session probe origin is not configured",
+        });
+    }
+    Ok(RezkaCompositionConfig {
+        mirrors,
+        session_probe_url,
+        session_valid_markers: parse_rezka_markers(&required_environment(
+            source,
+            REZKA_SESSION_VALID_MARKERS_JSON,
+        )?)?,
+        session_invalid_markers: parse_rezka_markers(&required_environment(
+            source,
+            REZKA_SESSION_INVALID_MARKERS_JSON,
+        )?)?,
+        username: read_secret(source, REZKA_USERNAME_FILE, SecretKind::RezkaUsername)?,
+        password: read_secret(source, REZKA_PASSWORD_FILE, SecretKind::RezkaPassword)?,
+        cookie_key: read_rezka_cookie_key(source)?,
+        session_store_path: required_path_environment(source, REZKA_SESSION_STORE_FILE)?,
+        user_agent: optional_environment(source, REZKA_USER_AGENT)?
+            .unwrap_or_else(|| DEFAULT_REZKA_USER_AGENT.to_owned()),
+    })
 }
 
 impl std::fmt::Debug for RunnerConfig {
@@ -328,6 +522,13 @@ impl std::fmt::Debug for RunnerConfig {
             .debug_struct("RunnerConfig")
             .field("service", &"[REDACTED]")
             .field("rezka", &"[REDACTED]")
+            .field("storage_roots", &"[REDACTED]")
+            .field("vaapi_device", &"[REDACTED]")
+            .field(
+                "qbittorrent",
+                &self.qbittorrent.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("gluetun", &self.gluetun.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
 }

@@ -9,7 +9,7 @@ use media_contract::{RunnerEventRequest, RunnerEventResponse};
 use media_core::{Actor, ApplicationError, LeaseId};
 use serde::Deserialize;
 
-use crate::{ApiError, ApiState, RequestId, convert, idempotency};
+use crate::{ApiError, ApiState, RequestId, SearchError, convert, idempotency};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,7 +39,7 @@ async fn lease_next(
                     .into_response();
             }
             match state.leases().lease_next(&actor, operation).await {
-                Ok(Some(lease)) => match convert::lease(&lease) {
+                Ok(Some(lease)) => match lease_dto(&state, &lease).await {
                     Ok(dto) => Json(dto).into_response(),
                     Err(_) => ApiError::internal(&request_id).into_response(),
                 },
@@ -73,7 +73,7 @@ async fn heartbeat(
                     .into_response();
             };
             match state.leases().heartbeat(&actor, operation, lease_id).await {
-                Ok(lease) => match convert::lease(&lease) {
+                Ok(lease) => match lease_dto(&state, &lease).await {
                     Ok(dto) => Json(dto).into_response(),
                     Err(_) => ApiError::internal(&request_id).into_response(),
                 },
@@ -126,6 +126,19 @@ async fn report_event(
 
 fn valid_empty_body(body: &[u8]) -> bool {
     body.is_empty() || serde_json::from_slice::<EmptyRequest>(body).is_ok()
+}
+
+async fn lease_dto(
+    state: &ApiState,
+    lease: &media_core::JobLease,
+) -> Result<media_contract::LeaseDto, ()> {
+    let mut dto = convert::lease(lease).map_err(|_| ())?;
+    match state.search().execution_for(lease.job().result_ref()).await {
+        Ok(execution) => dto.execution = Some(execution),
+        Err(SearchError::NotFound | SearchError::Infrastructure) => {}
+        Err(_) => return Err(()),
+    }
+    Ok(dto)
 }
 
 fn application_error(error: ApplicationError, request_id: &RequestId) -> Response {

@@ -5,6 +5,7 @@ mod job;
 mod lease;
 mod operation;
 mod readiness;
+mod search;
 
 pub use client::SeaOrmClientStore;
 pub use idempotency::{
@@ -16,6 +17,7 @@ pub use job::SeaOrmJobStore;
 pub use lease::SeaOrmLeaseStore;
 pub use operation::SeaOrmOperationReceiptRepository;
 pub use readiness::SeaOrmReadiness;
+pub use search::{SeaOrmSearchRepository, SearchSessionRecord};
 
 use media_core::PortError;
 use sea_orm::{DbErr, SqlErr};

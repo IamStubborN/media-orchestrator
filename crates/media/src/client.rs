@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-use media_contract::{CreateJobRequest, NotifyScopeDto, ProviderDto};
+use media_contract::{
+    ContinueSearchRequest, CreateJobRequest, NotifyScopeDto, ProviderDto, SelectResultRequest,
+    StartSearchRequest,
+};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::config::ClientConfig;
@@ -70,6 +73,33 @@ impl HttpClient {
     pub async fn queue_status(&self) -> Result<String, ClientError> {
         self.execute(self.request(reqwest::Method::GET, "v1/queue/status")?)
             .await
+    }
+
+    pub async fn search(&self, request: StartSearchRequest) -> Result<String, ClientError> {
+        self.execute(
+            self.request(reqwest::Method::POST, "v1/searches")?
+                .header(IDEMPOTENCY_KEY_HEADER, generated_identifier())
+                .json(&request),
+        )
+        .await
+    }
+
+    pub async fn continue_search(&self, continuation: String) -> Result<String, ClientError> {
+        self.execute(
+            self.request(reqwest::Method::POST, "v1/searches/continue")?
+                .header(IDEMPOTENCY_KEY_HEADER, generated_identifier())
+                .json(&ContinueSearchRequest { continuation }),
+        )
+        .await
+    }
+
+    pub async fn select(&self, request: SelectResultRequest) -> Result<String, ClientError> {
+        self.execute(
+            self.request(reqwest::Method::POST, "v1/selections")?
+                .header(IDEMPOTENCY_KEY_HEADER, generated_identifier())
+                .json(&request),
+        )
+        .await
     }
 
     fn request(
