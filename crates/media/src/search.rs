@@ -262,14 +262,14 @@ impl ConcreteSearchProvider {
             )
             .await
             .map_err(|error| {
-                tracing::warn!(stage = "authentication", error_code = ?error.code(), "Rezka search failed");
+                tracing::warn!(stage = "authentication", error_code = ?error.code(), error = %error, "Rezka search failed");
                 SearchError::Provider
             })?;
         let snapshot = prepared
             .client
             .export_session()
             .map_err(|error| {
-                tracing::warn!(stage = "session_export", error_code = ?error.code(), "Rezka search failed");
+                tracing::warn!(stage = "session_export", error_code = ?error.code(), error = %error, "Rezka search failed");
                 SearchError::Provider
             })?;
         prepared
@@ -287,7 +287,7 @@ impl ConcreteSearchProvider {
             None => prepared.client.search(&query).await,
         }
         .map_err(|error| {
-            tracing::warn!(stage = "catalog", error_code = ?error.code(), "Rezka search failed");
+            tracing::warn!(stage = "catalog", error_code = ?error.code(), error = %error, "Rezka search failed");
             SearchError::Provider
         })?;
         let provider_continuation = page.continuation().map(|value| value.as_str().to_owned());
@@ -302,7 +302,7 @@ impl ConcreteSearchProvider {
                 .title(entry.locator())
                 .await
                 .map_err(|error| {
-                    tracing::warn!(stage = "title", error_code = ?error.code(), "Rezka search failed");
+                    tracing::warn!(stage = "title", error_code = ?error.code(), error = %error, "Rezka search failed");
                     SearchError::Provider
                 })?;
             let media_kind = match details.kind() {
@@ -339,7 +339,7 @@ impl ConcreteSearchProvider {
                         .series_availability(&selection.map_err(|_| SearchError::Provider)?)
                         .await
                         .map_err(|error| {
-                            tracing::warn!(stage = "availability", error_code = ?error.code(), "Rezka search failed");
+                            tracing::warn!(stage = "availability", error_code = ?error.code(), error = %error, "Rezka search failed");
                             SearchError::Provider
                         })?;
                     by_translation.insert(
