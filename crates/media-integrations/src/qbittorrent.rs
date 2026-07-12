@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fmt,
     path::{Component, PathBuf},
     time::Duration,
@@ -295,9 +296,29 @@ impl QbittorrentClient {
         &self,
         selection: ExplicitTorrentSelection,
     ) -> Result<TorrentHandle, QbittorrentError> {
+        self.submit_selected_with_category(selection, self.config.category.clone())
+            .await
+    }
+
+    pub async fn submit_selected_to_category(
+        &self,
+        selection: ExplicitTorrentSelection,
+        category: impl Into<String>,
+    ) -> Result<TorrentHandle, QbittorrentError> {
+        let category = category.into();
+        self.ensure_category_exists(&category).await?;
+        self.submit_selected_with_category(selection, category)
+            .await
+    }
+
+    async fn submit_selected_with_category(
+        &self,
+        selection: ExplicitTorrentSelection,
+        category: String,
+    ) -> Result<TorrentHandle, QbittorrentError> {
         let form = reqwest::multipart::Form::new()
             .text("urls", selection.uri.as_str().to_owned())
-            .text("category", self.config.category.clone());
+            .text("category", category.clone());
         let mut request = self
             .client
             .post(endpoint(&self.config.base_url, "api/v2/torrents/add")?)
@@ -327,8 +348,33 @@ impl QbittorrentClient {
         Ok(TorrentHandle {
             source_identity: selection.source_identity,
             hash: selection.info_hash,
-            category: self.config.category.clone(),
+            category,
         })
+    }
+
+    async fn ensure_category_exists(&self, category: &str) -> Result<(), QbittorrentError> {
+        if category.trim().is_empty() || category.trim() != category {
+            return Err(QbittorrentError::InvalidSelection {
+                message: "category must not be empty or padded",
+            });
+        }
+        let response = self
+            .get(endpoint(
+                &self.config.base_url,
+                "api/v2/torrents/categories",
+            )?)
+            .await?;
+        let status = response.status();
+        let categories: HashMap<String, serde::de::IgnoredAny> = response
+            .json()
+            .await
+            .map_err(|_| QbittorrentError::ProviderResponse { status })?;
+        if !categories.contains_key(category) {
+            return Err(QbittorrentError::InvalidSelection {
+                message: "category does not exist",
+            });
+        }
+        Ok(())
     }
 
     pub async fn monitor(
@@ -427,7 +473,8 @@ impl QbittorrentClient {
     }
 
     fn validate_handle(&self, handle: &TorrentHandle) -> Result<(), QbittorrentError> {
-        if handle.category != self.config.category
+        if handle.category.trim().is_empty()
+            || handle.category.trim() != handle.category
             || handle.hash.len() != 40
             || !handle.hash.bytes().all(|byte| byte.is_ascii_hexdigit())
         {

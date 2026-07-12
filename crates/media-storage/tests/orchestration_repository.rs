@@ -2,10 +2,12 @@ mod support;
 
 use media_core::{
     PRIMARY_USER_ID, BootstrapClient, CheckpointValue, ClientRole, ClientStore, CredentialDigest,
-    JobEvent, JobEventId, JobId, JobState, JobStore, LeaseStore, NewJob, NotifyScope, Provider,
-    RUNNER_CLIENT_ID,
+    JobEvent, JobEventId, JobId, JobState, JobStore, LeaseStore, NewJob, NotificationEventType,
+    NotificationId, NotifyScope, Provider, RUNNER_CLIENT_ID, SECONDARY_USER_ID,
 };
-use media_storage::{SeaOrmClientStore, SeaOrmJobStore, SeaOrmLeaseStore};
+use media_storage::{
+    SeaOrmClientStore, SeaOrmJobStore, SeaOrmLeaseStore, SeaOrmNotificationOutbox,
+};
 use sea_orm::{ConnectionTrait, Statement};
 use support::{TestDatabase, operation_key, query};
 
@@ -30,14 +32,47 @@ async fn setup() -> (TestDatabase, SeaOrmJobStore, SeaOrmLeaseStore) {
 }
 
 fn new_job(reference: &str) -> NewJob {
+    new_job_with_notifications(reference, PRIMARY_USER_ID, NotifyScope::Initiator)
+}
+
+fn new_job_with_notifications(
+    reference: &str,
+    owner: media_core::UserId,
+    notify_scope: NotifyScope,
+) -> NewJob {
     NewJob::new(
         JobId::new(),
-        PRIMARY_USER_ID,
+        owner,
         Provider::Rezka,
         reference.to_owned(),
-        NotifyScope::Initiator,
+        notify_scope,
     )
     .unwrap()
+}
+
+async fn notification_rows(test_db: &TestDatabase) -> Vec<sea_orm::QueryResult> {
+    query(
+        test_db.connection(),
+        "SELECT event_type, recipient, payload FROM notification_outbox \
+         ORDER BY event_type, recipient",
+    )
+    .await
+}
+
+fn assert_sanitized_message(row: &sea_orm::QueryResult, forbidden: &[&str]) {
+    let payload = row.try_get::<serde_json::Value>("", "payload").unwrap();
+    assert_eq!(
+        payload.as_object().unwrap().keys().collect::<Vec<_>>(),
+        vec!["message"]
+    );
+    let message = payload["message"].as_str().unwrap();
+    assert!(!message.contains("://"));
+    for value in forbidden {
+        assert!(
+            !message.contains(value),
+            "message leaked {value:?}: {message}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -161,10 +196,333 @@ async fn duplicate_event_id_does_not_duplicate_transition_event_or_outbox() {
 }
 
 #[tokio::test]
-async fn retryable_stage_fails_terminally_on_third_attempt_and_releases_lease() {
+async fn rezka_runner_events_create_each_success_notification_once() {
+    let (test_db, jobs, leases) = setup().await;
+    jobs.create(
+        operation_key(),
+        new_job("rezka://private-provider-reference"),
+    )
+    .await
+    .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    let started = JobEvent::started(JobEventId::new());
+    leases
+        .report_event(
+            operation_key(),
+            lease.lease_id(),
+            RUNNER_CLIENT_ID,
+            started.clone(),
+        )
+        .await
+        .unwrap();
+    leases
+        .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, started)
+        .await
+        .unwrap();
+
+    for event in [
+        JobEvent::stage_started(JobEventId::new(), 0, "resolve_manifest".to_owned(), 0).unwrap(),
+        JobEvent::stage_completed(
+            JobEventId::new(),
+            0,
+            "resolve_manifest".to_owned(),
+            0,
+            Default::default(),
+        )
+        .unwrap(),
+        JobEvent::stage_started(JobEventId::new(), 0, "media_pipeline".to_owned(), 1).unwrap(),
+        JobEvent::stage_completed(
+            JobEventId::new(),
+            0,
+            "media_pipeline".to_owned(),
+            1,
+            Default::default(),
+        )
+        .unwrap(),
+        JobEvent::stage_started(JobEventId::new(), 0, "execution".to_owned(), 2).unwrap(),
+        JobEvent::stage_completed(
+            JobEventId::new(),
+            0,
+            "execution".to_owned(),
+            2,
+            Default::default(),
+        )
+        .unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::Publishing, None).unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::PlexPending, None).unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::Completed, None).unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    let notifications = notification_rows(&test_db).await;
+    let event_types = notifications
+        .iter()
+        .map(|row| row.try_get::<String>("", "event_type").unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        event_types,
+        vec!["downloaded", "encoding-complete", "plex-added", "started"]
+    );
+    for row in &notifications {
+        assert_eq!(row.try_get::<String>("", "recipient").unwrap(), "primary");
+        assert_sanitized_message(row, &["private-provider-reference", "rezka"]);
+    }
+}
+
+#[tokio::test]
+async fn partial_completion_creates_plex_and_partial_notifications_once() {
+    let (test_db, jobs, leases) = setup().await;
+    jobs.create(operation_key(), new_job("partial-private-reference"))
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::transition(JobEventId::new(), JobState::Publishing, None).unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::PlexPending, None).unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::Partial, None).unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    let notifications = notification_rows(&test_db).await;
+    let event_types = notifications
+        .iter()
+        .map(|row| row.try_get::<String>("", "event_type").unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        event_types,
+        vec![
+            "downloaded",
+            "encoding-complete",
+            "partial",
+            "plex-added",
+            "started",
+        ]
+    );
+    for row in &notifications {
+        assert_sanitized_message(row, &["partial-private-reference"]);
+    }
+}
+
+#[tokio::test]
+async fn different_source_events_dedupe_the_same_job_notification_type() {
+    let (test_db, jobs, leases) = setup().await;
+    jobs.create(operation_key(), new_job("semantic-notification-dedupe"))
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::stage_started(JobEventId::new(), 0, "download".to_owned(), 0).unwrap(),
+        JobEvent::stage_completed(
+            JobEventId::new(),
+            0,
+            "download".to_owned(),
+            0,
+            Default::default(),
+        )
+        .unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::Publishing, None).unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    let counts = query(
+        test_db.connection(),
+        "SELECT event_type, count(*)::bigint AS count FROM notification_outbox \
+         GROUP BY event_type ORDER BY event_type",
+    )
+    .await;
+    assert_eq!(
+        counts
+            .iter()
+            .map(|row| (
+                row.try_get::<String>("", "event_type").unwrap(),
+                row.try_get::<i64>("", "count").unwrap(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("downloaded".to_owned(), 1),
+            ("encoding-complete".to_owned(), 1),
+            ("started".to_owned(), 1),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn storage_block_notifies_both_family_recipients_once() {
+    let (test_db, jobs, leases) = setup().await;
+    jobs.create(
+        operation_key(),
+        new_job_with_notifications(
+            "blocked-private-reference",
+            SECONDARY_USER_ID,
+            NotifyScope::Family,
+        ),
+    )
+    .await
+    .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::stage_started(JobEventId::new(), 0, "media_pipeline".to_owned(), 1).unwrap(),
+        JobEvent::stage_completed(
+            JobEventId::new(),
+            0,
+            "media_pipeline".to_owned(),
+            1,
+            Default::default(),
+        )
+        .unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::BlockedStorage, None).unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    let notifications = notification_rows(&test_db).await;
+    assert_eq!(
+        notifications
+            .iter()
+            .map(|row| (
+                row.try_get::<String>("", "event_type").unwrap(),
+                row.try_get::<String>("", "recipient").unwrap(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("blocked-storage".to_owned(), "primary".to_owned()),
+            ("blocked-storage".to_owned(), "secondary".to_owned()),
+            ("started".to_owned(), "primary".to_owned()),
+            ("started".to_owned(), "secondary".to_owned()),
+        ]
+    );
+    for row in &notifications {
+        assert_sanitized_message(row, &["blocked-private-reference"]);
+    }
+
+    let deliveries = SeaOrmNotificationOutbox::new(test_db.connection().clone())
+        .lease_pending(
+            NotificationId::new(),
+            time::OffsetDateTime::now_utc() + time::Duration::seconds(1),
+            time::Duration::seconds(30),
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        deliveries
+            .iter()
+            .filter(|delivery| delivery.event_type() == NotificationEventType::BlockedStorage)
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn terminal_stage_failure_creates_one_sanitized_failure_notification() {
+    let (test_db, jobs, leases) = setup().await;
+    jobs.create(operation_key(), new_job("failure-private-reference"))
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::stage_started(JobEventId::new(), 0, "execution".to_owned(), 2).unwrap(),
+        JobEvent::stage_failed(
+            JobEventId::new(),
+            0,
+            "execution".to_owned(),
+            2,
+            false,
+            "provider_error:https://secret.example/token".to_owned(),
+        )
+        .unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    let failed = query(
+        test_db.connection(),
+        "SELECT event_type, recipient, payload FROM notification_outbox \
+         WHERE event_type = 'failed'",
+    )
+    .await;
+    assert_eq!(failed.len(), 1);
+    let message = failed[0]
+        .try_get::<serde_json::Value>("", "payload")
+        .unwrap()["message"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(message.contains("provider_error"));
+    assert_sanitized_message(
+        &failed[0],
+        &["secret.example", "token", "failure-private-reference"],
+    );
+}
+
+#[tokio::test]
+async fn successful_runner_transition_chain_reaches_completed_and_releases_the_lease() {
     let (test_db, jobs, leases) = setup().await;
     let created = jobs
-        .create(operation_key(), new_job("retry-stage"))
+        .create(operation_key(), new_job("successful-chain"))
         .await
         .unwrap();
     let lease = leases
@@ -185,8 +543,63 @@ async fn retryable_stage_fails_terminally_on_third_attempt_and_releases_lease() 
         )
         .await
         .unwrap();
+    for state in [
+        JobState::Publishing,
+        JobState::PlexPending,
+        JobState::Completed,
+    ] {
+        leases
+            .report_event(
+                operation_key(),
+                lease.lease_id(),
+                RUNNER_CLIENT_ID,
+                JobEvent::transition(JobEventId::new(), state, None).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
 
+    assert_eq!(
+        jobs.find_for_owner(created.id(), PRIMARY_USER_ID)
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        JobState::Completed,
+    );
+    assert!(
+        query(test_db.connection(), "SELECT id FROM job_leases")
+            .await
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn retryable_stage_fails_terminally_on_third_attempt_and_releases_lease() {
+    let (test_db, jobs, leases) = setup().await;
+    let created = jobs
+        .create(operation_key(), new_job("retry-stage"))
+        .await
+        .unwrap();
     for attempt in 1..=3 {
+        let lease = leases
+            .lease_next(
+                operation_key(),
+                RUNNER_CLIENT_ID,
+                time::Duration::seconds(60),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        leases
+            .report_event(
+                operation_key(),
+                lease.lease_id(),
+                RUNNER_CLIENT_ID,
+                JobEvent::started(JobEventId::new()),
+            )
+            .await
+            .unwrap();
         leases
             .report_event(
                 operation_key(),
@@ -217,10 +630,15 @@ async fn retryable_stage_fails_terminally_on_third_attempt_and_releases_lease() 
         assert_eq!(
             job.state(),
             if attempt < 3 {
-                JobState::Running
+                JobState::Queued
             } else {
                 JobState::Failed
             },
+        );
+        assert!(
+            query(test_db.connection(), "SELECT id FROM job_leases")
+                .await
+                .is_empty()
         );
     }
 
@@ -242,6 +660,188 @@ async fn retryable_stage_fails_terminally_on_third_attempt_and_releases_lease() 
         .unwrap()
         .unwrap();
     assert_eq!(persisted.state(), JobState::Failed);
+}
+
+#[tokio::test]
+async fn retry_can_replay_an_already_completed_stage_idempotently() {
+    let (_test_db, jobs, leases) = setup().await;
+    jobs.create(operation_key(), new_job("completed-stage-replay"))
+        .await
+        .unwrap();
+    let first = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    leases
+        .report_event(
+            operation_key(),
+            first.lease_id(),
+            RUNNER_CLIENT_ID,
+            JobEvent::started(JobEventId::new()),
+        )
+        .await
+        .unwrap();
+    for event in [
+        JobEvent::stage_started(JobEventId::new(), 0, "resolve_manifest".to_owned(), 0).unwrap(),
+        JobEvent::stage_completed(
+            JobEventId::new(),
+            0,
+            "resolve_manifest".to_owned(),
+            0,
+            Default::default(),
+        )
+        .unwrap(),
+        JobEvent::stage_started(JobEventId::new(), 0, "execution".to_owned(), 2).unwrap(),
+        JobEvent::stage_failed(
+            JobEventId::new(),
+            0,
+            "execution".to_owned(),
+            2,
+            true,
+            "execution_failed".to_owned(),
+        )
+        .unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), first.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    let second = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    leases
+        .report_event(
+            operation_key(),
+            second.lease_id(),
+            RUNNER_CLIENT_ID,
+            JobEvent::started(JobEventId::new()),
+        )
+        .await
+        .unwrap();
+    leases
+        .report_event(
+            operation_key(),
+            second.lease_id(),
+            RUNNER_CLIENT_ID,
+            JobEvent::stage_started(JobEventId::new(), 0, "resolve_manifest".to_owned(), 0)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    leases
+        .report_event(
+            operation_key(),
+            second.lease_id(),
+            RUNNER_CLIENT_ID,
+            JobEvent::stage_completed(
+                JobEventId::new(),
+                0,
+                "resolve_manifest".to_owned(),
+                0,
+                Default::default(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn replayed_completed_wrapper_stage_can_fail_and_requeue() {
+    let (test_db, jobs, leases) = setup().await;
+    jobs.create(operation_key(), new_job("completed-wrapper-retry"))
+        .await
+        .unwrap();
+    let first = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::stage_started(JobEventId::new(), 0, "execution".to_owned(), 2).unwrap(),
+        JobEvent::stage_completed(
+            JobEventId::new(),
+            0,
+            "execution".to_owned(),
+            2,
+            Default::default(),
+        )
+        .unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::Publishing, None).unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::PlexPending, None).unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), first.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+    test_db
+        .connection()
+        .execute_raw(Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            "UPDATE job_leases SET created_at = now() - interval '2 seconds', \
+             expires_at = now() - interval '1 second' WHERE id = $1",
+            [first.lease_id().into_uuid().into()],
+        ))
+        .await
+        .unwrap();
+
+    let retry = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::stage_started(JobEventId::new(), 0, "execution".to_owned(), 2).unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), retry.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+    let requeued = leases
+        .report_event(
+            operation_key(),
+            retry.lease_id(),
+            RUNNER_CLIENT_ID,
+            JobEvent::stage_failed(
+                JobEventId::new(),
+                0,
+                "execution".to_owned(),
+                2,
+                true,
+                "execution_failed".to_owned(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(requeued.state(), JobState::Queued);
 }
 
 #[tokio::test]

@@ -68,7 +68,11 @@ async fn subnet_whitelist_does_not_require_a_login_cookie() {
             .iter()
             .all(|request| request.url.path() != "/api/v2/auth/login")
     );
-    assert!(requests.iter().all(|request| !request.headers.contains_key("cookie")));
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.headers.contains_key("cookie"))
+    );
 }
 
 #[tokio::test]
@@ -123,6 +127,84 @@ async fn only_explicit_selection_is_submitted_to_the_configured_category() {
             "forbidden add field: {forbidden}"
         );
     }
+}
+
+#[tokio::test]
+async fn explicit_selection_is_submitted_to_the_requested_existing_category() {
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/categories"))
+        .and(header("cookie", "SID=session-cookie"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "media-tv": {"name": "media-tv", "savePath": "/downloads/media-tv"},
+            "media-movies": {"name": "media-movies", "savePath": "/downloads/media-movies"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/add"))
+        .and(header("cookie", "SID=session-cookie"))
+        .and(body_string_contains("name=\"category\""))
+        .and(body_string_contains("media-movies"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("Ok."))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = QbittorrentClient::connect(config(&server)).await.unwrap();
+    let selection = ExplicitTorrentSelection::new(
+        "prowlarr:3:movie-guid",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    )
+    .unwrap();
+    let handle = client
+        .submit_selected_to_category(selection, "media-movies")
+        .await
+        .unwrap();
+
+    assert_eq!(handle.category, "media-movies");
+}
+
+#[tokio::test]
+async fn selection_is_not_submitted_to_an_unknown_category() {
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/categories"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "media-tv": {"name": "media-tv", "savePath": "/downloads/media-tv"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = QbittorrentClient::connect(config(&server)).await.unwrap();
+    let selection = ExplicitTorrentSelection::new(
+        "prowlarr:3:movie-guid",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    )
+    .unwrap();
+    let error = client
+        .submit_selected_to_category(selection, "media-movies")
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error.code(),
+        media_integrations::qbittorrent::QbittorrentErrorCode::InvalidSelection
+    );
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.url.path() != "/api/v2/torrents/add")
+    );
 }
 
 #[tokio::test]
@@ -209,6 +291,46 @@ async fn monitoring_and_path_discovery_are_read_only() {
             .filter(|request| request.method.as_str() == "POST")
             .all(|request| { request.url.path() == "/api/v2/auth/login" })
     );
+}
+
+#[tokio::test]
+async fn monitoring_uses_the_category_preserved_in_the_job_handle() {
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/info"))
+        .and(query_param(
+            "hashes",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ))
+        .and(query_param("category", "media-movies"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "name": "Example Movie",
+                "category": "media-movies",
+                "state": "uploading",
+                "progress": 1.0,
+                "amount_left": 0,
+                "content_path": "/downloads/media-movies/Example Movie.mkv",
+                "save_path": "/downloads/media-movies/",
+                "completion_on": 1770000000
+            }])),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = QbittorrentClient::connect(config(&server)).await.unwrap();
+    let handle = media_integrations::qbittorrent::TorrentHandle {
+        source_identity: "prowlarr:3:movie-guid".into(),
+        hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        category: "media-movies".into(),
+    };
+
+    let snapshot = client.monitor(&handle).await.unwrap();
+
+    assert_eq!(snapshot.name, "Example Movie");
 }
 
 #[test]

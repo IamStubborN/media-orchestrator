@@ -141,9 +141,34 @@ fn runner_execution_payload_is_separate_from_public_search_results() {
         source_identity: "1:guid:42".to_owned(),
         info_hash: "0123456789abcdef0123456789abcdef01234567".to_owned(),
         uri: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567".to_owned(),
+        media_kind: MediaKindDto::Movie,
+        season: None,
         title: "Exact Release".to_owned(),
     };
     let value = serde_json::to_value(execution).unwrap();
     assert_eq!(value["source"], "prowlarr");
+    assert_eq!(value["media_kind"], "movie");
+    assert!(value.get("season").is_none());
     assert!(value["uri"].as_str().unwrap().starts_with("magnet:"));
+}
+
+#[test]
+fn legacy_prowlarr_execution_payloads_remain_deserializable() {
+    let execution: ExecutionSelectionDto = serde_json::from_value(serde_json::json!({
+        "source": "prowlarr",
+        "source_identity": "1:guid:42",
+        "info_hash": "0123456789abcdef0123456789abcdef01234567",
+        "uri": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+        "title": "Legacy Release"
+    }))
+    .unwrap();
+
+    assert!(matches!(
+        execution,
+        ExecutionSelectionDto::Prowlarr {
+            media_kind: MediaKindDto::Movie,
+            season: None,
+            ..
+        }
+    ));
 }

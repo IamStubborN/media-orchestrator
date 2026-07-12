@@ -181,9 +181,10 @@ async fn insert_notification_outbox(
     job: &Job,
     event: &JobEvent,
 ) -> Result<(), sea_orm::DbErr> {
-    let Some((event_type, message)) = notification_for_event(job, event) else {
+    let notifications = notifications_for_event(job, event);
+    if notifications.is_empty() {
         return Ok(());
-    };
+    }
     let recipients = match job.notify_scope() {
         NotifyScope::Family => vec!["primary", "secondary"],
         NotifyScope::Initiator if job.owner_id() == PRIMARY_USER_ID => vec!["primary"],
@@ -194,63 +195,113 @@ async fn insert_notification_outbox(
             ));
         }
     };
-    for recipient in recipients {
-        transaction
-            .execute_raw(Statement::from_sql_and_values(
-                DatabaseBackend::Postgres,
-                "INSERT INTO notification_outbox \
-                 (id, aggregate_type, aggregate_id, event_type, recipient, source_dedupe_key, payload) \
-                 VALUES ($1, 'job', $2, $3, $4, $5, $6) \
-                 ON CONFLICT (source_dedupe_key, recipient) DO NOTHING",
-                [
-                    Uuid::new_v4().into(),
-                    job.id().into_uuid().into(),
-                    event_type.into(),
-                    recipient.into(),
-                    event.id().into_uuid().as_bytes().to_vec().into(),
-                    serde_json::json!({"message": message}).into(),
-                ],
-            ))
-            .await?;
+    for (event_type, message) in notifications {
+        let source_dedupe_key = notification_dedupe_key(job, event_type);
+        for recipient in &recipients {
+            transaction
+                .execute_raw(Statement::from_sql_and_values(
+                    DatabaseBackend::Postgres,
+                    "INSERT INTO notification_outbox \
+                     (id, aggregate_type, aggregate_id, event_type, recipient, source_dedupe_key, payload) \
+                     VALUES ($1, 'job', $2, $3, $4, $5, $6) \
+                     ON CONFLICT (source_dedupe_key, recipient) DO NOTHING",
+                    [
+                        Uuid::new_v4().into(),
+                        job.id().into_uuid().into(),
+                        event_type.into(),
+                        (*recipient).into(),
+                        source_dedupe_key.clone().into(),
+                        serde_json::json!({"message": message}).into(),
+                    ],
+                ))
+                .await?;
+        }
     }
     Ok(())
 }
 
-fn notification_for_event(job: &Job, event: &JobEvent) -> Option<(&'static str, String)> {
+fn notifications_for_event(job: &Job, event: &JobEvent) -> Vec<(&'static str, String)> {
     let id = job.id();
     match event.kind() {
-        JobEventKind::Started => Some(("started", format!("Media job {id} started."))),
-        JobEventKind::StageCompleted { stage, .. } if stage.name() == "download" => Some((
-            "downloaded",
-            format!("Media job {id} finished downloading."),
-        )),
+        JobEventKind::Started => vec![("started", format!("Media job {id} started."))],
+        JobEventKind::StageCompleted { stage, .. }
+            if matches!(stage.name(), "download" | "torrent_monitor") =>
+        {
+            vec![(
+                "downloaded",
+                format!("Media job {id} finished downloading."),
+            )]
+        }
         JobEventKind::StageCompleted { stage, .. }
             if matches!(stage.name(), "encode" | "encoding" | "transcode") =>
         {
-            Some((
+            vec![(
                 "encoding-complete",
                 format!("Media job {id} finished encoding."),
-            ))
+            )]
         }
-        JobEventKind::StageFailed { .. } if job.state() == JobState::Failed => {
-            Some(("failed", format!("Media job {id} failed.")))
+        JobEventKind::StageFailed { error_code, .. } if job.state() == JobState::Failed => {
+            let error_code = sanitized_error_code(error_code);
+            vec![("failed", format!("Media job {id} failed ({error_code})."))]
         }
         JobEventKind::JobTransition { state, .. } => match state {
-            JobState::NeedsAction => Some((
+            JobState::NeedsAction => vec![(
                 "choice-needed",
                 format!("Media job {id} needs a choice before it can continue."),
-            )),
-            JobState::Partial => Some((
-                "partial",
-                format!("Media job {id} completed with partial results."),
-            )),
-            JobState::Completed => {
-                Some(("plex-added", format!("Media job {id} was added to Plex.")))
+            )],
+            JobState::BlockedStorage => vec![(
+                "blocked-storage",
+                format!("Media job {id} is blocked because storage space is insufficient."),
+            )],
+            JobState::Publishing => {
+                let mut notifications = vec![(
+                    "downloaded",
+                    format!("Media job {id} finished downloading."),
+                )];
+                if job.provider() == media_core::Provider::Rezka {
+                    notifications.push((
+                        "encoding-complete",
+                        format!("Media job {id} finished encoding."),
+                    ));
+                }
+                notifications
             }
-            JobState::Failed => Some(("failed", format!("Media job {id} failed."))),
-            _ => None,
+            JobState::Partial => vec![
+                ("plex-added", format!("Media job {id} was added to Plex.")),
+                (
+                    "partial",
+                    format!("Media job {id} completed with partial results."),
+                ),
+            ],
+            JobState::Completed => {
+                vec![("plex-added", format!("Media job {id} was added to Plex."))]
+            }
+            JobState::Failed => vec![("failed", format!("Media job {id} failed."))],
+            _ => Vec::new(),
         },
-        _ => None,
+        _ => Vec::new(),
+    }
+}
+
+fn notification_dedupe_key(job: &Job, event_type: &str) -> Vec<u8> {
+    let mut key = job.id().into_uuid().as_bytes().to_vec();
+    key.extend_from_slice(event_type.as_bytes());
+    key
+}
+
+fn sanitized_error_code(error_code: &str) -> &str {
+    let safe_length = error_code
+        .char_indices()
+        .take_while(|(_, character)| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
+        .take(64)
+        .last()
+        .map_or(0, |(index, character)| index + character.len_utf8());
+    if safe_length == 0 {
+        "provider_error"
+    } else {
+        &error_code[..safe_length]
     }
 }
 
@@ -297,6 +348,10 @@ async fn apply_event(
             if terminal {
                 transition_job(transaction, &current, JobState::Failed, None).await?;
                 release_lease(transaction, lease).await?;
+            } else {
+                reset_running_work(transaction, current.id()).await?;
+                transition_job(transaction, &current, JobState::Queued, None).await?;
+                release_lease(transaction, lease).await?;
             }
         }
         JobEventKind::JobTransition {
@@ -318,6 +373,30 @@ async fn apply_event(
         }
     }
     load_job(transaction, current.id().into_uuid()).await
+}
+
+async fn reset_running_work(
+    transaction: &sea_orm::DatabaseTransaction,
+    job_id: media_core::JobId,
+) -> Result<(), sea_orm::DbErr> {
+    transaction
+        .execute_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "UPDATE job_stages SET state = 'pending', updated_at = now() \
+             WHERE task_id IN (SELECT id FROM job_tasks WHERE job_id = $1) \
+             AND state = 'running'",
+            [job_id.into_uuid().into()],
+        ))
+        .await?;
+    transaction
+        .execute_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "UPDATE job_tasks SET state = 'pending', updated_at = now() \
+             WHERE job_id = $1 AND state = 'running'",
+            [job_id.into_uuid().into()],
+        ))
+        .await?;
+    Ok(())
 }
 
 fn require_running(job: &Job) -> Result<(), sea_orm::DbErr> {
@@ -419,9 +498,10 @@ async fn start_stage(
              (id, task_id, name, ordinal, state, attempt_count, started_at) \
              VALUES ($1, $2, $3, $4, 'running', 1, now()) \
              ON CONFLICT (task_id, name) DO UPDATE SET state = 'running', \
-             attempt_count = job_stages.attempt_count + 1, \
+             attempt_count = job_stages.attempt_count + 1, completed_at = NULL, \
              started_at = COALESCE(job_stages.started_at, now()), updated_at = now() \
-             WHERE job_stages.state = 'pending' AND job_stages.attempt_count < 3 \
+             WHERE job_stages.state IN ('pending', 'completed') \
+             AND job_stages.attempt_count < 3 \
              AND job_stages.ordinal = EXCLUDED.ordinal RETURNING attempt_count",
             [
                 Uuid::new_v4().into(),
@@ -451,10 +531,15 @@ async fn update_stage_checkpoint(
         .map_err(|_| sea_orm::DbErr::Type("stage ordinal is out of range".to_owned()))?;
     let state = if complete { "completed" } else { "running" };
     let completed_at = if complete { "now()" } else { "completed_at" };
+    let allowed_states = if complete {
+        "('running', 'completed')"
+    } else {
+        "('running')"
+    };
     let sql = format!(
         "UPDATE job_stages SET checkpoint = checkpoint || $4, state = '{state}', \
          completed_at = {completed_at}, updated_at = now() WHERE task_id = $1 \
-         AND name = $2 AND ordinal = $3 AND state = 'running'"
+         AND name = $2 AND ordinal = $3 AND state IN {allowed_states}"
     );
     let updated = transaction
         .execute_raw(Statement::from_sql_and_values(

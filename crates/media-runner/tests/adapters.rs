@@ -139,6 +139,26 @@ async fn reqwest_adapter_resumes_only_from_matching_content_range() {
 }
 
 #[tokio::test]
+async fn reqwest_adapter_probes_video_size_with_a_single_byte_range() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/video"))
+        .and(header("range", "bytes=0-0"))
+        .respond_with(
+            ResponseTemplate::new(206)
+                .insert_header("content-range", "bytes 0-0/734003200")
+                .set_body_bytes(b"x"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let adapter = ReqwestHttpAdapter::new(std::time::Duration::from_secs(5)).unwrap();
+    let url = SensitiveUrl::parse(&format!("{}/video", server.uri()), "video").unwrap();
+
+    assert_eq!(adapter.probe_video_size(&url).await.unwrap(), 734_003_200);
+}
+
+#[tokio::test]
 async fn ignored_range_restarts_only_the_current_partial_file() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

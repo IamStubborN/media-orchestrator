@@ -44,6 +44,19 @@ struct RecordingExecutor {
     max_active: AtomicUsize,
 }
 
+struct FailingExecutor;
+
+#[async_trait::async_trait]
+impl JobExecutor for FailingExecutor {
+    async fn execute(
+        &self,
+        _: &LeaseDto,
+        _: &RunnerControl,
+    ) -> Result<ExecutionOutcome, media::runner::RunnerError> {
+        Err(media::runner::RunnerError::Execution)
+    }
+}
+
 #[async_trait::async_trait]
 impl JobExecutor for RecordingExecutor {
     async fn execute(
@@ -75,6 +88,8 @@ fn lease() -> LeaseDto {
             source_identity: "mock:1".to_owned(),
             info_hash: "0123456789abcdef0123456789abcdef01234567".to_owned(),
             uri: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567".to_owned(),
+            media_kind: media_contract::MediaKindDto::Movie,
+            season: None,
             title: "Movie".to_owned(),
         }),
         expires_at: "2026-07-13T12:00:00Z".to_owned(),
@@ -104,6 +119,21 @@ async fn loop_leases_heartbeats_reports_stages_and_runs_one_active_job() {
     let events = api.events.lock().unwrap();
     assert!(matches!(events.first(), Some(RunnerEventDto::Started)));
     assert!(events.iter().any(|event| matches!(event, RunnerEventDto::StageStarted { stage_name, .. } if stage_name == "resolve")));
+    let transitions = events
+        .iter()
+        .filter_map(|event| match event {
+            RunnerEventDto::JobTransition { state, .. } => Some(*state),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        transitions,
+        vec![
+            JobStateDto::Publishing,
+            JobStateDto::PlexPending,
+            JobStateDto::Completed,
+        ]
+    );
     assert!(matches!(
         events.last(),
         Some(RunnerEventDto::JobTransition {
@@ -111,4 +141,33 @@ async fn loop_leases_heartbeats_reports_stages_and_runs_one_active_job() {
             ..
         })
     ));
+}
+
+#[tokio::test]
+async fn execution_failure_is_reported_without_stopping_the_runner_loop() {
+    let api = Arc::new(FakeApi {
+        lease: Mutex::new(Some(lease())),
+        events: Mutex::default(),
+        heartbeats: AtomicUsize::new(0),
+    });
+
+    assert!(
+        run_single_iteration(
+            api.clone(),
+            Arc::new(FailingExecutor),
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap()
+    );
+    let events = api.events.lock().unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RunnerEventDto::StageFailed {
+            stage_name,
+            retryable: true,
+            error_code,
+            ..
+        } if stage_name == "execution" && error_code == "execution_failed"
+    )));
 }

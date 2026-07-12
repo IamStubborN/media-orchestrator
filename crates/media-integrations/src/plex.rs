@@ -288,7 +288,8 @@ impl PlexClient {
         if !path_matches {
             mismatches.push(PlexMismatch::Path);
         }
-        if item.guid != expected.canonical_identity
+        if plex_guid_identity(&expected.canonical_identity)
+            && item.guid != expected.canonical_identity
             && !item
                 .guids
                 .iter()
@@ -335,7 +336,10 @@ impl PlexClient {
             .map_err(|_| PlexError::Configuration {
                 message: "section endpoint could not be constructed",
             })?;
-        endpoint.query_pairs_mut().append_pair("includeGuids", "1");
+        endpoint
+            .query_pairs_mut()
+            .append_pair("includeGuids", "1")
+            .append_pair("type", if season.is_some() { "4" } else { "1" });
         let response = self.send_get(endpoint).await?;
         let status = response.status();
         let payload: MetadataResponse = response
@@ -355,7 +359,8 @@ impl PlexClient {
         if item.media_type != expected_type {
             mismatches.push(PlexMismatch::MediaType);
         }
-        if item.guid != canonical_identity
+        if plex_guid_identity(canonical_identity)
+            && item.guid != canonical_identity
             && !item.guids.iter().any(|guid| guid.id == canonical_identity)
         {
             mismatches.push(PlexMismatch::CanonicalIdentity);
@@ -398,6 +403,12 @@ impl PlexClient {
         }
         Ok(response)
     }
+}
+
+fn plex_guid_identity(identity: &str) -> bool {
+    ["plex://", "tmdb://", "tvdb://", "imdb://"]
+        .iter()
+        .any(|prefix| identity.starts_with(prefix))
 }
 
 #[derive(Deserialize)]

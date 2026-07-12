@@ -45,6 +45,7 @@ cargo_metadata.workspace = true
 testcontainers.workspace = true
 tower.workspace = true
 wait-timeout = "=0.2.1"
+wiremock.workspace = true
 
 [[test]]
 name = "postgres"

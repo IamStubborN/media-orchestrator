@@ -32,7 +32,8 @@ const REZKA_USER_AGENT: &str = "MEDIA_REZKA_USER_AGENT";
 const PROWLARR_URL: &str = "MEDIA_PROWLARR_URL";
 const PROWLARR_API_KEY_FILE: &str = "MEDIA_PROWLARR_API_KEY_FILE";
 const QBITTORRENT_URL: &str = "MEDIA_QBITTORRENT_URL";
-const QBITTORRENT_CATEGORY: &str = "MEDIA_QBITTORRENT_CATEGORY";
+const QBITTORRENT_TV_CATEGORY: &str = "MEDIA_QBITTORRENT_TV_CATEGORY";
+const QBITTORRENT_MOVIES_CATEGORY: &str = "MEDIA_QBITTORRENT_MOVIES_CATEGORY";
 const QBITTORRENT_USERNAME: &str = "MEDIA_QBITTORRENT_USERNAME";
 const QBITTORRENT_PASSWORD_FILE: &str = "MEDIA_QBITTORRENT_PASSWORD_FILE";
 const GLUETUN_URL: &str = "MEDIA_GLUETUN_URL";
@@ -486,7 +487,8 @@ impl ProwlarrCompositionConfig {
 
 pub struct QbittorrentCompositionConfig {
     base_url: url::Url,
-    category: String,
+    tv_category: String,
+    movies_category: String,
     username: String,
     password: SecretString,
 }
@@ -517,8 +519,11 @@ impl QbittorrentCompositionConfig {
     pub const fn base_url(&self) -> &url::Url {
         &self.base_url
     }
-    pub fn category(&self) -> &str {
-        &self.category
+    pub fn tv_category(&self) -> &str {
+        &self.tv_category
+    }
+    pub fn movies_category(&self) -> &str {
+        &self.movies_category
     }
     pub fn username(&self) -> &str {
         &self.username
@@ -572,7 +577,8 @@ fn load_qbittorrent_config(
 ) -> Result<QbittorrentCompositionConfig, ConfigError> {
     Ok(QbittorrentCompositionConfig {
         base_url: parse_service_url(source, QBITTORRENT_URL)?,
-        category: required_environment(source, QBITTORRENT_CATEGORY)?,
+        tv_category: required_environment(source, QBITTORRENT_TV_CATEGORY)?,
+        movies_category: required_environment(source, QBITTORRENT_MOVIES_CATEGORY)?,
         username: required_environment(source, QBITTORRENT_USERNAME)?,
         password: read_secret(source, QBITTORRENT_PASSWORD_FILE, SecretKind::Token)?,
     })

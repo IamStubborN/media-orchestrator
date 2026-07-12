@@ -8,6 +8,8 @@ pub struct StartSearchRequest {
     pub source: ProviderDto,
     pub query: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_kind: Option<MediaKindDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub season: Option<u16>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preferred_qualities: Vec<String>,
@@ -118,6 +120,10 @@ pub enum SearchResultDto {
     },
 }
 
+const fn legacy_prowlarr_media_kind() -> MediaKindDto {
+    MediaKindDto::Movie
+}
+
 impl SearchResultDto {
     #[must_use]
     pub fn result_id(&self) -> &str {
@@ -159,6 +165,10 @@ pub enum ExecutionSelectionDto {
         source_identity: String,
         info_hash: String,
         uri: String,
+        #[serde(default = "legacy_prowlarr_media_kind")]
+        media_kind: MediaKindDto,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        season: Option<u16>,
         title: String,
     },
 }

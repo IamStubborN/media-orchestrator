@@ -7,7 +7,8 @@ use media_contract::{
     StartSearchRequest,
 };
 use media_core::{
-    Job, JobApplication, JobState, NewJobCommand, NotifyScope, OperationKey, Provider, UserId,
+    EpisodeDiscoveryPort, EpisodeSnapshot, Job, JobApplication, JobState, NewJobCommand,
+    NotifyScope, OperationKey, PortError, Provider, TrackingSubscription, UserId,
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -140,6 +141,84 @@ pub trait SearchProvider: Send + Sync {
         request: &StartSearchRequest,
         continuation: Option<&str>,
     ) -> Result<ProviderPage, SearchError>;
+}
+
+pub struct ProviderEpisodeDiscovery {
+    provider: Arc<dyn SearchProvider>,
+}
+
+impl ProviderEpisodeDiscovery {
+    #[must_use]
+    pub fn new(provider: Arc<dyn SearchProvider>) -> Self {
+        Self { provider }
+    }
+}
+
+#[async_trait::async_trait]
+impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
+    async fn available_episodes(
+        &self,
+        tracking: &TrackingSubscription,
+    ) -> Result<Vec<EpisodeSnapshot>, PortError> {
+        let page = self
+            .provider
+            .search(
+                &StartSearchRequest {
+                    source: ProviderDto::Rezka,
+                    query: tracking.title().to_owned(),
+                    media_kind: None,
+                    season: None,
+                    preferred_qualities: Vec::new(),
+                    preferred_languages: Vec::new(),
+                    preferred_codecs: Vec::new(),
+                    preferred_release_groups: Vec::new(),
+                },
+                None,
+            )
+            .await
+            .map_err(|_| PortError::Infrastructure)?;
+        let result = page.results.into_iter().find(|result| {
+            matches!(
+                &result.public,
+                SearchResultDto::Rezka { title, .. }
+                    if title.trim().eq_ignore_ascii_case(tracking.title().trim())
+            )
+        });
+        let Some(ProviderResult {
+            public: SearchResultDto::Rezka { translations, .. },
+            private:
+                PrivateResult::Rezka {
+                    translation_episodes,
+                    ..
+                },
+        }) = result
+        else {
+            return Err(PortError::Infrastructure);
+        };
+        let translation_id = translations
+            .iter()
+            .find(|translation| {
+                translation
+                    .name
+                    .trim()
+                    .eq_ignore_ascii_case(tracking.translation().trim())
+            })
+            .map(|translation| translation.id)
+            .ok_or(PortError::Infrastructure)?;
+        let mut episodes = translation_episodes
+            .get(&translation_id)
+            .ok_or(PortError::Infrastructure)?
+            .iter()
+            .flat_map(|(season, episodes)| {
+                episodes
+                    .iter()
+                    .filter_map(|episode| EpisodeSnapshot::new(*season, *episode).ok())
+            })
+            .collect::<Vec<_>>();
+        episodes.sort_unstable();
+        episodes.dedup();
+        Ok(episodes)
+    }
 }
 
 pub struct ConcreteSearchProvider {
@@ -310,11 +389,13 @@ impl ConcreteSearchProvider {
         continuation: Option<&str>,
     ) -> Result<ProviderPage, SearchError> {
         let client = self.prowlarr.as_ref().ok_or(SearchError::Provider)?;
-        let kind = request
-            .season
-            .map_or(media_integrations::prowlarr::MediaKind::Movie, |season| {
+        let kind = match (request.media_kind, request.season) {
+            (Some(MediaKindDto::Movie), None) => media_integrations::prowlarr::MediaKind::Movie,
+            (Some(MediaKindDto::Series), Some(season)) => {
                 media_integrations::prowlarr::MediaKind::Series { season }
-            });
+            }
+            _ => return Err(SearchError::InvalidRequest),
+        };
         let query = media_integrations::prowlarr::MediaQuery {
             title: request.query.clone(),
             kind,
@@ -651,7 +732,13 @@ impl DurableSearchService {
         if request.query.trim().is_empty()
             || request.query.len() > 512
             || request.query.chars().any(char::is_control)
-            || (request.source == ProviderDto::Rezka && request.season.is_some())
+            || (request.source == ProviderDto::Rezka
+                && (request.season.is_some() || request.media_kind.is_some()))
+            || (request.source == ProviderDto::Prowlarr
+                && !matches!(
+                    (request.media_kind, request.season),
+                    (Some(MediaKindDto::Movie), None) | (Some(MediaKindDto::Series), Some(_))
+                ))
             || request.season == Some(0)
         {
             return Err(SearchError::InvalidRequest);
@@ -767,7 +854,12 @@ impl SearchService for DurableSearchService {
             .iter()
             .find(|result| result.public.result_id() == request.result_id)
             .ok_or(SearchError::NotFound)?;
-        let execution = execution(result, &request)?;
+        let execution = execution(
+            result,
+            &request,
+            session.request.media_kind,
+            session.request.season,
+        )?;
         let result_ref = format!("selection:{}", uuid::Uuid::new_v4());
         self.persistence
             .insert_execution(result_ref.clone(), execution)
@@ -806,6 +898,8 @@ impl SearchService for DurableSearchService {
 fn execution(
     result: &ProviderResult,
     request: &SelectResultRequest,
+    searched_kind: Option<MediaKindDto>,
+    searched_season: Option<u16>,
 ) -> Result<ExecutionSelectionDto, SearchError> {
     match (&result.public, &result.private) {
         (
@@ -826,6 +920,8 @@ fn execution(
                 source_identity: source_identity.clone(),
                 info_hash: info_hash.clone(),
                 uri: uri.clone(),
+                media_kind: searched_kind.ok_or(SearchError::Infrastructure)?,
+                season: searched_season,
                 title: title.clone(),
             })
         }
@@ -851,23 +947,32 @@ fn execution(
                 MediaKindDto::Movie if request.season.is_some() || request.episode.is_some() => {
                     return Err(SearchError::InvalidRequest);
                 }
-                MediaKindDto::Series => {
-                    let (season, episode) = request
-                        .season
-                        .zip(request.episode)
-                        .ok_or(SearchError::InvalidRequest)?;
-                    let available =
-                        translation_episodes
+                MediaKindDto::Series => match (request.season, request.episode) {
+                    (Some(season), Some(episode)) => {
+                        let available =
+                            translation_episodes
+                                .get(&translation_id)
+                                .is_some_and(|seasons| {
+                                    seasons.iter().any(|(candidate, episodes)| {
+                                        *candidate == season && episodes.contains(&episode)
+                                    })
+                                });
+                        if !available {
+                            return Err(SearchError::InvalidRequest);
+                        }
+                    }
+                    (None, None) => {
+                        if !translation_episodes
                             .get(&translation_id)
                             .is_some_and(|seasons| {
-                                seasons.iter().any(|(candidate, episodes)| {
-                                    *candidate == season && episodes.contains(&episode)
-                                })
-                            });
-                    if !available {
-                        return Err(SearchError::InvalidRequest);
+                                seasons.iter().any(|(_, episodes)| !episodes.is_empty())
+                            })
+                        {
+                            return Err(SearchError::InvalidRequest);
+                        }
                     }
-                }
+                    _ => return Err(SearchError::InvalidRequest),
+                },
                 MediaKindDto::Movie => {}
             }
             Ok(ExecutionSelectionDto::Rezka {

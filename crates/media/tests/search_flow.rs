@@ -14,14 +14,71 @@ use media_contract::{
     StartSearchRequest, TrackingPromptDto,
 };
 use media_core::{
-    PRIMARY_USER_ID, Job, JobApplication, JobId, JobStore, NewJob, OperationKey, PortError,
-    QueueStatus, UserId, SECONDARY_USER_ID,
+    PRIMARY_USER_ID, EpisodeDiscoveryPort, Job, JobApplication, JobId, JobStore, NewJob,
+    OperationKey, PortError, Provider, QueueStatus, TrackingId, TrackingScope,
+    TrackingSubscription, UserId, SECONDARY_USER_ID,
 };
 
 #[derive(Default)]
 struct MemorySearchPersistence {
     sessions: Mutex<HashMap<String, StoredSearchSession>>,
     executions: Mutex<HashMap<String, media_contract::ExecutionSelectionDto>>,
+}
+
+#[tokio::test]
+async fn tracking_discovery_uses_the_selected_rezka_translation_snapshot() {
+    let public = SearchResultDto::Rezka {
+        result_id: "rezka-show".to_owned(),
+        title: "Show".to_owned(),
+        original_title: None,
+        year: Some(2026),
+        media_kind: MediaKindDto::Series,
+        thumbnail_url: None,
+        translations: vec![RezkaTranslationDto {
+            id: 37,
+            name: "Original".to_owned(),
+            premium: false,
+            director: false,
+            camrip: false,
+            has_ads: false,
+        }],
+        availability: Some(SeriesAvailabilityDto {
+            incomplete: true,
+            seasons: vec![SeasonAvailabilityDto {
+                season: 1,
+                episodes: vec![1, 2],
+            }],
+            tracking_prompt: None,
+        }),
+    };
+    let provider = Arc::new(FakeProvider {
+        pages: Mutex::new(HashMap::from([(
+            ProviderDto::Rezka,
+            vec![ProviderPage {
+                results: vec![ProviderResult::rezka(public, "/show.html".to_owned(), 42)],
+                provider_continuation: None,
+            }],
+        )])),
+    });
+    let discovery = media::search::ProviderEpisodeDiscovery::new(provider);
+    let tracking = TrackingSubscription::rehydrate(
+        TrackingId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        "Show".to_owned(),
+        "Original".to_owned(),
+        vec![media_core::EpisodeSnapshot::new(1, 1).unwrap()],
+        TrackingScope::Personal,
+    )
+    .unwrap();
+
+    assert_eq!(
+        discovery.available_episodes(&tracking).await.unwrap(),
+        vec![
+            media_core::EpisodeSnapshot::new(1, 1).unwrap(),
+            media_core::EpisodeSnapshot::new(1, 2).unwrap(),
+        ]
+    );
 }
 
 #[async_trait::async_trait]
@@ -158,6 +215,7 @@ fn request(source: ProviderDto) -> StartSearchRequest {
     StartSearchRequest {
         source,
         query: "Example".to_owned(),
+        media_kind: (source == ProviderDto::Prowlarr).then_some(MediaKindDto::Movie),
         season: None,
         preferred_qualities: vec![],
         preferred_languages: vec![],
@@ -203,6 +261,18 @@ fn service(pages: HashMap<ProviderDto, Vec<ProviderPage>>) -> DurableSearchServi
 }
 
 #[tokio::test]
+async fn prowlarr_series_search_requires_an_explicit_season() {
+    let service = service(HashMap::new());
+    let mut request = request(ProviderDto::Prowlarr);
+    request.media_kind = Some(MediaKindDto::Series);
+
+    assert_eq!(
+        service.start(PRIMARY_USER_ID, request).await.unwrap_err(),
+        SearchError::InvalidRequest
+    );
+}
+
+#[tokio::test]
 async fn prowlarr_paginates_five_and_runner_gets_only_the_exact_selected_result() {
     let mut pages = HashMap::new();
     pages.insert(
@@ -242,9 +312,15 @@ async fn prowlarr_paginates_five_and_runner_gets_only_the_exact_selected_result(
         .await
         .unwrap();
     let execution = service.execution_for(&selected.result_ref).await.unwrap();
-    assert!(
-        matches!(execution, media_contract::ExecutionSelectionDto::Prowlarr { title, uri, .. } if title == "Release 5" && uri.ends_with("dn=5"))
-    );
+    assert!(matches!(
+        execution,
+        media_contract::ExecutionSelectionDto::Prowlarr {
+            title,
+            uri,
+            media_kind: MediaKindDto::Movie,
+            ..
+        } if title == "Release 5" && uri.ends_with("dn=5")
+    ));
 }
 
 #[tokio::test]
@@ -327,6 +403,33 @@ async fn rezka_requires_explicit_translation_and_available_episode_without_fallb
             .unwrap_err(),
         SearchError::NotFound
     );
+
+    let whole_series = service
+        .select(
+            PRIMARY_USER_ID,
+            OperationKey::from_bytes([10; 32]),
+            SelectResultRequest {
+                session_id: page.session_id.clone(),
+                result_id: "rezka-show".to_owned(),
+                translation_id: Some(37),
+                season: None,
+                episode: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        service
+            .execution_for(&whole_series.result_ref)
+            .await
+            .unwrap(),
+        media_contract::ExecutionSelectionDto::Rezka {
+            translation_id: 37,
+            season: None,
+            episode: None,
+            ..
+        }
+    ));
 
     let job = service
         .select(

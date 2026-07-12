@@ -16,6 +16,7 @@ pub enum NotificationEventType {
     EncodingComplete,
     PlexAdded,
     Partial,
+    BlockedStorage,
     Failed,
     FutureEpisodeFound,
 }

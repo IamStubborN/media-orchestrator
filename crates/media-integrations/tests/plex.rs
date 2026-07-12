@@ -129,10 +129,11 @@ async fn path_verification_finds_the_exact_scanned_episode_without_a_rating_key(
     Mock::given(method("GET"))
         .and(path("/library/sections/7/all"))
         .and(query_param("includeGuids", "1"))
+        .and(query_param("type", "4"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "MediaContainer": {"Metadata": [{
                 "ratingKey": "321", "guid": "plex://episode/abcdef", "type": "episode",
-                "parentIndex": 2, "index": 4, "Guid": [{"id": "rezka://42"}],
+                "parentIndex": 2, "index": 4, "Guid": [{"id": "tvdb://456"}],
                 "Media": [{"Part": [{"file": "/plex/tv/Show/Season 02/Show - S02E04.mkv"}]}]
             }]}
         })))

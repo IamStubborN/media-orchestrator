@@ -6,6 +6,7 @@ mod m20260711_000005_operation_receipts;
 mod m20260712_000006_job_orchestration;
 mod m20260712_000007_search_sessions;
 mod m20260712_000008_tracking_notifications;
+mod m20260712_000009_blocked_storage_notification;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseTransaction;
@@ -24,6 +25,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260712_000006_job_orchestration::Migration),
             Box::new(m20260712_000007_search_sessions::Migration),
             Box::new(m20260712_000008_tracking_notifications::Migration),
+            Box::new(m20260712_000009_blocked_storage_notification::Migration),
         ]
     }
 }

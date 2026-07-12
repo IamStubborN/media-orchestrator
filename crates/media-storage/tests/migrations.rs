@@ -241,8 +241,8 @@ async fn a_failed_migration_explicitly_rolls_back_partial_schema() {
     let migrations = Migrator::migrations();
     assert_eq!(
         migrations.last().unwrap().name(),
-        "m20260712_000008_tracking_notifications",
-        "tracking notifications must remain after the parallel 000007 search migration",
+        "m20260712_000009_blocked_storage_notification",
+        "blocked-storage notification support must follow the notification outbox migration",
     );
     for migration in migrations {
         assert_eq!(

@@ -90,3 +90,41 @@ fn composition_constructs_typed_rezka_dependencies_without_network_calls() {
         );
     }
 }
+
+#[test]
+fn composition_reads_the_encrypted_session_before_building_the_client() {
+    let store_path = std::env::temp_dir().join(format!(
+        "media-rezka-composition-{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::write(&store_path, b"not-an-encrypted-session").unwrap();
+    let encoded_key = STANDARD.encode([7_u8; 32]);
+    let mut source = FakeSource::default();
+    source.set_env("MEDIA_SERVICE_URL", "https://media.internal.example");
+    source.set_secret("MEDIA_TOKEN_FILE", b"runner-token");
+    source.set_env("MEDIA_REZKA_MIRRORS", "https://rezka.invalid");
+    source.set_env(
+        "MEDIA_REZKA_SESSION_PROBE_URL",
+        "https://rezka.invalid/account/probe",
+    );
+    source.set_env(
+        "MEDIA_REZKA_SESSION_VALID_MARKERS_JSON",
+        r#"["account-menu"]"#,
+    );
+    source.set_env(
+        "MEDIA_REZKA_SESSION_INVALID_MARKERS_JSON",
+        r#"["login-form"]"#,
+    );
+    source.set_env("MEDIA_REZKA_SESSION_STORE_FILE", store_path.as_os_str());
+    source.set_env("MEDIA_REZKA_USER_AGENT", "composition-test-agent/1.0");
+    source.set_secret("MEDIA_REZKA_USERNAME_FILE", b"rezka-user");
+    source.set_secret("MEDIA_REZKA_PASSWORD_FILE", b"rezka-password");
+    source.set_secret("MEDIA_REZKA_COOKIE_KEY_FILE", encoded_key.as_bytes());
+
+    let config = RunnerConfig::load_from(&source).unwrap();
+    assert!(matches!(
+        media::composition::prepare_runner_session(&config),
+        Err(media::composition::RunnerCompositionError::Store)
+    ));
+    std::fs::remove_file(store_path).unwrap();
+}

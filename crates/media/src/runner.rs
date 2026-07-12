@@ -99,6 +99,28 @@ impl RunnerControl {
             )
             .await
     }
+
+    pub async fn stage_failed(
+        &self,
+        task_ordinal: u32,
+        name: &str,
+        stage_ordinal: u32,
+        retryable: bool,
+        error_code: &str,
+    ) -> Result<(), RunnerError> {
+        self.api
+            .report(
+                &self.lease,
+                RunnerEventDto::StageFailed {
+                    task_ordinal,
+                    stage_name: name.to_owned(),
+                    stage_ordinal,
+                    retryable,
+                    error_code: error_code.to_owned(),
+                },
+            )
+            .await
+    }
 }
 
 impl media_runner::Cancellation for RunnerControl {
@@ -111,17 +133,48 @@ pub struct MediaJobExecutor {
     rezka: tokio::sync::Mutex<crate::composition::PreparedRunnerSession>,
     pipeline: media_runner::EpisodePipeline,
     qbittorrent: Option<Arc<media_integrations::qbittorrent::QbittorrentClient>>,
+    torrent_tv_category: String,
+    torrent_movies_category: String,
     gluetun: Option<Arc<media_integrations::gluetun::GluetunClient>>,
     roots: media_runner::StorageRoots,
     vaapi_device: std::path::PathBuf,
 }
 
+pub(crate) struct TorrentRouting {
+    client: Option<Arc<media_integrations::qbittorrent::QbittorrentClient>>,
+    tv_category: String,
+    movies_category: String,
+}
+
+impl TorrentRouting {
+    pub(crate) fn new(
+        client: Option<Arc<media_integrations::qbittorrent::QbittorrentClient>>,
+        tv_category: String,
+        movies_category: String,
+    ) -> Self {
+        Self {
+            client,
+            tv_category,
+            movies_category,
+        }
+    }
+}
+
+struct TorrentExecution<'a> {
+    source_identity: &'a str,
+    info_hash: &'a str,
+    uri: &'a str,
+    media_kind: media_contract::MediaKindDto,
+    season: Option<u16>,
+    title: &'a str,
+}
+
 impl MediaJobExecutor {
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         rezka: crate::composition::PreparedRunnerSession,
         pipeline: media_runner::EpisodePipeline,
-        qbittorrent: Option<Arc<media_integrations::qbittorrent::QbittorrentClient>>,
+        torrent: TorrentRouting,
         gluetun: Option<Arc<media_integrations::gluetun::GluetunClient>>,
         roots: media_runner::StorageRoots,
         vaapi_device: std::path::PathBuf,
@@ -129,7 +182,9 @@ impl MediaJobExecutor {
         Self {
             rezka: tokio::sync::Mutex::new(rezka),
             pipeline,
-            qbittorrent,
+            qbittorrent: torrent.client,
+            torrent_tv_category: torrent.tv_category,
+            torrent_movies_category: torrent.movies_category,
             gluetun,
             roots,
             vaapi_device,
@@ -174,10 +229,19 @@ impl MediaJobExecutor {
                 source_identity,
                 info_hash,
                 uri,
+                media_kind,
+                season,
                 title,
             } => {
-                self.execute_torrent(lease, control, source_identity, info_hash, uri, title)
-                    .await
+                let request = TorrentExecution {
+                    source_identity,
+                    info_hash,
+                    uri,
+                    media_kind: *media_kind,
+                    season: *season,
+                    title,
+                };
+                self.execute_torrent(lease, control, request).await
             }
         }
     }
@@ -198,13 +262,12 @@ impl MediaJobExecutor {
         episode: Option<u32>,
         title: &str,
     ) -> Result<ExecutionOutcome, RunnerError> {
-        control.stage_started(0, "resolve_manifest", 0).await?;
         let mut prepared = self.rezka.lock().await;
         let crate::composition::PreparedRunnerSession {
             client,
             credentials,
             probe,
-            store,
+            store: _,
         } = &mut *prepared;
         client
             .ensure_authenticated(credentials, probe)
@@ -235,40 +298,98 @@ impl MediaJobExecutor {
         let selection = details
             .select_translation(&key)
             .map_err(|_| RunnerError::Execution)?;
-        let request = match media_kind {
-            media_contract::MediaKindDto::Movie => selection
-                .movie_request()
-                .map_err(|_| RunnerError::Execution)?,
+        let requests = match media_kind {
+            media_contract::MediaKindDto::Movie => vec![(
+                None,
+                None,
+                selection
+                    .movie_request()
+                    .map_err(|_| RunnerError::Execution)?,
+            )],
             media_contract::MediaKindDto::Series => {
-                let (season, episode) = season.zip(episode).ok_or(RunnerError::Execution)?;
-                client
+                let availability = client
                     .series_availability(&selection)
                     .await
-                    .map_err(|_| RunnerError::Execution)?
-                    .select_episode(season, episode)
-                    .map_err(|_| RunnerError::Execution)?
-                    .playback_request()
+                    .map_err(|_| RunnerError::Execution)?;
+                let targets = match (season, episode) {
+                    (Some(season), Some(episode)) => vec![(season, episode)],
+                    (None, None) => availability
+                        .seasons()
+                        .iter()
+                        .flat_map(|season| {
+                            season
+                                .episodes()
+                                .iter()
+                                .map(move |episode| (season.number(), episode.number()))
+                        })
+                        .collect(),
+                    _ => return Err(RunnerError::Execution),
+                };
+                let requests = targets
+                    .into_iter()
+                    .map(|(season, episode)| {
+                        availability
+                            .select_episode(season, episode)
+                            .map(|selection| {
+                                (Some(season), Some(episode), selection.playback_request())
+                            })
+                            .map_err(|_| RunnerError::Execution)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if requests.is_empty() {
+                    return Err(RunnerError::Execution);
+                }
+                requests
             }
         };
-        let manifest = client
-            .resolve(request)
-            .await
-            .map_err(|_| RunnerError::Execution)?;
-        let snapshot = client
-            .export_session()
-            .map_err(|_| RunnerError::Execution)?;
-        store.save(&snapshot).map_err(|_| RunnerError::Execution)?;
         drop(prepared);
-        control.stage_completed(0, "resolve_manifest", 0).await?;
-        let work = self.rezka_work(lease, &manifest, title, season, episode)?;
-        control.stage_started(0, "media_pipeline", 1).await?;
-        let outcome = self
-            .pipeline
-            .run(&work, control)
-            .await
-            .map_err(|_| RunnerError::Execution)?;
-        control.stage_completed(0, "media_pipeline", 1).await?;
-        Ok(map_pipeline_outcome(outcome))
+
+        let mut aggregate = ExecutionOutcome::Completed;
+        for (task_ordinal, (season, episode, request)) in requests.into_iter().enumerate() {
+            let task_ordinal = u32::try_from(task_ordinal).map_err(|_| RunnerError::Execution)?;
+            control
+                .stage_started(task_ordinal, "resolve_manifest", 0)
+                .await?;
+            let mut prepared = self.rezka.lock().await;
+            let manifest = prepared
+                .client
+                .resolve(request)
+                .await
+                .map_err(|_| RunnerError::Execution)?;
+            let snapshot = prepared
+                .client
+                .export_session()
+                .map_err(|_| RunnerError::Execution)?;
+            prepared
+                .store
+                .save(&snapshot)
+                .map_err(|_| RunnerError::Execution)?;
+            drop(prepared);
+            control
+                .stage_completed(task_ordinal, "resolve_manifest", 0)
+                .await?;
+
+            let work = self.rezka_work(lease, &manifest, title, season, episode)?;
+            control
+                .stage_started(task_ordinal, "media_pipeline", 1)
+                .await?;
+            let outcome = self
+                .pipeline
+                .run(&work, control)
+                .await
+                .map_err(|_| RunnerError::Execution)?;
+            control
+                .stage_completed(task_ordinal, "media_pipeline", 1)
+                .await?;
+            aggregate = combine_episode_outcome(aggregate, map_pipeline_outcome(outcome));
+            if !matches!(
+                aggregate,
+                ExecutionOutcome::Completed | ExecutionOutcome::Partial
+            ) {
+                break;
+            }
+        }
+        Ok(aggregate)
     }
 
     fn rezka_work(
@@ -340,8 +461,6 @@ impl MediaJobExecutor {
             encoded_partial: staging.join("encoded.partial.mkv"),
             final_video: final_video.clone(),
             vaapi_device: self.vaapi_device.clone(),
-            expected_download_bytes: 8 * media_runner::GIB,
-            expected_transcode_bytes: 5 * media_runner::GIB,
             subtitles,
             plex: media_runner::PlexExpectation {
                 path: final_video,
@@ -356,10 +475,7 @@ impl MediaJobExecutor {
         &self,
         lease: &LeaseDto,
         control: &RunnerControl,
-        source_identity: &str,
-        info_hash: &str,
-        uri: &str,
-        title: &str,
+        request: TorrentExecution<'_>,
     ) -> Result<ExecutionOutcome, RunnerError> {
         let client = self
             .qbittorrent
@@ -367,13 +483,17 @@ impl MediaJobExecutor {
             .ok_or(RunnerError::Configuration)?;
         control.stage_started(0, "torrent_submit", 0).await?;
         let selection = media_integrations::qbittorrent::ExplicitTorrentSelection::new(
-            source_identity,
-            info_hash,
-            uri,
+            request.source_identity,
+            request.info_hash,
+            request.uri,
         )
         .map_err(|_| RunnerError::Execution)?;
+        let category = match request.media_kind {
+            media_contract::MediaKindDto::Movie => &self.torrent_movies_category,
+            media_contract::MediaKindDto::Series => &self.torrent_tv_category,
+        };
         let handle = client
-            .submit_selected(selection)
+            .submit_selected_to_category(selection, category)
             .await
             .map_err(|_| RunnerError::Execution)?;
         control.stage_completed(0, "torrent_submit", 0).await?;
@@ -398,49 +518,93 @@ impl MediaJobExecutor {
             .discover_content(&handle)
             .await
             .map_err(|_| RunnerError::Execution)?;
-        let final_video = content
+        control.stage_completed(0, "torrent_monitor", 1).await?;
+        let mut videos = content
             .files
             .into_iter()
-            .find(|path| {
-                path.extension()
-                    .and_then(|value| value.to_str())
-                    .is_some_and(|ext| {
-                        matches!(ext.to_ascii_lowercase().as_str(), "mkv" | "mp4" | "avi")
-                    })
-            })
-            .unwrap_or(content.root);
-        control.stage_completed(0, "torrent_monitor", 1).await?;
-        let staging = self
-            .roots
-            .staging()
-            .join(lease.job.id.to_string())
-            .join("torrent");
-        let work = media_runner::EpisodeWork {
-            provider: media_runner::ProviderKind::Torrent,
-            job_id: lease.job.id.to_string(),
-            episode_id: "torrent".to_owned(),
-            source_url: None,
-            staging_directory: staging.clone(),
-            source_partial: staging.join("unused.source"),
-            encoded_partial: staging.join("unused.encoded"),
-            final_video: final_video.clone(),
-            vaapi_device: self.vaapi_device.clone(),
-            expected_download_bytes: 0,
-            expected_transcode_bytes: 0,
-            subtitles: Vec::new(),
-            plex: media_runner::PlexExpectation {
-                path: final_video,
-                canonical_id: format!("prowlarr://{source_identity}"),
-                season: None,
-                episode: None,
-            },
+            .filter(|path| is_video_path(path))
+            .collect::<Vec<_>>();
+        if videos.is_empty() && is_video_path(&content.root) {
+            videos.push(content.root);
+        }
+        videos.sort();
+        if videos.is_empty() {
+            return Ok(ExecutionOutcome::NeedsActionPlexMismatch);
+        }
+        let expected_season = request.season.map(u32::from);
+        let work_items = match request.media_kind {
+            media_contract::MediaKindDto::Movie => {
+                videos.truncate(1);
+                videos
+                    .into_iter()
+                    .map(|path| (path, None))
+                    .collect::<Vec<_>>()
+            }
+            media_contract::MediaKindDto::Series => {
+                let Some(expected_season) = expected_season else {
+                    return Ok(ExecutionOutcome::NeedsActionPlexMismatch);
+                };
+                let items = matching_episode_videos(videos, expected_season)
+                    .into_iter()
+                    .map(|(path, coordinates)| (path, Some(coordinates)))
+                    .collect::<Vec<_>>();
+                if items.is_empty() {
+                    return Ok(ExecutionOutcome::NeedsActionPlexMismatch);
+                }
+                items
+            }
         };
-        let _ = title;
-        self.pipeline
-            .run(&work, control)
-            .await
-            .map(map_pipeline_outcome)
-            .map_err(|_| RunnerError::Execution)
+        let mut aggregate = ExecutionOutcome::Completed;
+        for (index, (final_video, coordinates)) in work_items.into_iter().enumerate() {
+            let task_ordinal = u32::try_from(index + 1).map_err(|_| RunnerError::Execution)?;
+            control
+                .stage_started(task_ordinal, "plex_reconcile", 0)
+                .await?;
+            let staging = self
+                .roots
+                .staging()
+                .join(lease.job.id.to_string())
+                .join(format!("torrent-{task_ordinal}"));
+            let (season, episode) = coordinates.unzip();
+            let work = media_runner::EpisodeWork {
+                provider: media_runner::ProviderKind::Torrent,
+                job_id: lease.job.id.to_string(),
+                episode_id: coordinates.map_or_else(
+                    || "movie".to_owned(),
+                    |(season, episode)| format!("s{season:02}e{episode:02}"),
+                ),
+                source_url: None,
+                staging_directory: staging.clone(),
+                source_partial: staging.join("unused.source"),
+                encoded_partial: staging.join("unused.encoded"),
+                final_video: final_video.clone(),
+                vaapi_device: self.vaapi_device.clone(),
+                subtitles: Vec::new(),
+                plex: media_runner::PlexExpectation {
+                    path: final_video,
+                    canonical_id: format!("prowlarr://{}", request.source_identity),
+                    season,
+                    episode,
+                },
+            };
+            let outcome = self
+                .pipeline
+                .run(&work, control)
+                .await
+                .map_err(|_| RunnerError::Execution)?;
+            control
+                .stage_completed(task_ordinal, "plex_reconcile", 0)
+                .await?;
+            aggregate = combine_episode_outcome(aggregate, map_pipeline_outcome(outcome));
+            if !matches!(
+                aggregate,
+                ExecutionOutcome::Completed | ExecutionOutcome::Partial
+            ) {
+                break;
+            }
+        }
+        let _ = request.title;
+        Ok(aggregate)
     }
 }
 
@@ -451,22 +615,28 @@ impl JobExecutor for MediaJobExecutor {
         lease: &LeaseDto,
         control: &RunnerControl,
     ) -> Result<ExecutionOutcome, RunnerError> {
-        let sticky = match &self.gluetun {
-            Some(client) => Some((
+        let uses_rezka_vpn = matches!(
+            &lease.execution,
+            Some(media_contract::ExecutionSelectionDto::Rezka { .. })
+        );
+        let sticky = match (&self.gluetun, uses_rezka_vpn) {
+            (Some(client), true) => Some((
                 client,
                 client
                     .begin_job(lease.job.id.to_string())
                     .await
                     .map_err(|_| RunnerError::Execution)?,
             )),
-            None => None,
+            _ => None,
         };
         let result = self.execute_inner(lease, control).await;
         if let Some((client, sticky)) = sticky {
-            client
-                .end_job(sticky)
-                .await
-                .map_err(|_| RunnerError::Execution)?;
+            if client.end_job(sticky).await.is_err() {
+                tracing::warn!("failed to end the sticky Rezka VPN job");
+            }
+            if client.rotate_between_jobs().await.is_err() {
+                tracing::warn!("failed to rotate the Rezka VPN between jobs");
+            }
         }
         result
     }
@@ -493,6 +663,65 @@ fn safe_name(value: &str) -> String {
     }
 }
 
+fn is_video_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "mkv" | "mp4" | "avi"
+            )
+        })
+}
+
+fn parse_episode_coordinates(path: &std::path::Path) -> Option<(u32, u32)> {
+    let name = path.file_name()?.to_str()?.to_ascii_uppercase();
+    let bytes = name.as_bytes();
+    for start in 0..bytes.len() {
+        if bytes[start] != b'S' {
+            continue;
+        }
+        let season_start = start + 1;
+        let Some(e_offset) = bytes[season_start..].iter().position(|byte| *byte == b'E') else {
+            continue;
+        };
+        let episode_marker = season_start + e_offset;
+        if !(1..=3).contains(&e_offset) {
+            continue;
+        }
+        let episode_start = episode_marker + 1;
+        let episode_len = bytes[episode_start..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .take(3)
+            .count();
+        if episode_len == 0 {
+            continue;
+        }
+        let season = name[season_start..episode_marker].parse::<u32>().ok()?;
+        let episode = name[episode_start..episode_start + episode_len]
+            .parse::<u32>()
+            .ok()?;
+        if season > 0 && episode > 0 {
+            return Some((season, episode));
+        }
+    }
+    None
+}
+
+fn matching_episode_videos(
+    videos: Vec<std::path::PathBuf>,
+    expected_season: u32,
+) -> Vec<(std::path::PathBuf, (u32, u32))> {
+    videos
+        .into_iter()
+        .filter_map(|path| {
+            let coordinates = parse_episode_coordinates(&path)?;
+            (coordinates.0 == expected_season).then_some((path, coordinates))
+        })
+        .collect()
+}
+
 fn map_pipeline_outcome(outcome: media_runner::EpisodeOutcome) -> ExecutionOutcome {
     match outcome {
         media_runner::EpisodeOutcome::Completed => ExecutionOutcome::Completed,
@@ -503,6 +732,23 @@ fn map_pipeline_outcome(outcome: media_runner::EpisodeOutcome) -> ExecutionOutco
             ExecutionOutcome::NeedsActionPlexMismatch
         }
         media_runner::EpisodeOutcome::Cancelled => ExecutionOutcome::Cancelled,
+    }
+}
+
+fn combine_episode_outcome(
+    aggregate: ExecutionOutcome,
+    current: ExecutionOutcome,
+) -> ExecutionOutcome {
+    match (aggregate, current) {
+        (_, ExecutionOutcome::Cancelled) => ExecutionOutcome::Cancelled,
+        (_, ExecutionOutcome::NeedsActionPlexMismatch) => ExecutionOutcome::NeedsActionPlexMismatch,
+        (_, ExecutionOutcome::BlockedStorage) => ExecutionOutcome::BlockedStorage,
+        (_, ExecutionOutcome::PlexPending) => ExecutionOutcome::PlexPending,
+        (_, ExecutionOutcome::Failed) => ExecutionOutcome::Failed,
+        (ExecutionOutcome::Partial, ExecutionOutcome::Completed)
+        | (ExecutionOutcome::Completed, ExecutionOutcome::Partial)
+        | (ExecutionOutcome::Partial, ExecutionOutcome::Partial) => ExecutionOutcome::Partial,
+        (aggregate, ExecutionOutcome::Partial | ExecutionOutcome::Completed) => aggregate,
     }
 }
 
@@ -545,30 +791,59 @@ pub async fn run_single_iteration(
         lease: lease.clone(),
         cancelled,
     };
+    control.stage_started(0, "execution", 2).await?;
     let outcome = executor.execute(&lease, &control).await;
     finished.store(true, Ordering::SeqCst);
     heartbeat.await.map_err(|_| RunnerError::Execution)??;
-    let outcome = outcome?;
-    let (state, reason) = match outcome {
-        ExecutionOutcome::Completed => (JobStateDto::Completed, None),
-        ExecutionOutcome::Partial => (JobStateDto::Partial, None),
-        ExecutionOutcome::BlockedStorage => (JobStateDto::BlockedStorage, None),
-        ExecutionOutcome::PlexPending => (JobStateDto::PlexPending, None),
-        ExecutionOutcome::NeedsActionPlexMismatch => (
-            JobStateDto::NeedsAction,
-            Some(NeedsActionReasonDto::PlexMismatch),
-        ),
-        ExecutionOutcome::Cancelled => (JobStateDto::Cancelled, None),
-        ExecutionOutcome::Failed => (JobStateDto::Failed, None),
+    let outcome = match outcome {
+        Ok(outcome) => {
+            control.stage_completed(0, "execution", 2).await?;
+            outcome
+        }
+        Err(_) => {
+            control
+                .stage_failed(0, "execution", 2, true, "execution_failed")
+                .await?;
+            return Ok(true);
+        }
     };
-    api.report(
-        &lease,
-        RunnerEventDto::JobTransition {
-            state,
-            needs_action_reason: reason,
-        },
-    )
-    .await?;
+    let transitions = match outcome {
+        ExecutionOutcome::Completed => vec![
+            (JobStateDto::Publishing, None),
+            (JobStateDto::PlexPending, None),
+            (JobStateDto::Completed, None),
+        ],
+        ExecutionOutcome::Partial => vec![
+            (JobStateDto::Publishing, None),
+            (JobStateDto::PlexPending, None),
+            (JobStateDto::Partial, None),
+        ],
+        ExecutionOutcome::BlockedStorage => vec![(JobStateDto::BlockedStorage, None)],
+        ExecutionOutcome::PlexPending => vec![
+            (JobStateDto::Publishing, None),
+            (JobStateDto::PlexPending, None),
+        ],
+        ExecutionOutcome::NeedsActionPlexMismatch => vec![
+            (JobStateDto::Publishing, None),
+            (JobStateDto::PlexPending, None),
+            (
+                JobStateDto::NeedsAction,
+                Some(NeedsActionReasonDto::PlexMismatch),
+            ),
+        ],
+        ExecutionOutcome::Cancelled => vec![(JobStateDto::Cancelled, None)],
+        ExecutionOutcome::Failed => vec![(JobStateDto::Failed, None)],
+    };
+    for (state, needs_action_reason) in transitions {
+        api.report(
+            &lease,
+            RunnerEventDto::JobTransition {
+                state,
+                needs_action_reason,
+            },
+        )
+        .await?;
+    }
     Ok(true)
 }
 
@@ -679,5 +954,69 @@ impl RunnerApi for HttpRunnerApi {
         let _: media_contract::RunnerEventResponse =
             serde_json::from_value(value).map_err(|_| RunnerError::Service)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::{
+        ExecutionOutcome, combine_episode_outcome, matching_episode_videos,
+        parse_episode_coordinates,
+    };
+
+    #[test]
+    fn series_outcomes_preserve_partial_and_stop_on_blocking_states() {
+        assert_eq!(
+            combine_episode_outcome(ExecutionOutcome::Completed, ExecutionOutcome::Partial),
+            ExecutionOutcome::Partial,
+        );
+        assert_eq!(
+            combine_episode_outcome(ExecutionOutcome::Partial, ExecutionOutcome::Completed),
+            ExecutionOutcome::Partial,
+        );
+        assert_eq!(
+            combine_episode_outcome(ExecutionOutcome::Partial, ExecutionOutcome::BlockedStorage),
+            ExecutionOutcome::BlockedStorage,
+        );
+    }
+
+    #[test]
+    fn torrent_episode_coordinates_are_parsed_without_guessing_ambiguous_names() {
+        assert_eq!(
+            parse_episode_coordinates(Path::new("Show.Name.S02E04.1080p.mkv")),
+            Some((2, 4))
+        );
+        assert_eq!(
+            parse_episode_coordinates(Path::new("show s1e12.mp4")),
+            Some((1, 12))
+        );
+        assert_eq!(parse_episode_coordinates(Path::new("Episode 04.mkv")), None);
+    }
+
+    #[test]
+    fn season_pack_ignores_samples_extras_and_other_seasons() {
+        let matched = matching_episode_videos(
+            vec![
+                "Show.S02E01.mkv".into(),
+                "sample.mkv".into(),
+                "Show.S01E09.mkv".into(),
+                "extras.mp4".into(),
+                "Show.S02E02.mkv".into(),
+            ],
+            2,
+        );
+
+        assert_eq!(
+            matched
+                .iter()
+                .map(|(path, coordinates)| (path.to_string_lossy().into_owned(), *coordinates))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Show.S02E01.mkv".to_owned(), (2, 1)),
+                ("Show.S02E02.mkv".to_owned(), (2, 2)),
+            ]
+        );
     }
 }

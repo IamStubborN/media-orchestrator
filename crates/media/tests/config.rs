@@ -88,6 +88,22 @@ fn valid_runner_source() -> FakeSource {
 }
 
 #[test]
+fn runner_config_loads_distinct_existing_torrent_categories() {
+    let mut source = valid_runner_source();
+    source.set_env("MEDIA_QBITTORRENT_URL", "http://gluetun:8400");
+    source.set_env("MEDIA_QBITTORRENT_TV_CATEGORY", "tv");
+    source.set_env("MEDIA_QBITTORRENT_MOVIES_CATEGORY", "movies");
+    source.set_env("MEDIA_QBITTORRENT_USERNAME", "runner");
+    source.set_secret("MEDIA_QBITTORRENT_PASSWORD_FILE", b"qbit-secret");
+
+    let config = RunnerConfig::load_from(&source).unwrap();
+    let qbittorrent = config.qbittorrent().unwrap();
+
+    assert_eq!(qbittorrent.tv_category(), "tv");
+    assert_eq!(qbittorrent.movies_category(), "movies");
+}
+
+#[test]
 fn database_config_requires_the_database_url_file_setting() {
     let error = DatabaseConfig::load_from(&FakeSource::default()).unwrap_err();
 

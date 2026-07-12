@@ -77,8 +77,6 @@ pub struct EpisodeWork {
     pub encoded_partial: PathBuf,
     pub final_video: PathBuf,
     pub vaapi_device: PathBuf,
-    pub expected_download_bytes: u64,
-    pub expected_transcode_bytes: u64,
     pub subtitles: Vec<SubtitleTrack>,
     pub plex: PlexExpectation,
 }
@@ -133,33 +131,30 @@ impl EpisodePipeline {
 
         let video_published = self.filesystem.file_len(&work.final_video).await?.is_some();
         if !video_published {
+            let source_url = work
+                .source_url
+                .as_ref()
+                .ok_or(RunnerPortError::InvalidWork)?;
+            let source_bytes = self.http.probe_video_size(source_url).await?;
+            self.filesystem
+                .create_dir_all(&work.staging_directory)
+                .await?;
             let available = self
                 .filesystem
                 .available_bytes(&work.staging_directory)
                 .await?;
-            let estimate = PeakEstimate::new(
-                work.expected_download_bytes,
-                work.expected_transcode_bytes,
-                0,
-            )
-            .map_err(|_| RunnerPortError::InvalidWork)?;
+            let estimate = PeakEstimate::new(source_bytes, source_bytes, 0)
+                .map_err(|_| RunnerPortError::InvalidWork)?;
             if self.storage.check(available, estimate).is_err() {
                 return Ok(EpisodeOutcome::BlockedStorage);
             }
 
-            self.filesystem
-                .create_dir_all(&work.staging_directory)
-                .await?;
             let final_parent = work
                 .final_video
                 .parent()
                 .ok_or(RunnerPortError::InvalidWork)?;
             self.filesystem.create_dir_all(final_parent).await?;
 
-            let source_url = work
-                .source_url
-                .as_ref()
-                .ok_or(RunnerPortError::InvalidWork)?;
             let resume_from = self
                 .filesystem
                 .file_len(&work.source_partial)

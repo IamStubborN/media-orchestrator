@@ -98,7 +98,7 @@ pub async fn run_runner(config: RunnerConfig) -> Result<(), RunnerError> {
         Some(config) => {
             let config = media_integrations::qbittorrent::QbittorrentConfig::new(
                 config.base_url().clone(),
-                config.category(),
+                config.tv_category(),
                 config.username(),
                 config.password().clone(),
                 Duration::from_secs(30),
@@ -129,7 +129,16 @@ pub async fn run_runner(config: RunnerConfig) -> Result<(), RunnerError> {
     let executor = Arc::new(crate::runner::MediaJobExecutor::new(
         rezka,
         pipeline,
-        qbittorrent,
+        crate::runner::TorrentRouting::new(
+            qbittorrent,
+            config
+                .qbittorrent()
+                .map_or_else(|| "tv".to_owned(), |value| value.tv_category().to_owned()),
+            config.qbittorrent().map_or_else(
+                || "movies".to_owned(),
+                |value| value.movies_category().to_owned(),
+            ),
+        ),
         gluetun,
         config.storage_roots().clone(),
         config.vaapi_device().to_owned(),
@@ -168,14 +177,13 @@ pub fn prepare_rezka_session(
 ) -> Result<PreparedRunnerSession, RunnerCompositionError> {
     let mirrors = rezka_client::MirrorSet::new(config.mirrors().to_vec())
         .map_err(|_| RunnerCompositionError::Client)?;
-    let client = rezka_client::RezkaClient::new(rezka_client::RezkaClientConfig {
+    let client_config = rezka_client::RezkaClientConfig {
         mirrors,
         user_agent: config.user_agent().to_owned(),
         request_timeout: time::Duration::seconds(30),
         max_retries: 2,
         anubis_max_nonce: 5_000_000,
-    })
-    .map_err(|_| RunnerCompositionError::Client)?;
+    };
     let credentials = rezka_client::RezkaCredentials {
         username: config.username().clone(),
         password: config.password().clone(),
@@ -195,6 +203,12 @@ pub fn prepare_rezka_session(
             key,
         })
         .map_err(|_| RunnerCompositionError::Store)?;
+    let snapshot = store.load().map_err(|_| RunnerCompositionError::Store)?;
+    let client = match snapshot.as_ref() {
+        Some(snapshot) => rezka_client::RezkaClient::from_snapshot(client_config, snapshot),
+        None => rezka_client::RezkaClient::new(client_config),
+    }
+    .map_err(|_| RunnerCompositionError::Client)?;
 
     Ok(PreparedRunnerSession {
         client,
@@ -347,6 +361,7 @@ fn storage_response(api: StoredHttpResponse) -> StoredResponseRecord {
 pub struct PreparedService {
     router: axum::Router,
     notifications: Option<PreparedNotificationDispatcher>,
+    tracking: Option<TrackingRuntime>,
 }
 
 pub struct PreparedNotificationDispatcher {
@@ -397,6 +412,8 @@ pub struct PlexReconcileAdapter {
     client: media_integrations::plex::PlexClient,
     tv_section: u32,
     movies_section: u32,
+    poll_interval: Duration,
+    max_wait: Duration,
 }
 
 impl PlexReconcileAdapter {
@@ -410,7 +427,24 @@ impl PlexReconcileAdapter {
             client,
             tv_section,
             movies_section,
+            poll_interval: Duration::from_secs(1),
+            max_wait: Duration::from_secs(30),
         }
+    }
+
+    #[must_use]
+    pub fn with_polling(mut self, poll_interval: Duration, max_wait: Duration) -> Self {
+        assert!(
+            !poll_interval.is_zero(),
+            "Plex poll interval must be positive"
+        );
+        assert!(
+            !max_wait.is_zero(),
+            "Plex polling deadline must be positive"
+        );
+        self.poll_interval = poll_interval;
+        self.max_wait = max_wait;
+        self
     }
 }
 
@@ -433,15 +467,41 @@ impl PlexReconcileService for PlexReconcileAdapter {
         let scan_path = path.parent().ok_or(PlexServiceError::InvalidRequest)?;
         let scan = media_integrations::plex::ScanRequest::new(section, scan_path)
             .map_err(|_| PlexServiceError::InvalidRequest)?;
-        self.client
-            .trigger_scan(&scan)
+        if let Err(error) = self.client.trigger_scan(&scan).await {
+            return if transient_plex_error(&error) {
+                Ok(pending_plex_response())
+            } else {
+                Err(PlexServiceError::Infrastructure)
+            };
+        }
+        let deadline = tokio::time::Instant::now() + self.max_wait;
+        let verification = loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break media_integrations::plex::PlexVerification::NotFound;
+            }
+            match tokio::time::timeout(
+                remaining,
+                self.client
+                    .verify_path(section, &path, &request.canonical_id, season, episode),
+            )
             .await
-            .map_err(|_| PlexServiceError::Infrastructure)?;
-        let verification = self
-            .client
-            .verify_path(section, &path, &request.canonical_id, season, episode)
-            .await
-            .map_err(|_| PlexServiceError::Infrastructure)?;
+            {
+                Ok(Ok(media_integrations::plex::PlexVerification::NotFound)) => {}
+                Ok(Ok(verification)) => break verification,
+                Ok(Err(error)) if !transient_plex_error(&error) => {
+                    return Err(PlexServiceError::Infrastructure);
+                }
+                Ok(Err(_)) | Err(_) => {
+                    break media_integrations::plex::PlexVerification::NotFound;
+                }
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break media_integrations::plex::PlexVerification::NotFound;
+            }
+            tokio::time::sleep(self.poll_interval.min(remaining)).await;
+        };
         let (status, observation) = match verification {
             media_integrations::plex::PlexVerification::Matched { .. } => (
                 media_contract::PlexReconcileStatus::Matched,
@@ -466,9 +526,26 @@ impl PlexReconcileService for PlexReconcileAdapter {
     }
 }
 
+fn transient_plex_error(error: &media_integrations::plex::PlexError) -> bool {
+    matches!(
+        error.code(),
+        media_integrations::plex::PlexErrorCode::Transport
+            | media_integrations::plex::PlexErrorCode::ProviderResponse
+    )
+}
+
+fn pending_plex_response() -> media_contract::PlexReconcileResponse {
+    media_contract::PlexReconcileResponse {
+        status: media_contract::PlexReconcileStatus::Pending,
+        observation: None,
+    }
+}
+
 impl std::fmt::Debug for PreparedService {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("PreparedService { router: [REDACTED], notifications: [REDACTED] }")
+        formatter.write_str(
+            "PreparedService { router: [REDACTED], notifications: [REDACTED], tracking: [REDACTED] }",
+        )
     }
 }
 
@@ -497,6 +574,7 @@ impl PreparedService {
         let Self {
             router,
             notifications,
+            tracking,
         } = self;
         let notification_task = notifications.map(|dispatcher| {
             tokio::spawn(async move {
@@ -505,6 +583,20 @@ impl PreparedService {
                         tracing::warn!("notification dispatch pass failed");
                     }
                     tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            })
+        });
+        let tracking_task = tracking.map(|runtime| {
+            tokio::spawn(async move {
+                loop {
+                    if runtime
+                        .run_once(time::OffsetDateTime::now_utc(), 25)
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!("tracking discovery pass failed");
+                    }
+                    tokio::time::sleep(Duration::from_secs(60)).await;
                 }
             })
         });
@@ -531,6 +623,10 @@ impl PreparedService {
             }
         };
         if let Some(task) = notification_task {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(task) = tracking_task {
             task.abort();
             let _ = task.await;
         }
@@ -592,6 +688,7 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
         readiness,
     )
     .with_tracking(tracking);
+    let mut tracking_runtime = None;
     if config.rezka().is_some() || config.prowlarr().is_some() {
         let rezka = config
             .rezka()
@@ -614,7 +711,16 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
         let persistence = Arc::new(StorageSearchPersistence::new(
             media_storage::SeaOrmSearchRepository::new(database.clone()),
         ));
+        let rezka_tracking_enabled = rezka.is_some();
         let provider = Arc::new(ConcreteSearchProvider::new(rezka, prowlarr));
+        if rezka_tracking_enabled {
+            tracking_runtime = Some(prepare_tracking_scheduler(
+                database.clone(),
+                Arc::new(crate::search::ProviderEpisodeDiscovery::new(
+                    provider.clone(),
+                )),
+            ));
+        }
         state = state.with_search(Arc::new(DurableSearchService::new(
             persistence,
             provider,
@@ -640,6 +746,7 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
     Ok(PreparedService {
         router: media_api::router(state),
         notifications,
+        tracking: tracking_runtime,
     })
 }
 

@@ -51,6 +51,8 @@ pub trait FileSystemPort: Send + Sync {
 
 #[async_trait]
 pub trait HttpPort: Send + Sync {
+    async fn probe_video_size(&self, url: &SensitiveUrl) -> Result<u64, RunnerPortError>;
+
     async fn download_video(
         &self,
         url: &SensitiveUrl,

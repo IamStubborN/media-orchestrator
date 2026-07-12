@@ -114,6 +114,7 @@ impl FileSystemPort for FakeFs {
 
 #[derive(Default)]
 struct FakeHttp {
+    video_size: Option<u64>,
     video_offsets: Mutex<Vec<u64>>,
     subtitle_failures: Mutex<HashSet<String>>,
     subtitle_requests: Mutex<Vec<String>>,
@@ -122,6 +123,10 @@ struct FakeHttp {
 
 #[async_trait]
 impl HttpPort for FakeHttp {
+    async fn probe_video_size(&self, _url: &SensitiveUrl) -> Result<u64, RunnerPortError> {
+        Ok(self.video_size.unwrap_or(2 * GIB))
+    }
+
     async fn download_video(
         &self,
         _url: &SensitiveUrl,
@@ -230,8 +235,6 @@ fn work() -> EpisodeWork {
         encoded_partial: PathBuf::from("/staging/job-1/s01e01/encoded.partial.mkv"),
         final_video: PathBuf::from("/plex/tv/Show/Season 01/Show - S01E01.mkv"),
         vaapi_device: PathBuf::from("/dev/dri/renderD128"),
-        expected_download_bytes: 2 * GIB,
-        expected_transcode_bytes: GIB,
         subtitles: vec![
             SubtitleTrack {
                 id: "en".to_owned(),
@@ -287,6 +290,32 @@ async fn rezka_episode_runs_one_pipeline_and_publishes_video_last() {
     assert_eq!(http.video_offsets.lock().unwrap().as_slice(), &[0]);
     let published = filesystem.published.lock().unwrap();
     assert_eq!(published.last(), Some(&work.final_video));
+}
+
+#[tokio::test]
+async fn storage_preflight_uses_the_probed_source_size() {
+    let work = work();
+    let filesystem = Arc::new(FakeFs::with_available(23 * GIB));
+    let http = Arc::new(FakeHttp {
+        video_size: Some(2 * GIB),
+        ..FakeHttp::default()
+    });
+    let process = Arc::new(FakeProcess {
+        probes: Mutex::default(),
+        commands: Mutex::default(),
+        filesystem: filesystem.clone(),
+    });
+    let service = Arc::new(FakeService {
+        checks: Mutex::default(),
+        scans: Mutex::default(),
+    });
+    let pipeline = EpisodePipeline::new(filesystem, http.clone(), process, service);
+
+    assert_eq!(
+        pipeline.run(&work, &NeverCancelled).await.unwrap(),
+        EpisodeOutcome::BlockedStorage
+    );
+    assert!(http.video_offsets.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

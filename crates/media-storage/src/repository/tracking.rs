@@ -405,6 +405,7 @@ fn parse_event(value: &str) -> Result<NotificationEventType, PortError> {
         "encoding-complete" => Ok(NotificationEventType::EncodingComplete),
         "plex-added" => Ok(NotificationEventType::PlexAdded),
         "partial" => Ok(NotificationEventType::Partial),
+        "blocked-storage" => Ok(NotificationEventType::BlockedStorage),
         "failed" => Ok(NotificationEventType::Failed),
         "future-episode-found" => Ok(NotificationEventType::FutureEpisodeFound),
         _ => Err(PortError::Infrastructure),

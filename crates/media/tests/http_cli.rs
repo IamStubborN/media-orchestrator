@@ -408,7 +408,11 @@ async fn search_continue_and_download_use_stable_json_and_exact_selection() {
                     && request.headers().contains_key("idempotency-key");
                 let body = to_bytes(request.into_body(), 64 * 1024).await.unwrap();
                 let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                if valid && body["source"] == "prowlarr" && body["query"] == "Movie" {
+                if valid
+                    && body["source"] == "prowlarr"
+                    && body["query"] == "Movie"
+                    && body["media_kind"] == "movie"
+                {
                     json_response(StatusCode::CREATED, r#"{
                         "api_version":"v1","session_id":"session-1","source":"prowlarr",
                         "expires_at":"2026-07-13T12:00:00Z","continuation":"session-1:5",
@@ -446,7 +450,7 @@ async fn search_continue_and_download_use_stable_json_and_exact_selection() {
     let first = command_output(command(
         &server,
         &token_file,
-        ["search", "prowlarr", "Movie", "--json"],
+        ["search", "prowlarr", "Movie", "--kind", "movie", "--json"],
     ))
     .await
     .unwrap();

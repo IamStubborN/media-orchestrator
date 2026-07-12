@@ -119,6 +119,21 @@ enum Provider {
 }
 
 #[derive(Debug, Copy, Clone, ValueEnum)]
+enum MediaKind {
+    Movie,
+    Series,
+}
+
+impl From<MediaKind> for media_contract::MediaKindDto {
+    fn from(value: MediaKind) -> Self {
+        match value {
+            MediaKind::Movie => Self::Movie,
+            MediaKind::Series => Self::Series,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, ValueEnum)]
 enum TrackingScope {
     Personal,
     Family,
@@ -144,6 +159,8 @@ struct SearchArgs {
     query: Option<String>,
     #[arg(long = "continue", conflicts_with = "query")]
     continuation: Option<String>,
+    #[arg(long, value_enum)]
+    kind: Option<MediaKind>,
     #[arg(long)]
     season: Option<u16>,
     #[arg(long)]
@@ -284,6 +301,7 @@ async fn run_search(args: SearchArgs) -> Result<(), RunError> {
                     query: args
                         .query
                         .expect("clap requires query without continuation"),
+                    media_kind: args.kind.map(Into::into),
                     season: args.season,
                     preferred_qualities: Vec::new(),
                     preferred_languages: Vec::new(),

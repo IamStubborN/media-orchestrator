@@ -212,6 +212,29 @@ impl std::fmt::Debug for ReqwestHttpAdapter {
 
 #[async_trait]
 impl HttpPort for ReqwestHttpAdapter {
+    async fn probe_video_size(&self, url: &SensitiveUrl) -> Result<u64, RunnerPortError> {
+        let response = self
+            .client
+            .get(url.as_url().clone())
+            .header(reqwest::header::RANGE, "bytes=0-0")
+            .send()
+            .await
+            .map_err(|_| RunnerPortError::Http)?;
+        if !response.status().is_success() {
+            return Err(RunnerPortError::Http);
+        }
+        let content_range_total = response
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_content_range)
+            .and_then(|(_, total)| total);
+        content_range_total
+            .or_else(|| response.content_length())
+            .filter(|size| *size > 0)
+            .ok_or(RunnerPortError::Http)
+    }
+
     async fn download_video(
         &self,
         url: &SensitiveUrl,
