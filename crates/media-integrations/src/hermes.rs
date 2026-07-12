@@ -189,6 +189,29 @@ fn classify_status_error(status: reqwest::StatusCode) -> WebhookError {
     }
 }
 
+/// Maps a webhook failure onto the outbox retry taxonomy. Only deterministic
+/// failures that a replay would repeat identically are terminal: a rejected
+/// signature/auth/payload (`TerminalHttp`) and a payload `Serialization`
+/// failure. Everything else — including a boot-time `Configuration` gap that a
+/// redeploy can fix — stays retryable so a transient condition does not
+/// permanently dead-letter an otherwise valid notification.
+fn classify_delivery_failure(error: WebhookError) -> NotificationDeliveryFailure {
+    match error {
+        WebhookError::Timeout => NotificationDeliveryFailure::retryable("webhook_timeout"),
+        WebhookError::Connect => NotificationDeliveryFailure::retryable("webhook_connect"),
+        WebhookError::RetryableHttp => NotificationDeliveryFailure::retryable("webhook_http"),
+        WebhookError::Request => NotificationDeliveryFailure::retryable("webhook_request"),
+        WebhookError::Clock => NotificationDeliveryFailure::retryable("webhook_clock"),
+        WebhookError::Configuration => {
+            NotificationDeliveryFailure::retryable("webhook_configuration")
+        }
+        WebhookError::TerminalHttp => NotificationDeliveryFailure::terminal("webhook_rejected"),
+        WebhookError::Serialization => {
+            NotificationDeliveryFailure::terminal("webhook_serialization")
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl NotificationSink for HermesWebhookClient {
     async fn deliver(
@@ -197,20 +220,42 @@ impl NotificationSink for HermesWebhookClient {
     ) -> Result<(), NotificationDeliveryFailure> {
         HermesWebhookClient::deliver(self, delivery)
             .await
-            .map_err(|error| match error {
-                WebhookError::Timeout => NotificationDeliveryFailure::retryable("webhook_timeout"),
-                WebhookError::Connect => NotificationDeliveryFailure::retryable("webhook_connect"),
-                WebhookError::RetryableHttp => {
-                    NotificationDeliveryFailure::retryable("webhook_http")
-                }
-                WebhookError::Request => NotificationDeliveryFailure::retryable("webhook_request"),
-                WebhookError::Clock => NotificationDeliveryFailure::retryable("webhook_clock"),
-                WebhookError::TerminalHttp => {
-                    NotificationDeliveryFailure::terminal("webhook_rejected")
-                }
-                WebhookError::Configuration | WebhookError::Serialization => {
-                    NotificationDeliveryFailure::terminal("webhook_internal")
-                }
-            })
+            .map_err(classify_delivery_failure)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WebhookError, classify_delivery_failure};
+
+    #[test]
+    fn configuration_gap_is_retryable_but_serialization_is_terminal() {
+        // A missing secret/endpoint at boot can be fixed by a redeploy, so it
+        // must not permanently dead-letter the notification.
+        let configuration = classify_delivery_failure(WebhookError::Configuration);
+        assert!(configuration.is_retryable());
+        assert_eq!(configuration.code(), "webhook_configuration");
+
+        // A payload serialization failure is deterministic and never recovers.
+        let serialization = classify_delivery_failure(WebhookError::Serialization);
+        assert!(!serialization.is_retryable());
+        assert_eq!(serialization.code(), "webhook_serialization");
+    }
+
+    #[test]
+    fn rejected_delivery_stays_terminal_and_transient_failures_stay_retryable() {
+        assert!(!classify_delivery_failure(WebhookError::TerminalHttp).is_retryable());
+        for transient in [
+            WebhookError::Timeout,
+            WebhookError::Connect,
+            WebhookError::RetryableHttp,
+            WebhookError::Request,
+            WebhookError::Clock,
+        ] {
+            assert!(
+                classify_delivery_failure(transient).is_retryable(),
+                "{transient:?} must stay retryable"
+            );
+        }
     }
 }

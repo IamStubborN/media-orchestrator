@@ -1,4 +1,4 @@
-use std::{fmt, net::IpAddr, time::Duration};
+use std::{fmt, future::Future, net::IpAddr, time::Duration};
 
 use reqwest::StatusCode;
 use secrecy::{ExposeSecret, SecretString};
@@ -209,16 +209,55 @@ impl GluetunClient {
             return Err(GluetunError::StickyJobActive);
         }
 
-        let previous_public_ip = self.public_ip().await?;
-        self.set_status(VpnStatus::Stopped).await?;
-        self.set_status(VpnStatus::Running).await?;
+        // Every control call below can briefly return a transport blip or a 5xx
+        // while Gluetun tears the tunnel down and brings it back up. A single
+        // transient failure must not fail an otherwise healthy rotation, so each
+        // step is retried with the same bounded backoff as `await_running`.
+        let previous_public_ip = self
+            .retry_transient(running_deadline, || self.public_ip())
+            .await?;
+        self.retry_transient(running_deadline, || self.set_status(VpnStatus::Stopped))
+            .await?;
+        self.retry_transient(running_deadline, || self.set_status(VpnStatus::Running))
+            .await?;
         self.await_running(running_deadline).await?;
-        let current_public_ip = self.public_ip().await?;
+        let current_public_ip = self
+            .retry_transient(running_deadline, || self.public_ip())
+            .await?;
         drop(state);
         Ok(VpnRotation {
             previous_public_ip: Some(previous_public_ip),
             current_public_ip: Some(current_public_ip),
         })
+    }
+
+    /// Retries a control-plane operation while it fails transiently (a transport
+    /// error or a 5xx from the control server), using the same bounded
+    /// exponential backoff as [`Self::await_running`]. Non-transient errors (for
+    /// example authentication or a malformed body) are returned immediately.
+    async fn retry_transient<T, F, Fut>(
+        &self,
+        deadline: Duration,
+        mut operation: F,
+    ) -> Result<T, GluetunError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T, GluetunError>>,
+    {
+        let start = Instant::now();
+        let mut delay = ROTATION_POLL_INITIAL;
+        loop {
+            match operation().await {
+                Ok(value) => return Ok(value),
+                Err(error) => {
+                    if !is_transient(&error) || start.elapsed() + delay >= deadline {
+                        return Err(error);
+                    }
+                    sleep(delay).await;
+                    delay = (delay * 2).min(ROTATION_POLL_MAX);
+                }
+            }
+        }
     }
 
     async fn await_running(&self, deadline: Duration) -> Result<(), GluetunError> {
@@ -318,6 +357,18 @@ enum VpnStatusReport {
     Stopped,
     #[serde(other)]
     Transitional,
+}
+
+/// A control call is worth retrying only when the failure is transient: a
+/// transport-level error or a 5xx from the control server while the tunnel
+/// restarts. Authentication, configuration, and malformed-body failures are
+/// deterministic and are surfaced immediately.
+fn is_transient(error: &GluetunError) -> bool {
+    match error {
+        GluetunError::Transport => true,
+        GluetunError::ProviderResponse { status } => status.is_server_error(),
+        _ => false,
+    }
 }
 
 fn endpoint(base_url: &Url, path: &str) -> Result<Url, GluetunError> {

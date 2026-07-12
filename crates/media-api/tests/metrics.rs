@@ -126,3 +126,38 @@ async fn http_requests_are_counted_with_the_matched_route_label() {
         "missing matched-route counter series in:\n{body}"
     );
 }
+
+#[tokio::test]
+async fn unusual_request_method_is_recorded_as_a_bounded_other_label() {
+    let app = app_with_source(Arc::new(FakeMetricsSource::ok(MetricsSnapshot::default())));
+
+    // The metrics middleware wraps the whole router before auth resolves, so an
+    // unauthenticated client can pick the method token. An arbitrary token must
+    // collapse to `other` rather than becoming its own unbounded series.
+    let odd = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("BREW")
+                .uri("/v1/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(odd.status(), StatusCode::OK);
+
+    let scrape = app
+        .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let body = body_text(scrape).await;
+    assert!(
+        body.contains("method=\"other\""),
+        "unusual method should collapse to the `other` label in:\n{body}"
+    );
+    assert!(
+        !body.contains("BREW"),
+        "raw method token must never become a label in:\n{body}"
+    );
+}

@@ -3,8 +3,9 @@
 //! Only four metric families are exposed, so a dedicated metrics crate would add
 //! more dependency surface than value. The exposition follows the Prometheus
 //! text format version 0.0.4. Labels are deliberately low cardinality: HTTP
-//! series use the matched route pattern (never the raw path), method, and status
-//! code, none of which carry identifiers or secrets.
+//! series use the matched route pattern (never the raw path), the method
+//! collapsed to a bounded allowlist, and the status code, none of which carry
+//! identifiers or secrets or grow without bound.
 
 use std::{
     collections::HashMap,
@@ -33,7 +34,7 @@ pub(crate) async fn record_http_metrics(
     next: Next,
 ) -> Response {
     let started = Instant::now();
-    let method = request.method().as_str().to_owned();
+    let method = normalize_method(request.method().as_str());
     let route = request
         .extensions()
         .get::<MatchedPath>()
@@ -41,11 +42,31 @@ pub(crate) async fn record_http_metrics(
     let response = next.run(request).await;
     state.metrics.record(
         &route,
-        &method,
+        method,
         response.status().as_u16(),
         started.elapsed(),
     );
     response
+}
+
+/// Collapses an HTTP method token to a bounded allowlist of the standard
+/// methods, mapping anything else to `other`. The metrics middleware runs before
+/// authentication resolves, so an unauthenticated client could otherwise emit
+/// arbitrary method tokens and grow the label cardinality of the series map
+/// without bound.
+fn normalize_method(method: &str) -> &'static str {
+    match method {
+        "GET" => "GET",
+        "HEAD" => "HEAD",
+        "POST" => "POST",
+        "PUT" => "PUT",
+        "PATCH" => "PATCH",
+        "DELETE" => "DELETE",
+        "OPTIONS" => "OPTIONS",
+        "TRACE" => "TRACE",
+        "CONNECT" => "CONNECT",
+        _ => "other",
+    }
 }
 
 /// Content type for the Prometheus text exposition format.
@@ -253,7 +274,31 @@ mod tests {
 
     use media_core::{JobState, MetricsSnapshot};
 
-    use super::{MetricsRecorder, render};
+    use super::{MetricsRecorder, normalize_method, render};
+
+    #[test]
+    fn unusual_method_token_collapses_to_a_bounded_other_series() {
+        // Standard methods pass through; anything else becomes the single
+        // `other` label so an unauthenticated client cannot inflate cardinality.
+        assert_eq!(normalize_method("GET"), "GET");
+        assert_eq!(normalize_method("DELETE"), "DELETE");
+        assert_eq!(normalize_method("BREW"), "other");
+        assert_eq!(normalize_method("\u{1}garbage"), "other");
+
+        let recorder = MetricsRecorder::default();
+        recorder.record(
+            "/v1/health",
+            normalize_method("BREW"),
+            405,
+            Duration::from_millis(1),
+        );
+        let body = render(None, &recorder);
+
+        assert!(body.contains(
+            "media_http_requests_total{route=\"/v1/health\",method=\"other\",status=\"405\"} 1"
+        ));
+        assert!(!body.contains("BREW"));
+    }
 
     #[test]
     fn render_includes_all_families_and_zero_filled_states() {

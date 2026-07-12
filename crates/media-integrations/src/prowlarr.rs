@@ -13,6 +13,10 @@ pub const RESULTS_PER_PAGE: u32 = 5;
 /// so this also bounds how deep pagination can reach.
 const CANDIDATE_LIMIT: u32 = 100;
 const MAX_TORRENT_BYTES: usize = 8 * 1024 * 1024;
+/// Upper bound on the search response body. `CANDIDATE_LIMIT` rich results stay
+/// well under this, but a hostile or misbehaving Prowlarr must not be able to
+/// stream an unbounded payload into memory before deserialization.
+const MAX_SEARCH_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_BENCODE_DEPTH: usize = 128;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -332,9 +336,10 @@ impl ProwlarrClient {
             if !status.is_success() {
                 return Err(ProwlarrError::ProviderResponse { status });
             }
-            let raw: Vec<RawRelease> = response
-                .json()
+            let body = read_capped(response, MAX_SEARCH_RESPONSE_BYTES)
                 .await
+                .ok_or(ProwlarrError::ProviderResponse { status })?;
+            let raw: Vec<RawRelease> = serde_json::from_slice(&body)
                 .map_err(|_| ProwlarrError::ProviderResponse { status })?;
             raw.into_iter()
                 .filter(|release| release.protocol == "torrent")
@@ -385,26 +390,36 @@ impl ProwlarrClient {
             .send()
             .await
             .ok()?;
-        if !response.status().is_success()
-            || response
-                .content_length()
-                .is_some_and(|length| length > MAX_TORRENT_BYTES as u64)
-        {
+        if !response.status().is_success() {
             return None;
         }
-
-        let mut body = Vec::new();
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.ok()?;
-            if body.len().saturating_add(chunk.len()) > MAX_TORRENT_BYTES {
-                return None;
-            }
-            body.extend_from_slice(&chunk);
-        }
+        let body = read_capped(response, MAX_TORRENT_BYTES).await?;
         let info = torrent_info_bytes(&body)?;
         Some(hex::encode(Sha1::digest(info)))
     }
+}
+
+/// Reads a response body into memory, rejecting anything larger than `cap`. The
+/// advertised `Content-Length` short-circuits an oversized body, and the stream
+/// is also measured chunk by chunk so a response that lies about (or omits) its
+/// length cannot exhaust memory.
+async fn read_capped(response: reqwest::Response, cap: usize) -> Option<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > cap as u64)
+    {
+        return None;
+    }
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.ok()?;
+        if body.len().saturating_add(chunk.len()) > cap {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Some(body)
 }
 
 fn same_origin(left: &Url, right: &Url) -> bool {

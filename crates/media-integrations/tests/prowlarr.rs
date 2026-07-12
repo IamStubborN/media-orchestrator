@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use media_integrations::prowlarr::{
-    MediaQuery, ProwlarrClient, ProwlarrConfig, SearchPageRequest, SearchSession,
+    MediaQuery, ProwlarrClient, ProwlarrConfig, ProwlarrErrorCode, SearchPageRequest, SearchSession,
 };
 use secrecy::SecretString;
 use url::Url;
@@ -440,6 +440,30 @@ async fn ranking_exposes_every_required_factor_for_a_season_word_release() {
     assert_eq!(score.release_group_preference, 2);
     assert!(!page.results[1].ranking.exact_title);
     assert!(page.continuation.is_none());
+}
+
+#[tokio::test]
+async fn oversized_search_body_is_rejected_before_deserialization() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'x'; 8 * 1024 * 1024 + 1]))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let request = SearchPageRequest::new(
+        SearchSession::new("oversized-body", MediaQuery::movie("Example Movie")).unwrap(),
+        0,
+    )
+    .unwrap();
+    let error = ProwlarrClient::new(config(&server))
+        .unwrap()
+        .search(request)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), ProwlarrErrorCode::ProviderResponse);
 }
 
 #[test]
