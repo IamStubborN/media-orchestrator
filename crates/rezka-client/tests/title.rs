@@ -1,6 +1,6 @@
 use rezka_client::{
-    ProviderFailureReason, RezkaError, RezkaErrorCode, RezkaMediaKind, TitleLocator, TranslationId,
-    TranslationKey,
+    ProviderFailureReason, RezkaError, RezkaErrorCode, RezkaMediaKind, SeriesLifecycleStatus,
+    TitleLocator, TranslationId, TranslationKey,
     catalog::parser::parse_title_page,
     mirror::MirrorSet,
     session::{RezkaClient, RezkaClientConfig},
@@ -49,6 +49,86 @@ fn movie_page(translations: &str, default_id: u64) -> String {
         <ul id="translators-list">{translations}</ul>
         <script>sof.tv.initCDNMoviesEvents(55, {default_id}, {{}}, {{}});</script></body></html>"#
     )
+}
+
+fn series_page(info_rows: &str) -> String {
+    format!(
+        r#"<html><head><title>Series</title><meta property="og:type" content="video.tv_series"></head>
+        <body><main class="b-content__main"><input id="post_id" value="56">
+        <h1 class="b-post__title">Series</h1>
+        <table class="b-post__info">{info_rows}</table>
+        <ul id="translators-list"><li class="b-translator__item" data-translator_id="7">Studio</li></ul>
+        <script>sof.tv.initCDNSeriesEvents(56, 7, {{}}, {{}});</script>
+        </main></body></html>"#
+    )
+}
+
+#[test]
+fn series_lifecycle_parses_completed_russian_and_ukrainian_rows() {
+    for row in [
+        "<tr><td>Статус сериала:</td><td>Завершён</td></tr>",
+        "<tr><td><h2>Статус серіалу</h2></td><td><span>Завершено</span></td></tr>",
+    ] {
+        let title = parse(&series_page(row), "/series/56-series.html").unwrap();
+        assert_eq!(
+            title.series_lifecycle_status(),
+            SeriesLifecycleStatus::Completed,
+            "row: {row}"
+        );
+    }
+}
+
+#[test]
+fn series_lifecycle_parses_ongoing_russian_and_ukrainian_rows() {
+    for row in [
+        "<tr><td>Статус сериала</td><td>Онгоинг</td></tr>",
+        "<tr><td>Статус серіалу:</td><td>Триває</td></tr>",
+        "<tr><td>СТАТУС СЕРИАЛА:</td><td>Выходит</td></tr>",
+        "<tr><td>Статус серіалу</td><td>Виходить</td></tr>",
+        "<tr><td>Статус серіалу</td><td>Продовжується</td></tr>",
+    ] {
+        let title = parse(&series_page(row), "/series/56-series.html").unwrap();
+        assert_eq!(
+            title.series_lifecycle_status(),
+            SeriesLifecycleStatus::Ongoing,
+            "row: {row}"
+        );
+    }
+}
+
+#[test]
+fn movie_does_not_expose_a_series_lifecycle_status() {
+    let html = movie_page(
+        r#"<li class="b-translator__item" data-translator_id="7">Studio</li>"#,
+        7,
+    )
+    .replace(
+        "<ul id=\"translators-list\">",
+        "<table class=\"b-post__info\"><tr><td>Статус сериала</td><td>Завершён</td></tr></table><ul id=\"translators-list\">",
+    );
+    let title = parse(&html, "/films/55-movie.html").unwrap();
+
+    assert_eq!(
+        title.series_lifecycle_status(),
+        SeriesLifecycleStatus::Unknown
+    );
+}
+
+#[test]
+fn series_lifecycle_is_unknown_when_missing_unrecognized_or_ambiguous() {
+    for rows in [
+        "",
+        "<tr><td>Статус сериала</td><td>Скоро</td></tr>",
+        "<tr><td>Комментарий</td><td>Сериал завершён</td></tr>",
+        "<tr><td>Статус сериала</td><td>Завершён</td></tr><tr><td>Статус серіалу</td><td>Триває</td></tr>",
+    ] {
+        let title = parse(&series_page(rows), "/series/56-series.html").unwrap();
+        assert_eq!(
+            title.series_lifecycle_status(),
+            SeriesLifecycleStatus::Unknown,
+            "rows: {rows}"
+        );
+    }
 }
 
 #[test]
@@ -470,7 +550,7 @@ fn title_capability_debug_matrix_is_exact_and_redacted() {
             "TitlePlaybackRef { id: RezkaTitleId(901), locator: \"[REDACTED]\", kind: Movie }",
             "SelectedTranslation { title: TitlePlaybackRef { id: RezkaTitleId(901), locator: \"[REDACTED]\", kind: Movie }, translation: Translation { key: Movie { id: TranslationId(7), is_camrip: false, has_ads: false, is_director: false }, name: \"[REDACTED]\", is_premium: false, .. } }",
             "Movie(SelectedTranslation { title: TitlePlaybackRef { id: RezkaTitleId(901), locator: \"[REDACTED]\", kind: Movie }, translation: Translation { key: Movie { id: TranslationId(7), is_camrip: false, has_ads: false, is_director: false }, name: \"[REDACTED]\", is_premium: false, .. } })",
-            "TitleDetails { id: RezkaTitleId(901), locator: \"[REDACTED]\", title: \"[REDACTED]\", original_title: Some(\"[REDACTED]\"), release_year: None, kind: Movie, thumbnail: Some(\"[REDACTED]\"), translations: 1, default_translation: None }",
+            "TitleDetails { id: RezkaTitleId(901), locator: \"[REDACTED]\", title: \"[REDACTED]\", original_title: Some(\"[REDACTED]\"), release_year: None, kind: Movie, series_lifecycle_status: Unknown, thumbnail: Some(\"[REDACTED]\"), translations: 1, default_translation: None }",
         ]
     );
     for debug in debug_values {

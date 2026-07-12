@@ -28,8 +28,9 @@ pub use plex::{
 };
 pub use search::{
     ContinueSearchRequest, ExecutionSelectionDto, MAX_SEARCH_RESULTS_PER_PAGE, MediaKindDto,
-    ProwlarrRankingDto, RezkaTranslationDto, SearchPageDto, SearchResultDto, SeasonAvailabilityDto,
-    SelectResultRequest, SeriesAvailabilityDto, StartSearchRequest, TrackingPromptDto,
+    ProwlarrRankingDto, RezkaTranslationDto, SearchPageDto, SearchResultDto, SearchScopeDto,
+    SeasonAvailabilityDto, SelectResultRequest, SeriesAvailabilityDto, SeriesLifecycleStatusDto,
+    StartSearchRequest, TrackingPromptDto,
 };
 pub use tracking::{
     CreateTrackingRequest, EpisodeSnapshotDto, TrackingDto, TrackingListDto, TrackingScopeDto,

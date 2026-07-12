@@ -12,9 +12,9 @@ use crate::{
     PublicImageUrl, RezkaError,
     catalog::{
         CatalogContinuation, CatalogEntry, CatalogPage, CatalogQuery, MAX_CATALOG_ENTRIES,
-        RezkaMediaKind, RezkaTitleId, TitleDetails, TitleLocator, Translation, TranslationId,
-        TranslationKey, has_malformed_percent_encoding, invalid_catalog,
-        path_has_prohibited_segment,
+        RezkaMediaKind, RezkaTitleId, SeriesLifecycleStatus, TitleDetails, TitleLocator,
+        Translation, TranslationId, TranslationKey, has_malformed_percent_encoding,
+        invalid_catalog, path_has_prohibited_segment,
     },
     mirror::same_origin,
 };
@@ -70,6 +70,7 @@ pub fn parse_title_page(
     )?;
     let original_title = optional_element_text(&document, ".b-post__origtitle")?;
     let release_year = parse_release_year(&document)?;
+    let series_lifecycle_status = parse_series_lifecycle_status(&document, kind)?;
     let thumbnail = parse_title_thumbnail(&document, selected_origin)?;
     let translations = parse_translations(&document, kind, &initializations)?;
     let default_translation = parse_default_translation(&translations, kind, &initializations)?;
@@ -81,10 +82,75 @@ pub fn parse_title_page(
         original_title,
         release_year,
         kind,
+        series_lifecycle_status,
         thumbnail,
         translations,
         default_translation,
     ))
+}
+
+fn parse_series_lifecycle_status(
+    document: &Html,
+    kind: RezkaMediaKind,
+) -> Result<SeriesLifecycleStatus, RezkaError> {
+    if kind != RezkaMediaKind::Series {
+        return Ok(SeriesLifecycleStatus::Unknown);
+    }
+
+    let row_selector = selector(".b-content__main .b-post__info tr");
+    let cell_selector = selector("td");
+    let mut found = Vec::new();
+    for row in document.select(&row_selector) {
+        let cells = row.select(&cell_selector).collect::<Vec<_>>();
+        if cells.len() < 2 {
+            continue;
+        }
+        let label = normalized_text(cells[0].text())?.unwrap_or_default();
+        if !is_series_status_label(&label) {
+            continue;
+        }
+        let value = normalized_text(cells[1].text())?.unwrap_or_default();
+        let Some(status) = normalized_series_status(&value) else {
+            return Ok(SeriesLifecycleStatus::Unknown);
+        };
+        found.push(status);
+    }
+
+    let Some(first) = found.first().copied() else {
+        return Ok(SeriesLifecycleStatus::Unknown);
+    };
+    Ok(if found.iter().all(|status| *status == first) {
+        first
+    } else {
+        SeriesLifecycleStatus::Unknown
+    })
+}
+
+fn is_series_status_label(value: &str) -> bool {
+    matches!(
+        normalize_status_text(value).as_str(),
+        "статус сериала" | "статус серіалу"
+    )
+}
+
+fn normalized_series_status(value: &str) -> Option<SeriesLifecycleStatus> {
+    match normalize_status_text(value).as_str() {
+        "завершен" | "завершён" | "завершено" | "завершений" => {
+            Some(SeriesLifecycleStatus::Completed)
+        }
+        "онгоинг" | "продолжается" | "выходит" | "триває" | "виходить" | "продовжується" => {
+            Some(SeriesLifecycleStatus::Ongoing)
+        }
+        _ => None,
+    }
+}
+
+fn normalize_status_text(value: &str) -> String {
+    value
+        .trim()
+        .trim_end_matches([':', '：'])
+        .trim()
+        .to_lowercase()
 }
 
 #[derive(Copy, Clone)]

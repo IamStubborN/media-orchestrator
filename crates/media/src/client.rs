@@ -122,11 +122,18 @@ impl HttpClient {
         .await
     }
 
-    pub async fn continue_search(&self, continuation: String) -> Result<String, ClientError> {
+    pub async fn continue_search(
+        &self,
+        continuation: String,
+        scope: media_contract::SearchScopeDto,
+    ) -> Result<String, ClientError> {
         self.execute(
             self.request(reqwest::Method::POST, "v1/searches/continue")?
                 .header(IDEMPOTENCY_KEY_HEADER, generated_identifier())
-                .json(&ContinueSearchRequest { continuation }),
+                .json(&ContinueSearchRequest {
+                    continuation,
+                    scope,
+                }),
         )
         .await
     }

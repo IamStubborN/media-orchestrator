@@ -31,11 +31,20 @@ impl RunnerApi for FakeApi {
     }
     async fn report(
         &self,
-        _: &LeaseDto,
+        lease: &LeaseDto,
         event: RunnerEventDto,
-    ) -> Result<(), media::runner::RunnerError> {
+    ) -> Result<media_contract::JobDto, media::runner::RunnerError> {
+        let mut job = lease.job.clone();
+        match &event {
+            RunnerEventDto::StageFailed { retryable, .. } if *retryable => {
+                job.state = JobStateDto::Queued;
+            }
+            RunnerEventDto::StageFailed { .. } => job.state = JobStateDto::Failed,
+            RunnerEventDto::JobTransition { state, .. } => job.state = *state,
+            _ => {}
+        }
         self.events.lock().unwrap().push(event);
-        Ok(())
+        Ok(job)
     }
 }
 

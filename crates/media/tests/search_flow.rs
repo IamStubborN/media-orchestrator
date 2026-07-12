@@ -10,8 +10,8 @@ use media::search::{
 use media_api::{SearchError, SearchService};
 use media_contract::{
     ContinueSearchRequest, MediaKindDto, ProviderDto, ProwlarrRankingDto, RezkaTranslationDto,
-    SearchResultDto, SeasonAvailabilityDto, SelectResultRequest, SeriesAvailabilityDto,
-    StartSearchRequest, TrackingPromptDto,
+    SearchResultDto, SearchScopeDto, SeasonAvailabilityDto, SelectResultRequest,
+    SeriesAvailabilityDto, StartSearchRequest, TrackingPromptDto,
 };
 use media_core::{
     PRIMARY_USER_ID, EpisodeDiscoveryPort, Job, JobApplication, JobId, JobStore, NewJob,
@@ -43,6 +43,7 @@ async fn tracking_discovery_uses_the_selected_rezka_translation_snapshot() {
             has_ads: false,
         }],
         availability: Some(SeriesAvailabilityDto {
+            lifecycle_status: media_contract::SeriesLifecycleStatusDto::Ongoing,
             incomplete: true,
             seasons: vec![SeasonAvailabilityDto {
                 season: 1,
@@ -213,6 +214,7 @@ impl JobStore for MemoryJobStore {
 
 fn request(source: ProviderDto) -> StartSearchRequest {
     StartSearchRequest {
+        scope: telegram_scope("default", None),
         source,
         query: "Example".to_owned(),
         media_kind: (source == ProviderDto::Prowlarr).then_some(MediaKindDto::Movie),
@@ -221,6 +223,14 @@ fn request(source: ProviderDto) -> StartSearchRequest {
         preferred_languages: vec![],
         preferred_codecs: vec![],
         preferred_release_groups: vec![],
+    }
+}
+
+fn telegram_scope(chat_id: &str, thread_id: Option<&str>) -> SearchScopeDto {
+    SearchScopeDto {
+        platform: "telegram".to_owned(),
+        chat_id: chat_id.to_owned(),
+        thread_id: thread_id.map(str::to_owned),
     }
 }
 
@@ -292,7 +302,13 @@ async fn prowlarr_paginates_five_and_runner_gets_only_the_exact_selected_result(
     let continuation = first.continuation.clone().unwrap();
     assert!(!serde_json::to_string(&first).unwrap().contains("magnet:"));
     let second = service
-        .continue_search(PRIMARY_USER_ID, ContinueSearchRequest { continuation })
+        .continue_search(
+            PRIMARY_USER_ID,
+            ContinueSearchRequest {
+                continuation,
+                scope: telegram_scope("default", None),
+            },
+        )
         .await
         .unwrap();
     assert_eq!(second.results.len(), 1);
@@ -307,6 +323,7 @@ async fn prowlarr_paginates_five_and_runner_gets_only_the_exact_selected_result(
                 translation_id: None,
                 season: None,
                 episode: None,
+                scope: telegram_scope("default", None),
             },
         )
         .await
@@ -321,6 +338,53 @@ async fn prowlarr_paginates_five_and_runner_gets_only_the_exact_selected_result(
             ..
         } if title == "Release 5" && uri.ends_with("dn=5")
     ));
+}
+
+#[tokio::test]
+async fn search_session_rejects_the_same_owner_from_another_chat_or_thread() {
+    let mut start = request(ProviderDto::Prowlarr);
+    start.scope = telegram_scope("chat-a", Some("thread-a"));
+    let service = service(HashMap::from([(
+        ProviderDto::Prowlarr,
+        vec![ProviderPage {
+            results: (0..6).map(prowlarr_result).collect(),
+            provider_continuation: None,
+        }],
+    )]));
+    let page = service.start(PRIMARY_USER_ID, start).await.unwrap();
+    let foreign_scope = telegram_scope("chat-a", Some("thread-b"));
+
+    assert_eq!(
+        service
+            .continue_search(
+                PRIMARY_USER_ID,
+                ContinueSearchRequest {
+                    continuation: page.continuation.clone().unwrap(),
+                    scope: foreign_scope.clone(),
+                },
+            )
+            .await
+            .unwrap_err(),
+        SearchError::Forbidden
+    );
+    assert_eq!(
+        service
+            .select(
+                PRIMARY_USER_ID,
+                OperationKey::from_bytes([17; 32]),
+                SelectResultRequest {
+                    session_id: page.session_id,
+                    result_id: "torrent-0".to_owned(),
+                    translation_id: None,
+                    season: None,
+                    episode: None,
+                    scope: foreign_scope,
+                },
+            )
+            .await
+            .unwrap_err(),
+        SearchError::Forbidden
+    );
 }
 
 #[tokio::test]
@@ -341,6 +405,7 @@ async fn rezka_requires_explicit_translation_and_available_episode_without_fallb
             has_ads: false,
         }],
         availability: Some(SeriesAvailabilityDto {
+            lifecycle_status: media_contract::SeriesLifecycleStatusDto::Ongoing,
             incomplete: true,
             seasons: vec![SeasonAvailabilityDto {
                 season: 1,
@@ -374,6 +439,7 @@ async fn rezka_requires_explicit_translation_and_available_episode_without_fallb
             translation_id: None,
             season: Some(1),
             episode: Some(1),
+            scope: telegram_scope("default", None),
         },
         SelectResultRequest {
             session_id: page.session_id.clone(),
@@ -381,6 +447,7 @@ async fn rezka_requires_explicit_translation_and_available_episode_without_fallb
             translation_id: Some(37),
             season: Some(1),
             episode: Some(9),
+            scope: telegram_scope("default", None),
         },
     ] {
         assert_eq!(
@@ -396,7 +463,8 @@ async fn rezka_requires_explicit_translation_and_available_episode_without_fallb
             .continue_search(
                 SECONDARY_USER_ID,
                 ContinueSearchRequest {
-                    continuation: format!("{}:5", page.session_id)
+                    continuation: format!("{}:5", page.session_id),
+                    scope: telegram_scope("default", None),
                 }
             )
             .await
@@ -414,6 +482,7 @@ async fn rezka_requires_explicit_translation_and_available_episode_without_fallb
                 translation_id: Some(37),
                 season: None,
                 episode: None,
+                scope: telegram_scope("default", None),
             },
         )
         .await
@@ -427,8 +496,12 @@ async fn rezka_requires_explicit_translation_and_available_episode_without_fallb
             translation_id: 37,
             season: None,
             episode: None,
+            episodes,
             ..
-        }
+        } if episodes == vec![
+            media_contract::EpisodeSnapshotDto { season: 1, episode: 1 },
+            media_contract::EpisodeSnapshotDto { season: 1, episode: 2 },
+        ]
     ));
 
     let job = service
@@ -441,6 +514,7 @@ async fn rezka_requires_explicit_translation_and_available_episode_without_fallb
                 translation_id: Some(37),
                 season: Some(1),
                 episode: Some(2),
+                scope: telegram_scope("default", None),
             },
         )
         .await
@@ -451,7 +525,8 @@ async fn rezka_requires_explicit_translation_and_available_episode_without_fallb
             translation_id: 37,
             season: Some(1),
             episode: Some(2),
+            episodes,
             ..
-        }
+        } if episodes == vec![media_contract::EpisodeSnapshotDto { season: 1, episode: 2 }]
     ));
 }

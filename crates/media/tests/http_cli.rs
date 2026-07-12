@@ -412,6 +412,7 @@ async fn search_continue_and_download_use_stable_json_and_exact_selection() {
                     && body["source"] == "prowlarr"
                     && body["query"] == "Movie"
                     && body["media_kind"] == "movie"
+                    && body["scope"] == serde_json::json!({"platform":"cli","chat_id":"local"})
                 {
                     json_response(StatusCode::CREATED, r#"{
                         "api_version":"v1","session_id":"session-1","source":"prowlarr",
@@ -429,7 +430,10 @@ async fn search_continue_and_download_use_stable_json_and_exact_selection() {
             any(|request: Request| async move {
                 let body = to_bytes(request.into_body(), 64 * 1024).await.unwrap();
                 let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                if body == serde_json::json!({"continuation":"session-1:5"}) {
+                if body == serde_json::json!({
+                    "continuation":"session-1:5",
+                    "scope":{"platform":"cli","chat_id":"local"}
+                }) {
                     json_response(StatusCode::OK, r#"{"api_version":"v1","session_id":"session-1","source":"prowlarr","expires_at":"2026-07-13T12:00:00Z","results":[]}"#)
                 } else { json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#) }
             }),
@@ -439,7 +443,10 @@ async fn search_continue_and_download_use_stable_json_and_exact_selection() {
             any(|request: Request| async move {
                 let body = to_bytes(request.into_body(), 64 * 1024).await.unwrap();
                 let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                if body == serde_json::json!({"session_id":"session-1","result_id":"result-1"}) {
+                if body == serde_json::json!({
+                    "session_id":"session-1","result_id":"result-1",
+                    "scope":{"platform":"cli","chat_id":"local"}
+                }) {
                     json_response(StatusCode::CREATED, r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","provider":"prowlarr","result_ref":"selection:one","state":"queued","notify_scope":"initiator"}"#)
                 } else { json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#) }
             }),

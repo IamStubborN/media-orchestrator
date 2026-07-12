@@ -343,6 +343,13 @@ pub enum RezkaMediaKind {
     Series,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum SeriesLifecycleStatus {
+    Completed,
+    Ongoing,
+    Unknown,
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct RezkaTitleId(u64);
 
@@ -482,6 +489,7 @@ pub struct TitleDetails {
     original_title: Option<String>,
     release_year: Option<u16>,
     kind: RezkaMediaKind,
+    series_lifecycle_status: SeriesLifecycleStatus,
     thumbnail: Option<PublicImageUrl>,
     translations: Vec<Translation>,
     default_translation: Option<TranslationKey>,
@@ -496,6 +504,7 @@ impl TitleDetails {
         original_title: Option<String>,
         release_year: Option<u16>,
         kind: RezkaMediaKind,
+        series_lifecycle_status: SeriesLifecycleStatus,
         thumbnail: Option<PublicImageUrl>,
         translations: Vec<Translation>,
         default_translation: Option<TranslationKey>,
@@ -507,6 +516,7 @@ impl TitleDetails {
             original_title,
             release_year,
             kind,
+            series_lifecycle_status,
             thumbnail,
             translations,
             default_translation,
@@ -541,6 +551,11 @@ impl TitleDetails {
     #[must_use]
     pub const fn kind(&self) -> RezkaMediaKind {
         self.kind
+    }
+
+    #[must_use]
+    pub const fn series_lifecycle_status(&self) -> SeriesLifecycleStatus {
+        self.series_lifecycle_status
     }
 
     #[must_use]
@@ -588,6 +603,7 @@ impl fmt::Debug for TitleDetails {
             )
             .field("release_year", &self.release_year)
             .field("kind", &self.kind)
+            .field("series_lifecycle_status", &self.series_lifecycle_status)
             .field("thumbnail", &self.thumbnail.as_ref().map(|_| "[REDACTED]"))
             .field("translations", &self.translations.len())
             .field("default_translation", &self.default_translation)

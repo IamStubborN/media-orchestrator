@@ -7,9 +7,9 @@ mod repository;
 
 pub use migration::Migrator;
 pub use repository::{
-    ReservationGeneration, ReservationHandle, ReservationHandleError, ReservationRecord,
-    SeaOrmClientStore, SeaOrmIdempotencyRepository, SeaOrmIdentityStore, SeaOrmJobStore,
-    SeaOrmLeaseStore, SeaOrmNotificationOutbox, SeaOrmOperationReceiptRepository, SeaOrmReadiness,
-    SeaOrmSearchRepository, SeaOrmTrackingStore, SearchSessionRecord, StoredResponseError,
-    StoredResponseRecord,
+    MaintenanceReport, ReservationGeneration, ReservationHandle, ReservationHandleError,
+    ReservationRecord, SeaOrmClientStore, SeaOrmIdempotencyRepository, SeaOrmIdentityStore,
+    SeaOrmJobStore, SeaOrmLeaseStore, SeaOrmMaintenanceStore, SeaOrmNotificationOutbox,
+    SeaOrmOperationReceiptRepository, SeaOrmReadiness, SeaOrmSearchRepository, SeaOrmTrackingStore,
+    SearchSessionRecord, StoredResponseError, StoredResponseRecord,
 };

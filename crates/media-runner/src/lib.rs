@@ -6,6 +6,7 @@ mod media;
 mod pipeline;
 mod plex;
 mod ports;
+mod retention;
 pub mod rezka_session_store;
 mod storage;
 mod subtitle;
@@ -25,6 +26,7 @@ pub use ports::{
     RunnerServicePort,
 };
 
+pub use retention::{StagingRetentionError, cleanup_terminal_staging, mark_terminal};
 pub use rezka_session_store::{
     EncryptedRezkaSessionStore, RezkaSessionStoreConfig, RezkaSessionStoreError,
 };

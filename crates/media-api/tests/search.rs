@@ -123,7 +123,10 @@ async fn authenticated_user_searches_continues_and_selects_without_identity_flag
         .oneshot(post(
             "/v1/searches",
             VALID_TOKEN,
-            serde_json::json!({"source":"prowlarr","query":"Movie"}),
+            serde_json::json!({
+                "scope":{"platform":"telegram","chat_id":"42"},
+                "source":"prowlarr","query":"Movie"
+            }),
         ))
         .await
         .unwrap();
@@ -138,7 +141,10 @@ async fn authenticated_user_searches_continues_and_selects_without_identity_flag
         .oneshot(post(
             "/v1/searches/continue",
             VALID_TOKEN,
-            serde_json::json!({"continuation":"session:5"}),
+            serde_json::json!({
+                "continuation":"session:5",
+                "scope":{"platform":"telegram","chat_id":"42"}
+            }),
         ))
         .await
         .unwrap();
@@ -154,6 +160,7 @@ async fn authenticated_user_searches_continues_and_selects_without_identity_flag
                 "translation_id":37,
                 "season":1,
                 "episode":2
+                ,"scope":{"platform":"telegram","chat_id":"42"}
             }),
         ))
         .await

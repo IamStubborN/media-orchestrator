@@ -5,6 +5,7 @@ pub const MAX_SEARCH_RESULTS_PER_PAGE: usize = 5;
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StartSearchRequest {
+    pub scope: SearchScopeDto,
     pub source: ProviderDto,
     pub query: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -25,6 +26,7 @@ pub struct StartSearchRequest {
 #[serde(deny_unknown_fields)]
 pub struct ContinueSearchRequest {
     pub continuation: String,
+    pub scope: SearchScopeDto,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -38,6 +40,16 @@ pub struct SelectResultRequest {
     pub season: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub episode: Option<u32>,
+    pub scope: SearchScopeDto,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SearchScopeDto {
+    pub platform: String,
+    pub chat_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -72,10 +84,19 @@ pub struct TrackingPromptDto {
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SeriesAvailabilityDto {
+    pub lifecycle_status: SeriesLifecycleStatusDto,
     pub incomplete: bool,
     pub seasons: Vec<SeasonAvailabilityDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tracking_prompt: Option<TrackingPromptDto>,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeriesLifecycleStatusDto {
+    Completed,
+    Ongoing,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -159,6 +180,8 @@ pub enum ExecutionSelectionDto {
         season: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         episode: Option<u32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        episodes: Vec<crate::EpisodeSnapshotDto>,
         title: String,
     },
     Prowlarr {

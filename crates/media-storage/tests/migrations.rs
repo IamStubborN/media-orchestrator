@@ -239,10 +239,18 @@ async fn migrations_apply_seed_fixed_users_and_reverse_cleanly() {
 #[tokio::test]
 async fn a_failed_migration_explicitly_rolls_back_partial_schema() {
     let migrations = Migrator::migrations();
-    assert_eq!(
-        migrations.last().unwrap().name(),
-        "m20260712_000009_blocked_storage_notification",
-        "blocked-storage notification support must follow the notification outbox migration",
+    let names = migrations
+        .iter()
+        .map(|migration| migration.name().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        names.windows(2).any(|pair| {
+            pair == [
+                "m20260712_000009_blocked_storage_notification",
+                "m20260712_000010_search_scope",
+            ]
+        }),
+        "search scope migration must follow blocked-storage notification support",
     );
     for migration in migrations {
         assert_eq!(
@@ -283,6 +291,36 @@ async fn a_failed_migration_explicitly_rolls_back_partial_schema() {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn search_scope_migration_discards_only_legacy_unscoped_sessions() {
+    let test_db = TestDatabase::start().await;
+    let db = test_db.connection();
+    Migrator::up(db, Some(9)).await.unwrap();
+    execute(
+        db,
+        "INSERT INTO search_sessions (id, owner_id, payload, expires_at) VALUES
+         ('10000000-0000-0000-0000-000000000091',
+          '00000000-0000-0000-0000-000000000001',
+          '{\"request\":{\"source\":\"rezka\",\"query\":\"legacy\"},\"results\":[]}',
+          now() + interval '1 hour'),
+         ('10000000-0000-0000-0000-000000000092',
+          '00000000-0000-0000-0000-000000000001',
+          '{\"request\":{\"scope\":{\"platform\":\"telegram\",\"chat_id\":\"42\"},\"source\":\"rezka\",\"query\":\"current\"},\"results\":[]}',
+          now() + interval '1 hour')",
+    )
+    .await
+    .unwrap();
+
+    Migrator::up(db, None).await.unwrap();
+
+    let sessions = query(db, "SELECT id FROM search_sessions ORDER BY id").await;
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].try_get::<uuid::Uuid>("", "id").unwrap(),
+        uuid::Uuid::parse_str("10000000-0000-0000-0000-000000000092").unwrap()
     );
 }
 

@@ -13,7 +13,7 @@ pub mod transport;
 
 pub use catalog::{
     CatalogContinuation, CatalogEntry, CatalogPage, CatalogQuery, RezkaMediaKind, RezkaTitleId,
-    TitleDetails, TitleLocator, Translation, TranslationId, TranslationKey,
+    SeriesLifecycleStatus, TitleDetails, TitleLocator, Translation, TranslationId, TranslationKey,
 };
 pub use error::{ProviderFailureReason, RezkaError, RezkaErrorCode};
 pub use mirror::MirrorSet;

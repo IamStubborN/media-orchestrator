@@ -38,7 +38,11 @@ pub enum ExecutionOutcome {
 pub trait RunnerApi: Send + Sync {
     async fn lease_next(&self) -> Result<Option<LeaseDto>, RunnerError>;
     async fn heartbeat(&self, lease: &LeaseDto) -> Result<LeaseDto, RunnerError>;
-    async fn report(&self, lease: &LeaseDto, event: RunnerEventDto) -> Result<(), RunnerError>;
+    async fn report(
+        &self,
+        lease: &LeaseDto,
+        event: RunnerEventDto,
+    ) -> Result<media_contract::JobDto, RunnerError>;
 }
 
 #[async_trait::async_trait]
@@ -48,6 +52,14 @@ pub trait JobExecutor: Send + Sync {
         lease: &LeaseDto,
         control: &RunnerControl,
     ) -> Result<ExecutionOutcome, RunnerError>;
+
+    async fn retire(&self, _lease: &LeaseDto) -> Result<(), RunnerError> {
+        Ok(())
+    }
+
+    async fn maintain(&self, _protected_job_ids: &[String]) -> Result<(), RunnerError> {
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -79,6 +91,7 @@ impl RunnerControl {
                 },
             )
             .await
+            .map(|_| ())
     }
 
     pub async fn stage_completed(
@@ -98,6 +111,7 @@ impl RunnerControl {
                 },
             )
             .await
+            .map(|_| ())
     }
 
     pub async fn stage_failed(
@@ -107,7 +121,7 @@ impl RunnerControl {
         stage_ordinal: u32,
         retryable: bool,
         error_code: &str,
-    ) -> Result<(), RunnerError> {
+    ) -> Result<media_contract::JobDto, RunnerError> {
         self.api
             .report(
                 &self.lease,
@@ -207,6 +221,7 @@ impl MediaJobExecutor {
                 has_ads,
                 season,
                 episode,
+                episodes,
                 title,
             } => {
                 self.execute_rezka(
@@ -221,6 +236,7 @@ impl MediaJobExecutor {
                     *has_ads,
                     *season,
                     *episode,
+                    episodes,
                     title,
                 )
                 .await
@@ -260,6 +276,7 @@ impl MediaJobExecutor {
         has_ads: bool,
         season: Option<u32>,
         episode: Option<u32>,
+        episodes: &[media_contract::EpisodeSnapshotDto],
         title: &str,
     ) -> Result<ExecutionOutcome, RunnerError> {
         let mut prepared = self.rezka.lock().await;
@@ -311,19 +328,26 @@ impl MediaJobExecutor {
                     .series_availability(&selection)
                     .await
                     .map_err(|_| RunnerError::Execution)?;
-                let targets = match (season, episode) {
-                    (Some(season), Some(episode)) => vec![(season, episode)],
-                    (None, None) => availability
-                        .seasons()
+                let targets = if !episodes.is_empty() {
+                    episodes
                         .iter()
-                        .flat_map(|season| {
-                            season
-                                .episodes()
-                                .iter()
-                                .map(move |episode| (season.number(), episode.number()))
-                        })
-                        .collect(),
-                    _ => return Err(RunnerError::Execution),
+                        .map(|episode| (episode.season, episode.episode))
+                        .collect()
+                } else {
+                    match (season, episode) {
+                        (Some(season), Some(episode)) => vec![(season, episode)],
+                        (None, None) => availability
+                            .seasons()
+                            .iter()
+                            .flat_map(|season| {
+                                season
+                                    .episodes()
+                                    .iter()
+                                    .map(move |episode| (season.number(), episode.number()))
+                            })
+                            .collect(),
+                        _ => return Err(RunnerError::Execution),
+                    }
                 };
                 let requests = targets
                     .into_iter()
@@ -615,10 +639,40 @@ impl JobExecutor for MediaJobExecutor {
         lease: &LeaseDto,
         control: &RunnerControl,
     ) -> Result<ExecutionOutcome, RunnerError> {
+        let current_job_id = lease.job.id.to_string();
         let uses_rezka_vpn = matches!(
             &lease.execution,
             Some(media_contract::ExecutionSelectionDto::Rezka { .. })
         );
+        if uses_rezka_vpn {
+            tokio::fs::create_dir_all(self.roots.staging().join(&current_job_id))
+                .await
+                .map_err(|_| RunnerError::Execution)?;
+            media_runner::mark_terminal(
+                self.roots.staging(),
+                &current_job_id,
+                std::time::SystemTime::now(),
+            )
+            .await
+            .map_err(|_| RunnerError::Execution)?;
+        }
+        match media_runner::cleanup_terminal_staging(
+            self.roots.staging(),
+            std::time::SystemTime::now(),
+            Duration::from_secs(7 * 24 * 60 * 60),
+            &[current_job_id.as_str()],
+        )
+        .await
+        {
+            Ok(removed) if !removed.is_empty() => {
+                tracing::info!(
+                    directories_removed = removed.len(),
+                    "expired staging removed"
+                );
+            }
+            Ok(_) => {}
+            Err(_) => tracing::warn!("staging retention pass failed"),
+        }
         let sticky = match (&self.gluetun, uses_rezka_vpn) {
             (Some(client), true) => Some((
                 client,
@@ -639,6 +693,39 @@ impl JobExecutor for MediaJobExecutor {
             }
         }
         result
+    }
+
+    async fn retire(&self, lease: &LeaseDto) -> Result<(), RunnerError> {
+        let job_id = lease.job.id.to_string();
+        let result = media_runner::mark_terminal(
+            self.roots.staging(),
+            &job_id,
+            std::time::SystemTime::now(),
+        )
+        .await;
+        result.map_err(|_| RunnerError::Execution)
+    }
+
+    async fn maintain(&self, protected_job_ids: &[String]) -> Result<(), RunnerError> {
+        let protected = protected_job_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let removed = media_runner::cleanup_terminal_staging(
+            self.roots.staging(),
+            std::time::SystemTime::now(),
+            Duration::from_secs(7 * 24 * 60 * 60),
+            &protected,
+        )
+        .await
+        .map_err(|_| RunnerError::Execution)?;
+        if !removed.is_empty() {
+            tracing::info!(
+                directories_removed = removed.len(),
+                "expired staging removed"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -763,7 +850,7 @@ pub async fn run_single_iteration(
     if lease.execution.is_none() {
         return Err(RunnerError::Execution);
     }
-    api.report(&lease, RunnerEventDto::Started).await?;
+    let _ = api.report(&lease, RunnerEventDto::Started).await?;
     let cancelled = Arc::new(AtomicBool::new(matches!(
         lease.job.state,
         JobStateDto::CancelRequested | JobStateDto::Cancelled
@@ -801,12 +888,19 @@ pub async fn run_single_iteration(
             outcome
         }
         Err(_) => {
-            control
+            let job = control
                 .stage_failed(0, "execution", 2, true, "execution_failed")
                 .await?;
+            if job.state == JobStateDto::Failed && executor.retire(&lease).await.is_err() {
+                tracing::warn!("failed to mark terminal staging for retention");
+            }
             return Ok(true);
         }
     };
+    let retire_staging = matches!(
+        outcome,
+        ExecutionOutcome::Completed | ExecutionOutcome::Partial | ExecutionOutcome::Cancelled
+    );
     let transitions = match outcome {
         ExecutionOutcome::Completed => vec![
             (JobStateDto::Publishing, None),
@@ -835,14 +929,18 @@ pub async fn run_single_iteration(
         ExecutionOutcome::Failed => vec![(JobStateDto::Failed, None)],
     };
     for (state, needs_action_reason) in transitions {
-        api.report(
-            &lease,
-            RunnerEventDto::JobTransition {
-                state,
-                needs_action_reason,
-            },
-        )
-        .await?;
+        let _ = api
+            .report(
+                &lease,
+                RunnerEventDto::JobTransition {
+                    state,
+                    needs_action_reason,
+                },
+            )
+            .await?;
+    }
+    if retire_staging && executor.retire(&lease).await.is_err() {
+        tracing::warn!("failed to mark terminal staging for retention");
     }
     Ok(true)
 }
@@ -852,8 +950,17 @@ pub async fn run_loop(
     executor: Arc<dyn JobExecutor>,
     heartbeat_interval: Duration,
 ) -> Result<(), RunnerError> {
+    let mut next_maintenance = tokio::time::Instant::now();
     loop {
-        if !run_single_iteration(api.clone(), executor.clone(), heartbeat_interval).await? {
+        let worked =
+            run_single_iteration(api.clone(), executor.clone(), heartbeat_interval).await?;
+        if tokio::time::Instant::now() >= next_maintenance {
+            if executor.maintain(&[]).await.is_err() {
+                tracing::warn!("staging retention pass failed");
+            }
+            next_maintenance = tokio::time::Instant::now() + Duration::from_secs(60 * 60);
+        }
+        if !worked {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
@@ -940,7 +1047,11 @@ impl RunnerApi for HttpRunnerApi {
         serde_json::from_value(value).map_err(|_| RunnerError::Service)
     }
 
-    async fn report(&self, lease: &LeaseDto, event: RunnerEventDto) -> Result<(), RunnerError> {
+    async fn report(
+        &self,
+        lease: &LeaseDto,
+        event: RunnerEventDto,
+    ) -> Result<media_contract::JobDto, RunnerError> {
         let path = format!("v1/runner/leases/{}/events", lease.lease_id);
         let request = RunnerEventRequest {
             event_id: media_contract::PublicId::parse(&uuid::Uuid::new_v4().to_string())
@@ -951,9 +1062,9 @@ impl RunnerApi for HttpRunnerApi {
             .json(self.request(reqwest::Method::POST, &path)?.json(&request))
             .await?
             .ok_or(RunnerError::Service)?;
-        let _: media_contract::RunnerEventResponse =
+        let response: media_contract::RunnerEventResponse =
             serde_json::from_value(value).map_err(|_| RunnerError::Service)?;
-        Ok(())
+        Ok(response.job)
     }
 }
 

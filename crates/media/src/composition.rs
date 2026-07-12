@@ -18,8 +18,8 @@ use media_core::{
 use media_storage::{
     ReservationGeneration as StorageReservationGeneration, ReservationHandle, ReservationRecord,
     SeaOrmClientStore, SeaOrmIdempotencyRepository, SeaOrmJobStore, SeaOrmLeaseStore,
-    SeaOrmNotificationOutbox, SeaOrmOperationReceiptRepository, SeaOrmReadiness,
-    SeaOrmTrackingStore, StoredResponseRecord,
+    SeaOrmMaintenanceStore, SeaOrmNotificationOutbox, SeaOrmOperationReceiptRepository,
+    SeaOrmReadiness, SeaOrmTrackingStore, StoredResponseRecord,
 };
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
@@ -362,6 +362,7 @@ pub struct PreparedService {
     router: axum::Router,
     notifications: Option<PreparedNotificationDispatcher>,
     tracking: Option<TrackingRuntime>,
+    maintenance: SeaOrmMaintenanceStore,
 }
 
 pub struct PreparedNotificationDispatcher {
@@ -544,7 +545,7 @@ fn pending_plex_response() -> media_contract::PlexReconcileResponse {
 impl std::fmt::Debug for PreparedService {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(
-            "PreparedService { router: [REDACTED], notifications: [REDACTED], tracking: [REDACTED] }",
+            "PreparedService { router: [REDACTED], notifications: [REDACTED], tracking: [REDACTED], maintenance: [REDACTED] }",
         )
     }
 }
@@ -575,7 +576,24 @@ impl PreparedService {
             router,
             notifications,
             tracking,
+            maintenance,
         } = self;
+        let maintenance_task = tokio::spawn(async move {
+            loop {
+                match maintenance.run(time::OffsetDateTime::now_utc()).await {
+                    Ok(report) => tracing::info!(
+                        search_sessions_deleted = report.search_sessions_deleted,
+                        search_executions_deleted = report.search_executions_deleted,
+                        jobs_deleted = report.jobs_deleted,
+                        notifications_deleted = report.notifications_deleted,
+                        outbox_events_deleted = report.outbox_events_deleted,
+                        "database retention pass completed"
+                    ),
+                    Err(_) => tracing::warn!("database retention pass failed"),
+                }
+                tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
+            }
+        });
         let notification_task = notifications.map(|dispatcher| {
             tokio::spawn(async move {
                 loop {
@@ -630,6 +648,8 @@ impl PreparedService {
             task.abort();
             let _ = task.await;
         }
+        maintenance_task.abort();
+        let _ = maintenance_task.await;
         result
     }
 }
@@ -747,6 +767,7 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
         router: media_api::router(state),
         notifications,
         tracking: tracking_runtime,
+        maintenance: SeaOrmMaintenanceStore::new(database),
     })
 }
 

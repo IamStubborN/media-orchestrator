@@ -3,6 +3,7 @@ mod idempotency;
 mod identity;
 mod job;
 mod lease;
+mod maintenance;
 mod operation;
 mod readiness;
 mod search;
@@ -16,6 +17,7 @@ pub use idempotency::{
 pub use identity::SeaOrmIdentityStore;
 pub use job::SeaOrmJobStore;
 pub use lease::SeaOrmLeaseStore;
+pub use maintenance::{MaintenanceReport, SeaOrmMaintenanceStore};
 pub use operation::SeaOrmOperationReceiptRepository;
 pub use readiness::SeaOrmReadiness;
 pub use search::{SeaOrmSearchRepository, SearchSessionRecord};

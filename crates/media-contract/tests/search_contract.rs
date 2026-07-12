@@ -72,6 +72,11 @@ fn selection_is_explicit_and_rejects_identity_fields() {
         translation_id: Some(37),
         season: Some(1),
         episode: Some(4),
+        scope: media_contract::SearchScopeDto {
+            platform: "telegram".to_owned(),
+            chat_id: "42".to_owned(),
+            thread_id: None,
+        },
     };
     assert_eq!(
         serde_json::to_value(request).unwrap(),
@@ -80,7 +85,8 @@ fn selection_is_explicit_and_rejects_identity_fields() {
             "result_id":"result-2",
             "translation_id":37,
             "season":1,
-            "episode":4
+            "episode":4,
+            "scope":{"platform":"telegram","chat_id":"42"}
         })
     );
 
@@ -115,6 +121,7 @@ fn rezka_series_exposes_translation_and_tracking_prompt_without_urls() {
             has_ads: false,
         }],
         availability: Some(media_contract::SeriesAvailabilityDto {
+            lifecycle_status: media_contract::SeriesLifecycleStatusDto::Ongoing,
             incomplete: true,
             seasons: vec![media_contract::SeasonAvailabilityDto {
                 season: 1,
@@ -131,6 +138,7 @@ fn rezka_series_exposes_translation_and_tracking_prompt_without_urls() {
     let value = serde_json::to_value(result).unwrap();
     assert_eq!(value["translations"][0]["id"], 37);
     assert_eq!(value["availability"]["incomplete"], true);
+    assert_eq!(value["availability"]["lifecycle_status"], "ongoing");
     assert!(value["availability"]["tracking_prompt"].is_object());
     assert!(!serde_json::to_string(&value).unwrap().contains("stream"));
 }

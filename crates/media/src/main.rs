@@ -292,11 +292,13 @@ async fn run_tracking(args: TrackingArgs) -> Result<(), RunError> {
 
 async fn run_search(args: SearchArgs) -> Result<(), RunError> {
     let client = HttpClient::new(ClientConfig::load()?)?;
+    let scope = current_search_scope();
     let output = match args.continuation {
-        Some(continuation) => client.continue_search(continuation).await?,
+        Some(continuation) => client.continue_search(continuation, scope).await?,
         None => {
             client
                 .search(media_contract::StartSearchRequest {
+                    scope,
                     source: args.source.into(),
                     query: args
                         .query
@@ -341,11 +343,31 @@ async fn run_download(args: DownloadArgs) -> Result<(), RunError> {
             translation_id: args.translation_id,
             season: args.season,
             episode: args.episode,
+            scope: current_search_scope(),
         })
         .await?;
     let _ = args.json;
     println!("{output}");
     Ok(())
+}
+
+fn current_search_scope() -> media_contract::SearchScopeDto {
+    let platform = std::env::var("HERMES_SESSION_PLATFORM")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "cli".to_owned());
+    let chat_id = std::env::var("HERMES_SESSION_CHAT_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "local".to_owned());
+    let thread_id = std::env::var("HERMES_SESSION_THREAD_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    media_contract::SearchScopeDto {
+        platform,
+        chat_id,
+        thread_id,
+    }
 }
 
 async fn run_jobs(args: JobsArgs) -> Result<(), RunError> {

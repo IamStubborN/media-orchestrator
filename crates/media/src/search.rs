@@ -164,6 +164,11 @@ impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
             .provider
             .search(
                 &StartSearchRequest {
+                    scope: media_contract::SearchScopeDto {
+                        platform: "system".to_owned(),
+                        chat_id: "tracking".to_owned(),
+                        thread_id: None,
+                    },
                     source: ProviderDto::Rezka,
                     query: tracking.title().to_owned(),
                     media_kind: None,
@@ -340,8 +345,21 @@ impl ConcreteSearchProvider {
                         .copied()
                         .map(|episode| (*season, episode))
                 });
+                let lifecycle = details.series_lifecycle_status();
+                let incomplete = lifecycle != rezka_client::SeriesLifecycleStatus::Completed;
                 media_contract::SeriesAvailabilityDto {
-                    incomplete: true,
+                    lifecycle_status: match lifecycle {
+                        rezka_client::SeriesLifecycleStatus::Completed => {
+                            media_contract::SeriesLifecycleStatusDto::Completed
+                        }
+                        rezka_client::SeriesLifecycleStatus::Ongoing => {
+                            media_contract::SeriesLifecycleStatusDto::Ongoing
+                        }
+                        rezka_client::SeriesLifecycleStatus::Unknown => {
+                            media_contract::SeriesLifecycleStatusDto::Unknown
+                        }
+                    },
+                    incomplete,
                     seasons: union
                         .into_iter()
                         .map(|(season, episodes)| media_contract::SeasonAvailabilityDto {
@@ -349,13 +367,16 @@ impl ConcreteSearchProvider {
                             episodes,
                         })
                         .collect(),
-                    tracking_prompt: latest.map(|(latest_season, latest_episode)| {
-                        media_contract::TrackingPromptDto {
-                            title: details.title().to_owned(),
-                            latest_season,
-                            latest_episode,
-                        }
-                    }),
+                    tracking_prompt: (lifecycle == rezka_client::SeriesLifecycleStatus::Ongoing)
+                        .then_some(latest)
+                        .flatten()
+                        .map(
+                            |(latest_season, latest_episode)| media_contract::TrackingPromptDto {
+                                title: details.title().to_owned(),
+                                latest_season,
+                                latest_episode,
+                            },
+                        ),
                 }
             });
             let public = SearchResultDto::Rezka {
@@ -833,6 +854,9 @@ impl SearchService for DurableSearchService {
             .persistence
             .session_for_owner(session_id, owner)
             .await?;
+        if session.request.scope != request.scope {
+            return Err(SearchError::Forbidden);
+        }
         self.page(session, offset).await
     }
 
@@ -846,6 +870,9 @@ impl SearchService for DurableSearchService {
             .persistence
             .session_for_owner(&request.session_id, owner)
             .await?;
+        if session.request.scope != request.scope {
+            return Err(SearchError::Forbidden);
+        }
         if session.expires_at <= OffsetDateTime::now_utc() {
             return Err(SearchError::NotFound);
         }
@@ -975,6 +1002,28 @@ fn execution(
                 },
                 MediaKindDto::Movie => {}
             }
+            let episodes = match media_kind {
+                MediaKindDto::Movie => Vec::new(),
+                MediaKindDto::Series => match (request.season, request.episode) {
+                    (Some(season), Some(episode)) => {
+                        vec![media_contract::EpisodeSnapshotDto { season, episode }]
+                    }
+                    (None, None) => translation_episodes
+                        .get(&translation_id)
+                        .into_iter()
+                        .flatten()
+                        .flat_map(|(season, episodes)| {
+                            episodes
+                                .iter()
+                                .map(|episode| media_contract::EpisodeSnapshotDto {
+                                    season: *season,
+                                    episode: *episode,
+                                })
+                        })
+                        .collect(),
+                    _ => return Err(SearchError::InvalidRequest),
+                },
+            };
             Ok(ExecutionSelectionDto::Rezka {
                 locator: locator.clone(),
                 title_id: *title_id,
@@ -985,6 +1034,7 @@ fn execution(
                 has_ads: translation.has_ads,
                 season: request.season,
                 episode: request.episode,
+                episodes,
                 title: title.clone(),
             })
         }
