@@ -8,6 +8,7 @@ mod execution;
 mod id;
 mod job;
 mod lease;
+mod plex;
 mod search;
 
 pub use actor::{NotifyScopeDto, ProviderDto};
@@ -19,6 +20,9 @@ pub use job::{
     QueueStatusDto,
 };
 pub use lease::LeaseDto;
+pub use plex::{
+    PlexObservationDto, PlexReconcileRequest, PlexReconcileResponse, PlexReconcileStatus,
+};
 pub use search::{
     ContinueSearchRequest, ExecutionSelectionDto, MAX_SEARCH_RESULTS_PER_PAGE, MediaKindDto,
     ProwlarrRankingDto, RezkaTranslationDto, SearchPageDto, SearchResultDto, SeasonAvailabilityDto,

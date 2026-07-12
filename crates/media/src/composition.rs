@@ -6,7 +6,8 @@ use std::{
 
 use media_api::{
     ApiState, IdempotencyError, IdempotencyGeneration, IdempotencyHandle, IdempotencyRequest,
-    IdempotencyStore, OperationCompletionStore, Reservation, StoredHttpResponse,
+    IdempotencyStore, OperationCompletionStore, PlexReconcileService, PlexServiceError,
+    Reservation, StoredHttpResponse,
 };
 use media_core::{
     PRIMARY_CLIENT_ID, PRIMARY_USER_ID, BootstrapClient, ClientRole, ClientStore, CredentialDigest,
@@ -343,6 +344,79 @@ pub struct PreparedService {
     router: axum::Router,
 }
 
+pub struct PlexReconcileAdapter {
+    client: media_integrations::plex::PlexClient,
+    tv_section: u32,
+    movies_section: u32,
+}
+
+impl PlexReconcileAdapter {
+    #[must_use]
+    pub fn new(
+        client: media_integrations::plex::PlexClient,
+        tv_section: u32,
+        movies_section: u32,
+    ) -> Self {
+        Self {
+            client,
+            tv_section,
+            movies_section,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl PlexReconcileService for PlexReconcileAdapter {
+    async fn reconcile(
+        &self,
+        request: media_contract::PlexReconcileRequest,
+    ) -> Result<media_contract::PlexReconcileResponse, PlexServiceError> {
+        let path = std::path::PathBuf::from(&request.path);
+        let (season, episode, section) = match (request.season, request.episode) {
+            (Some(season), Some(episode)) => (
+                Some(u16::try_from(season).map_err(|_| PlexServiceError::InvalidRequest)?),
+                Some(u16::try_from(episode).map_err(|_| PlexServiceError::InvalidRequest)?),
+                self.tv_section,
+            ),
+            (None, None) => (None, None, self.movies_section),
+            _ => return Err(PlexServiceError::InvalidRequest),
+        };
+        let scan_path = path.parent().ok_or(PlexServiceError::InvalidRequest)?;
+        let scan = media_integrations::plex::ScanRequest::new(section, scan_path)
+            .map_err(|_| PlexServiceError::InvalidRequest)?;
+        self.client
+            .trigger_scan(&scan)
+            .await
+            .map_err(|_| PlexServiceError::Infrastructure)?;
+        let verification = self
+            .client
+            .verify_path(section, &path, &request.canonical_id, season, episode)
+            .await
+            .map_err(|_| PlexServiceError::Infrastructure)?;
+        let (status, observation) = match verification {
+            media_integrations::plex::PlexVerification::Matched { .. } => (
+                media_contract::PlexReconcileStatus::Matched,
+                Some(media_contract::PlexObservationDto {
+                    path: request.path,
+                    canonical_id: request.canonical_id,
+                    season: request.season,
+                    episode: request.episode,
+                }),
+            ),
+            media_integrations::plex::PlexVerification::NotFound => {
+                (media_contract::PlexReconcileStatus::Pending, None)
+            }
+            media_integrations::plex::PlexVerification::Mismatch(_) => {
+                (media_contract::PlexReconcileStatus::Mismatch, None)
+            }
+        };
+        Ok(media_contract::PlexReconcileResponse {
+            status,
+            observation,
+        })
+    }
+}
+
 impl std::fmt::Debug for PreparedService {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("PreparedService { router: [REDACTED] }")
@@ -468,6 +542,21 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
             persistence,
             provider,
             jobs,
+        )));
+    }
+    if let Some(config) = config.plex() {
+        let plex_config = media_integrations::plex::PlexConfig::new(
+            config.base_url().clone(),
+            config.token().clone(),
+            Duration::from_secs(30),
+        )
+        .map_err(|_| ServiceError::Bootstrap)?;
+        let client = media_integrations::plex::PlexClient::new(plex_config)
+            .map_err(|_| ServiceError::Bootstrap)?;
+        state = state.with_plex(Arc::new(PlexReconcileAdapter::new(
+            client,
+            config.tv_section(),
+            config.movies_section(),
         )));
     }
 

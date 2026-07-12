@@ -4,6 +4,7 @@ mod auth;
 mod convert;
 mod error;
 mod idempotency;
+mod plex;
 mod request_id;
 mod route;
 mod search;
@@ -18,6 +19,7 @@ pub use idempotency::{
     IdempotencyError, IdempotencyGeneration, IdempotencyHandle, IdempotencyRequest,
     IdempotencyStore, OperationCompletionStore, Reservation, StoredHttpResponse,
 };
+pub use plex::{PlexReconcileService, PlexServiceError};
 pub use request_id::RequestId;
 pub use search::{SearchError, SearchService};
 
@@ -40,6 +42,7 @@ pub struct ApiState {
     pub(crate) operations: Arc<dyn OperationCompletionStore>,
     pub(crate) readiness: Arc<dyn ReadinessPort>,
     pub(crate) search: Arc<dyn SearchService>,
+    pub(crate) plex: Arc<dyn PlexReconcileService>,
 }
 
 impl ApiState {
@@ -60,6 +63,7 @@ impl ApiState {
             operations,
             readiness,
             search: Arc::new(search::UnavailableSearchService),
+            plex: Arc::new(plex::UnavailablePlexService),
         }
     }
 
@@ -92,6 +96,17 @@ impl ApiState {
     #[must_use]
     pub fn search(&self) -> &dyn SearchService {
         self.search.as_ref()
+    }
+
+    #[must_use]
+    pub fn with_plex(mut self, plex: Arc<dyn PlexReconcileService>) -> Self {
+        self.plex = plex;
+        self
+    }
+
+    #[must_use]
+    pub fn plex(&self) -> &dyn PlexReconcileService {
+        self.plex.as_ref()
     }
 }
 

@@ -37,6 +37,10 @@ const STAGING_ROOT: &str = "MEDIA_STAGING_ROOT";
 const TV_ROOT: &str = "MEDIA_TV_ROOT";
 const MOVIES_ROOT: &str = "MEDIA_MOVIES_ROOT";
 const VAAPI_DEVICE: &str = "MEDIA_VAAPI_DEVICE";
+const PLEX_URL: &str = "MEDIA_PLEX_URL";
+const PLEX_TOKEN_FILE: &str = "MEDIA_PLEX_TOKEN_FILE";
+const PLEX_TV_SECTION: &str = "MEDIA_PLEX_TV_SECTION";
+const PLEX_MOVIES_SECTION: &str = "MEDIA_PLEX_MOVIES_SECTION";
 const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:8080";
 const DEFAULT_REZKA_USER_AGENT: &str = "media-orchestrator/0.1 rezka-session";
 const DEFAULT_LEASE_TTL_SECONDS: i64 = 60;
@@ -141,6 +145,7 @@ pub struct ServerConfig {
     lease_ttl: time::Duration,
     rezka: Option<RezkaCompositionConfig>,
     prowlarr: Option<ProwlarrCompositionConfig>,
+    plex: Option<PlexCompositionConfig>,
 }
 
 impl ServerConfig {
@@ -178,6 +183,10 @@ impl ServerConfig {
             .var_os(PROWLARR_URL)
             .map(|_| load_prowlarr_config(source))
             .transpose()?;
+        let plex = source
+            .var_os(PLEX_URL)
+            .map(|_| load_plex_config(source))
+            .transpose()?;
         Ok(Self {
             database_url: database.database_url,
             listen_addr,
@@ -187,6 +196,7 @@ impl ServerConfig {
             lease_ttl: time::Duration::seconds(lease_ttl_seconds),
             rezka,
             prowlarr,
+            plex,
         })
     }
 
@@ -229,6 +239,10 @@ impl ServerConfig {
     pub const fn prowlarr(&self) -> Option<&ProwlarrCompositionConfig> {
         self.prowlarr.as_ref()
     }
+
+    pub const fn plex(&self) -> Option<&PlexCompositionConfig> {
+        self.plex.as_ref()
+    }
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -243,6 +257,7 @@ impl std::fmt::Debug for ServerConfig {
             .field("lease_ttl", &self.lease_ttl)
             .field("rezka", &self.rezka.as_ref().map(|_| "[REDACTED]"))
             .field("prowlarr", &self.prowlarr.as_ref().map(|_| "[REDACTED]"))
+            .field("plex", &self.plex.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
 }
@@ -392,6 +407,28 @@ pub struct QbittorrentCompositionConfig {
     password: SecretString,
 }
 
+pub struct PlexCompositionConfig {
+    base_url: url::Url,
+    token: SecretString,
+    tv_section: u32,
+    movies_section: u32,
+}
+
+impl PlexCompositionConfig {
+    pub const fn base_url(&self) -> &url::Url {
+        &self.base_url
+    }
+    pub const fn token(&self) -> &SecretString {
+        &self.token
+    }
+    pub const fn tv_section(&self) -> u32 {
+        self.tv_section
+    }
+    pub const fn movies_section(&self) -> u32 {
+        self.movies_section
+    }
+}
+
 impl QbittorrentCompositionConfig {
     pub const fn base_url(&self) -> &url::Url {
         &self.base_url
@@ -454,6 +491,22 @@ fn load_qbittorrent_config(
         category: required_environment(source, QBITTORRENT_CATEGORY)?,
         username: required_environment(source, QBITTORRENT_USERNAME)?,
         password: read_secret(source, QBITTORRENT_PASSWORD_FILE, SecretKind::Token)?,
+    })
+}
+
+fn load_plex_config(source: &impl ConfigSource) -> Result<PlexCompositionConfig, ConfigError> {
+    let section = |name| {
+        required_environment(source, name)?
+            .parse::<u32>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or(ConfigError::InvalidEnvironment { name })
+    };
+    Ok(PlexCompositionConfig {
+        base_url: parse_service_url(source, PLEX_URL)?,
+        token: read_secret(source, PLEX_TOKEN_FILE, SecretKind::Token)?,
+        tv_section: section(PLEX_TV_SECTION)?,
+        movies_section: section(PLEX_MOVIES_SECTION)?,
     })
 }
 

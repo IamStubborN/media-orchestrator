@@ -5,11 +5,11 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
-use media_contract::{RunnerEventRequest, RunnerEventResponse};
+use media_contract::{PlexReconcileRequest, RunnerEventRequest, RunnerEventResponse};
 use media_core::{Actor, ApplicationError, LeaseId};
 use serde::Deserialize;
 
-use crate::{ApiError, ApiState, RequestId, SearchError, convert, idempotency};
+use crate::{ApiError, ApiState, PlexServiceError, RequestId, SearchError, convert, idempotency};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -20,6 +20,25 @@ pub(super) fn routes() -> Router<ApiState> {
         .route("/v1/runner/leases", post(lease_next))
         .route("/v1/runner/leases/{lease_id}/heartbeat", post(heartbeat))
         .route("/v1/runner/leases/{lease_id}/events", post(report_event))
+        .route("/v1/runner/plex/reconcile", post(reconcile_plex))
+}
+
+async fn reconcile_plex(
+    State(state): State<ApiState>,
+    Extension(actor): Extension<Actor>,
+    Extension(request_id): Extension<RequestId>,
+    Json(request): Json<PlexReconcileRequest>,
+) -> Response {
+    if actor.require_runner().is_err() {
+        return ApiError::forbidden(&request_id, "operation is forbidden").into_response();
+    }
+    match state.plex().reconcile(request).await {
+        Ok(response) => Json(response).into_response(),
+        Err(PlexServiceError::InvalidRequest) => {
+            ApiError::invalid_request(&request_id, "Plex request is invalid").into_response()
+        }
+        Err(PlexServiceError::Infrastructure) => ApiError::internal(&request_id).into_response(),
+    }
 }
 
 async fn lease_next(
@@ -135,7 +154,7 @@ async fn lease_dto(
     let mut dto = convert::lease(lease).map_err(|_| ())?;
     match state.search().execution_for(lease.job().result_ref()).await {
         Ok(execution) => dto.execution = Some(execution),
-        Err(SearchError::NotFound | SearchError::Infrastructure) => {}
+        Err(SearchError::NotFound) => {}
         Err(_) => return Err(()),
     }
     Ok(dto)

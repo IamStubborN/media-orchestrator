@@ -70,6 +70,6 @@ impl SearchService for UnavailableSearchService {
     }
 
     async fn execution_for(&self, _: &str) -> Result<ExecutionSelectionDto, SearchError> {
-        Err(SearchError::Infrastructure)
+        Err(SearchError::NotFound)
     }
 }

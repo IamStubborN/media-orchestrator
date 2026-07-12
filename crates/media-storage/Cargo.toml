@@ -62,5 +62,10 @@ name = "readiness"
 path = "tests/readiness.rs"
 required-features = ["integration-tests"]
 
+[[test]]
+name = "search_repository"
+path = "tests/search_repository.rs"
+required-features = ["integration-tests"]
+
 [lints]
 workspace = true

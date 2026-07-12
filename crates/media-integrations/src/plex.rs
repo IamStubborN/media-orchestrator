@@ -314,6 +314,72 @@ impl PlexClient {
         }
     }
 
+    pub async fn verify_path(
+        &self,
+        section_key: u32,
+        path: &Path,
+        canonical_identity: &str,
+        season: Option<u16>,
+        episode: Option<u16>,
+    ) -> Result<PlexVerification, PlexError> {
+        validate_absolute_path(path)?;
+        if section_key == 0 || season.is_some() != episode.is_some() {
+            return Err(PlexError::InvalidRequest {
+                message: "path verification request is invalid",
+            });
+        }
+        let mut endpoint = self
+            .config
+            .base_url
+            .join(&format!("library/sections/{section_key}/all"))
+            .map_err(|_| PlexError::Configuration {
+                message: "section endpoint could not be constructed",
+            })?;
+        endpoint.query_pairs_mut().append_pair("includeGuids", "1");
+        let response = self.send_get(endpoint).await?;
+        let status = response.status();
+        let payload: MetadataResponse = response
+            .json()
+            .await
+            .map_err(|_| PlexError::ProviderResponse { status })?;
+        let Some(item) = payload.media_container.metadata.into_iter().find(|item| {
+            item.media
+                .iter()
+                .flat_map(|media| &media.parts)
+                .any(|part| Path::new(&part.file) == path)
+        }) else {
+            return Ok(PlexVerification::NotFound);
+        };
+        let mut mismatches = Vec::new();
+        let expected_type = if season.is_some() { "episode" } else { "movie" };
+        if item.media_type != expected_type {
+            mismatches.push(PlexMismatch::MediaType);
+        }
+        if item.guid != canonical_identity
+            && !item.guids.iter().any(|guid| guid.id == canonical_identity)
+        {
+            mismatches.push(PlexMismatch::CanonicalIdentity);
+        }
+        if item.parent_index != season {
+            mismatches.push(PlexMismatch::Season);
+        }
+        if item.index != episode {
+            mismatches.push(PlexMismatch::Episode);
+        }
+        let rating_key = item
+            .rating_key
+            .parse::<u64>()
+            .map_err(|_| PlexError::ProviderResponse { status })?;
+        if mismatches.is_empty() {
+            Ok(PlexVerification::Matched {
+                rating_key,
+                plex_guid: item.guid,
+            })
+        } else {
+            Ok(PlexVerification::Mismatch(mismatches))
+        }
+    }
+
     async fn send_get(&self, endpoint: Url) -> Result<reqwest::Response, PlexError> {
         let response = self
             .client
