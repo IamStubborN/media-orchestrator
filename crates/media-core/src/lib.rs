@@ -11,6 +11,7 @@ mod job;
 mod operation;
 mod orchestration;
 mod port;
+mod tracking;
 
 pub use action::NeedsActionReason;
 pub use actor::{
@@ -21,7 +22,8 @@ pub use application::{
 };
 pub use id::{
     PRIMARY_CLIENT_ID, PRIMARY_USER_ID, ClientId, EpisodeId, JobEventId, JobId, LeaseId, MediaId,
-    RUNNER_CLIENT_ID, SeasonId, TaskId, UserId, SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
+    NotificationId, RUNNER_CLIENT_ID, SeasonId, TaskId, TrackingId, UserId, SECONDARY_CLIENT_ID,
+    SECONDARY_USER_ID,
 };
 pub use identity::{
     CanonicalEpisode, CanonicalMedia, CanonicalSeason, EpisodeProviderMapping, EpisodeResolution,
@@ -38,3 +40,8 @@ pub use orchestration::{
     MAX_STAGE_ATTEMPTS, StageFailureOutcome, StageRef,
 };
 pub use port::{ClientStore, IdentityStore, JobStore, LeaseStore, PortError, ReadinessPort};
+pub use tracking::{
+    EpisodeSnapshot, EpisodeSnapshotError, NewTrackingCommand, NewTrackingSubscription,
+    TrackingApplication, TrackingApplicationError, TrackingScope, TrackingState, TrackingStore,
+    TrackingSubscription, TrackingValidationError,
+};

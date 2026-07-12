@@ -8,6 +8,8 @@ mod execution;
 mod id;
 mod job;
 mod lease;
+mod notification;
+mod tracking;
 
 pub use actor::{NotifyScopeDto, ProviderDto};
 pub use error::{ApiError, ApiErrorCode};
@@ -18,3 +20,8 @@ pub use job::{
     QueueStatusDto,
 };
 pub use lease::LeaseDto;
+pub use notification::{HermesDeliverOnlyWebhook, NotificationEventTypeDto};
+pub use tracking::{
+    CreateTrackingRequest, EpisodeSnapshotDto, TrackingDto, TrackingListDto, TrackingScopeDto,
+    TrackingStateDto,
+};
