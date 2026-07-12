@@ -8,6 +8,10 @@ use sha1::{Digest, Sha1};
 use url::Url;
 
 pub const RESULTS_PER_PAGE: u32 = 5;
+/// Upper bound on the candidate set fetched from Prowlarr in a single request.
+/// The whole set is ranked locally and paginated into `RESULTS_PER_PAGE` pages,
+/// so this also bounds how deep pagination can reach.
+const CANDIDATE_LIMIT: u32 = 100;
 const MAX_TORRENT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_BENCODE_DEPTH: usize = 128;
 
@@ -312,7 +316,7 @@ impl ProwlarrClient {
                 .append_pair("query", &request.session.query.title)
                 .append_pair("type", search_type)
                 .append_pair("indexerIds", "-2")
-                .append_pair("limit", "5")
+                .append_pair("limit", &CANDIDATE_LIMIT.to_string())
                 .append_pair("offset", "0");
             let response = self
                 .client

@@ -95,7 +95,7 @@ async fn series_search_sends_exact_five_item_page_and_ranks_valid_results() {
         .and(query_param("query", "Example Show"))
         .and(query_param("type", "tvsearch"))
         .and(query_param("indexerIds", "-2"))
-        .and(query_param("limit", "5"))
+        .and(query_param("limit", "100"))
         .and(query_param("offset", "0"))
         .respond_with(ResponseTemplate::new(200).set_body_json(releases()))
         .expect(1)
@@ -142,7 +142,7 @@ async fn movie_search_uses_movie_type_and_never_submits_a_result() {
         .and(query_param("query", "Example Movie"))
         .and(query_param("type", "movie"))
         .and(query_param("indexerIds", "-2"))
-        .and(query_param("limit", "5"))
+        .and(query_param("limit", "100"))
         .and(query_param("offset", "0"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
         .expect(1)
@@ -513,6 +513,7 @@ async fn later_pages_are_sliced_locally_from_the_full_ranked_result_set() {
         .collect::<Vec<_>>();
     Mock::given(method("GET"))
         .and(path("/api/v1/search"))
+        .and(query_param("limit", "100"))
         .and(query_param("offset", "0"))
         .respond_with(ResponseTemplate::new(200).set_body_json(releases))
         .expect(1)
@@ -529,4 +530,53 @@ async fn later_pages_are_sliced_locally_from_the_full_ranked_result_set() {
     assert_eq!(page.results.len(), 1);
     assert_eq!(page.results[0].identity.guid, "guid-0");
     assert!(page.continuation.is_none());
+}
+
+#[tokio::test]
+async fn later_pages_never_request_a_shifted_upstream_offset() {
+    let server = MockServer::start().await;
+    let releases = (0..12)
+        .map(|id| {
+            serde_json::json!({
+                "id": id + 1,
+                "guid": format!("guid-{id}"),
+                "indexerId": 1,
+                "title": format!("Movie 1080p release-{id}"),
+                "size": 1000 + id,
+                "seeders": 100 - id,
+                "protocol": "torrent",
+                "infoHash": format!("{id:040x}"),
+                "magnetUrl": format!("magnet:?xt=urn:btih:{id:040x}")
+            })
+        })
+        .collect::<Vec<_>>();
+    // A Prowlarr that honors the window returns the full candidate set only for
+    // offset=0; any shifted upstream offset would come back empty.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/search"))
+        .and(query_param("offset", "0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(releases))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/search"))
+        .and(query_param("offset", "5"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let session = SearchSession::new("deep-page", MediaQuery::movie("Movie")).unwrap();
+    let page = ProwlarrClient::new(config(&server))
+        .unwrap()
+        .search(SearchPageRequest::new(session.clone(), 5).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(page.results.len(), 5);
+    assert_eq!(page.results[0].identity.guid, "guid-5");
+    assert_eq!(
+        page.continuation,
+        Some(SearchPageRequest::new(session, 10).unwrap())
+    );
 }
