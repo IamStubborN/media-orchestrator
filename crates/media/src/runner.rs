@@ -168,6 +168,32 @@ impl media_runner::Cancellation for RunnerControl {
 /// needs to stay constant across retries of the same episode.
 const TRANSCODE_STAGE_ORDINAL: u32 = 2;
 
+/// Stage ordinal for the internal "execution" wrapper reported on task 0 around
+/// the whole job. It is deliberately placed in a reserved high band, well above
+/// any pipeline sub-stage ordinal (`resolve_manifest` 0, `media_pipeline` 1,
+/// `transcode` 2, torrent stages 0/1), so it can never collide with a real
+/// sub-stage under the `job_stages` `UNIQUE (task_id, ordinal)` constraint — a
+/// collision at ordinal 2 previously rolled back and silently dropped the
+/// transcode milestone for every movie and first episode. The service keys the
+/// stage row on (task, name), so the exact value only has to stay constant and
+/// non-colliding; `current_stage` excludes this wrapper by name.
+const EXECUTION_STAGE_ORDINAL: u32 = 1_000_000;
+
+// Compile-time guard: the execution wrapper must never share an ordinal with a
+// task-0 pipeline sub-stage (resolve_manifest 0, media_pipeline 1, transcode 2),
+// or the transcode `stage_started` would violate the job_stages
+// UNIQUE(task_id, ordinal) constraint and be silently dropped (its reporter is
+// best-effort) for every movie and first episode.
+const _: () = assert!(EXECUTION_STAGE_ORDINAL != TRANSCODE_STAGE_ORDINAL);
+const _: () = assert!(EXECUTION_STAGE_ORDINAL > 2);
+
+/// Retention window for runner-owned staging directories. A directory stamped
+/// terminal is removed this long after retirement; an unstamped directory (a
+/// non-terminal outcome or a dead runner) is swept once it has seen no activity
+/// for the same window. The window is far longer than any job can run, so an
+/// in-progress download or transcode is never mistaken for an orphan.
+const STAGING_RETENTION_WINDOW: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
 /// Adapts [`RunnerControl`] to the pipeline's [`media_runner::StageReporter`]
 /// port, binding each reported sub-stage to the current episode's task ordinal.
 struct ControlStageReporter<'a> {
@@ -706,7 +732,7 @@ impl JobExecutor for MediaJobExecutor {
         match media_runner::cleanup_terminal_staging(
             self.roots.staging(),
             std::time::SystemTime::now(),
-            Duration::from_secs(7 * 24 * 60 * 60),
+            STAGING_RETENTION_WINDOW,
             &[current_job_id.as_str()],
         )
         .await
@@ -719,6 +745,26 @@ impl JobExecutor for MediaJobExecutor {
             }
             Ok(_) => {}
             Err(_) => tracing::warn!("staging retention pass failed"),
+        }
+        // Sweep staging left behind by non-terminal outcomes and dead runners,
+        // which never get a terminal stamp. The current job is protected so its
+        // in-progress staging is never touched.
+        match media_runner::cleanup_orphan_staging(
+            self.roots.staging(),
+            std::time::SystemTime::now(),
+            STAGING_RETENTION_WINDOW,
+            &[current_job_id.as_str()],
+        )
+        .await
+        {
+            Ok(removed) if !removed.is_empty() => {
+                tracing::info!(
+                    directories_removed = removed.len(),
+                    "orphan staging removed"
+                );
+            }
+            Ok(_) => {}
+            Err(_) => tracing::warn!("orphan staging retention pass failed"),
         }
         let sticky = match (&self.gluetun, uses_rezka_vpn) {
             (Some(client), true) => Some((
@@ -758,10 +804,11 @@ impl JobExecutor for MediaJobExecutor {
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
+        let now = std::time::SystemTime::now();
         let removed = media_runner::cleanup_terminal_staging(
             self.roots.staging(),
-            std::time::SystemTime::now(),
-            Duration::from_secs(7 * 24 * 60 * 60),
+            now,
+            STAGING_RETENTION_WINDOW,
             &protected,
         )
         .await
@@ -770,6 +817,22 @@ impl JobExecutor for MediaJobExecutor {
             tracing::info!(
                 directories_removed = removed.len(),
                 "expired staging removed"
+            );
+        }
+        // Also sweep unstamped orphans (non-terminal outcomes, dead runners) that
+        // the terminal fast path above never removes.
+        let orphaned = media_runner::cleanup_orphan_staging(
+            self.roots.staging(),
+            now,
+            STAGING_RETENTION_WINDOW,
+            &protected,
+        )
+        .await
+        .map_err(|_| RunnerError::Execution)?;
+        if !orphaned.is_empty() {
+            tracing::info!(
+                directories_removed = orphaned.len(),
+                "orphan staging removed"
             );
         }
         Ok(())
@@ -886,10 +949,22 @@ fn combine_episode_outcome(
     }
 }
 
-/// Consecutive heartbeat failures tolerated before the lease is treated as lost
-/// and execution is cancelled cooperatively. Paired with [`heartbeat_retry_backoff`]
-/// the accumulated delay spans roughly a lease TTL before giving up.
-const MAX_HEARTBEAT_FAILURES: u32 = 5;
+/// Lease TTL assumed when a lease's `expires_at` cannot be parsed. It matches the
+/// service's minimum configurable TTL so cancellation still fires early rather
+/// than late when the timestamp is unexpectedly malformed.
+const FALLBACK_LEASE_TTL: Duration = Duration::from_secs(30);
+
+/// Remaining lifetime of a lease, derived from its `expires_at`. `None` when the
+/// timestamp cannot be parsed or is already in the past, in which case the caller
+/// uses a conservative fallback (and an already-expired lease cancels at once).
+fn lease_remaining_ttl(lease: &LeaseDto) -> Option<Duration> {
+    let expires = time::OffsetDateTime::parse(
+        &lease.expires_at,
+        &time::format_description::well_known::Rfc3339,
+    )
+    .ok()?;
+    Duration::try_from(expires - time::OffsetDateTime::now_utc()).ok()
+}
 
 /// Initial delay for retrying a failed runner-loop iteration.
 const RUN_LOOP_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
@@ -927,12 +1002,31 @@ pub async fn run_single_iteration(
     let heartbeat_lease = lease.clone();
     let heartbeat_cancelled = cancelled.clone();
     let heartbeat_finished = finished.clone();
+    let lease_ttl = lease_remaining_ttl(&lease).unwrap_or(FALLBACK_LEASE_TTL);
     let heartbeat = tokio::spawn(async move {
+        // Cancel cooperatively once too much wall-time has elapsed since the last
+        // successful heartbeat relative to the lease TTL, keeping a safety margin
+        // before the lease actually expires. Driving cancellation from elapsed
+        // time (not a fixed failure count) guarantees we stop before the service
+        // reaper could re-lease this job to another runner — even when a hung
+        // service makes each attempt slow rather than failing outright.
+        let cancel_after = lease_ttl.saturating_sub(lease_ttl / 4);
+        // Bound every attempt well below the heartbeat cadence so a single hung
+        // request cannot consume the whole budget and push cancellation late.
+        let attempt_timeout = (heartbeat_interval / 2).max(Duration::from_millis(1));
+        let mut last_success = tokio::time::Instant::now();
         let mut consecutive_failures: u32 = 0;
         loop {
-            match heartbeat_api.heartbeat(&heartbeat_lease).await {
-                Ok(current) => {
+            if last_success.elapsed() >= cancel_after {
+                heartbeat_cancelled.store(true, Ordering::SeqCst);
+                break;
+            }
+            match tokio::time::timeout(attempt_timeout, heartbeat_api.heartbeat(&heartbeat_lease))
+                .await
+            {
+                Ok(Ok(current)) => {
                     consecutive_failures = 0;
+                    last_success = tokio::time::Instant::now();
                     if matches!(
                         current.job.state,
                         JobStateDto::CancelRequested | JobStateDto::Cancelled
@@ -940,24 +1034,21 @@ pub async fn run_single_iteration(
                         heartbeat_cancelled.store(true, Ordering::SeqCst);
                     }
                 }
-                Err(_) => {
+                // A failed or timed-out attempt keeps the lease unrenewed; retry
+                // with backoff until the TTL-based deadline above forces a cancel.
+                Ok(Err(_)) | Err(_) => {
                     consecutive_failures += 1;
-                    // Retrying a transient failure keeps the lease alive across a
-                    // brief service blip. Once failures pile up far enough that
-                    // the lease is effectively lost, the service may re-lease the
-                    // job, so cancel execution cooperatively to avoid running it
-                    // twice, then stop heartbeating.
-                    if consecutive_failures >= MAX_HEARTBEAT_FAILURES {
-                        heartbeat_cancelled.store(true, Ordering::SeqCst);
-                        break;
-                    }
                 }
             }
-            let wait = if consecutive_failures == 0 {
+            let base_wait = if consecutive_failures == 0 {
                 heartbeat_interval
             } else {
                 heartbeat_retry_backoff(consecutive_failures, heartbeat_interval)
             };
+            // Never sleep past the point where we must cancel, so a long backoff
+            // cannot delay cancellation beyond the lease deadline.
+            let remaining = cancel_after.saturating_sub(last_success.elapsed());
+            let wait = base_wait.min(remaining);
             tokio::select! {
                 () = tokio::time::sleep(wait) => {}
                 () = heartbeat_finished.notified() => break,
@@ -969,19 +1060,29 @@ pub async fn run_single_iteration(
         lease: lease.clone(),
         cancelled,
     };
-    control.stage_started(0, "execution", 2).await?;
+    control
+        .stage_started(0, "execution", EXECUTION_STAGE_ORDINAL)
+        .await?;
     let outcome = executor.execute(&lease, &control).await;
     // Wake the heartbeat task immediately instead of waiting out its sleep.
     finished.notify_one();
     let _ = heartbeat.await;
     let outcome = match outcome {
         Ok(outcome) => {
-            control.stage_completed(0, "execution", 2).await?;
+            control
+                .stage_completed(0, "execution", EXECUTION_STAGE_ORDINAL)
+                .await?;
             outcome
         }
         Err(_) => {
             let job = control
-                .stage_failed(0, "execution", 2, true, "execution_failed")
+                .stage_failed(
+                    0,
+                    "execution",
+                    EXECUTION_STAGE_ORDINAL,
+                    true,
+                    "execution_failed",
+                )
                 .await?;
             if job.state == JobStateDto::Failed && executor.retire(&lease).await.is_err() {
                 tracing::warn!("failed to mark terminal staging for retention");

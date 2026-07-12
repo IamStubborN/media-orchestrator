@@ -609,8 +609,16 @@ impl PreparedService {
         let notification_task = notifications.map(|dispatcher| {
             tokio::spawn(async move {
                 loop {
-                    if dispatcher.run_once().await.is_err() {
-                        tracing::warn!("notification dispatch pass failed");
+                    match dispatcher.run_once().await {
+                        // A dead-lettered notification will never be retried, so
+                        // surface the count (no message content, which may carry
+                        // recipient detail) for operator visibility.
+                        Ok(result) if result.dead > 0 => tracing::warn!(
+                            dead = result.dead,
+                            "notifications permanently dead-lettered"
+                        ),
+                        Ok(_) => {}
+                        Err(_) => tracing::warn!("notification dispatch pass failed"),
                     }
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }

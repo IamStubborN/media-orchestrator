@@ -344,6 +344,60 @@ async fn run_removes_expired_idempotency_records_and_old_operation_receipts() {
 }
 
 #[tokio::test]
+async fn run_keeps_operation_receipts_for_active_jobs_and_purges_settled_terminal_ones() {
+    let database = TestDatabase::start_migrated().await;
+    let now = OffsetDateTime::from_unix_timestamp(2_000_000_000).unwrap();
+    let old = timestamp(now - Duration::days(91));
+
+    // Both receipts are old enough to purge by age, but one belongs to a still
+    // non-terminal (queued) job and must be kept so idempotent replay of the
+    // operation survives; the other belongs to a long-terminal job and is purged.
+    database
+        .connection()
+        .execute_unprepared(&format!(
+            "INSERT INTO jobs
+               (id, owner_id, provider, result_ref, state, notify_scope, created_at, completed_at)
+             VALUES
+               ('20000000-0000-0000-0000-0000000000a1', '{PRIMARY_ID}', 'rezka',
+                'selection:active-receipt', 'queued', 'initiator', '{old}', NULL),
+               ('20000000-0000-0000-0000-0000000000a2', '{PRIMARY_ID}', 'rezka',
+                'selection:terminal-receipt', 'completed', 'initiator', '{old}', '{old}');
+             INSERT INTO operation_receipts
+               (id, operation_key, operation_kind, result_kind, result_snapshot,
+                created_at, updated_at)
+             VALUES
+               ('a0000000-0000-0000-0000-0000000000a1', decode(repeat('a1', 32), 'hex'),
+                'create_job', 'job',
+                '{{\"id\":\"20000000-0000-0000-0000-0000000000a1\"}}', '{old}', '{old}'),
+               ('a0000000-0000-0000-0000-0000000000a2', decode(repeat('a2', 32), 'hex'),
+                'create_job', 'job',
+                '{{\"id\":\"20000000-0000-0000-0000-0000000000a2\"}}', '{old}', '{old}')"
+        ))
+        .await
+        .unwrap();
+
+    let report = SeaOrmMaintenanceStore::new(database.connection().clone())
+        .run(now)
+        .await
+        .unwrap();
+
+    assert_eq!(report.operation_receipts_deleted, 1);
+    let remaining = query(
+        database.connection(),
+        "SELECT operation_key FROM operation_receipts",
+    )
+    .await;
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(
+        remaining[0]
+            .try_get::<Vec<u8>>("", "operation_key")
+            .unwrap(),
+        vec![0xa1; 32],
+        "the receipt bound to the still-active job is retained",
+    );
+}
+
+#[tokio::test]
 async fn run_prunes_dead_letters_after_the_retention_window() {
     let database = TestDatabase::start_migrated().await;
     let now = OffsetDateTime::from_unix_timestamp(2_000_000_000).unwrap();

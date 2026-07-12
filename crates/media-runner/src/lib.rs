@@ -26,7 +26,9 @@ pub use ports::{
     RunnerServicePort, StageReporter,
 };
 
-pub use retention::{StagingRetentionError, cleanup_terminal_staging, mark_terminal};
+pub use retention::{
+    StagingRetentionError, cleanup_orphan_staging, cleanup_terminal_staging, mark_terminal,
+};
 pub use rezka_session_store::{
     EncryptedRezkaSessionStore, RezkaSessionStoreConfig, RezkaSessionStoreError,
 };

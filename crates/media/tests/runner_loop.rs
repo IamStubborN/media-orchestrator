@@ -204,25 +204,48 @@ impl JobExecutor for CancelAwareExecutor {
     }
 }
 
+/// Builds a lease whose TTL (via `expires_at`) is `seconds` from now, so the
+/// runner derives a realistic deadline for heartbeat-driven cancellation.
+fn lease_expiring_in(seconds: i64) -> LeaseDto {
+    let mut lease = lease();
+    lease.expires_at = (time::OffsetDateTime::now_utc() + time::Duration::seconds(seconds))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    lease
+}
+
 #[tokio::test]
-async fn repeated_heartbeat_failures_cancel_execution_instead_of_leaking_the_lease() {
+async fn heartbeat_failures_cancel_before_the_lease_ttl_elapses() {
+    // The service never answers a heartbeat and the lease has a 3s TTL. Driving
+    // cancellation from elapsed time versus the TTL, the runner must cancel while
+    // the lease still has margin — before the service reaper could re-lease the
+    // job. The previous fixed-failure-count logic (with a realistic heartbeat
+    // interval and its backoff) needs ~5.5s to give up here, outlasting the TTL;
+    // this test fails against that timing.
     let api = Arc::new(HeartbeatFailingApi {
-        lease: Mutex::new(Some(lease())),
+        lease: Mutex::new(Some(lease_expiring_in(3))),
         events: Mutex::default(),
         heartbeat_attempts: AtomicUsize::new(0),
     });
 
+    let started = std::time::Instant::now();
     assert!(
         run_single_iteration(
             api.clone(),
             Arc::new(CancelAwareExecutor),
-            Duration::from_millis(1)
+            Duration::from_secs(2),
         )
         .await
         .unwrap()
     );
+    let elapsed = started.elapsed();
 
-    // The heartbeat task retried before giving up, then cancelled execution.
+    // Cancellation fired strictly before the 3s lease TTL.
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "cancellation must precede lease expiry, took {elapsed:?}"
+    );
+    // The heartbeat was retried across the outage rather than giving up at once.
     assert!(api.heartbeat_attempts.load(Ordering::SeqCst) >= 2);
     let events = api.events.lock().unwrap();
     let transitions = events

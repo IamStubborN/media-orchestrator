@@ -23,6 +23,39 @@ pub enum NotificationEventType {
     FutureEpisodeFound,
 }
 
+impl NotificationEventType {
+    /// Parses the persisted wire tag for a notification event type, returning
+    /// `None` for an unknown tag. The tags are the stable strings written to the
+    /// notification outbox `event_type` column.
+    #[must_use]
+    pub fn from_wire(value: &str) -> Option<Self> {
+        Some(match value {
+            "started" => Self::Started,
+            "choice-needed" => Self::ChoiceNeeded,
+            "downloading-started" => Self::DownloadingStarted,
+            "downloaded" => Self::Downloaded,
+            "transcoding-started" => Self::TranscodingStarted,
+            "encoding-complete" => Self::EncodingComplete,
+            "plex-added" => Self::PlexAdded,
+            "partial" => Self::Partial,
+            "blocked-storage" => Self::BlockedStorage,
+            "failed" => Self::Failed,
+            "future-episode-found" => Self::FutureEpisodeFound,
+            _ => return None,
+        })
+    }
+
+    /// Whether this event is an intermediate progress milestone ("downloading
+    /// started", "transcoding started"). Progress milestones are noise for a
+    /// co-owner who did not initiate the job, so recipient selection routes them
+    /// to the initiator only, even under a `Family` notify scope. Terminal and
+    /// action-required events keep the job's configured scope routing.
+    #[must_use]
+    pub const fn is_progress_milestone(self) -> bool {
+        matches!(self, Self::DownloadingStarted | Self::TranscodingStarted)
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NotificationDelivery {
     id: NotificationId,

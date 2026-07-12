@@ -101,15 +101,18 @@ impl JobStore for SeaOrmJobStore {
             return Ok(None);
         };
         // The running stage, preferring the latest task and stage, answers "how is
-        // my movie doing?" with the phase the runner is currently executing. No
-        // running stage (queued, publishing, terminal) yields no stage.
+        // my movie doing?" with the phase the runner is currently executing. The
+        // internal "execution" wrapper spans the whole task and is always running,
+        // so it is excluded by name; otherwise it would mask the real phase for
+        // every single-task (torrent and movie) job. No running phase (queued,
+        // publishing, terminal) yields no stage.
         let current_stage = self
             .database
             .query_one_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
                 "SELECT s.name FROM job_stages s \
                  JOIN job_tasks t ON s.task_id = t.id \
-                 WHERE t.job_id = $1 AND s.state = 'running' \
+                 WHERE t.job_id = $1 AND s.state = 'running' AND s.name <> 'execution' \
                  ORDER BY t.ordinal DESC, s.ordinal DESC LIMIT 1",
                 [id.into_uuid().into()],
             ))

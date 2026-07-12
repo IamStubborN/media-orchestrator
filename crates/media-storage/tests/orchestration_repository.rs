@@ -562,9 +562,11 @@ async fn storage_block_notifies_both_family_recipients_once() {
             ))
             .collect::<Vec<_>>(),
         vec![
+            // Terminal and lifecycle events keep the Family scope (both users),
+            // while the downloading-started progress milestone routes to the
+            // initiator (Secondary) only.
             ("blocked-storage".to_owned(), "primary".to_owned()),
             ("blocked-storage".to_owned(), "secondary".to_owned()),
-            ("downloading-started".to_owned(), "primary".to_owned()),
             ("downloading-started".to_owned(), "secondary".to_owned()),
             ("started".to_owned(), "primary".to_owned()),
             ("started".to_owned(), "secondary".to_owned()),
@@ -1216,5 +1218,188 @@ async fn job_detail_reports_the_running_stage_and_clears_it_when_idle() {
     assert_eq!(
         idle.current_stage, None,
         "a completed stage leaves no running stage to report",
+    );
+}
+
+#[tokio::test]
+async fn job_detail_ignores_the_internal_execution_wrapper_stage() {
+    let (_test_db, jobs, leases) = setup().await;
+    let created = jobs
+        .create(operation_key(), new_job("rezka://execution-wrapper"))
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    // The runner wraps the whole task in an "execution" stage at a reserved high
+    // ordinal, then reports the real phase underneath it. Both are running, and
+    // the wrapper has the higher ordinal, so an unfiltered "latest running stage"
+    // query would surface the wrapper instead of the meaningful phase.
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::stage_started(JobEventId::new(), 0, "execution".to_owned(), 1_000_000).unwrap(),
+        JobEvent::stage_started(JobEventId::new(), 0, "media_pipeline".to_owned(), 1).unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    let detail = jobs
+        .find_detail_for_owner(created.id(), PRIMARY_USER_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        detail.current_stage.as_deref(),
+        Some("media_pipeline"),
+        "the real running phase is reported, not the internal execution wrapper",
+    );
+}
+
+#[tokio::test]
+async fn movie_transcode_milestone_persists_alongside_the_execution_wrapper() {
+    let (test_db, jobs, leases) = setup().await;
+    jobs.create(operation_key(), new_job("rezka://movie-transcode"))
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    // The exact task-0 sequence the runner emits for a movie / first episode. The
+    // execution wrapper sits at a reserved high ordinal so the transcode
+    // milestone at ordinal 2 no longer collides with it under the job_stages
+    // UNIQUE(task_id, ordinal) constraint (which previously rolled back and
+    // dropped the transcode milestone for every movie and first episode).
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::stage_started(JobEventId::new(), 0, "execution".to_owned(), 1_000_000).unwrap(),
+        JobEvent::stage_started(JobEventId::new(), 0, "resolve_manifest".to_owned(), 0).unwrap(),
+        JobEvent::stage_completed(
+            JobEventId::new(),
+            0,
+            "resolve_manifest".to_owned(),
+            0,
+            Default::default(),
+        )
+        .unwrap(),
+        JobEvent::stage_started(JobEventId::new(), 0, "media_pipeline".to_owned(), 1).unwrap(),
+        JobEvent::stage_started(JobEventId::new(), 0, "transcode".to_owned(), 2).unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    let stages = query(
+        test_db.connection(),
+        "SELECT s.name FROM job_stages s JOIN job_tasks t ON s.task_id = t.id \
+         WHERE t.job_id = (SELECT id FROM jobs WHERE result_ref = 'rezka://movie-transcode') \
+         AND s.name = 'transcode' AND s.state = 'running'",
+    )
+    .await;
+    assert_eq!(
+        stages.len(),
+        1,
+        "the transcode milestone must persist rather than roll back on an ordinal collision",
+    );
+
+    let notifications = query(
+        test_db.connection(),
+        "SELECT recipient FROM notification_outbox WHERE event_type = 'transcoding-started'",
+    )
+    .await;
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(
+        notifications[0].try_get::<String>("", "recipient").unwrap(),
+        "primary"
+    );
+}
+
+#[tokio::test]
+async fn family_job_routes_progress_to_initiator_but_terminal_events_to_both() {
+    let (test_db, jobs, leases) = setup().await;
+    jobs.create(
+        operation_key(),
+        new_job_with_notifications(
+            "rezka://family-progress",
+            SECONDARY_USER_ID,
+            NotifyScope::Family,
+        ),
+    )
+    .await
+    .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::stage_started(JobEventId::new(), 0, "media_pipeline".to_owned(), 1).unwrap(),
+        JobEvent::stage_started(JobEventId::new(), 0, "transcode".to_owned(), 2).unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::Publishing, None).unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::PlexPending, None).unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::Completed, None).unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    // Progress milestones reach the initiator (Secondary) only, even though the
+    // job is Family scope.
+    let progress = query(
+        test_db.connection(),
+        "SELECT event_type, recipient FROM notification_outbox \
+         WHERE event_type IN ('downloading-started', 'transcoding-started') \
+         ORDER BY event_type, recipient",
+    )
+    .await;
+    assert_eq!(
+        progress
+            .iter()
+            .map(|row| (
+                row.try_get::<String>("", "event_type").unwrap(),
+                row.try_get::<String>("", "recipient").unwrap(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("downloading-started".to_owned(), "secondary".to_owned()),
+            ("transcoding-started".to_owned(), "secondary".to_owned()),
+        ],
+    );
+
+    // A terminal Plex event keeps the Family scope: both recipients.
+    let plex = query(
+        test_db.connection(),
+        "SELECT recipient FROM notification_outbox WHERE event_type = 'plex-added' \
+         ORDER BY recipient",
+    )
+    .await;
+    assert_eq!(
+        plex.iter()
+            .map(|row| row.try_get::<String>("", "recipient").unwrap())
+            .collect::<Vec<_>>(),
+        vec!["primary".to_owned(), "secondary".to_owned()],
     );
 }

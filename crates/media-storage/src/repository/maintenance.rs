@@ -135,11 +135,37 @@ impl SeaOrmMaintenanceStore {
                 ))
                 .await?;
 
+            // Operation receipts back idempotent replay of runner/API operations,
+            // so — like the job, notification, and outbox purges — a receipt is
+            // only removed once it is settled and its operation is no longer
+            // live: a receipt tied to a job (its snapshot carries the job id, at
+            // the top level for a job result or under `job` for a lease result)
+            // is kept while that job is still non-terminal, only recently
+            // completed, or actively leased. Receipts with no job reference
+            // ('none' results) or referencing an already-purged job fall through
+            // to age-only pruning. Never purge a still-'pending' receipt.
             let operation_receipts = transaction
                 .execute_raw(Statement::from_sql_and_values(
                     DatabaseBackend::Postgres,
-                    "DELETE FROM operation_receipts WHERE created_at <= $1",
-                    [job_cutoff.into()],
+                    "DELETE FROM operation_receipts AS receipt \
+                     WHERE receipt.created_at <= $1 \
+                       AND receipt.result_kind <> 'pending' \
+                       AND NOT EXISTS ( \
+                           SELECT 1 FROM jobs AS job \
+                           WHERE job.id = COALESCE( \
+                                   (receipt.result_snapshot->>'id')::uuid, \
+                                   (receipt.result_snapshot->'job'->>'id')::uuid) \
+                             AND ( \
+                                 job.state NOT IN \
+                                     ('completed', 'partial', 'failed', 'cancelled') \
+                                 OR job.completed_at > $1 \
+                                 OR EXISTS ( \
+                                     SELECT 1 FROM job_leases AS lease \
+                                     WHERE lease.job_id = job.id AND lease.expires_at > $2 \
+                                 ) \
+                             ) \
+                       )",
+                    [job_cutoff.into(), now.into()],
                 ))
                 .await?;
 

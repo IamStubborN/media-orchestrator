@@ -36,6 +36,84 @@ pub async fn mark_terminal(
     Ok(())
 }
 
+/// Age-based sweep for staging directories that were never stamped terminal.
+///
+/// The terminal-stamp fast path ([`cleanup_terminal_staging`]) only removes
+/// directories a runner explicitly retired on a completed or terminal outcome.
+/// Non-terminal outcomes (PlexPending, BlockedStorage, plex-mismatch, retryable
+/// failures) and permanently-dead runners never stamp their staging, so those
+/// directories would otherwise leak forever. This sweep removes any staging
+/// directory whose most recent activity — the newest mtime across the directory
+/// and everything under it — is older than `orphan_after`, while never touching a
+/// protected (currently leased) job or a directory that is still being written.
+///
+/// `orphan_after` should be generous (well beyond the longest a job can run) so
+/// an active download or transcode is never mistaken for an orphan; because the
+/// window is measured against the newest descendant mtime, an in-progress job
+/// whose partials are still growing is always kept.
+pub async fn cleanup_orphan_staging(
+    staging_root: &Path,
+    now: SystemTime,
+    orphan_after: Duration,
+    protected_job_ids: &[&str],
+) -> Result<Vec<PathBuf>, StagingRetentionError> {
+    let mut removed = Vec::new();
+    let mut entries = match tokio::fs::read_dir(staging_root).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(removed),
+        Err(error) => return Err(error.into()),
+    };
+    while let Some(entry) = entries.next_entry().await? {
+        let file_type = entry.file_type().await?;
+        if !file_type.is_dir() || file_type.is_symlink() {
+            continue;
+        }
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| protected_job_ids.contains(&name))
+        {
+            continue;
+        }
+        let last_activity = latest_mtime(&entry.path()).await?;
+        // A future mtime (clock skew) reads as no elapsed age, so the directory is
+        // kept rather than deleted.
+        if now.duration_since(last_activity).unwrap_or_default() < orphan_after {
+            continue;
+        }
+        tokio::fs::remove_dir_all(entry.path()).await?;
+        removed.push(entry.path());
+    }
+    Ok(removed)
+}
+
+/// Newest modification time across `root` and every descendant, without following
+/// symlinks. Used to decide whether a staging directory is still active.
+async fn latest_mtime(root: &Path) -> Result<SystemTime, StagingRetentionError> {
+    let mut newest = tokio::fs::symlink_metadata(root).await?.modified()?;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        let mut entries = match tokio::fs::read_dir(&directory).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            // `DirEntry::metadata` does not traverse symlinks, so a symlinked
+            // directory contributes its own mtime and is not descended into.
+            let metadata = entry.metadata().await?;
+            let modified = metadata.modified()?;
+            if modified > newest {
+                newest = modified;
+            }
+            if metadata.is_dir() {
+                stack.push(entry.path());
+            }
+        }
+    }
+    Ok(newest)
+}
+
 pub async fn cleanup_terminal_staging(
     staging_root: &Path,
     now: SystemTime,

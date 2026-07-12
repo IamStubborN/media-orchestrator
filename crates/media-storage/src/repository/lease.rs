@@ -1,7 +1,7 @@
 use media_core::{
     PRIMARY_USER_ID, Checkpoint, CheckpointValue, ClientId, Job, JobEvent, JobEventKind, JobLease,
-    JobState, LeaseId, LeaseStore, NotifyScope, OperationKey, PortError, StageFailureOutcome,
-    StageRef, SECONDARY_USER_ID,
+    JobState, LeaseId, LeaseStore, NotificationEventType, NotifyScope, OperationKey, PortError,
+    StageFailureOutcome, StageRef, SECONDARY_USER_ID,
 };
 use sea_orm::{
     ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, Statement, TransactionTrait,
@@ -185,19 +185,32 @@ async fn insert_notification_outbox(
     if notifications.is_empty() {
         return Ok(());
     }
-    let recipients = match job.notify_scope() {
-        NotifyScope::Family => vec!["primary", "secondary"],
-        NotifyScope::Initiator if job.owner_id() == PRIMARY_USER_ID => vec!["primary"],
-        NotifyScope::Initiator if job.owner_id() == SECONDARY_USER_ID => vec!["secondary"],
-        NotifyScope::Initiator => {
+    let initiator = match job.owner_id() {
+        owner if owner == PRIMARY_USER_ID => "primary",
+        owner if owner == SECONDARY_USER_ID => "secondary",
+        _ => {
             return Err(sea_orm::DbErr::Type(
                 "job owner has no notification route".to_owned(),
             ));
         }
     };
+    // Terminal, action-required, and lifecycle events follow the job's configured
+    // notify scope. Progress milestones are routed to the initiator only, even for
+    // a Family job, so a co-owner is not pinged for every download/transcode start.
+    let scope_recipients: Vec<&str> = match job.notify_scope() {
+        NotifyScope::Family => vec!["primary", "secondary"],
+        NotifyScope::Initiator => vec![initiator],
+    };
     for (event_type, message) in notifications {
+        let recipients: &[&str] = if NotificationEventType::from_wire(event_type)
+            .is_some_and(NotificationEventType::is_progress_milestone)
+        {
+            std::slice::from_ref(&initiator)
+        } else {
+            &scope_recipients
+        };
         let source_dedupe_key = notification_dedupe_key(job, event_type);
-        for recipient in &recipients {
+        for recipient in recipients {
             transaction
                 .execute_raw(Statement::from_sql_and_values(
                     DatabaseBackend::Postgres,
