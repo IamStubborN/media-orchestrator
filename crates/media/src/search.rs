@@ -292,7 +292,11 @@ impl ConcreteSearchProvider {
         })?;
         let provider_continuation = page.continuation().map(|value| value.as_str().to_owned());
         let mut results = Vec::new();
-        for entry in page.entries() {
+        for entry in page
+            .entries()
+            .iter()
+            .take(media_contract::MAX_SEARCH_RESULTS_PER_PAGE)
+        {
             let details = prepared
                 .client
                 .title(entry.locator())

@@ -33,7 +33,7 @@ const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 // Conservative application-level budgets, independent of proxy/server defaults.
 const MAX_REQUEST_HEADER_COUNT: usize = 64;
 const MAX_REQUEST_HEADER_BYTES: usize = 16 * 1024;
-const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Copy, Clone)]
 pub(crate) struct RequestTimeout(Duration);
