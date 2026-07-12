@@ -12,7 +12,7 @@ use media_core::{
 use crate::{ApiError, ApiState, RequestId};
 
 pub(super) fn routes() -> Router<ApiState> {
-    Router::new().route("/v1/runner/lifecycle", get(get_state).put(update_state))
+    Router::new().route("/v1/runner/lifecycle", get(get_state).post(update_state))
 }
 
 async fn get_state(
