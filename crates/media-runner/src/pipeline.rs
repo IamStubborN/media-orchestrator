@@ -155,23 +155,34 @@ impl EpisodePipeline {
                 .ok_or(RunnerPortError::InvalidWork)?;
             self.filesystem.create_dir_all(final_parent).await?;
 
-            let resume_from = self
+            let partial_bytes = self
                 .filesystem
                 .file_len(&work.source_partial)
                 .await?
                 .unwrap_or(0);
-            if let Err(error) = self
-                .http
-                .download_video(
-                    source_url,
-                    &work.source_partial,
-                    resume_from,
-                    self.filesystem.as_ref(),
-                    cancellation,
-                )
-                .await
-            {
-                return cancellation_outcome(error);
+            // A prior attempt may have completed the download but failed before
+            // publishing. Skip re-fetching a partial that already spans the whole
+            // source; treat an oversized partial as corrupt and restart it from
+            // the beginning rather than issue an unsatisfiable ranged request.
+            if partial_bytes != source_bytes {
+                let resume_from = if partial_bytes < source_bytes {
+                    partial_bytes
+                } else {
+                    0
+                };
+                if let Err(error) = self
+                    .http
+                    .download_video(
+                        source_url,
+                        &work.source_partial,
+                        resume_from,
+                        self.filesystem.as_ref(),
+                        cancellation,
+                    )
+                    .await
+                {
+                    return cancellation_outcome(error);
+                }
             }
             if cancellation.is_cancelled() {
                 return Ok(EpisodeOutcome::Cancelled);

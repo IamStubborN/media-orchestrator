@@ -2,6 +2,8 @@
 pub enum ResumeAction {
     Append,
     Restart,
+    /// The partial already spans the whole resource; nothing remains to fetch.
+    Complete,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
@@ -19,6 +21,13 @@ pub fn decide_resume(
             Ok(ResumeAction::Append)
         }
         (existing, 200, None) if existing > 0 => Ok(ResumeAction::Restart),
+        // 416 Range Not Satisfiable: the server rejects the requested start.
+        // When the partial already equals the resource length it is complete
+        // rather than an error, so a prior attempt that stopped after the full
+        // download can finish without re-fetching.
+        (existing, 416, Some((_, Some(total)))) if existing > 0 && total == existing => {
+            Ok(ResumeAction::Complete)
+        }
         _ => Err(ResumeError),
     }
 }

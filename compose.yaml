@@ -71,6 +71,12 @@ services:
       MEDIA_REZKA_PASSWORD_FILE: /run/secrets/rezka-password
       MEDIA_REZKA_COOKIE_KEY_FILE: /run/secrets/rezka-cookie-key
       MEDIA_REZKA_SESSION_STORE_FILE: /var/lib/media/rezka-session.bin
+      # Storage roots must live on the writable /media volume and share one
+      # filesystem; the defaults (/staging/rezka, /plex/tv, /plex/movies) would
+      # hit the read-only rootfs and fail the same-filesystem preflight.
+      MEDIA_STAGING_ROOT: /media/staging
+      MEDIA_TV_ROOT: /media/tv
+      MEDIA_MOVIES_ROOT: /media/movies
     secrets: [runner-token, rezka-username, rezka-password, rezka-cookie-key]
     volumes:
       - runner-state:/var/lib/media

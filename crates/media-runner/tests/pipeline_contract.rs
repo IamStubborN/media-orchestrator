@@ -32,6 +32,14 @@ fn resumed_download_appends_only_for_matching_partial_response() {
         ResumeAction::Restart
     );
     assert!(decide_resume(4096, 206, Some((0, Some(10_000)))).is_err());
+    // A 416 whose reported total equals the local length means the partial is
+    // already complete rather than an error.
+    assert_eq!(
+        decide_resume(8, 416, Some((8, Some(8)))).unwrap(),
+        ResumeAction::Complete
+    );
+    // A 416 whose total disagrees with the local length is still an error.
+    assert!(decide_resume(8, 416, Some((8, Some(4)))).is_err());
 }
 
 #[test]

@@ -186,6 +186,84 @@ async fn ignored_range_restarts_only_the_current_partial_file() {
     );
 }
 
+#[tokio::test]
+async fn streaming_client_completes_transfers_that_exceed_a_total_deadline() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/video"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(300))
+                .set_body_bytes(b"streamed-body".to_vec()),
+        )
+        .mount(&server)
+        .await;
+    let temporary = tempdir().unwrap();
+    let partial = temporary.path().join("video.partial");
+    let filesystem: Arc<dyn FileSystemPort> = Arc::new(TokioFileSystem);
+    let url = SensitiveUrl::parse(&format!("{}/video", server.uri()), "video").unwrap();
+
+    // A short total deadline aborts a transfer that runs longer than it.
+    let total_deadline = ReqwestHttpAdapter::new(std::time::Duration::from_millis(50)).unwrap();
+    assert!(
+        total_deadline
+            .download_video(&url, &partial, 0, filesystem.as_ref(), &Active)
+            .await
+            .is_err()
+    );
+
+    // The streaming client has no total deadline, so the same transfer completes.
+    let streaming = ReqwestHttpAdapter::streaming(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(5),
+    )
+    .unwrap();
+    streaming
+        .download_video(&url, &partial, 0, filesystem.as_ref(), &Active)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        filesystem.read(&partial).await.unwrap().unwrap(),
+        b"streamed-body"
+    );
+}
+
+#[tokio::test]
+async fn download_treats_a_fully_satisfied_partial_as_complete_on_416() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/video"))
+        .and(header("range", "bytes=8-"))
+        .respond_with(ResponseTemplate::new(416).insert_header("content-range", "bytes */8"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let temporary = tempdir().unwrap();
+    let partial = temporary.path().join("video.partial");
+    let filesystem: Arc<dyn FileSystemPort> = Arc::new(TokioFileSystem);
+    filesystem
+        .write_atomic(&partial, b"abcdefgh")
+        .await
+        .unwrap();
+    let adapter = ReqwestHttpAdapter::streaming(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(5),
+    )
+    .unwrap();
+    let url = SensitiveUrl::parse(&format!("{}/video", server.uri()), "video").unwrap();
+
+    adapter
+        .download_video(&url, &partial, 8, filesystem.as_ref(), &Active)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        filesystem.read(&partial).await.unwrap().unwrap(),
+        b"abcdefgh"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn process_adapter_parses_truthful_ffprobe_dimensions() {

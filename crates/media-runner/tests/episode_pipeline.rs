@@ -388,6 +388,46 @@ async fn existing_publication_skips_download_and_transcode_but_reconciles_plex()
 }
 
 #[tokio::test]
+async fn complete_partial_skips_download_but_still_transcodes_and_publishes() {
+    let work = work();
+    let filesystem = Arc::new(FakeFs::with_available(30 * GIB));
+    // A prior attempt already downloaded the full source (equal to the probed
+    // size) but failed before publishing.
+    filesystem
+        .files
+        .lock()
+        .unwrap()
+        .insert(work.source_partial.clone(), b"video".to_vec());
+    let http = Arc::new(FakeHttp {
+        video_size: Some(5),
+        ..FakeHttp::default()
+    });
+    let process = Arc::new(FakeProcess {
+        probes: Mutex::new(VecDeque::from([probe("h264"), probe("hevc")])),
+        commands: Mutex::default(),
+        filesystem: filesystem.clone(),
+    });
+    let service = Arc::new(FakeService {
+        checks: Mutex::new(VecDeque::from([matched(&work.plex)])),
+        scans: Mutex::default(),
+    });
+    let pipeline = EpisodePipeline::new(filesystem.clone(), http.clone(), process.clone(), service);
+
+    assert_eq!(
+        pipeline.run(&work, &NeverCancelled).await.unwrap(),
+        EpisodeOutcome::Completed
+    );
+    // The download was skipped because the partial already spanned the source.
+    assert!(http.video_offsets.lock().unwrap().is_empty());
+    // Transcode and publication still ran on the recovered partial.
+    assert_eq!(process.commands.lock().unwrap().len(), 1);
+    assert_eq!(
+        filesystem.published.lock().unwrap().last(),
+        Some(&work.final_video)
+    );
+}
+
+#[tokio::test]
 async fn torrent_work_never_touches_download_transcode_or_publication() {
     let mut work = work();
     work.provider = ProviderKind::Torrent;

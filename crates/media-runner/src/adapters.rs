@@ -194,9 +194,29 @@ pub struct ReqwestHttpAdapter {
 }
 
 impl ReqwestHttpAdapter {
+    /// Builds an adapter for short, bounded requests. `timeout` is a total
+    /// request deadline, which is appropriate only when the whole response is
+    /// expected to arrive quickly.
     pub fn new(timeout: Duration) -> Result<Self, RunnerPortError> {
         let client = reqwest::Client::builder()
             .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .build()
+            .map_err(|_| RunnerPortError::Http)?;
+        Ok(Self { client })
+    }
+
+    /// Builds an adapter for streaming media transfers. It applies a connect and
+    /// an idle read timeout but no total deadline, so an arbitrarily large
+    /// download is bounded by continued progress rather than wall-clock time;
+    /// logical hangs rely on cooperative cancellation at the call sites.
+    pub fn streaming(
+        connect_timeout: Duration,
+        read_timeout: Duration,
+    ) -> Result<Self, RunnerPortError> {
+        let client = reqwest::Client::builder()
+            .connect_timeout(connect_timeout)
+            .read_timeout(read_timeout)
             .redirect(reqwest::redirect::Policy::limited(5))
             .build()
             .map_err(|_| RunnerPortError::Http)?;
@@ -252,16 +272,26 @@ impl HttpPort for ReqwestHttpAdapter {
         }
         let response = request.send().await.map_err(|_| RunnerPortError::Http)?;
         let status = response.status().as_u16();
-        let content_range = response
+        let raw_content_range = response
             .headers()
             .get(reqwest::header::CONTENT_RANGE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(parse_content_range);
+            .and_then(|value| value.to_str().ok());
+        // A 416 carries an unsatisfied range (`bytes */total`) rather than a
+        // satisfied one; surface its total so decide_resume can recognize a
+        // partial that already spans the whole resource as already-complete.
+        let content_range = if status == 416 {
+            raw_content_range
+                .and_then(parse_unsatisfied_range)
+                .map(|total| (resume_from, Some(total)))
+        } else {
+            raw_content_range.and_then(parse_content_range)
+        };
         let action =
             decide_resume(resume_from, status, content_range).map_err(|_| RunnerPortError::Http)?;
         let mut offset = match action {
             ResumeAction::Append => resume_from,
             ResumeAction::Restart => 0,
+            ResumeAction::Complete => return Ok(()),
         };
         let initial_offset = offset;
         let mut body = response.bytes_stream();
@@ -342,6 +372,12 @@ fn parse_content_range(value: &str) -> Option<(u64, Option<u64>)> {
         return None;
     }
     Some((start, total))
+}
+
+/// Parses the total length from an unsatisfied range header (`bytes */total`),
+/// as sent with a `416 Range Not Satisfiable` response.
+fn parse_unsatisfied_range(value: &str) -> Option<u64> {
+    value.strip_prefix("bytes */")?.trim().parse::<u64>().ok()
 }
 
 #[derive(Debug, Clone)]

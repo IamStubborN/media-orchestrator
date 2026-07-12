@@ -75,9 +75,16 @@ pub async fn run_runner(config: RunnerConfig) -> Result<(), RunnerError> {
         .prepare_storage_roots(config.storage_roots())
         .await
         .map_err(|_| RunnerError::Configuration)?;
+    // Media transfers stream for far longer than any fixed request deadline, so
+    // this client has no total timeout: a slow connect is bounded by
+    // connect_timeout and a stalled body by the idle read_timeout, while logical
+    // hangs rely on cooperative cancellation.
     let http = Arc::new(
-        media_runner::ReqwestHttpAdapter::new(Duration::from_secs(30))
-            .map_err(|_| RunnerError::Configuration)?,
+        media_runner::ReqwestHttpAdapter::streaming(
+            Duration::from_secs(30),
+            Duration::from_secs(60),
+        )
+        .map_err(|_| RunnerError::Configuration)?,
     );
     let process = Arc::new(media_runner::TokioProcessAdapter::new(
         "ffprobe",
@@ -85,11 +92,14 @@ pub async fn run_runner(config: RunnerConfig) -> Result<(), RunnerError> {
         Duration::from_secs(6 * 60 * 60),
     ));
     let (service_url, service_token) = config.service().cloned_parts();
+    // The server-side Plex reconcile polls up to 30s (PlexReconcileAdapter
+    // max_wait); the client needs headroom over that deadline so it does not time
+    // out first when Plex is slow.
     let plex_service = Arc::new(
         media_runner::HttpRunnerServiceAdapter::new(
             service_url,
             service_token,
-            Duration::from_secs(30),
+            Duration::from_secs(45),
         )
         .map_err(|_| RunnerError::Configuration)?,
     );
@@ -587,6 +597,8 @@ impl PreparedService {
                         jobs_deleted = report.jobs_deleted,
                         notifications_deleted = report.notifications_deleted,
                         outbox_events_deleted = report.outbox_events_deleted,
+                        idempotency_records_deleted = report.idempotency_records_deleted,
+                        operation_receipts_deleted = report.operation_receipts_deleted,
                         "database retention pass completed"
                     ),
                     Err(_) => tracing::warn!("database retention pass failed"),

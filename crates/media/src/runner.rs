@@ -75,13 +75,18 @@ impl RunnerControl {
         self.cancelled.load(Ordering::SeqCst)
     }
 
+    /// Reports a stage start. Progress events are best-effort: a transient
+    /// delivery failure is logged and swallowed so it never fails the job. Only
+    /// terminal transitions ([`Self::stage_failed`] and job transitions) are
+    /// delivered reliably.
     pub async fn stage_started(
         &self,
         task_ordinal: u32,
         name: &str,
         stage_ordinal: u32,
     ) -> Result<(), RunnerError> {
-        self.api
+        if let Err(error) = self
+            .api
             .report(
                 &self.lease,
                 RunnerEventDto::StageStarted {
@@ -91,16 +96,23 @@ impl RunnerControl {
                 },
             )
             .await
-            .map(|_| ())
+        {
+            tracing::warn!(?error, stage_name = name, "failed to report stage start");
+        }
+        Ok(())
     }
 
+    /// Reports a stage completion. Like [`Self::stage_started`], this is a
+    /// best-effort progress event: a transient failure (including a dropped
+    /// checkpoint) is logged and swallowed rather than failing the job.
     pub async fn stage_completed(
         &self,
         task_ordinal: u32,
         name: &str,
         stage_ordinal: u32,
     ) -> Result<(), RunnerError> {
-        self.api
+        if let Err(error) = self
+            .api
             .report(
                 &self.lease,
                 RunnerEventDto::StageCompleted {
@@ -111,7 +123,14 @@ impl RunnerControl {
                 },
             )
             .await
-            .map(|_| ())
+        {
+            tracing::warn!(
+                ?error,
+                stage_name = name,
+                "failed to report stage completion"
+            );
+        }
+        Ok(())
     }
 
     pub async fn stage_failed(
@@ -645,16 +664,13 @@ impl JobExecutor for MediaJobExecutor {
             Some(media_contract::ExecutionSelectionDto::Rezka { .. })
         );
         if uses_rezka_vpn {
+            // Only create the staging directory here. Stamping it terminal is
+            // deferred to `retire`, on a completed or terminal outcome, so
+            // retention never counts an in-progress job's staging as terminal
+            // from its start time.
             tokio::fs::create_dir_all(self.roots.staging().join(&current_job_id))
                 .await
                 .map_err(|_| RunnerError::Execution)?;
-            media_runner::mark_terminal(
-                self.roots.staging(),
-                &current_job_id,
-                std::time::SystemTime::now(),
-            )
-            .await
-            .map_err(|_| RunnerError::Execution)?;
         }
         match media_runner::cleanup_terminal_staging(
             self.roots.staging(),
@@ -839,6 +855,26 @@ fn combine_episode_outcome(
     }
 }
 
+/// Consecutive heartbeat failures tolerated before the lease is treated as lost
+/// and execution is cancelled cooperatively. Paired with [`heartbeat_retry_backoff`]
+/// the accumulated delay spans roughly a lease TTL before giving up.
+const MAX_HEARTBEAT_FAILURES: u32 = 5;
+
+/// Initial delay for retrying a failed runner-loop iteration.
+const RUN_LOOP_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+
+/// Upper bound for the runner-loop retry backoff.
+const RUN_LOOP_MAX_BACKOFF: Duration = Duration::from_secs(60);
+
+/// Backoff between heartbeat retries after a transient failure. Retries start
+/// below the steady cadence so a brief blip recovers quickly, then grow and are
+/// capped at the heartbeat interval.
+fn heartbeat_retry_backoff(consecutive_failures: u32, interval: Duration) -> Duration {
+    let base = (interval / 4).max(Duration::from_millis(1));
+    let factor = 1u32 << (consecutive_failures.saturating_sub(1)).min(5);
+    base.saturating_mul(factor).min(interval.max(base))
+}
+
 pub async fn run_single_iteration(
     api: Arc<dyn RunnerApi>,
     executor: Arc<dyn JobExecutor>,
@@ -855,23 +891,47 @@ pub async fn run_single_iteration(
         lease.job.state,
         JobStateDto::CancelRequested | JobStateDto::Cancelled
     )));
-    let finished = Arc::new(AtomicBool::new(false));
+    let finished = Arc::new(tokio::sync::Notify::new());
     let heartbeat_api = api.clone();
     let heartbeat_lease = lease.clone();
     let heartbeat_cancelled = cancelled.clone();
     let heartbeat_finished = finished.clone();
     let heartbeat = tokio::spawn(async move {
-        while !heartbeat_finished.load(Ordering::SeqCst) {
-            let current = heartbeat_api.heartbeat(&heartbeat_lease).await?;
-            if matches!(
-                current.job.state,
-                JobStateDto::CancelRequested | JobStateDto::Cancelled
-            ) {
-                heartbeat_cancelled.store(true, Ordering::SeqCst);
+        let mut consecutive_failures: u32 = 0;
+        loop {
+            match heartbeat_api.heartbeat(&heartbeat_lease).await {
+                Ok(current) => {
+                    consecutive_failures = 0;
+                    if matches!(
+                        current.job.state,
+                        JobStateDto::CancelRequested | JobStateDto::Cancelled
+                    ) {
+                        heartbeat_cancelled.store(true, Ordering::SeqCst);
+                    }
+                }
+                Err(_) => {
+                    consecutive_failures += 1;
+                    // Retrying a transient failure keeps the lease alive across a
+                    // brief service blip. Once failures pile up far enough that
+                    // the lease is effectively lost, the service may re-lease the
+                    // job, so cancel execution cooperatively to avoid running it
+                    // twice, then stop heartbeating.
+                    if consecutive_failures >= MAX_HEARTBEAT_FAILURES {
+                        heartbeat_cancelled.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                }
             }
-            tokio::time::sleep(heartbeat_interval).await;
+            let wait = if consecutive_failures == 0 {
+                heartbeat_interval
+            } else {
+                heartbeat_retry_backoff(consecutive_failures, heartbeat_interval)
+            };
+            tokio::select! {
+                () = tokio::time::sleep(wait) => {}
+                () = heartbeat_finished.notified() => break,
+            }
         }
-        Ok::<(), RunnerError>(())
     });
     let control = RunnerControl {
         api: api.clone(),
@@ -880,8 +940,9 @@ pub async fn run_single_iteration(
     };
     control.stage_started(0, "execution", 2).await?;
     let outcome = executor.execute(&lease, &control).await;
-    finished.store(true, Ordering::SeqCst);
-    heartbeat.await.map_err(|_| RunnerError::Execution)??;
+    // Wake the heartbeat task immediately instead of waiting out its sleep.
+    finished.notify_one();
+    let _ = heartbeat.await;
     let outcome = match outcome {
         Ok(outcome) => {
             control.stage_completed(0, "execution", 2).await?;
@@ -951,9 +1012,28 @@ pub async fn run_loop(
     heartbeat_interval: Duration,
 ) -> Result<(), RunnerError> {
     let mut next_maintenance = tokio::time::Instant::now();
+    let mut backoff = RUN_LOOP_INITIAL_BACKOFF;
     loop {
         let worked =
-            run_single_iteration(api.clone(), executor.clone(), heartbeat_interval).await?;
+            match run_single_iteration(api.clone(), executor.clone(), heartbeat_interval).await {
+                Ok(worked) => {
+                    backoff = RUN_LOOP_INITIAL_BACKOFF;
+                    worked
+                }
+                // A misconfigured runner fails identically on every iteration, so
+                // stop rather than spin.
+                Err(RunnerError::Configuration) => return Err(RunnerError::Configuration),
+                // Transient service or execution errors (leasing, reporting the
+                // Started event, joining the heartbeat task, terminal transition
+                // reporting) must not tear down the long-lived runner process. Log,
+                // back off, and retry the loop.
+                Err(error) => {
+                    tracing::warn!(?error, "runner iteration failed; retrying after backoff");
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(RUN_LOOP_MAX_BACKOFF);
+                    continue;
+                }
+            };
         if tokio::time::Instant::now() >= next_maintenance {
             if executor.maintain(&[]).await.is_err() {
                 tracing::warn!("staging retention pass failed");

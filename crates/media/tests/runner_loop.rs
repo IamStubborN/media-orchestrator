@@ -7,7 +7,7 @@ use std::{
 };
 
 use media::runner::{
-    ExecutionOutcome, JobExecutor, RunnerApi, RunnerControl, run_single_iteration,
+    ExecutionOutcome, JobExecutor, RunnerApi, RunnerControl, run_loop, run_single_iteration,
 };
 use media_contract::{
     ExecutionSelectionDto, JobDto, JobStateDto, LeaseDto, NotifyScopeDto, ProviderDto,
@@ -150,6 +150,246 @@ async fn loop_leases_heartbeats_reports_stages_and_runs_one_active_job() {
             ..
         })
     ));
+}
+
+/// Fails every heartbeat while recording report events, so a job can only end by
+/// cooperative cancellation once the lease is treated as lost.
+struct HeartbeatFailingApi {
+    lease: Mutex<Option<LeaseDto>>,
+    events: Mutex<Vec<RunnerEventDto>>,
+    heartbeat_attempts: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl RunnerApi for HeartbeatFailingApi {
+    async fn lease_next(&self) -> Result<Option<LeaseDto>, media::runner::RunnerError> {
+        Ok(self.lease.lock().unwrap().take())
+    }
+    async fn heartbeat(&self, _lease: &LeaseDto) -> Result<LeaseDto, media::runner::RunnerError> {
+        self.heartbeat_attempts.fetch_add(1, Ordering::SeqCst);
+        Err(media::runner::RunnerError::Service)
+    }
+    async fn report(
+        &self,
+        lease: &LeaseDto,
+        event: RunnerEventDto,
+    ) -> Result<media_contract::JobDto, media::runner::RunnerError> {
+        let mut job = lease.job.clone();
+        if let RunnerEventDto::JobTransition { state, .. } = &event {
+            job.state = *state;
+        }
+        self.events.lock().unwrap().push(event);
+        Ok(job)
+    }
+}
+
+/// Runs until cancelled, so the test observes when the heartbeat task gives up
+/// and flips the shared cancellation flag.
+struct CancelAwareExecutor;
+
+#[async_trait::async_trait]
+impl JobExecutor for CancelAwareExecutor {
+    async fn execute(
+        &self,
+        _: &LeaseDto,
+        control: &RunnerControl,
+    ) -> Result<ExecutionOutcome, media::runner::RunnerError> {
+        for _ in 0..10_000 {
+            if control.is_cancelled() {
+                return Ok(ExecutionOutcome::Cancelled);
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        Ok(ExecutionOutcome::Completed)
+    }
+}
+
+#[tokio::test]
+async fn repeated_heartbeat_failures_cancel_execution_instead_of_leaking_the_lease() {
+    let api = Arc::new(HeartbeatFailingApi {
+        lease: Mutex::new(Some(lease())),
+        events: Mutex::default(),
+        heartbeat_attempts: AtomicUsize::new(0),
+    });
+
+    assert!(
+        run_single_iteration(
+            api.clone(),
+            Arc::new(CancelAwareExecutor),
+            Duration::from_millis(1)
+        )
+        .await
+        .unwrap()
+    );
+
+    // The heartbeat task retried before giving up, then cancelled execution.
+    assert!(api.heartbeat_attempts.load(Ordering::SeqCst) >= 2);
+    let events = api.events.lock().unwrap();
+    let transitions = events
+        .iter()
+        .filter_map(|event| match event {
+            RunnerEventDto::JobTransition { state, .. } => Some(*state),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(transitions, vec![JobStateDto::Cancelled]);
+}
+
+/// Errors `lease_next` a bounded number of times, then leases a real job once.
+struct FlakyLeaseApi {
+    remaining_errors: AtomicUsize,
+    lease: Mutex<Option<LeaseDto>>,
+    events: Mutex<Vec<RunnerEventDto>>,
+}
+
+#[async_trait::async_trait]
+impl RunnerApi for FlakyLeaseApi {
+    async fn lease_next(&self) -> Result<Option<LeaseDto>, media::runner::RunnerError> {
+        if self.remaining_errors.load(Ordering::SeqCst) > 0 {
+            self.remaining_errors.fetch_sub(1, Ordering::SeqCst);
+            return Err(media::runner::RunnerError::Service);
+        }
+        Ok(self.lease.lock().unwrap().take())
+    }
+    async fn heartbeat(&self, lease: &LeaseDto) -> Result<LeaseDto, media::runner::RunnerError> {
+        Ok(lease.clone())
+    }
+    async fn report(
+        &self,
+        lease: &LeaseDto,
+        event: RunnerEventDto,
+    ) -> Result<media_contract::JobDto, media::runner::RunnerError> {
+        let mut job = lease.job.clone();
+        if let RunnerEventDto::JobTransition { state, .. } = &event {
+            job.state = *state;
+        }
+        self.events.lock().unwrap().push(event);
+        Ok(job)
+    }
+}
+
+/// Signals through a oneshot the first time it executes a job.
+struct SignalingExecutor {
+    done: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+#[async_trait::async_trait]
+impl JobExecutor for SignalingExecutor {
+    async fn execute(
+        &self,
+        _: &LeaseDto,
+        _: &RunnerControl,
+    ) -> Result<ExecutionOutcome, media::runner::RunnerError> {
+        if let Some(sender) = self.done.lock().unwrap().take() {
+            let _ = sender.send(());
+        }
+        Ok(ExecutionOutcome::Completed)
+    }
+}
+
+#[tokio::test]
+async fn run_loop_survives_a_transient_iteration_error_and_keeps_working() {
+    let api = Arc::new(FlakyLeaseApi {
+        remaining_errors: AtomicUsize::new(1),
+        lease: Mutex::new(Some(lease())),
+        events: Mutex::default(),
+    });
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let executor = Arc::new(SignalingExecutor {
+        done: Mutex::new(Some(sender)),
+    });
+    let handle = tokio::spawn(run_loop(
+        api.clone(),
+        executor.clone(),
+        Duration::from_millis(1),
+    ));
+
+    // The first iteration errors on lease_next; the loop backs off and the
+    // second iteration leases and runs the job, proving the runner did not exit.
+    tokio::time::timeout(Duration::from_secs(30), receiver)
+        .await
+        .expect("job should run after the transient lease error")
+        .expect("executor should signal completion");
+    handle.abort();
+
+    assert!(
+        api.events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, RunnerEventDto::Started))
+    );
+}
+
+/// Fails only stage progress events, keeping terminal transitions reliable.
+struct ProgressFailingApi {
+    lease: Mutex<Option<LeaseDto>>,
+    events: Mutex<Vec<RunnerEventDto>>,
+}
+
+#[async_trait::async_trait]
+impl RunnerApi for ProgressFailingApi {
+    async fn lease_next(&self) -> Result<Option<LeaseDto>, media::runner::RunnerError> {
+        Ok(self.lease.lock().unwrap().take())
+    }
+    async fn heartbeat(&self, lease: &LeaseDto) -> Result<LeaseDto, media::runner::RunnerError> {
+        Ok(lease.clone())
+    }
+    async fn report(
+        &self,
+        lease: &LeaseDto,
+        event: RunnerEventDto,
+    ) -> Result<media_contract::JobDto, media::runner::RunnerError> {
+        self.events.lock().unwrap().push(event.clone());
+        match event {
+            RunnerEventDto::StageStarted { .. } | RunnerEventDto::StageCompleted { .. } => {
+                Err(media::runner::RunnerError::Service)
+            }
+            RunnerEventDto::JobTransition { state, .. } => {
+                let mut job = lease.job.clone();
+                job.state = state;
+                Ok(job)
+            }
+            _ => Ok(lease.job.clone()),
+        }
+    }
+}
+
+#[tokio::test]
+async fn progress_report_failures_do_not_fail_the_job() {
+    let api = Arc::new(ProgressFailingApi {
+        lease: Mutex::new(Some(lease())),
+        events: Mutex::default(),
+    });
+    let executor = Arc::new(RecordingExecutor {
+        active: AtomicUsize::new(0),
+        max_active: AtomicUsize::new(0),
+    });
+
+    assert!(
+        run_single_iteration(api.clone(), executor, Duration::from_millis(1))
+            .await
+            .unwrap()
+    );
+
+    // Despite every stage progress report failing, the job reached its terminal
+    // transitions.
+    let events = api.events.lock().unwrap();
+    let transitions = events
+        .iter()
+        .filter_map(|event| match event {
+            RunnerEventDto::JobTransition { state, .. } => Some(*state),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        transitions,
+        vec![
+            JobStateDto::Publishing,
+            JobStateDto::PlexPending,
+            JobStateDto::Completed,
+        ]
+    );
 }
 
 #[tokio::test]
