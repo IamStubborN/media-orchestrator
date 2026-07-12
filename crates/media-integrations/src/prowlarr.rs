@@ -494,7 +494,7 @@ fn parse_bytes(value: &[u8], position: usize) -> Option<(&[u8], usize)> {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawRelease {
-    id: i32,
+    id: Option<i32>,
     guid: Option<String>,
     indexer_id: i32,
     indexer: Option<String>,
@@ -512,6 +512,10 @@ struct RawRelease {
 impl ProwlarrResult {
     fn from_raw(raw: RawRelease, query: &MediaQuery) -> Option<Self> {
         let guid = raw.guid?;
+        let result_id = raw
+            .id
+            .filter(|value| *value > 0)
+            .unwrap_or_else(|| stable_result_id(&guid));
         let title = raw.title?;
         let seeders = raw.seeders.unwrap_or_default().max(0);
         let normalized_title = normalize(&title);
@@ -547,7 +551,7 @@ impl ProwlarrResult {
             .map_or(0, |index| query.preferred_release_groups.len() - index);
         Some(Self {
             identity: ProwlarrIdentity {
-                result_id: raw.id,
+                result_id,
                 indexer_id: raw.indexer_id,
                 guid,
             },
@@ -573,6 +577,12 @@ impl ProwlarrResult {
             },
         })
     }
+}
+
+fn stable_result_id(guid: &str) -> i32 {
+    let digest = Sha1::digest(guid.as_bytes());
+    let value = i32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) & i32::MAX;
+    value.max(1)
 }
 
 #[derive(Eq, Ord, PartialEq, PartialOrd)]

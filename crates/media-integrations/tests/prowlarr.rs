@@ -179,6 +179,44 @@ async fn movie_search_uses_movie_type_and_never_submits_a_result() {
 }
 
 #[tokio::test]
+async fn search_accepts_null_release_ids_from_prowlarr() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/search"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "id": null,
+                "guid": "https://tracker.example/topic/42",
+                "indexerId": 7,
+                "indexer": "tracker",
+                "title": "Example Movie 1080p",
+                "size": 2000,
+                "seeders": 10,
+                "protocol": "torrent",
+                "infoHash": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "magnetUrl": "magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            }])),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let request = SearchPageRequest::new(
+        SearchSession::new("null-id", MediaQuery::movie("Example Movie")).unwrap(),
+        0,
+    )
+    .unwrap();
+    let page = ProwlarrClient::new(config(&server))
+        .unwrap()
+        .search(request)
+        .await
+        .unwrap();
+
+    assert_eq!(page.results.len(), 1);
+    assert!(page.results[0].identity.result_id > 0);
+}
+
+#[tokio::test]
 async fn download_url_is_resolved_to_exact_v1_info_hash() {
     let server = MockServer::start().await;
     let download_url = format!("{}/download/one?apikey=provider-secret", server.uri());
