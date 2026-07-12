@@ -583,29 +583,33 @@ impl MediaJobExecutor {
                     .join(format!("{safe_title} - S{s:02}E{e:02}.mkv"))
             },
         );
-        let variant = manifest.preferred_variant();
+        let variant = match premium_status {
+            rezka_client::PremiumStatus::Active => manifest.preferred_variant(),
+            rezka_client::PremiumStatus::Inactive => manifest
+                .variants()
+                .iter()
+                .find(|variant| {
+                    variant
+                        .advertised_quality()
+                        .vertical_hint()
+                        .is_some_and(|height| height <= 720)
+                })
+                .ok_or(RunnerError::Execution)?,
+        };
         tracing::info!(
             advertised_height = variant.advertised_quality().vertical_hint(),
             premium = ?premium_status,
             "selected Rezka stream quality"
         );
-        let preferred_kind = match premium_status {
-            rezka_client::PremiumStatus::Active => rezka_client::StreamKind::Mp4,
-            rezka_client::PremiumStatus::Inactive => rezka_client::StreamKind::Hls,
-        };
-        let fallback_kind = match preferred_kind {
-            rezka_client::StreamKind::Mp4 => rezka_client::StreamKind::Hls,
-            rezka_client::StreamKind::Hls => rezka_client::StreamKind::Mp4,
-        };
         let endpoint = variant
             .endpoints()
             .iter()
-            .find(|endpoint| endpoint.kind() == preferred_kind)
+            .find(|endpoint| endpoint.kind() == rezka_client::StreamKind::Mp4)
             .or_else(|| {
                 variant
                     .endpoints()
                     .iter()
-                    .find(|endpoint| endpoint.kind() == fallback_kind)
+                    .find(|endpoint| endpoint.kind() == rezka_client::StreamKind::Hls)
             })
             .ok_or(RunnerError::Execution)?;
         let source_kind = match endpoint.kind() {

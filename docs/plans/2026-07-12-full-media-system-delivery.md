@@ -58,7 +58,11 @@ Unit tests or a healthy container do not satisfy a live-verification gate.
 ## Workstream 2: Rezka Episode E2E
 
 **Priority:** Critical  
-**Current state:** Search/playback code and Vaultwarden session refresh are implemented; session refresh is live-verified.
+**Current state:** Search, explicit translation selection, full download, VAAPI,
+publication, Plex identity, and initiator notifications are live-verified for one
+real episode. The authenticated non-premium session exposed advertised 1080p only
+as a rejected 60-second preview; its highest complete stream measured 854x480.
+Subtitle-present and pagination live gates remain pending.
 
 ### Implementation and Verification
 
