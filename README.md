@@ -121,8 +121,17 @@ mise exec -- cargo run -p media -- jobs get JOB_ID --json
 mise exec -- cargo run -p media -- queue status --json
 ```
 
-CLI output is always JSON; the `--json` flag is accepted on every subcommand
-for compatibility but has no effect on the emitted format.
+By default the CLI prints a concise human-readable view (aligned tables and
+key-value blocks). Pass `--json` for the raw JSON response — the stable
+machine contract consumed by `hermes-home`, unchanged byte-for-byte. Unknown
+or absent fields degrade gracefully, and errors and exit codes are identical
+in both modes.
+
+The service also exposes an unauthenticated Prometheus `GET /metrics` endpoint
+(text format) alongside `/v1/health` and `/v1/ready`, reporting job counts by
+state, notification outbox gauges, HTTP request counters/latency histograms
+labelled by matched route pattern, and build info. It is intended for the
+private network only and carries no identifiers or secrets.
 
 > **Warning:** `media serve` has no public route or public-ingress security
 > contract. Bind it to loopback or a private container network only; do not

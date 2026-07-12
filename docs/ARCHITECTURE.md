@@ -118,6 +118,9 @@ Owns the HTTP server boundary:
 - DTO validation and domain conversion.
 - HTTP status and public error mapping.
 - Health and readiness endpoints.
+- Unauthenticated Prometheus `/metrics` scrape endpoint (job-state and outbox
+  gauges through a narrow `media-core` metrics port, plus HTTP counters and
+  latency histograms labelled by matched route pattern).
 
 Architecture invariant: handlers are thin. They validate transport input, call an application use case, and convert the result to a transport response.
 
