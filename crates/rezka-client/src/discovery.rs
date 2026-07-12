@@ -132,9 +132,9 @@ pub fn parse_quick_search(
         .expect("static quick search section selector is valid");
     let item = Selector::parse("ul > li").expect("static quick search item selector is valid");
     let link = Selector::parse("a[href]").expect("static link selector is valid");
-    let title = Selector::parse(".b-search__section_list_title")
+    let title = Selector::parse(".b-search__section_list_title, span.enty")
         .expect("static quick search title selector is valid");
-    let info = Selector::parse(".b-search__section_list_info")
+    let info = Selector::parse(".b-search__section_list_info, span.rating")
         .expect("static quick search info selector is valid");
     let document = Html::parse_document(html);
     let mut sections = document.select(&section);

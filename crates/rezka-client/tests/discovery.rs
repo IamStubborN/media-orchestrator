@@ -139,6 +139,23 @@ fn quick_search_parses_provider_order_and_normalizes_text() {
 }
 
 #[test]
+fn quick_search_accepts_the_legacy_live_result_fields() {
+    let html = r#"
+        <div class="b-search__live_section"><ul><li>
+          <a href="/animation/comedy/1-show.html">
+            <span class="enty">Show title</span>
+            <span class="rating">8.7</span>
+          </a>
+        </li></ul></div>"#;
+
+    let entries = parse_quick_search(html, &query(), &origin()).unwrap();
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].title(), "Show title");
+    assert_eq!(entries[0].info(), Some("8.7"));
+}
+
+#[test]
 fn empty_quick_search_section_is_valid() {
     assert!(
         parse_quick_search(
