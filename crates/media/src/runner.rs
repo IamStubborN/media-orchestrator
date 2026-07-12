@@ -1141,12 +1141,16 @@ pub async fn run_single_iteration(
             outcome
         }
         Err(_) => {
+            let retryable = !matches!(
+                lease.execution.as_ref(),
+                Some(media_contract::ExecutionSelectionDto::RezkaSessionRefresh { .. })
+            );
             let job = control
                 .stage_failed(
                     0,
                     "execution",
                     EXECUTION_STAGE_ORDINAL,
-                    true,
+                    retryable,
                     "execution_failed",
                 )
                 .await?;
