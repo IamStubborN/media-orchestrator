@@ -120,6 +120,20 @@ impl RezkaClient {
         }
     }
 
+    pub async fn validate_session(
+        &mut self,
+        probe: &SessionValidationProbe,
+    ) -> Result<SessionValidation, RezkaError> {
+        let response = self.fetch_probe(probe).await?;
+        match Self::classify_probe(probe, &response) {
+            SessionValidation::Valid => Ok(SessionValidation::Valid),
+            SessionValidation::Invalid => Err(RezkaError::AuthenticationRequired {
+                context: sanitize_provider_text("stored session is invalid"),
+            }),
+            SessionValidation::Inconclusive => Err(inconclusive_validation()),
+        }
+    }
+
     pub async fn fetch_probe(
         &mut self,
         probe: &SessionValidationProbe,

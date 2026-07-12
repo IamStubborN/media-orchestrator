@@ -54,8 +54,10 @@ Alpine image. Provider and live-network tests are not part of either gate.
 the runner additionally contains ffmpeg/ffprobe with VAAPI support. Both run
 as UID/GID 65532 and support a read-only root filesystem.
 
-`compose.yaml` is a local-only stack with pinned PostgreSQL, example secrets,
-private service/database networking, and an opt-in runner profile. Override
+`compose.yaml` is a local-only stack with pinned PostgreSQL, `.env` configuration,
+private service/database networking, and an opt-in runner profile. Copy
+`.env.example` to `.env`, replace every placeholder, and keep the resulting file
+mode at `0600`. Override
 `MEDIA_SERVICE_IMAGE`, `MEDIA_RUNNER_IMAGE`, and `MEDIA_POSTGRES_IMAGE` when
 testing homelab image references. The runner requires a Linux `/dev/dri` host:
 
@@ -72,7 +74,7 @@ docker compose --profile runner up --detach runner
 ## Local PostgreSQL Service
 
 Development requires PostgreSQL 17 and Docker. Start a disposable local
-database and prepare secret files with dummy local credentials:
+database and export dummy local credentials:
 
 ```bash
 docker run --rm --name media-postgres \
@@ -82,36 +84,26 @@ docker run --rm --name media-postgres \
   -p 127.0.0.1:5432:5432 \
   postgres:17-alpine
 
-export MEDIA_SECRETS_DIR="${TMPDIR:-/tmp}/media-orchestrator-secrets"
-mkdir -p "$MEDIA_SECRETS_DIR"
-printf '%s\n' \
-  'postgres://media:media-local-password@127.0.0.1:5432/media_orchestrator' \
-  > "$MEDIA_SECRETS_DIR/database-url"
-openssl rand -hex 32 > "$MEDIA_SECRETS_DIR/primary-token"
-openssl rand -hex 32 > "$MEDIA_SECRETS_DIR/secondary-token"
-openssl rand -hex 32 > "$MEDIA_SECRETS_DIR/runner-token"
+export MEDIA_DATABASE_URL='postgres://media:media-local-password@127.0.0.1:5432/media_orchestrator'
+export MEDIA_PRIMARY_TOKEN="$(openssl rand -hex 32)"
+export MEDIA_SECONDARY_TOKEN="$(openssl rand -hex 32)"
+export MEDIA_RUNNER_TOKEN="$(openssl rand -hex 32)"
 ```
 
 In another shell, apply explicit migrations and start the service:
 
 ```bash
-export MEDIA_SECRETS_DIR="${TMPDIR:-/tmp}/media-orchestrator-secrets"
-export MEDIA_DATABASE_URL_FILE="$MEDIA_SECRETS_DIR/database-url"
-export MEDIA_PRIMARY_TOKEN_FILE="$MEDIA_SECRETS_DIR/primary-token"
-export MEDIA_SECONDARY_TOKEN_FILE="$MEDIA_SECRETS_DIR/secondary-token"
-export MEDIA_RUNNER_TOKEN_FILE="$MEDIA_SECRETS_DIR/runner-token"
 export MEDIA_LISTEN_ADDR=127.0.0.1:8080
 
 mise exec -- cargo run -p media -- migrate
 mise exec -- cargo run -p media -- serve
 ```
 
-The CLI reads its own service URL and token file. For example:
+The CLI reads its own service URL and token. For example:
 
 ```bash
 export MEDIA_SERVICE_URL=http://127.0.0.1:8080
-export MEDIA_SECRETS_DIR="${TMPDIR:-/tmp}/media-orchestrator-secrets"
-export MEDIA_TOKEN_FILE="$MEDIA_SECRETS_DIR/primary-token"
+export MEDIA_TOKEN="$MEDIA_PRIMARY_TOKEN"
 
 mise exec -- cargo run -p media -- jobs create \
   --provider rezka \

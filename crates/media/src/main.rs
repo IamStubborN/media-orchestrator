@@ -22,9 +22,37 @@ enum Command {
     Search(SearchArgs),
     #[command(visible_alias = "select")]
     Download(DownloadArgs),
+    Rezka(RezkaArgs),
     Migrate,
     Serve,
     Runner,
+}
+
+#[derive(Debug, Args)]
+struct RezkaArgs {
+    #[command(subcommand)]
+    command: RezkaCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum RezkaCommand {
+    Session(RezkaSessionArgs),
+}
+
+#[derive(Debug, Args)]
+struct RezkaSessionArgs {
+    #[command(subcommand)]
+    command: RezkaSessionCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum RezkaSessionCommand {
+    Refresh {
+        #[arg(long = "credential-request")]
+        credential_request_id: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -224,6 +252,7 @@ async fn run(cli: Cli) -> Result<(), RunError> {
         Command::Tracking(args) => run_tracking(args).await,
         Command::Search(args) => run_search(args).await,
         Command::Download(args) => run_download(args).await,
+        Command::Rezka(args) => run_rezka(args).await,
         Command::Migrate => {
             let config = DatabaseConfig::load()?;
             composition::migrate(&config).await?;
@@ -239,6 +268,24 @@ async fn run(cli: Cli) -> Result<(), RunError> {
             Ok(())
         }
     }
+}
+
+async fn run_rezka(args: RezkaArgs) -> Result<(), RunError> {
+    let client = HttpClient::new(ClientConfig::load()?)?;
+    match args.command {
+        RezkaCommand::Session(args) => match args.command {
+            RezkaSessionCommand::Refresh {
+                credential_request_id,
+                json,
+            } => {
+                let output = client.refresh_rezka_session(credential_request_id).await?;
+                emit(&output, json, |value| {
+                    render::job(value, Some("Queued session refresh"))
+                });
+            }
+        },
+    }
+    Ok(())
 }
 
 async fn run_healthcheck(args: HealthcheckArgs) -> Result<(), RunError> {

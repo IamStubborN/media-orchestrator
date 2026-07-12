@@ -1,6 +1,6 @@
 use rezka_client::{
-    ProviderFailureReason, RezkaError, RezkaErrorCode, RezkaMediaKind, SeriesLifecycleStatus,
-    TitleLocator, TranslationId, TranslationKey,
+    ProviderFailureReason, RatingSource, RezkaError, RezkaErrorCode, RezkaMediaKind,
+    SeriesLifecycleStatus, TitleLocator, TranslationId, TranslationKey,
     catalog::parser::parse_title_page,
     mirror::MirrorSet,
     session::{RezkaClient, RezkaClientConfig},
@@ -144,6 +144,25 @@ fn movie_fixture_preserves_flag_specific_identity_and_ambiguous_default() {
     assert_eq!(title.title(), "Fixture Movie");
     assert_eq!(title.original_title(), Some("Original Fixture Movie"));
     assert_eq!(title.release_year(), Some(2024));
+    assert_eq!(title.description(), Some("A fixture movie description."));
+    assert_eq!(title.countries(), ["USA", "Canada"]);
+    assert_eq!(title.genres(), ["Drama", "Thriller"]);
+    assert_eq!(title.duration_minutes(), Some(102));
+    assert_eq!(title.age_rating(), Some(16));
+    assert_eq!(title.ratings().len(), 2);
+    assert_eq!(title.ratings()[0].source(), RatingSource::Kinopoisk);
+    assert_eq!(title.ratings()[0].value(), 7.8);
+    assert_eq!(title.ratings()[1].source(), RatingSource::Imdb);
+    assert_eq!(title.ratings()[1].value(), 8.1);
+    assert_eq!(title.franchise().len(), 3);
+    assert_eq!(title.franchise()[0].title(), "Fixture Prequel");
+    assert_eq!(
+        title.franchise()[0].locator().as_str(),
+        "/films/drama/100-fixture-prequel.html"
+    );
+    assert!(!title.franchise()[0].is_current());
+    assert!(title.franchise()[1].is_current());
+    assert_eq!(title.franchise()[2].title(), "Fixture Sequel");
     assert_eq!(title.kind(), RezkaMediaKind::Movie);
     assert_eq!(title.translations().len(), 3);
     assert_eq!(title.translations()[0].id().get(), 7);
@@ -550,7 +569,7 @@ fn title_capability_debug_matrix_is_exact_and_redacted() {
             "TitlePlaybackRef { id: RezkaTitleId(901), locator: \"[REDACTED]\", kind: Movie }",
             "SelectedTranslation { title: TitlePlaybackRef { id: RezkaTitleId(901), locator: \"[REDACTED]\", kind: Movie }, translation: Translation { key: Movie { id: TranslationId(7), is_camrip: false, has_ads: false, is_director: false }, name: \"[REDACTED]\", is_premium: false, .. } }",
             "Movie(SelectedTranslation { title: TitlePlaybackRef { id: RezkaTitleId(901), locator: \"[REDACTED]\", kind: Movie }, translation: Translation { key: Movie { id: TranslationId(7), is_camrip: false, has_ads: false, is_director: false }, name: \"[REDACTED]\", is_premium: false, .. } })",
-            "TitleDetails { id: RezkaTitleId(901), locator: \"[REDACTED]\", title: \"[REDACTED]\", original_title: Some(\"[REDACTED]\"), release_year: None, kind: Movie, series_lifecycle_status: Unknown, thumbnail: Some(\"[REDACTED]\"), translations: 1, default_translation: None }",
+            "TitleDetails { id: RezkaTitleId(901), locator: \"[REDACTED]\", title: \"[REDACTED]\", original_title: Some(\"[REDACTED]\"), release_year: None, kind: Movie, series_lifecycle_status: Unknown, description: None, countries: 0, genres: 0, duration_minutes: None, age_rating: None, ratings: [], franchise: 0, thumbnail: Some(\"[REDACTED]\"), translations: 1, default_translation: None }",
         ]
     );
     for debug in debug_values {
@@ -569,6 +588,39 @@ fn title_capability_debug_matrix_is_exact_and_redacted() {
             assert!(!debug.contains(forbidden), "leaked {forbidden} in {debug}");
         }
     }
+}
+
+#[test]
+fn detailed_metadata_rejects_invalid_values_and_bounded_collections() {
+    let base = movie_page(
+        r#"<li class="b-translator__item" data-translator_id="7">Studio</li>"#,
+        7,
+    );
+    for row in [
+        "<tr><td>Duration:</td><td>999 hours</td></tr>",
+        "<tr><td>Age:</td><td>99+</td></tr>",
+    ] {
+        let html = base.replace(
+            "<ul id=\"translators-list\">",
+            &format!("<div class=\"b-content__main\"><table class=\"b-post__info\">{row}</table></div><ul id=\"translators-list\">"),
+        );
+        assert_code(
+            parse(&html, "/films/55-movie.html"),
+            RezkaErrorCode::ProviderResponseInvalid,
+        );
+    }
+
+    let countries = (0..65)
+        .map(|index| format!(r#"<a href="/country/c{index}/">Country {index}</a>"#))
+        .collect::<String>();
+    let html = base.replace(
+        "<ul id=\"translators-list\">",
+        &format!("<div class=\"b-content__main\"><table class=\"b-post__info\"><tr><td>Country:</td><td>{countries}</td></tr></table></div><ul id=\"translators-list\">"),
+    );
+    assert_code(
+        parse(&html, "/films/55-movie.html"),
+        RezkaErrorCode::ProviderResponseInvalid,
+    );
 }
 
 fn test_client(server: &MockServer) -> RezkaClient {

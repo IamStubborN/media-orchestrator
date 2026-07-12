@@ -13,8 +13,7 @@ services:
     environment:
       POSTGRES_DB: media_orchestrator
       POSTGRES_USER: media
-      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
-    secrets: [postgres-password]
+      POSTGRES_PASSWORD: ${MEDIA_POSTGRES_PASSWORD}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks: [backend]
@@ -30,8 +29,7 @@ services:
     image: ${MEDIA_SERVICE_IMAGE:-media-orchestrator-service:local}
     command: [migrate]
     environment:
-      MEDIA_DATABASE_URL_FILE: /run/secrets/database-url
-    secrets: [database-url]
+      MEDIA_DATABASE_URL: ${MEDIA_DATABASE_URL}
     networks: [backend]
     depends_on:
       postgres:
@@ -42,12 +40,11 @@ services:
     <<: *runtime-security
     image: ${MEDIA_SERVICE_IMAGE:-media-orchestrator-service:local}
     environment:
-      MEDIA_DATABASE_URL_FILE: /run/secrets/database-url
-      MEDIA_PRIMARY_TOKEN_FILE: /run/secrets/primary-token
-      MEDIA_SECONDARY_TOKEN_FILE: /run/secrets/secondary-token
-      MEDIA_RUNNER_TOKEN_FILE: /run/secrets/runner-token
+      MEDIA_DATABASE_URL: ${MEDIA_DATABASE_URL}
+      MEDIA_PRIMARY_TOKEN: ${MEDIA_PRIMARY_TOKEN}
+      MEDIA_SECONDARY_TOKEN: ${MEDIA_SECONDARY_TOKEN}
+      MEDIA_RUNNER_TOKEN: ${MEDIA_RUNNER_TOKEN}
       MEDIA_LISTEN_ADDR: 0.0.0.0:8080
-    secrets: [database-url, primary-token, secondary-token, runner-token]
     networks: [backend]
     ports:
       - ${MEDIA_BIND_ADDRESS:-127.0.0.1}:${MEDIA_PORT:-8080}:8080
@@ -62,14 +59,15 @@ services:
     image: ${MEDIA_RUNNER_IMAGE:-media-orchestrator-runner:local}
     environment:
       MEDIA_SERVICE_URL: http://service:8080
-      MEDIA_TOKEN_FILE: /run/secrets/runner-token
+      MEDIA_TOKEN: ${MEDIA_RUNNER_TOKEN}
       MEDIA_REZKA_MIRRORS: ${MEDIA_REZKA_MIRRORS:-https://rezka.example.invalid}
       MEDIA_REZKA_SESSION_PROBE_URL: ${MEDIA_REZKA_SESSION_PROBE_URL:-https://rezka.example.invalid/}
       MEDIA_REZKA_SESSION_VALID_MARKERS_JSON: ${MEDIA_REZKA_SESSION_VALID_MARKERS_JSON:-["logout"]}
       MEDIA_REZKA_SESSION_INVALID_MARKERS_JSON: ${MEDIA_REZKA_SESSION_INVALID_MARKERS_JSON:-["login"]}
-      MEDIA_REZKA_USERNAME_FILE: /run/secrets/rezka-username
-      MEDIA_REZKA_PASSWORD_FILE: /run/secrets/rezka-password
-      MEDIA_REZKA_COOKIE_KEY_FILE: /run/secrets/rezka-cookie-key
+      MEDIA_REZKA_CREDENTIAL_BROKER_URL: ${MEDIA_REZKA_CREDENTIAL_BROKER_URL:-http://host.docker.internal:8787}
+      MEDIA_REZKA_CREDENTIAL_BROKER_TOKEN: ${MEDIA_REZKA_CREDENTIAL_BROKER_TOKEN}
+      MEDIA_REZKA_CREDENTIAL_BROKER_PRIVATE_HTTP_HOSTS: ${MEDIA_REZKA_CREDENTIAL_BROKER_PRIVATE_HTTP_HOSTS:-host.docker.internal}
+      MEDIA_REZKA_COOKIE_KEY: ${MEDIA_REZKA_COOKIE_KEY}
       MEDIA_REZKA_SESSION_STORE_FILE: /var/lib/media/rezka-session.bin
       # Storage roots must live on the writable /media volume and share one
       # filesystem; the defaults (/staging/rezka, /plex/tv, /plex/movies) would
@@ -77,7 +75,6 @@ services:
       MEDIA_STAGING_ROOT: /media/staging
       MEDIA_TV_ROOT: /media/tv
       MEDIA_MOVIES_ROOT: /media/movies
-    secrets: [runner-token, rezka-username, rezka-password, rezka-cookie-key]
     volumes:
       - runner-state:/var/lib/media
       - ${MEDIA_LIBRARY_ROOT:-./.local/media}:/media
@@ -97,21 +94,3 @@ networks:
 volumes:
   postgres-data: {}
   runner-state: {}
-
-secrets:
-  postgres-password:
-    file: ${MEDIA_EXAMPLE_SECRETS_DIR:-./deploy/compose/secrets/example}/postgres-password
-  database-url:
-    file: ${MEDIA_EXAMPLE_SECRETS_DIR:-./deploy/compose/secrets/example}/database-url
-  primary-token:
-    file: ${MEDIA_EXAMPLE_SECRETS_DIR:-./deploy/compose/secrets/example}/primary-token
-  secondary-token:
-    file: ${MEDIA_EXAMPLE_SECRETS_DIR:-./deploy/compose/secrets/example}/secondary-token
-  runner-token:
-    file: ${MEDIA_EXAMPLE_SECRETS_DIR:-./deploy/compose/secrets/example}/runner-token
-  rezka-username:
-    file: ${MEDIA_EXAMPLE_SECRETS_DIR:-./deploy/compose/secrets/example}/rezka-username
-  rezka-password:
-    file: ${MEDIA_EXAMPLE_SECRETS_DIR:-./deploy/compose/secrets/example}/rezka-password
-  rezka-cookie-key:
-    file: ${MEDIA_EXAMPLE_SECRETS_DIR:-./deploy/compose/secrets/example}/rezka-cookie-key

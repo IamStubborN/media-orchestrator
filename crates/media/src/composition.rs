@@ -136,6 +136,17 @@ pub async fn run_runner(config: RunnerConfig) -> Result<(), RunnerError> {
                 .map_err(|_| RunnerError::Configuration)
         })
         .transpose()?;
+    let broker_config = media_integrations::credential_broker::CredentialBrokerConfig::new(
+        config.credential_broker().base_url().clone(),
+        config.credential_broker().token().clone(),
+        Duration::from_secs(15),
+        config.credential_broker().private_http_hosts(),
+    )
+    .map_err(|_| RunnerError::Configuration)?;
+    let credential_broker = Arc::new(
+        media_integrations::credential_broker::CredentialBrokerClient::new(broker_config)
+            .map_err(|_| RunnerError::Configuration)?,
+    );
     let executor = Arc::new(crate::runner::MediaJobExecutor::new(
         rezka,
         pipeline,
@@ -150,6 +161,7 @@ pub async fn run_runner(config: RunnerConfig) -> Result<(), RunnerError> {
             ),
         ),
         gluetun,
+        credential_broker,
         config.storage_roots().clone(),
         config.vaapi_device().to_owned(),
     ));
@@ -159,7 +171,7 @@ pub async fn run_runner(config: RunnerConfig) -> Result<(), RunnerError> {
 
 pub struct PreparedRunnerSession {
     pub client: rezka_client::RezkaClient,
-    pub credentials: rezka_client::RezkaCredentials,
+    pub credentials: Option<rezka_client::RezkaCredentials>,
     pub probe: rezka_client::SessionValidationProbe,
     pub store: media_runner::EncryptedRezkaSessionStore,
 }
@@ -179,11 +191,18 @@ impl std::fmt::Debug for PreparedRunnerSession {
 pub fn prepare_runner_session(
     config: &RunnerConfig,
 ) -> Result<PreparedRunnerSession, RunnerCompositionError> {
-    prepare_rezka_session(config.rezka())
+    prepare_rezka_session_inner(config.rezka(), false)
 }
 
 pub fn prepare_rezka_session(
     config: &RezkaCompositionConfig,
+) -> Result<PreparedRunnerSession, RunnerCompositionError> {
+    prepare_rezka_session_inner(config, true)
+}
+
+fn prepare_rezka_session_inner(
+    config: &RezkaCompositionConfig,
+    include_credentials: bool,
 ) -> Result<PreparedRunnerSession, RunnerCompositionError> {
     let mirrors = rezka_client::MirrorSet::new(config.mirrors().to_vec())
         .map_err(|_| RunnerCompositionError::Client)?;
@@ -194,10 +213,10 @@ pub fn prepare_rezka_session(
         max_retries: 2,
         anubis_max_nonce: 5_000_000,
     };
-    let credentials = rezka_client::RezkaCredentials {
+    let credentials = include_credentials.then(|| rezka_client::RezkaCredentials {
         username: config.username().clone(),
         password: config.password().clone(),
-    };
+    });
     let probe = rezka_client::SessionValidationProbe::new(
         config.session_probe_url().clone(),
         config.session_valid_markers().to_vec(),

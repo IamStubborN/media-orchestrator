@@ -15,10 +15,13 @@ pub use adapters::{
     HttpRunnerServiceAdapter, ReqwestHttpAdapter, TokioFileSystem, TokioProcessAdapter,
 };
 pub use download::{ResumeAction, ResumeError, decide_resume};
-pub use media::{MediaProbe, MediaProbeError, ProcessCommand, build_rezka_vaapi_command};
+pub use media::{
+    MediaProbe, MediaProbeError, ProcessCommand, build_hls_ingest_command,
+    build_rezka_vaapi_command,
+};
 pub use pipeline::{
     EpisodeOutcome, EpisodePipeline, EpisodeWork, ProviderKind, SensitiveUrl, SensitiveUrlError,
-    SubtitleTrack,
+    SubtitleTrack, VideoSourceKind,
 };
 pub use plex::{PlexExpectation, PlexMismatch, PlexObservation, validate_plex_observation};
 pub use ports::{

@@ -166,8 +166,17 @@ pub struct SearchPageDto {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RezkaSessionRefreshRequest {
+    pub credential_request_id: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum ExecutionSelectionDto {
+    RezkaSessionRefresh {
+        credential_request_id: String,
+    },
     Rezka {
         locator: String,
         title_id: u64,

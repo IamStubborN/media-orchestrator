@@ -1,3 +1,4 @@
+pub mod credential_broker;
 pub mod gluetun;
 pub mod hermes;
 pub mod plex;

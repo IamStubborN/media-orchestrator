@@ -83,6 +83,11 @@ fn valid_runner_source() -> FakeSource {
     );
     source.set_secret("MEDIA_REZKA_USERNAME_FILE", b"rezka-user");
     source.set_secret("MEDIA_REZKA_PASSWORD_FILE", b"rezka-password");
+    source.set_env(
+        "MEDIA_REZKA_CREDENTIAL_BROKER_URL",
+        "https://broker.internal.example",
+    );
+    source.set_secret("MEDIA_REZKA_CREDENTIAL_BROKER_TOKEN_FILE", b"broker-token");
     source.set_secret("MEDIA_REZKA_COOKIE_KEY_FILE", encoded_key.as_bytes());
     source
 }
@@ -104,13 +109,25 @@ fn runner_config_loads_distinct_existing_torrent_categories() {
 }
 
 #[test]
-fn database_config_requires_the_database_url_file_setting() {
+fn runner_config_does_not_require_static_rezka_credentials() {
+    let mut source = valid_runner_source();
+    source.env.remove("MEDIA_REZKA_USERNAME_FILE");
+    source.env.remove("MEDIA_REZKA_PASSWORD_FILE");
+
+    let config = RunnerConfig::load_from(&source).unwrap();
+    let prepared = media::composition::prepare_runner_session(&config).unwrap();
+
+    assert!(prepared.credentials.is_none());
+}
+
+#[test]
+fn database_config_requires_the_database_url_setting() {
     let error = DatabaseConfig::load_from(&FakeSource::default()).unwrap_err();
 
     assert_eq!(
         error,
         ConfigError::MissingEnvironment {
-            name: "MEDIA_DATABASE_URL_FILE",
+            name: "MEDIA_DATABASE_URL",
         },
     );
 }
@@ -130,7 +147,7 @@ fn notification_webhooks_are_optional_but_both_hmac_secrets_are_atomic() {
     assert_eq!(
         ServerConfig::load_from(&partial).unwrap_err(),
         ConfigError::MissingEnvironment {
-            name: "MEDIA_SECONDARY_WEBHOOK_HMAC_FILE",
+            name: "MEDIA_SECONDARY_WEBHOOK_HMAC",
         }
     );
 
@@ -142,6 +159,28 @@ fn notification_webhooks_are_optional_but_both_hmac_secrets_are_atomic() {
     assert!(rendered.contains("[REDACTED]"));
     assert!(!rendered.contains("hermes-primary"));
     assert!(!rendered.contains("primary-hmac"));
+}
+
+#[test]
+fn database_config_accepts_direct_environment_and_prefers_file_override() {
+    let mut direct = FakeSource::default();
+    direct.set_env("MEDIA_DATABASE_URL", "postgres://direct");
+    assert_eq!(
+        DatabaseConfig::load_from(&direct)
+            .unwrap()
+            .database_url()
+            .expose_secret(),
+        "postgres://direct"
+    );
+
+    direct.set_secret("MEDIA_DATABASE_URL_FILE", b"postgres://file");
+    assert_eq!(
+        DatabaseConfig::load_from(&direct)
+            .unwrap()
+            .database_url()
+            .expose_secret(),
+        "postgres://file"
+    );
 }
 
 #[test]

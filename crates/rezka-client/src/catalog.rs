@@ -18,6 +18,139 @@ const MAX_CATALOG_QUERY_SCALARS: usize = 200;
 const MAX_CATALOG_QUERY_BYTES: usize = 512;
 const MAX_TITLE_LOCATOR_BYTES: usize = 2_048;
 const MAX_CATALOG_CONTINUATION_BYTES: usize = 2_048;
+const MAX_CATALOG_SLUG_BYTES: usize = 64;
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum CatalogCategory {
+    Films,
+    Series,
+    Cartoons,
+    Animation,
+}
+
+impl CatalogCategory {
+    const fn path(self) -> &'static str {
+        match self {
+            Self::Films => "films",
+            Self::Series => "series",
+            Self::Cartoons => "cartoons",
+            Self::Animation => "animation",
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum CatalogSort {
+    New,
+    Popular,
+}
+
+#[derive(Clone, Eq, PartialEq, Hash)]
+pub struct CatalogSlug(String);
+
+impl CatalogSlug {
+    pub fn new(value: &str) -> Result<Self, RezkaError> {
+        let valid = !value.is_empty()
+            && value.len() <= MAX_CATALOG_SLUG_BYTES
+            && value
+                .as_bytes()
+                .iter()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+            && !value.starts_with('-')
+            && !value.ends_with('-')
+            && !value.contains("--");
+        if !valid {
+            return Err(invalid_catalog("invalid catalog slug"));
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for CatalogSlug {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CatalogSlug([REDACTED])")
+    }
+}
+
+#[derive(Debug, Clone)]
+enum CatalogFilter {
+    Country(CatalogSlug),
+    Year(u16),
+}
+
+#[derive(Debug, Clone)]
+pub struct CatalogBrowse {
+    category: CatalogCategory,
+    filter: Option<CatalogFilter>,
+    sort: Option<CatalogSort>,
+}
+
+impl CatalogBrowse {
+    #[must_use]
+    pub const fn new(category: CatalogCategory) -> Self {
+        Self {
+            category,
+            filter: None,
+            sort: None,
+        }
+    }
+
+    pub fn with_country(mut self, country: CatalogSlug) -> Result<Self, RezkaError> {
+        self.set_filter(CatalogFilter::Country(country))?;
+        Ok(self)
+    }
+
+    pub fn with_year(mut self, year: u16) -> Result<Self, RezkaError> {
+        if !(1895..=9999).contains(&year) {
+            return Err(invalid_catalog("invalid catalog year"));
+        }
+        self.set_filter(CatalogFilter::Year(year))?;
+        Ok(self)
+    }
+
+    #[must_use]
+    pub const fn with_sort(mut self, sort: CatalogSort) -> Self {
+        self.sort = Some(sort);
+        self
+    }
+
+    fn set_filter(&mut self, filter: CatalogFilter) -> Result<(), RezkaError> {
+        if self.filter.is_some() {
+            return Err(invalid_catalog("conflicting catalog filters"));
+        }
+        self.filter = Some(filter);
+        Ok(())
+    }
+
+    pub fn url(&self, origin: &Url) -> Result<Url, RezkaError> {
+        let category = self.category.path();
+        let path = match &self.filter {
+            Some(CatalogFilter::Country(country)) => {
+                format!("/{category}/country/{}/", country.as_str())
+            }
+            Some(CatalogFilter::Year(year)) => format!("/{category}/year/{year}/"),
+            None => format!("/{category}/"),
+        };
+        let mut url = origin
+            .join(&path)
+            .map_err(|_| invalid_catalog("invalid catalog browse endpoint"))?;
+        if let Some(sort) = self.sort {
+            url.query_pairs_mut().append_pair(
+                "filter",
+                match sort {
+                    CatalogSort::New => "last",
+                    CatalogSort::Popular => "popular",
+                },
+            );
+        }
+        Ok(url)
+    }
+}
 
 pub struct CatalogQuery(String);
 
@@ -121,6 +254,17 @@ impl fmt::Debug for CatalogContinuation {
 }
 
 impl RezkaClient {
+    pub async fn browse(&mut self, browse: &CatalogBrowse) -> Result<CatalogPage, RezkaError> {
+        let url = browse.url(self.transport_mut().selected_origin())?;
+        let response = self
+            .transport_mut()
+            .get_first_with_failover(url, None)
+            .await?;
+        reject_catalog_access_page(&response.body)?;
+        let selected_origin = self.transport_mut().selected_origin().clone();
+        parser::parse_browse_page(&response.body, &selected_origin)
+    }
+
     pub async fn search(&mut self, query: &CatalogQuery) -> Result<CatalogPage, RezkaError> {
         let url = initial_search_url(self.transport_mut().selected_origin(), query)?;
         self.fetch_catalog_page(url, query).await
@@ -490,6 +634,13 @@ pub struct TitleDetails {
     release_year: Option<u16>,
     kind: RezkaMediaKind,
     series_lifecycle_status: SeriesLifecycleStatus,
+    description: Option<String>,
+    countries: Vec<String>,
+    genres: Vec<String>,
+    duration_minutes: Option<u16>,
+    age_rating: Option<u8>,
+    ratings: Vec<TitleRating>,
+    franchise: Vec<FranchiseTitle>,
     thumbnail: Option<PublicImageUrl>,
     translations: Vec<Translation>,
     default_translation: Option<TranslationKey>,
@@ -505,6 +656,13 @@ impl TitleDetails {
         release_year: Option<u16>,
         kind: RezkaMediaKind,
         series_lifecycle_status: SeriesLifecycleStatus,
+        description: Option<String>,
+        countries: Vec<String>,
+        genres: Vec<String>,
+        duration_minutes: Option<u16>,
+        age_rating: Option<u8>,
+        ratings: Vec<TitleRating>,
+        franchise: Vec<FranchiseTitle>,
         thumbnail: Option<PublicImageUrl>,
         translations: Vec<Translation>,
         default_translation: Option<TranslationKey>,
@@ -517,6 +675,13 @@ impl TitleDetails {
             release_year,
             kind,
             series_lifecycle_status,
+            description,
+            countries,
+            genres,
+            duration_minutes,
+            age_rating,
+            ratings,
+            franchise,
             thumbnail,
             translations,
             default_translation,
@@ -556,6 +721,41 @@ impl TitleDetails {
     #[must_use]
     pub const fn series_lifecycle_status(&self) -> SeriesLifecycleStatus {
         self.series_lifecycle_status
+    }
+
+    #[must_use]
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+
+    #[must_use]
+    pub fn countries(&self) -> &[String] {
+        &self.countries
+    }
+
+    #[must_use]
+    pub fn genres(&self) -> &[String] {
+        &self.genres
+    }
+
+    #[must_use]
+    pub const fn duration_minutes(&self) -> Option<u16> {
+        self.duration_minutes
+    }
+
+    #[must_use]
+    pub const fn age_rating(&self) -> Option<u8> {
+        self.age_rating
+    }
+
+    #[must_use]
+    pub fn ratings(&self) -> &[TitleRating] {
+        &self.ratings
+    }
+
+    #[must_use]
+    pub fn franchise(&self) -> &[FranchiseTitle] {
+        &self.franchise
     }
 
     #[must_use]
@@ -604,9 +804,89 @@ impl fmt::Debug for TitleDetails {
             .field("release_year", &self.release_year)
             .field("kind", &self.kind)
             .field("series_lifecycle_status", &self.series_lifecycle_status)
+            .field(
+                "description",
+                &self.description.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("countries", &self.countries.len())
+            .field("genres", &self.genres.len())
+            .field("duration_minutes", &self.duration_minutes)
+            .field("age_rating", &self.age_rating)
+            .field("ratings", &self.ratings)
+            .field("franchise", &self.franchise.len())
             .field("thumbnail", &self.thumbnail.as_ref().map(|_| "[REDACTED]"))
             .field("translations", &self.translations.len())
             .field("default_translation", &self.default_translation)
+            .finish()
+    }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum RatingSource {
+    Kinopoisk,
+    Imdb,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct TitleRating {
+    source: RatingSource,
+    value: f32,
+}
+
+impl TitleRating {
+    pub(crate) const fn new(source: RatingSource, value: f32) -> Self {
+        Self { source, value }
+    }
+
+    #[must_use]
+    pub const fn source(self) -> RatingSource {
+        self.source
+    }
+
+    #[must_use]
+    pub const fn value(self) -> f32 {
+        self.value
+    }
+}
+
+pub struct FranchiseTitle {
+    locator: TitleLocator,
+    title: String,
+    is_current: bool,
+}
+
+impl FranchiseTitle {
+    pub(crate) const fn new(locator: TitleLocator, title: String, is_current: bool) -> Self {
+        Self {
+            locator,
+            title,
+            is_current,
+        }
+    }
+
+    #[must_use]
+    pub const fn locator(&self) -> &TitleLocator {
+        &self.locator
+    }
+
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    #[must_use]
+    pub const fn is_current(&self) -> bool {
+        self.is_current
+    }
+}
+
+impl fmt::Debug for FranchiseTitle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FranchiseTitle")
+            .field("locator", &"[REDACTED]")
+            .field("title", &"[REDACTED]")
+            .field("is_current", &self.is_current)
             .finish()
     }
 }

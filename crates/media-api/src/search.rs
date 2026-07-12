@@ -1,6 +1,6 @@
 use media_contract::{
-    ContinueSearchRequest, ExecutionSelectionDto, JobDto, SearchPageDto, SelectResultRequest,
-    StartSearchRequest,
+    ContinueSearchRequest, ExecutionSelectionDto, JobDto, RezkaSessionRefreshRequest,
+    SearchPageDto, SelectResultRequest, StartSearchRequest,
 };
 use media_core::{OperationKey, UserId};
 
@@ -22,6 +22,13 @@ pub enum SearchError {
 
 #[async_trait::async_trait]
 pub trait SearchService: Send + Sync {
+    async fn refresh_rezka_session(
+        &self,
+        owner: UserId,
+        operation: OperationKey,
+        request: RezkaSessionRefreshRequest,
+    ) -> Result<JobDto, SearchError>;
+
     async fn start(
         &self,
         owner: UserId,
@@ -48,6 +55,15 @@ pub(crate) struct UnavailableSearchService;
 
 #[async_trait::async_trait]
 impl SearchService for UnavailableSearchService {
+    async fn refresh_rezka_session(
+        &self,
+        _: UserId,
+        _: OperationKey,
+        _: RezkaSessionRefreshRequest,
+    ) -> Result<JobDto, SearchError> {
+        Err(SearchError::Infrastructure)
+    }
+
     async fn start(&self, _: UserId, _: StartSearchRequest) -> Result<SearchPageDto, SearchError> {
         Err(SearchError::Infrastructure)
     }

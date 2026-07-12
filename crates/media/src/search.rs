@@ -253,7 +253,13 @@ impl ConcreteSearchProvider {
         let prepared = &mut *state;
         prepared
             .client
-            .ensure_authenticated(&prepared.credentials, &prepared.probe)
+            .ensure_authenticated(
+                prepared
+                    .credentials
+                    .as_ref()
+                    .ok_or(SearchError::Infrastructure)?,
+                &prepared.probe,
+            )
             .await
             .map_err(|_| SearchError::Provider)?;
         let snapshot = prepared
@@ -816,6 +822,49 @@ impl DurableSearchService {
 
 #[async_trait::async_trait]
 impl SearchService for DurableSearchService {
+    async fn refresh_rezka_session(
+        &self,
+        owner: UserId,
+        operation: OperationKey,
+        request: media_contract::RezkaSessionRefreshRequest,
+    ) -> Result<JobDto, SearchError> {
+        if request.credential_request_id.trim().is_empty()
+            || request.credential_request_id.len() > 256
+            || request.credential_request_id.chars().any(char::is_control)
+        {
+            return Err(SearchError::InvalidRequest);
+        }
+        let result_ref = format!("selection:{}", uuid::Uuid::new_v4());
+        self.persistence
+            .insert_execution(
+                result_ref.clone(),
+                ExecutionSelectionDto::RezkaSessionRefresh {
+                    credential_request_id: request.credential_request_id,
+                },
+            )
+            .await?;
+        let job = self
+            .jobs
+            .create_job_for_owner(
+                owner,
+                operation,
+                NewJobCommand {
+                    provider: Provider::Rezka,
+                    result_ref,
+                    notify_scope: NotifyScope::Initiator,
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                media_core::ApplicationError::Conflict => SearchError::Conflict,
+                media_core::ApplicationError::InvalidInput(_) => SearchError::InvalidRequest,
+                media_core::ApplicationError::Forbidden => SearchError::Forbidden,
+                media_core::ApplicationError::NotFound => SearchError::NotFound,
+                media_core::ApplicationError::Infrastructure => SearchError::Infrastructure,
+            })?;
+        Ok(job_dto(&job))
+    }
+
     async fn start(
         &self,
         owner: UserId,

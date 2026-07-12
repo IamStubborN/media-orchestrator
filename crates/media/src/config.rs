@@ -8,41 +8,60 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use secrecy::{ExposeSecret as _, SecretBox, SecretString};
 
+const DATABASE_URL: &str = "MEDIA_DATABASE_URL";
 const DATABASE_URL_FILE: &str = "MEDIA_DATABASE_URL_FILE";
 const LISTEN_ADDR: &str = "MEDIA_LISTEN_ADDR";
+const PRIMARY_TOKEN: &str = "MEDIA_PRIMARY_TOKEN";
 const PRIMARY_TOKEN_FILE: &str = "MEDIA_PRIMARY_TOKEN_FILE";
+const SECONDARY_TOKEN: &str = "MEDIA_SECONDARY_TOKEN";
 const SECONDARY_TOKEN_FILE: &str = "MEDIA_SECONDARY_TOKEN_FILE";
+const RUNNER_TOKEN: &str = "MEDIA_RUNNER_TOKEN";
 const RUNNER_TOKEN_FILE: &str = "MEDIA_RUNNER_TOKEN_FILE";
+const PRIMARY_WEBHOOK_HMAC: &str = "MEDIA_PRIMARY_WEBHOOK_HMAC";
 const PRIMARY_WEBHOOK_HMAC_FILE: &str = "MEDIA_PRIMARY_WEBHOOK_HMAC_FILE";
+const SECONDARY_WEBHOOK_HMAC: &str = "MEDIA_SECONDARY_WEBHOOK_HMAC";
 const SECONDARY_WEBHOOK_HMAC_FILE: &str = "MEDIA_SECONDARY_WEBHOOK_HMAC_FILE";
 const PRIMARY_WEBHOOK_URL: &str = "MEDIA_PRIMARY_WEBHOOK_URL";
 const SECONDARY_WEBHOOK_URL: &str = "MEDIA_SECONDARY_WEBHOOK_URL";
 const LEASE_TTL_SECONDS: &str = "MEDIA_LEASE_TTL_SECONDS";
 const SERVICE_URL: &str = "MEDIA_SERVICE_URL";
+const TOKEN: &str = "MEDIA_TOKEN";
 const TOKEN_FILE: &str = "MEDIA_TOKEN_FILE";
 const REZKA_MIRRORS: &str = "MEDIA_REZKA_MIRRORS";
 const REZKA_SESSION_PROBE_URL: &str = "MEDIA_REZKA_SESSION_PROBE_URL";
 const REZKA_SESSION_VALID_MARKERS_JSON: &str = "MEDIA_REZKA_SESSION_VALID_MARKERS_JSON";
 const REZKA_SESSION_INVALID_MARKERS_JSON: &str = "MEDIA_REZKA_SESSION_INVALID_MARKERS_JSON";
+const REZKA_USERNAME: &str = "MEDIA_REZKA_USERNAME";
 const REZKA_USERNAME_FILE: &str = "MEDIA_REZKA_USERNAME_FILE";
+const REZKA_PASSWORD: &str = "MEDIA_REZKA_PASSWORD";
 const REZKA_PASSWORD_FILE: &str = "MEDIA_REZKA_PASSWORD_FILE";
+const REZKA_COOKIE_KEY: &str = "MEDIA_REZKA_COOKIE_KEY";
 const REZKA_COOKIE_KEY_FILE: &str = "MEDIA_REZKA_COOKIE_KEY_FILE";
 const REZKA_SESSION_STORE_FILE: &str = "MEDIA_REZKA_SESSION_STORE_FILE";
 const REZKA_USER_AGENT: &str = "MEDIA_REZKA_USER_AGENT";
+const CREDENTIAL_BROKER_URL: &str = "MEDIA_REZKA_CREDENTIAL_BROKER_URL";
+const CREDENTIAL_BROKER_TOKEN: &str = "MEDIA_REZKA_CREDENTIAL_BROKER_TOKEN";
+const CREDENTIAL_BROKER_TOKEN_FILE: &str = "MEDIA_REZKA_CREDENTIAL_BROKER_TOKEN_FILE";
+const CREDENTIAL_BROKER_PRIVATE_HTTP_HOSTS: &str =
+    "MEDIA_REZKA_CREDENTIAL_BROKER_PRIVATE_HTTP_HOSTS";
 const PROWLARR_URL: &str = "MEDIA_PROWLARR_URL";
+const PROWLARR_API_KEY: &str = "MEDIA_PROWLARR_API_KEY";
 const PROWLARR_API_KEY_FILE: &str = "MEDIA_PROWLARR_API_KEY_FILE";
 const QBITTORRENT_URL: &str = "MEDIA_QBITTORRENT_URL";
 const QBITTORRENT_TV_CATEGORY: &str = "MEDIA_QBITTORRENT_TV_CATEGORY";
 const QBITTORRENT_MOVIES_CATEGORY: &str = "MEDIA_QBITTORRENT_MOVIES_CATEGORY";
 const QBITTORRENT_USERNAME: &str = "MEDIA_QBITTORRENT_USERNAME";
+const QBITTORRENT_PASSWORD: &str = "MEDIA_QBITTORRENT_PASSWORD";
 const QBITTORRENT_PASSWORD_FILE: &str = "MEDIA_QBITTORRENT_PASSWORD_FILE";
 const GLUETUN_URL: &str = "MEDIA_GLUETUN_URL";
+const GLUETUN_API_KEY: &str = "MEDIA_GLUETUN_API_KEY";
 const GLUETUN_API_KEY_FILE: &str = "MEDIA_GLUETUN_API_KEY_FILE";
 const STAGING_ROOT: &str = "MEDIA_STAGING_ROOT";
 const TV_ROOT: &str = "MEDIA_TV_ROOT";
 const MOVIES_ROOT: &str = "MEDIA_MOVIES_ROOT";
 const VAAPI_DEVICE: &str = "MEDIA_VAAPI_DEVICE";
 const PLEX_URL: &str = "MEDIA_PLEX_URL";
+const PLEX_TOKEN: &str = "MEDIA_PLEX_TOKEN";
 const PLEX_TOKEN_FILE: &str = "MEDIA_PLEX_TOKEN_FILE";
 const PLEX_TV_SECTION: &str = "MEDIA_PLEX_TV_SECTION";
 const PLEX_MOVIES_SECTION: &str = "MEDIA_PLEX_MOVIES_SECTION";
@@ -124,7 +143,12 @@ impl DatabaseConfig {
 
     pub fn load_from(source: &impl ConfigSource) -> Result<Self, ConfigError> {
         Ok(Self {
-            database_url: read_secret(source, DATABASE_URL_FILE, SecretKind::DatabaseUrl)?,
+            database_url: read_secret(
+                source,
+                DATABASE_URL,
+                DATABASE_URL_FILE,
+                SecretKind::DatabaseUrl,
+            )?,
         })
     }
 
@@ -198,9 +222,14 @@ impl ServerConfig {
         Ok(Self {
             database_url: database.database_url,
             listen_addr,
-            primary_token: read_secret(source, PRIMARY_TOKEN_FILE, SecretKind::Token)?,
-            secondary_token: read_secret(source, SECONDARY_TOKEN_FILE, SecretKind::Token)?,
-            runner_token: read_secret(source, RUNNER_TOKEN_FILE, SecretKind::Token)?,
+            primary_token: read_secret(source, PRIMARY_TOKEN, PRIMARY_TOKEN_FILE, SecretKind::Token)?,
+            secondary_token: read_secret(
+                source,
+                SECONDARY_TOKEN,
+                SECONDARY_TOKEN_FILE,
+                SecretKind::Token,
+            )?,
+            runner_token: read_secret(source, RUNNER_TOKEN, RUNNER_TOKEN_FILE, SecretKind::Token)?,
             lease_ttl: time::Duration::seconds(lease_ttl_seconds),
             notifications: NotificationConfig::load_optional(source)?,
             rezka,
@@ -289,19 +318,21 @@ pub struct NotificationConfig {
 
 impl NotificationConfig {
     fn load_optional(source: &impl ConfigSource) -> Result<Option<Self>, ConfigError> {
-        let primary_file = source.var_os(PRIMARY_WEBHOOK_HMAC_FILE);
-        let secondary_file = source.var_os(SECONDARY_WEBHOOK_HMAC_FILE);
-        if primary_file.is_none() && secondary_file.is_none() {
+        let primary_configured = source.var_os(PRIMARY_WEBHOOK_HMAC_FILE).is_some()
+            || source.var_os(PRIMARY_WEBHOOK_HMAC).is_some();
+        let secondary_configured = source.var_os(SECONDARY_WEBHOOK_HMAC_FILE).is_some()
+            || source.var_os(SECONDARY_WEBHOOK_HMAC).is_some();
+        if !primary_configured && !secondary_configured {
             return Ok(None);
         }
-        if primary_file.is_none() {
+        if !primary_configured {
             return Err(ConfigError::MissingEnvironment {
-                name: PRIMARY_WEBHOOK_HMAC_FILE,
+                name: PRIMARY_WEBHOOK_HMAC,
             });
         }
-        if secondary_file.is_none() {
+        if !secondary_configured {
             return Err(ConfigError::MissingEnvironment {
-                name: SECONDARY_WEBHOOK_HMAC_FILE,
+                name: SECONDARY_WEBHOOK_HMAC,
             });
         }
         let primary_endpoint = optional_environment(source, PRIMARY_WEBHOOK_URL)?
@@ -311,8 +342,18 @@ impl NotificationConfig {
         Ok(Some(Self {
             primary_endpoint: parse_webhook_endpoint(&primary_endpoint, PRIMARY_WEBHOOK_URL)?,
             secondary_endpoint: parse_webhook_endpoint(&secondary_endpoint, SECONDARY_WEBHOOK_URL)?,
-            primary_secret: read_secret(source, PRIMARY_WEBHOOK_HMAC_FILE, SecretKind::Token)?,
-            secondary_secret: read_secret(source, SECONDARY_WEBHOOK_HMAC_FILE, SecretKind::Token)?,
+            primary_secret: read_secret(
+                source,
+                PRIMARY_WEBHOOK_HMAC,
+                PRIMARY_WEBHOOK_HMAC_FILE,
+                SecretKind::Token,
+            )?,
+            secondary_secret: read_secret(
+                source,
+                SECONDARY_WEBHOOK_HMAC,
+                SECONDARY_WEBHOOK_HMAC_FILE,
+                SecretKind::Token,
+            )?,
         }))
     }
 
@@ -378,7 +419,7 @@ impl ClientConfig {
 
         Ok(Self {
             service_url,
-            token: read_secret(source, TOKEN_FILE, SecretKind::Token)?,
+            token: read_secret(source, TOKEN, TOKEN_FILE, SecretKind::Token)?,
         })
     }
 
@@ -408,6 +449,7 @@ pub struct RunnerConfig {
     vaapi_device: PathBuf,
     qbittorrent: Option<QbittorrentCompositionConfig>,
     gluetun: Option<GluetunCompositionConfig>,
+    credential_broker: CredentialBrokerCompositionConfig,
 }
 
 impl RunnerConfig {
@@ -419,7 +461,7 @@ impl RunnerConfig {
         let service = ClientConfig::load_from(source)?;
         Ok(Self {
             service,
-            rezka: load_rezka_config(source)?,
+            rezka: load_rezka_runner_config(source)?,
             storage_roots: media_runner::StorageRoots::new(
                 optional_environment(source, STAGING_ROOT)?
                     .unwrap_or_else(|| "/staging/rezka".to_owned()),
@@ -442,6 +484,7 @@ impl RunnerConfig {
                 .var_os(GLUETUN_URL)
                 .map(|_| load_gluetun_config(source))
                 .transpose()?,
+            credential_broker: load_credential_broker_config(source)?,
         })
     }
 
@@ -466,6 +509,27 @@ impl RunnerConfig {
     }
     pub const fn gluetun(&self) -> Option<&GluetunCompositionConfig> {
         self.gluetun.as_ref()
+    }
+    pub const fn credential_broker(&self) -> &CredentialBrokerCompositionConfig {
+        &self.credential_broker
+    }
+}
+
+pub struct CredentialBrokerCompositionConfig {
+    base_url: url::Url,
+    token: SecretString,
+    private_http_hosts: Vec<String>,
+}
+
+impl CredentialBrokerCompositionConfig {
+    pub const fn base_url(&self) -> &url::Url {
+        &self.base_url
+    }
+    pub const fn token(&self) -> &SecretString {
+        &self.token
+    }
+    pub fn private_http_hosts(&self) -> &[String] {
+        &self.private_http_hosts
     }
 }
 
@@ -568,7 +632,12 @@ fn load_prowlarr_config(
     }
     Ok(ProwlarrCompositionConfig {
         base_url,
-        api_key: read_secret(source, PROWLARR_API_KEY_FILE, SecretKind::Token)?,
+        api_key: read_secret(
+            source,
+            PROWLARR_API_KEY,
+            PROWLARR_API_KEY_FILE,
+            SecretKind::Token,
+        )?,
     })
 }
 
@@ -580,7 +649,12 @@ fn load_qbittorrent_config(
         tv_category: required_environment(source, QBITTORRENT_TV_CATEGORY)?,
         movies_category: required_environment(source, QBITTORRENT_MOVIES_CATEGORY)?,
         username: required_environment(source, QBITTORRENT_USERNAME)?,
-        password: read_secret(source, QBITTORRENT_PASSWORD_FILE, SecretKind::Token)?,
+        password: read_secret(
+            source,
+            QBITTORRENT_PASSWORD,
+            QBITTORRENT_PASSWORD_FILE,
+            SecretKind::Token,
+        )?,
     })
 }
 
@@ -594,7 +668,7 @@ fn load_plex_config(source: &impl ConfigSource) -> Result<PlexCompositionConfig,
     };
     Ok(PlexCompositionConfig {
         base_url: parse_service_url(source, PLEX_URL)?,
-        token: read_secret(source, PLEX_TOKEN_FILE, SecretKind::Token)?,
+        token: read_secret(source, PLEX_TOKEN, PLEX_TOKEN_FILE, SecretKind::Token)?,
         tv_section: section(PLEX_TV_SECTION)?,
         movies_section: section(PLEX_MOVIES_SECTION)?,
     })
@@ -605,7 +679,12 @@ fn load_gluetun_config(
 ) -> Result<GluetunCompositionConfig, ConfigError> {
     Ok(GluetunCompositionConfig {
         base_url: parse_service_url(source, GLUETUN_URL)?,
-        api_key: read_secret(source, GLUETUN_API_KEY_FILE, SecretKind::Token)?,
+        api_key: read_secret(
+            source,
+            GLUETUN_API_KEY,
+            GLUETUN_API_KEY_FILE,
+            SecretKind::Token,
+        )?,
     })
 }
 
@@ -628,6 +707,24 @@ fn parse_service_url(
 }
 
 fn load_rezka_config(source: &impl ConfigSource) -> Result<RezkaCompositionConfig, ConfigError> {
+    load_rezka_config_with_credentials(source, true)
+}
+
+fn load_rezka_runner_config(
+    source: &impl ConfigSource,
+) -> Result<RezkaCompositionConfig, ConfigError> {
+    load_rezka_config_with_credentials(source, false)
+}
+
+fn load_rezka_config_with_credentials(
+    source: &impl ConfigSource,
+    credentials: bool,
+) -> Result<RezkaCompositionConfig, ConfigError> {
+    let credentials = credentials
+        || source.var_os(REZKA_USERNAME).is_some()
+        || source.var_os(REZKA_USERNAME_FILE).is_some()
+        || source.var_os(REZKA_PASSWORD).is_some()
+        || source.var_os(REZKA_PASSWORD_FILE).is_some();
     let mirrors = parse_rezka_mirrors(&required_environment(source, REZKA_MIRRORS)?)?;
     let session_probe_url =
         parse_rezka_probe_url(&required_environment(source, REZKA_SESSION_PROBE_URL)?)?;
@@ -650,12 +747,60 @@ fn load_rezka_config(source: &impl ConfigSource) -> Result<RezkaCompositionConfi
             source,
             REZKA_SESSION_INVALID_MARKERS_JSON,
         )?)?,
-        username: read_secret(source, REZKA_USERNAME_FILE, SecretKind::RezkaUsername)?,
-        password: read_secret(source, REZKA_PASSWORD_FILE, SecretKind::RezkaPassword)?,
+        username: credentials
+            .then(|| {
+                read_secret(
+                    source,
+                    REZKA_USERNAME,
+                    REZKA_USERNAME_FILE,
+                    SecretKind::RezkaUsername,
+                )
+            })
+            .transpose()?,
+        password: credentials
+            .then(|| {
+                read_secret(
+                    source,
+                    REZKA_PASSWORD,
+                    REZKA_PASSWORD_FILE,
+                    SecretKind::RezkaPassword,
+                )
+            })
+            .transpose()?,
         cookie_key: read_rezka_cookie_key(source)?,
         session_store_path: required_path_environment(source, REZKA_SESSION_STORE_FILE)?,
         user_agent: optional_environment(source, REZKA_USER_AGENT)?
             .unwrap_or_else(|| DEFAULT_REZKA_USER_AGENT.to_owned()),
+    })
+}
+
+fn load_credential_broker_config(
+    source: &impl ConfigSource,
+) -> Result<CredentialBrokerCompositionConfig, ConfigError> {
+    let base_url = required_environment(source, CREDENTIAL_BROKER_URL)?
+        .parse::<url::Url>()
+        .map_err(|_| ConfigError::InvalidEnvironment {
+            name: CREDENTIAL_BROKER_URL,
+        })?;
+    let private_http_hosts = optional_environment(source, CREDENTIAL_BROKER_PRIVATE_HTTP_HOSTS)?
+        .map(|hosts| {
+            hosts
+                .split(',')
+                .map(str::trim)
+                .filter(|host| !host.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(CredentialBrokerCompositionConfig {
+        base_url,
+        token: read_secret(
+            source,
+            CREDENTIAL_BROKER_TOKEN,
+            CREDENTIAL_BROKER_TOKEN_FILE,
+            SecretKind::Token,
+        )?,
+        private_http_hosts,
     })
 }
 
@@ -681,8 +826,8 @@ pub struct RezkaCompositionConfig {
     session_probe_url: url::Url,
     session_valid_markers: Vec<String>,
     session_invalid_markers: Vec<String>,
-    username: SecretString,
-    password: SecretString,
+    username: Option<SecretString>,
+    password: Option<SecretString>,
     cookie_key: SecretBox<[u8; 32]>,
     session_store_path: PathBuf,
     user_agent: String,
@@ -710,13 +855,17 @@ impl RezkaCompositionConfig {
     }
 
     #[must_use]
-    pub const fn username(&self) -> &SecretString {
-        &self.username
+    pub fn username(&self) -> &SecretString {
+        self.username
+            .as_ref()
+            .expect("search Rezka config has credentials")
     }
 
     #[must_use]
-    pub const fn password(&self) -> &SecretString {
-        &self.password
+    pub fn password(&self) -> &SecretString {
+        self.password
+            .as_ref()
+            .expect("search Rezka config has credentials")
     }
 
     #[must_use]
@@ -762,10 +911,12 @@ enum SecretKind {
 
 fn read_secret(
     source: &impl ConfigSource,
-    name: &'static str,
+    direct_name: &'static str,
+    file_name: &'static str,
     kind: SecretKind,
 ) -> Result<SecretString, ConfigError> {
-    let contents = read_secret_bytes(source, name, kind.max_bytes())?;
+    let (contents, configured_name) =
+        read_secret_bytes(source, direct_name, file_name, kind.max_bytes())?;
 
     let valid = match kind {
         SecretKind::DatabaseUrl => {
@@ -792,42 +943,58 @@ fn read_secret(
         }
     };
     if !valid {
-        return Err(ConfigError::InvalidSecret { name });
+        return Err(ConfigError::InvalidSecret {
+            name: configured_name,
+        });
     }
-    let contents = String::from_utf8(contents).map_err(|_| ConfigError::InvalidSecret { name })?;
+    let contents = String::from_utf8(contents).map_err(|_| ConfigError::InvalidSecret {
+        name: configured_name,
+    })?;
     Ok(SecretString::from(contents))
 }
 
 fn read_secret_bytes(
     source: &impl ConfigSource,
-    name: &'static str,
+    direct_name: &'static str,
+    file_name: &'static str,
     max_bytes: usize,
-) -> Result<Vec<u8>, ConfigError> {
-    let path = source
-        .var_os(name)
-        .ok_or(ConfigError::MissingEnvironment { name })?;
-    if path.is_empty() {
-        return Err(ConfigError::InvalidEnvironment { name });
+) -> Result<(Vec<u8>, &'static str), ConfigError> {
+    if let Some(path) = source.var_os(file_name) {
+        if path.is_empty() {
+            return Err(ConfigError::InvalidEnvironment { name: file_name });
+        }
+        let read_limit = max_bytes
+            .checked_add(2)
+            .ok_or(ConfigError::InvalidSecret { name: file_name })?;
+        let mut contents = source
+            .read_bounded(Path::new(&path), read_limit)
+            .map_err(|error| ConfigError::UnreadableSecret {
+                name: file_name,
+                kind: error.kind(),
+            })?;
+        strip_one_final_line_ending(&mut contents);
+        return Ok((contents, file_name));
     }
-    let read_limit = max_bytes
-        .checked_add(2)
-        .ok_or(ConfigError::InvalidSecret { name })?;
-    let mut contents = source
-        .read_bounded(Path::new(&path), read_limit)
-        .map_err(|error| ConfigError::UnreadableSecret {
-            name,
-            kind: error.kind(),
-        })?;
-    strip_one_final_line_ending(&mut contents);
-    Ok(contents)
+
+    let value = source
+        .var_os(direct_name)
+        .ok_or(ConfigError::MissingEnvironment { name: direct_name })?
+        .into_string()
+        .map_err(|_| ConfigError::InvalidEnvironment { name: direct_name })?;
+    if value.len() > max_bytes {
+        return Err(ConfigError::InvalidSecret { name: direct_name });
+    }
+    Ok((value.into_bytes(), direct_name))
 }
 
 fn read_rezka_cookie_key(source: &impl ConfigSource) -> Result<SecretBox<[u8; 32]>, ConfigError> {
-    let encoded = SecretBox::new(Box::new(read_secret_bytes(
+    let (encoded, _configured_name) = read_secret_bytes(
         source,
+        REZKA_COOKIE_KEY,
         REZKA_COOKIE_KEY_FILE,
         MAX_REZKA_COOKIE_KEY_ENCODED_BYTES,
-    )?));
+    )?;
+    let encoded = SecretBox::new(Box::new(encoded));
     let decoded = STANDARD.decode(encoded.expose_secret()).map_err(|_| {
         ConfigError::InvalidConfiguration {
             message: "Rezka cookie key must be base64",

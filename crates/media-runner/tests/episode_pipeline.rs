@@ -9,6 +9,7 @@ use media_runner::{
     Cancellation, EpisodeOutcome, EpisodePipeline, EpisodeWork, FileSystemPort, GIB, HttpPort,
     MediaProbe, PlexCheck, PlexExpectation, PlexObservation, ProcessCommand, ProcessPort,
     ProviderKind, RunnerPortError, RunnerServicePort, SensitiveUrl, StageReporter, SubtitleTrack,
+    VideoSourceKind,
 };
 
 #[derive(Default)]
@@ -242,6 +243,7 @@ fn work() -> EpisodeWork {
         source_url: Some(
             SensitiveUrl::parse("https://cdn.invalid/video?token=secret", "video").unwrap(),
         ),
+        source_kind: VideoSourceKind::Mp4,
         staging_directory: PathBuf::from("/staging/job-1/s01e01"),
         source_partial: PathBuf::from("/staging/job-1/s01e01/source.partial"),
         encoded_partial: PathBuf::from("/staging/job-1/s01e01/encoded.partial.mkv"),
@@ -302,6 +304,46 @@ async fn rezka_episode_runs_one_pipeline_and_publishes_video_last() {
     assert_eq!(http.video_offsets.lock().unwrap().as_slice(), &[0]);
     let published = filesystem.published.lock().unwrap();
     assert_eq!(published.last(), Some(&work.final_video));
+}
+
+#[tokio::test]
+async fn rezka_hls_fallback_uses_ffmpeg_ingest_without_http_range_download() {
+    let mut work = work();
+    work.source_kind = VideoSourceKind::Hls;
+    let filesystem = Arc::new(FakeFs::with_available(50 * GIB));
+    let http = Arc::new(FakeHttp::default());
+    let process = Arc::new(FakeProcess {
+        probes: Mutex::new(VecDeque::from([probe("h264"), probe("hevc")])),
+        commands: Mutex::default(),
+        filesystem: filesystem.clone(),
+    });
+    let service = Arc::new(FakeService {
+        checks: Mutex::new(VecDeque::from([matched(&work.plex)])),
+        scans: Mutex::default(),
+    });
+    let reporter = RecordingReporter::default();
+    let pipeline = EpisodePipeline::new(filesystem, http.clone(), process.clone(), service);
+
+    let outcome = pipeline
+        .run(&work, &NeverCancelled, &reporter)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, EpisodeOutcome::Completed);
+    assert!(http.video_offsets.lock().unwrap().is_empty());
+    let commands = process.commands.lock().unwrap();
+    assert_eq!(commands.len(), 2);
+    assert!(
+        commands[0]
+            .args()
+            .windows(2)
+            .any(|args| args == ["-c", "copy"])
+    );
+    assert!(!format!("{:?}", commands[0]).contains("token=secret"));
+    assert_eq!(
+        reporter.stages.lock().unwrap().as_slice(),
+        &["download", "transcode"]
+    );
 }
 
 #[tokio::test]

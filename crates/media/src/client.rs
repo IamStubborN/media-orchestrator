@@ -147,6 +147,20 @@ impl HttpClient {
         .await
     }
 
+    pub async fn refresh_rezka_session(
+        &self,
+        credential_request_id: String,
+    ) -> Result<String, ClientError> {
+        self.execute(
+            self.request(reqwest::Method::POST, "v1/rezka/session/refresh")?
+                .header(IDEMPOTENCY_KEY_HEADER, generated_identifier())
+                .json(&media_contract::RezkaSessionRefreshRequest {
+                    credential_request_id,
+                }),
+        )
+        .await
+    }
+
     fn request(
         &self,
         method: reqwest::Method,

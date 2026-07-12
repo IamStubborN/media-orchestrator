@@ -136,6 +136,54 @@ fn json_response(status: StatusCode, body: &'static str) -> Response<Body> {
 }
 
 #[tokio::test]
+async fn rezka_session_refresh_uses_the_credential_request_endpoint_without_echoing_capability() {
+    let router = Router::new().route(
+        "/v1/rezka/session/refresh",
+        any(|request: Request| async move {
+            let authorized = request
+                .headers()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                == Some("Bearer cli-secret");
+            let body = to_bytes(request.into_body(), 4096).await.unwrap();
+            let valid_body = serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+                == serde_json::json!({"credential_request_id":"request-secret-42"});
+            if authorized && valid_body {
+                json_response(
+                    StatusCode::CREATED,
+                    r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","provider":"rezka","result_ref":"selection:018f3f86","state":"queued","notify_scope":"initiator"}"#,
+                )
+            } else {
+                json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#)
+            }
+        }),
+    );
+    let server = TestServer::start(router).await;
+    let token_file = SecretFile::new("cli-secret\n");
+
+    let output = command_output(command(
+        &server,
+        &token_file,
+        [
+            "rezka",
+            "session",
+            "refresh",
+            "--credential-request",
+            "request-secret-42",
+            "--json",
+        ],
+    ))
+    .await
+    .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("selection:018f3f86"));
+    assert!(!stdout.contains("request-secret-42"));
+    server.stop().await;
+}
+
+#[tokio::test]
 async fn jobs_create_uses_auth_generated_headers_and_stable_json() {
     let router = Router::new().route(
         "/v1/jobs",

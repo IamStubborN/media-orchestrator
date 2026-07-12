@@ -11,21 +11,35 @@ use url::Url;
 use crate::{
     PublicImageUrl, RezkaError,
     catalog::{
-        CatalogContinuation, CatalogEntry, CatalogPage, CatalogQuery, MAX_CATALOG_ENTRIES,
-        RezkaMediaKind, RezkaTitleId, SeriesLifecycleStatus, TitleDetails, TitleLocator,
-        Translation, TranslationId, TranslationKey, has_malformed_percent_encoding,
-        invalid_catalog, path_has_prohibited_segment,
+        CatalogContinuation, CatalogEntry, CatalogPage, CatalogQuery, FranchiseTitle,
+        MAX_CATALOG_ENTRIES, RatingSource, RezkaMediaKind, RezkaTitleId, SeriesLifecycleStatus,
+        TitleDetails, TitleLocator, TitleRating, Translation, TranslationId, TranslationKey,
+        has_malformed_percent_encoding, invalid_catalog, path_has_prohibited_segment,
     },
     mirror::same_origin,
 };
 
 const MAX_NORMALIZED_TEXT_BYTES: usize = 4_096;
 const MAX_TRANSLATIONS: usize = 128;
+const MAX_METADATA_VALUES: usize = 64;
+const MAX_FRANCHISE_TITLES: usize = 64;
 
 pub fn parse_catalog_page(
     html: &str,
     query: &CatalogQuery,
     selected_origin: &Url,
+) -> Result<CatalogPage, RezkaError> {
+    parse_catalog_document(html, selected_origin, Some(query))
+}
+
+pub fn parse_browse_page(html: &str, selected_origin: &Url) -> Result<CatalogPage, RezkaError> {
+    parse_catalog_document(html, selected_origin, None)
+}
+
+fn parse_catalog_document(
+    html: &str,
+    selected_origin: &Url,
+    query: Option<&CatalogQuery>,
 ) -> Result<CatalogPage, RezkaError> {
     let document = Html::parse_document(html);
     let item_selector = selector("div.b-content__inline_items > div.b-content__inline_item");
@@ -50,7 +64,10 @@ pub fn parse_catalog_page(
         )?);
     }
 
-    let continuation = parse_continuation(document.select(&next_selector), query, selected_origin)?;
+    let continuation = match query {
+        Some(query) => parse_continuation(document.select(&next_selector), query, selected_origin)?,
+        None => None,
+    };
     Ok(CatalogPage::new(entries, continuation))
 }
 
@@ -71,6 +88,13 @@ pub fn parse_title_page(
     let original_title = optional_element_text(&document, ".b-post__origtitle")?;
     let release_year = parse_release_year(&document)?;
     let series_lifecycle_status = parse_series_lifecycle_status(&document, kind)?;
+    let description = optional_element_text(&document, ".b-post__description_text")?;
+    let countries = parse_info_list(&document, &["country", "страна", "країна"])?;
+    let genres = parse_info_list(&document, &["genre", "жанр"])?;
+    let duration_minutes = parse_duration(&document)?;
+    let age_rating = parse_age_rating(&document)?;
+    let ratings = parse_ratings(&document)?;
+    let franchise = parse_franchise(&document)?;
     let thumbnail = parse_title_thumbnail(&document, selected_origin)?;
     let translations = parse_translations(&document, kind, &initializations)?;
     let default_translation = parse_default_translation(&translations, kind, &initializations)?;
@@ -83,10 +107,215 @@ pub fn parse_title_page(
         release_year,
         kind,
         series_lifecycle_status,
+        description,
+        countries,
+        genres,
+        duration_minutes,
+        age_rating,
+        ratings,
+        franchise,
         thumbnail,
         translations,
         default_translation,
     ))
+}
+
+fn parse_info_list(document: &Html, labels: &[&str]) -> Result<Vec<String>, RezkaError> {
+    let Some(value_cell) = find_info_value(document, labels)? else {
+        return Ok(Vec::new());
+    };
+    let links = value_cell.select(&selector("a")).collect::<Vec<_>>();
+    let mut values = Vec::new();
+    if links.is_empty() {
+        if let Some(value) = normalized_text(value_cell.text())? {
+            for part in value.split(',') {
+                if let Some(part) = normalized_text(std::iter::once(part))? {
+                    push_bounded_metadata(&mut values, part)?;
+                }
+            }
+        }
+    } else {
+        for link in links {
+            if let Some(value) = normalized_text(link.text())? {
+                push_bounded_metadata(&mut values, value)?;
+            }
+        }
+    }
+    Ok(values)
+}
+
+fn push_bounded_metadata(values: &mut Vec<String>, value: String) -> Result<(), RezkaError> {
+    if values.len() == MAX_METADATA_VALUES {
+        return Err(invalid_catalog("title metadata value limit exceeded"));
+    }
+    if !values.contains(&value) {
+        values.push(value);
+    }
+    Ok(())
+}
+
+fn find_info_value<'a>(
+    document: &'a Html,
+    labels: &[&str],
+) -> Result<Option<ElementRef<'a>>, RezkaError> {
+    let row_selector = selector(".b-content__main .b-post__info tr");
+    let cell_selector = selector("td");
+    for row in document.select(&row_selector) {
+        let cells = row.select(&cell_selector).collect::<Vec<_>>();
+        if cells.len() < 2 {
+            continue;
+        }
+        let label = normalized_text(cells[0].text())?.unwrap_or_default();
+        let label = normalize_info_label(&label);
+        if labels.iter().any(|candidate| label == *candidate) {
+            return Ok(cells.last().copied());
+        }
+    }
+    Ok(None)
+}
+
+fn normalize_info_label(value: &str) -> String {
+    value
+        .trim()
+        .trim_end_matches([':', '：'])
+        .trim()
+        .to_lowercase()
+}
+
+fn parse_duration(document: &Html) -> Result<Option<u16>, RezkaError> {
+    let Some(cell) = find_info_value(
+        document,
+        &["duration", "время", "продолжительность", "тривалість"],
+    )?
+    else {
+        return Ok(None);
+    };
+    let value = normalized_text(cell.text())?
+        .unwrap_or_default()
+        .to_lowercase();
+    let numbers = decimal_numbers(&value)?;
+    let minutes = match numbers.as_slice() {
+        [] => return Ok(None),
+        [number] if has_hour_marker(&value) => number
+            .checked_mul(60)
+            .ok_or_else(|| invalid_catalog("invalid title duration"))?,
+        [minutes] => *minutes,
+        [hours, minutes, ..] => hours
+            .checked_mul(60)
+            .and_then(|value| value.checked_add(*minutes))
+            .ok_or_else(|| invalid_catalog("invalid title duration"))?,
+    };
+    u16::try_from(minutes)
+        .ok()
+        .filter(|minutes| *minutes > 0 && *minutes <= 24 * 60)
+        .map(Some)
+        .ok_or_else(|| invalid_catalog("invalid title duration"))
+}
+
+fn has_hour_marker(value: &str) -> bool {
+    value.split_whitespace().any(|word| {
+        matches!(
+            word.trim_matches(|character: char| !character.is_alphabetic()),
+            "h" | "hr"
+                | "hrs"
+                | "hour"
+                | "hours"
+                | "ч"
+                | "час"
+                | "часа"
+                | "часов"
+                | "год"
+                | "година"
+                | "години"
+                | "годин"
+        )
+    })
+}
+
+fn parse_age_rating(document: &Html) -> Result<Option<u8>, RezkaError> {
+    let Some(cell) = find_info_value(document, &["age", "возраст", "вік"])? else {
+        return Ok(None);
+    };
+    let value = normalized_text(cell.text())?.unwrap_or_default();
+    let Some(age) = decimal_numbers(&value)?.first().copied() else {
+        return Ok(None);
+    };
+    u8::try_from(age)
+        .ok()
+        .filter(|age| *age <= 21)
+        .map(Some)
+        .ok_or_else(|| invalid_catalog("invalid title age rating"))
+}
+
+fn decimal_numbers(value: &str) -> Result<Vec<u32>, RezkaError> {
+    let mut numbers = Vec::new();
+    for part in value.split(|character: char| !character.is_ascii_digit()) {
+        if part.is_empty() {
+            continue;
+        }
+        if numbers.len() == 4 {
+            return Err(invalid_catalog("title numeric metadata limit exceeded"));
+        }
+        numbers.push(
+            part.parse::<u32>()
+                .map_err(|_| invalid_catalog("invalid title numeric metadata"))?,
+        );
+    }
+    Ok(numbers)
+}
+
+fn parse_ratings(document: &Html) -> Result<Vec<TitleRating>, RezkaError> {
+    let selectors = [
+        (".b-post__rating_kp .num", RatingSource::Kinopoisk),
+        (".b-post__rating_imdb .num", RatingSource::Imdb),
+    ];
+    let mut ratings = Vec::new();
+    for (selector_value, source) in selectors {
+        let Some(value) = optional_element_text(document, selector_value)? else {
+            continue;
+        };
+        let value = value
+            .replace(',', ".")
+            .parse::<f32>()
+            .map_err(|_| invalid_catalog("invalid title rating"))?;
+        if !value.is_finite() || !(0.0..=10.0).contains(&value) {
+            return Err(invalid_catalog("invalid title rating"));
+        }
+        ratings.push(TitleRating::new(source, value));
+    }
+    Ok(ratings)
+}
+
+fn parse_franchise(document: &Html) -> Result<Vec<FranchiseTitle>, RezkaError> {
+    let item_selector = selector(".b-post__partcontent_item[href]");
+    let title_selector = selector(".b-post__partcontent_item_title");
+    let mut titles = Vec::new();
+    for item in document.select(&item_selector) {
+        if titles.len() == MAX_FRANCHISE_TITLES {
+            return Err(invalid_catalog("franchise title limit exceeded"));
+        }
+        let href = item
+            .attr("href")
+            .ok_or_else(|| invalid_catalog("franchise title missing locator"))?;
+        let title = item
+            .select(&title_selector)
+            .next()
+            .map(|element| normalized_text(element.text()))
+            .transpose()?
+            .flatten()
+            .or(normalized_text(item.text())?)
+            .ok_or_else(|| invalid_catalog("franchise title missing title"))?;
+        let is_current = item.value().classes().any(|class| class == "current");
+        titles.push(FranchiseTitle::new(
+            TitleLocator::new(href)?,
+            title,
+            is_current,
+        ));
+    }
+    if titles.iter().filter(|title| title.is_current()).count() > 1 {
+        return Err(invalid_catalog("multiple current franchise titles"));
+    }
+    Ok(titles)
 }
 
 fn parse_series_lifecycle_status(

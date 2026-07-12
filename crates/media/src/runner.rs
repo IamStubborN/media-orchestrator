@@ -220,6 +220,7 @@ pub struct MediaJobExecutor {
     torrent_tv_category: String,
     torrent_movies_category: String,
     gluetun: Option<Arc<media_integrations::gluetun::GluetunClient>>,
+    credential_broker: Arc<media_integrations::credential_broker::CredentialBrokerClient>,
     roots: media_runner::StorageRoots,
     vaapi_device: std::path::PathBuf,
 }
@@ -260,6 +261,7 @@ impl MediaJobExecutor {
         pipeline: media_runner::EpisodePipeline,
         torrent: TorrentRouting,
         gluetun: Option<Arc<media_integrations::gluetun::GluetunClient>>,
+        credential_broker: Arc<media_integrations::credential_broker::CredentialBrokerClient>,
         roots: media_runner::StorageRoots,
         vaapi_device: std::path::PathBuf,
     ) -> Self {
@@ -270,6 +272,7 @@ impl MediaJobExecutor {
             torrent_tv_category: torrent.tv_category,
             torrent_movies_category: torrent.movies_category,
             gluetun,
+            credential_broker,
             roots,
             vaapi_device,
         }
@@ -281,6 +284,12 @@ impl MediaJobExecutor {
         control: &RunnerControl,
     ) -> Result<ExecutionOutcome, RunnerError> {
         match lease.execution.as_ref().ok_or(RunnerError::Execution)? {
+            media_contract::ExecutionSelectionDto::RezkaSessionRefresh {
+                credential_request_id,
+            } => {
+                self.execute_rezka_session_refresh(credential_request_id)
+                    .await
+            }
             media_contract::ExecutionSelectionDto::Rezka {
                 locator,
                 title_id,
@@ -332,6 +341,37 @@ impl MediaJobExecutor {
         }
     }
 
+    async fn execute_rezka_session_refresh(
+        &self,
+        credential_request_id: &str,
+    ) -> Result<ExecutionOutcome, RunnerError> {
+        let credentials = self
+            .credential_broker
+            .resolve(credential_request_id)
+            .await
+            .map_err(|_| RunnerError::Execution)?;
+        let credentials = rezka_client::RezkaCredentials {
+            username: secrecy::SecretString::from(credentials.username),
+            password: credentials.password,
+        };
+        let mut prepared = self.rezka.lock().await;
+        let crate::composition::PreparedRunnerSession {
+            client,
+            probe,
+            store,
+            ..
+        } = &mut *prepared;
+        client
+            .ensure_authenticated(&credentials, probe)
+            .await
+            .map_err(|_| RunnerError::Execution)?;
+        let snapshot = client
+            .export_session()
+            .map_err(|_| RunnerError::Execution)?;
+        store.save(&snapshot).map_err(|_| RunnerError::Execution)?;
+        Ok(ExecutionOutcome::Completed)
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn execute_rezka(
         &self,
@@ -352,12 +392,12 @@ impl MediaJobExecutor {
         let mut prepared = self.rezka.lock().await;
         let crate::composition::PreparedRunnerSession {
             client,
-            credentials,
             probe,
             store: _,
+            ..
         } = &mut *prepared;
         client
-            .ensure_authenticated(credentials, probe)
+            .validate_session(probe)
             .await
             .map_err(|_| RunnerError::Execution)?;
         let locator =
@@ -522,7 +562,18 @@ impl MediaJobExecutor {
             .endpoints()
             .iter()
             .find(|endpoint| endpoint.kind() == rezka_client::StreamKind::Mp4)
+            .or_else(|| {
+                manifest
+                    .preferred_variant()
+                    .endpoints()
+                    .iter()
+                    .find(|endpoint| endpoint.kind() == rezka_client::StreamKind::Hls)
+            })
             .ok_or(RunnerError::Execution)?;
+        let source_kind = match endpoint.kind() {
+            rezka_client::StreamKind::Mp4 => media_runner::VideoSourceKind::Mp4,
+            rezka_client::StreamKind::Hls => media_runner::VideoSourceKind::Hls,
+        };
         let source = endpoint.url().with_url(|url| url.as_str().to_owned());
         let subtitles = manifest
             .subtitles()
@@ -554,6 +605,7 @@ impl MediaJobExecutor {
                 media_runner::SensitiveUrl::parse(&source, "rezka-video")
                     .map_err(|_| RunnerError::Execution)?,
             ),
+            source_kind,
             staging_directory: staging.clone(),
             source_partial: staging.join("source.partial"),
             encoded_partial: staging.join("encoded.partial.mkv"),
@@ -672,6 +724,7 @@ impl MediaJobExecutor {
                     |(season, episode)| format!("s{season:02}e{episode:02}"),
                 ),
                 source_url: None,
+                source_kind: media_runner::VideoSourceKind::Mp4,
                 staging_directory: staging.clone(),
                 source_partial: staging.join("unused.source"),
                 encoded_partial: staging.join("unused.encoded"),
@@ -718,7 +771,10 @@ impl JobExecutor for MediaJobExecutor {
         let current_job_id = lease.job.id.to_string();
         let uses_rezka_vpn = matches!(
             &lease.execution,
-            Some(media_contract::ExecutionSelectionDto::Rezka { .. })
+            Some(
+                media_contract::ExecutionSelectionDto::Rezka { .. }
+                    | media_contract::ExecutionSelectionDto::RezkaSessionRefresh { .. }
+            )
         );
         if uses_rezka_vpn {
             // Only create the staging directory here. Stamping it terminal is

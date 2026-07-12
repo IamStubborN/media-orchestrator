@@ -3,10 +3,12 @@ use std::{path::PathBuf, sync::Arc};
 use crate::{
     Cancellation, FileSystemPort, GIB, HttpPort, MediaProbe, PeakEstimate, PlexCheck,
     PlexExpectation, ProcessPort, RunnerPortError, RunnerServicePort, StageReporter,
-    StoragePreflight, build_rezka_vaapi_command, validate_plex_observation, validate_webvtt,
+    StoragePreflight, build_hls_ingest_command, build_rezka_vaapi_command,
+    validate_plex_observation, validate_webvtt,
 };
 
 const DEFAULT_RESERVE_BYTES: u64 = 20 * GIB;
+const HLS_SOURCE_ESTIMATE_BYTES: u64 = 10 * GIB;
 
 #[derive(Clone)]
 pub struct SensitiveUrl {
@@ -58,6 +60,12 @@ pub enum ProviderKind {
     Torrent,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum VideoSourceKind {
+    Mp4,
+    Hls,
+}
+
 #[derive(Debug, Clone)]
 pub struct SubtitleTrack {
     pub id: String,
@@ -72,6 +80,7 @@ pub struct EpisodeWork {
     pub job_id: String,
     pub episode_id: String,
     pub source_url: Option<SensitiveUrl>,
+    pub source_kind: VideoSourceKind,
     pub staging_directory: PathBuf,
     pub source_partial: PathBuf,
     pub encoded_partial: PathBuf,
@@ -136,7 +145,10 @@ impl EpisodePipeline {
                 .source_url
                 .as_ref()
                 .ok_or(RunnerPortError::InvalidWork)?;
-            let source_bytes = self.http.probe_video_size(source_url).await?;
+            let source_bytes = match work.source_kind {
+                VideoSourceKind::Mp4 => self.http.probe_video_size(source_url).await?,
+                VideoSourceKind::Hls => HLS_SOURCE_ESTIMATE_BYTES,
+            };
             self.filesystem
                 .create_dir_all(&work.staging_directory)
                 .await?;
@@ -156,33 +168,43 @@ impl EpisodePipeline {
                 .ok_or(RunnerPortError::InvalidWork)?;
             self.filesystem.create_dir_all(final_parent).await?;
 
-            let partial_bytes = self
-                .filesystem
-                .file_len(&work.source_partial)
-                .await?
-                .unwrap_or(0);
-            // A prior attempt may have completed the download but failed before
-            // publishing. Skip re-fetching a partial that already spans the whole
-            // source; treat an oversized partial as corrupt and restart it from
-            // the beginning rather than issue an unsatisfiable ranged request.
-            if partial_bytes != source_bytes {
-                let resume_from = if partial_bytes < source_bytes {
-                    partial_bytes
-                } else {
-                    0
-                };
-                if let Err(error) = self
-                    .http
-                    .download_video(
-                        source_url,
-                        &work.source_partial,
-                        resume_from,
-                        self.filesystem.as_ref(),
-                        cancellation,
-                    )
-                    .await
-                {
-                    return cancellation_outcome(error);
+            match work.source_kind {
+                VideoSourceKind::Mp4 => {
+                    let partial_bytes = self
+                        .filesystem
+                        .file_len(&work.source_partial)
+                        .await?
+                        .unwrap_or(0);
+                    // Skip re-fetching a complete partial. Restart an oversized
+                    // partial instead of issuing an unsatisfiable range request.
+                    if partial_bytes != source_bytes {
+                        let resume_from = if partial_bytes < source_bytes {
+                            partial_bytes
+                        } else {
+                            0
+                        };
+                        if let Err(error) = self
+                            .http
+                            .download_video(
+                                source_url,
+                                &work.source_partial,
+                                resume_from,
+                                self.filesystem.as_ref(),
+                                cancellation,
+                            )
+                            .await
+                        {
+                            return cancellation_outcome(error);
+                        }
+                    }
+                }
+                VideoSourceKind::Hls => {
+                    let command = build_hls_ingest_command(source_url, &work.source_partial)
+                        .map_err(|_| RunnerPortError::InvalidWork)?;
+                    reporter.stage_started("download").await;
+                    if let Err(error) = self.process.run(&command, cancellation).await {
+                        return cancellation_outcome(error);
+                    }
                 }
             }
             if cancellation.is_cancelled() {

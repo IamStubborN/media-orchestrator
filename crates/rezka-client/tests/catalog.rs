@@ -1,5 +1,6 @@
 use rezka_client::{
-    CatalogQuery, RezkaErrorCode, TitleLocator,
+    CatalogBrowse, CatalogCategory, CatalogQuery, CatalogSlug, CatalogSort, RezkaErrorCode,
+    TitleLocator,
     catalog::parser::parse_catalog_page,
     mirror::MirrorSet,
     session::{RezkaClient, RezkaClientConfig},
@@ -49,6 +50,65 @@ fn page_with_next(hrefs: &[&str]) -> String {
 fn assert_invalid(result: Result<impl std::fmt::Debug, rezka_client::RezkaError>) {
     let error = result.unwrap_err();
     assert_eq!(error.code(), RezkaErrorCode::ProviderResponseInvalid);
+}
+
+#[test]
+fn catalog_browse_builds_typed_category_filter_urls() {
+    let country = CatalogBrowse::new(CatalogCategory::Films)
+        .with_country(CatalogSlug::new("united-states").unwrap())
+        .unwrap();
+    assert_eq!(
+        country.url(&origin()).unwrap().as_str(),
+        "https://rezka.test/films/country/united-states/"
+    );
+
+    let year = CatalogBrowse::new(CatalogCategory::Series)
+        .with_year(2024)
+        .unwrap();
+    assert_eq!(
+        year.url(&origin()).unwrap().as_str(),
+        "https://rezka.test/series/year/2024/"
+    );
+
+    for (sort, expected) in [
+        (CatalogSort::New, "https://rezka.test/cartoons/?filter=last"),
+        (
+            CatalogSort::Popular,
+            "https://rezka.test/animation/?filter=popular",
+        ),
+    ] {
+        let browse = CatalogBrowse::new(match sort {
+            CatalogSort::New => CatalogCategory::Cartoons,
+            CatalogSort::Popular => CatalogCategory::Animation,
+        })
+        .with_sort(sort);
+        assert_eq!(browse.url(&origin()).unwrap().as_str(), expected);
+    }
+}
+
+#[test]
+fn catalog_browse_rejects_conflicting_filters_and_unsafe_slugs() {
+    for invalid in [
+        "",
+        "united states",
+        "../usa",
+        "usa/films",
+        "%2e%2e",
+        "https://foreign.test",
+        "russia?filter=popular",
+        "russia#fragment",
+    ] {
+        assert_invalid(CatalogSlug::new(invalid));
+    }
+
+    assert_invalid(
+        CatalogBrowse::new(CatalogCategory::Films)
+            .with_country(CatalogSlug::new("usa").unwrap())
+            .unwrap()
+            .with_year(2024),
+    );
+    assert_invalid(CatalogBrowse::new(CatalogCategory::Films).with_year(1894));
+    assert_invalid(CatalogBrowse::new(CatalogCategory::Films).with_year(10_000));
 }
 
 #[test]
@@ -453,6 +513,35 @@ async fn search_constructs_the_exact_query_and_search_next_uses_one_cookie_beari
     let next = client.search_next(continuation).await.unwrap();
     assert_eq!(next.entries().len(), 1);
     assert_eq!(next.entries()[0].title(), "Second");
+}
+
+#[tokio::test]
+async fn browse_requests_the_typed_url_and_uses_the_catalog_page_parser() {
+    let server = MockServer::start().await;
+    let origin = Url::parse(&server.uri()).unwrap();
+    let body = r#"<div class="b-content__inline_items">
+        <div class="b-content__inline_item">
+          <div class="b-content__inline_item-link"><a href="/films/1-first.html">First</a></div>
+        </div>
+      </div>"#;
+    Mock::given(method("GET"))
+        .and(path("/films/country/united-states/"))
+        .and(query_param("filter", "popular"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let browse = CatalogBrowse::new(CatalogCategory::Films)
+        .with_country(CatalogSlug::new("united-states").unwrap())
+        .unwrap()
+        .with_sort(CatalogSort::Popular);
+    let mut client = RezkaClient::new(client_config(vec![origin], 0)).unwrap();
+    let page = client.browse(&browse).await.unwrap();
+
+    assert_eq!(page.entries().len(), 1);
+    assert_eq!(page.entries()[0].title(), "First");
+    assert!(page.continuation().is_none());
 }
 
 #[tokio::test]

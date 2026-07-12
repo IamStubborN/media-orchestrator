@@ -4,6 +4,21 @@ use media_contract::{
 };
 
 #[test]
+fn rezka_session_refresh_execution_keeps_the_credential_request_in_the_private_payload() {
+    let execution = media_contract::ExecutionSelectionDto::RezkaSessionRefresh {
+        credential_request_id: "request-secret-42".to_owned(),
+    };
+
+    assert_eq!(
+        serde_json::to_value(execution).unwrap(),
+        serde_json::json!({
+            "source": "rezka_session_refresh",
+            "credential_request_id": "request-secret-42"
+        })
+    );
+}
+
+#[test]
 fn search_contract_is_versioned_paginated_and_safe() {
     let page = SearchPageDto {
         api_version: "v1".to_owned(),
