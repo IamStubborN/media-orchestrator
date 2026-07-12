@@ -3,6 +3,7 @@ use media::{
     client::{ClientError, HttpClient},
     composition::{self, ServiceError},
     config::{ClientConfig, ConfigError, DatabaseConfig, RunnerConfig, ServerConfig},
+    render,
 };
 
 #[derive(Debug, Parser)]
@@ -255,9 +256,24 @@ async fn run_healthcheck(args: HealthcheckArgs) -> Result<(), RunError> {
     Ok(())
 }
 
+/// Emit a command result. With `--json` the raw service response is printed
+/// verbatim (the machine contract). Otherwise the response is parsed and
+/// handed to `render` for a human-readable view, falling back to the raw
+/// response if it is not valid JSON.
+fn emit(output: &str, json: bool, render: impl FnOnce(&serde_json::Value) -> String) {
+    if json {
+        println!("{output}");
+        return;
+    }
+    match serde_json::from_str::<serde_json::Value>(output) {
+        Ok(value) => println!("{}", render(&value)),
+        Err(_) => println!("{output}"),
+    }
+}
+
 async fn run_tracking(args: TrackingArgs) -> Result<(), RunError> {
     let client = HttpClient::new(ClientConfig::load()?)?;
-    let output = match args.command {
+    match args.command {
         TrackingCommand::Add {
             provider,
             title,
@@ -266,8 +282,7 @@ async fn run_tracking(args: TrackingArgs) -> Result<(), RunError> {
             scope,
             json,
         } => {
-            let _ = json;
-            client
+            let output = client
                 .add_tracking(
                     provider.into(),
                     title,
@@ -275,18 +290,22 @@ async fn run_tracking(args: TrackingArgs) -> Result<(), RunError> {
                     known_episodes,
                     scope.into(),
                 )
-                .await?
+                .await?;
+            emit(&output, json, |value| {
+                render::tracking(value, Some("Added tracking"))
+            });
         }
         TrackingCommand::List { json } => {
-            let _ = json;
-            client.list_tracking().await?
+            let output = client.list_tracking().await?;
+            emit(&output, json, render::tracking_list);
         }
         TrackingCommand::Remove { tracking_id, json } => {
-            let _ = json;
-            client.remove_tracking(&tracking_id).await?
+            let output = client.remove_tracking(&tracking_id).await?;
+            emit(&output, json, |value| {
+                render::tracking(value, Some("Removed tracking"))
+            });
         }
-    };
-    println!("{output}");
+    }
     Ok(())
 }
 
@@ -313,8 +332,7 @@ async fn run_search(args: SearchArgs) -> Result<(), RunError> {
                 .await?
         }
     };
-    let _ = args.json;
-    println!("{output}");
+    emit(&output, args.json, render::search_page);
     Ok(())
 }
 
@@ -346,8 +364,9 @@ async fn run_download(args: DownloadArgs) -> Result<(), RunError> {
             scope: current_search_scope(),
         })
         .await?;
-    let _ = args.json;
-    println!("{output}");
+    emit(&output, args.json, |value| {
+        render::job(value, Some("Queued download"))
+    });
     Ok(())
 }
 
@@ -372,41 +391,43 @@ fn current_search_scope() -> media_contract::SearchScopeDto {
 
 async fn run_jobs(args: JobsArgs) -> Result<(), RunError> {
     let client = HttpClient::new(ClientConfig::load()?)?;
-    let output = match args.command {
+    match args.command {
         JobsCommand::Create {
             provider,
             result_ref,
             json,
         } => {
-            let _ = json;
-            client.create_job(provider.into(), result_ref).await?
+            let output = client.create_job(provider.into(), result_ref).await?;
+            emit(&output, json, |value| {
+                render::job(value, Some("Created job"))
+            });
         }
         JobsCommand::List { json } => {
-            let _ = json;
-            client.list_jobs().await?
+            let output = client.list_jobs().await?;
+            emit(&output, json, render::job_list);
         }
         JobsCommand::Show { job_id, json } => {
-            let _ = json;
-            client.get_job(&job_id).await?
+            let output = client.get_job(&job_id).await?;
+            emit(&output, json, |value| render::job(value, None));
         }
         JobsCommand::Cancel { job_id, json } => {
-            let _ = json;
-            client.cancel_job(&job_id).await?
+            let output = client.cancel_job(&job_id).await?;
+            emit(&output, json, |value| {
+                render::job(value, Some("Cancelled job"))
+            });
         }
-    };
-    println!("{output}");
+    }
     Ok(())
 }
 
 async fn run_queue(args: QueueArgs) -> Result<(), RunError> {
     let client = HttpClient::new(ClientConfig::load()?)?;
-    let output = match args.command {
+    match args.command {
         QueueCommand::Status { json } => {
-            let _ = json;
-            client.queue_status().await?
+            let output = client.queue_status().await?;
+            emit(&output, json, render::queue_status);
         }
-    };
-    println!("{output}");
+    }
     Ok(())
 }
 
