@@ -604,13 +604,12 @@ impl MediaJobExecutor {
         let endpoint = variant
             .endpoints()
             .iter()
-            .find(|endpoint| endpoint.kind() == rezka_client::StreamKind::Mp4)
+            .find(|endpoint| endpoint.kind() == rezka_client::StreamKind::Hls)
             .or_else(|| {
-                manifest
-                    .preferred_variant()
+                variant
                     .endpoints()
                     .iter()
-                    .find(|endpoint| endpoint.kind() == rezka_client::StreamKind::Hls)
+                    .find(|endpoint| endpoint.kind() == rezka_client::StreamKind::Mp4)
             })
             .ok_or(RunnerError::Execution)?;
         let source_kind = match endpoint.kind() {
