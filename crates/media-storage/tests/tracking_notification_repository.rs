@@ -6,6 +6,7 @@ use media_core::{
     TrackingId, TrackingScope, TrackingStore, SECONDARY_USER_ID,
 };
 use media_storage::{SeaOrmNotificationOutbox, SeaOrmTrackingStore};
+use sea_orm::ConnectionTrait;
 use support::{TestDatabase, operation_key, query};
 
 fn new_tracking(id: TrackingId, scope: TrackingScope) -> NewTrackingSubscription {
@@ -223,6 +224,112 @@ async fn outbox_leases_once_retries_with_backoff_and_keeps_stable_delivery_id() 
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn mark_failed_does_not_overflow_backoff_at_high_attempt_counts() {
+    let test_db = TestDatabase::start_migrated().await;
+    let tracking = SeaOrmTrackingStore::new(test_db.connection().clone());
+    let outbox = SeaOrmNotificationOutbox::new(test_db.connection().clone());
+    let value = tracking
+        .add(
+            operation_key(),
+            new_tracking(TrackingId::new(), TrackingScope::Personal),
+        )
+        .await
+        .unwrap();
+    tracking
+        .record_future_episode(
+            value.id(),
+            EpisodeSnapshot::new(1, 5).unwrap(),
+            time::OffsetDateTime::now_utc() + time::Duration::hours(6),
+        )
+        .await
+        .unwrap();
+    let now = time::OffsetDateTime::now_utc();
+    let worker = NotificationId::new();
+    let leased = outbox
+        .lease_pending(worker, now, time::Duration::seconds(30), 10)
+        .await
+        .unwrap();
+    let delivery_id = leased[0].id();
+
+    test_db
+        .connection()
+        .execute_unprepared("UPDATE notification_outbox SET attempt_count = 40")
+        .await
+        .unwrap();
+
+    // With attempt_count this high, `30 * power(2, attempt_count)` overflowed int4
+    // before the exponent was clamped, so mark_failed used to error here.
+    outbox
+        .mark_failed(delivery_id, worker, now, "webhook_http")
+        .await
+        .unwrap();
+
+    let rows = query(
+        test_db.connection(),
+        "SELECT attempt_count FROM notification_outbox",
+    )
+    .await;
+    assert_eq!(rows[0].try_get::<i32>("", "attempt_count").unwrap(), 41);
+}
+
+#[tokio::test]
+async fn mark_dead_buries_a_delivery_so_it_is_never_leased_again() {
+    let test_db = TestDatabase::start_migrated().await;
+    let tracking = SeaOrmTrackingStore::new(test_db.connection().clone());
+    let outbox = SeaOrmNotificationOutbox::new(test_db.connection().clone());
+    let value = tracking
+        .add(
+            operation_key(),
+            new_tracking(TrackingId::new(), TrackingScope::Personal),
+        )
+        .await
+        .unwrap();
+    tracking
+        .record_future_episode(
+            value.id(),
+            EpisodeSnapshot::new(1, 5).unwrap(),
+            time::OffsetDateTime::now_utc() + time::Duration::hours(6),
+        )
+        .await
+        .unwrap();
+    let now = time::OffsetDateTime::now_utc();
+    let worker = NotificationId::new();
+    let leased = outbox
+        .lease_pending(worker, now, time::Duration::seconds(30), 10)
+        .await
+        .unwrap();
+    let delivery_id = leased[0].id();
+
+    outbox
+        .mark_dead(delivery_id, worker, now, "webhook_rejected")
+        .await
+        .unwrap();
+
+    assert!(
+        outbox
+            .lease_pending(
+                NotificationId::new(),
+                now + time::Duration::hours(6),
+                time::Duration::seconds(30),
+                10,
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let rows = query(
+        test_db.connection(),
+        "SELECT last_error_code FROM notification_outbox WHERE dead_at IS NOT NULL",
+    )
+    .await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].try_get::<String>("", "last_error_code").unwrap(),
+        "webhook_rejected"
     );
 }
 

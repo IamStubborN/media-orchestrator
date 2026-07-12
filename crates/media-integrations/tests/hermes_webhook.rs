@@ -88,3 +88,35 @@ async fn non_success_is_retryable_and_error_output_contains_no_endpoint_or_secre
     assert!(!rendered.contains("test-webhook-secret"));
     assert!(!rendered.contains("sensitive upstream detail"));
 }
+
+async fn delivery_error_for_status(status: u16) -> WebhookError {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/webhooks/media-notify"))
+        .respond_with(ResponseTemplate::new(status))
+        .mount(&server)
+        .await;
+    HermesWebhookClient::new(config(&server))
+        .unwrap()
+        .deliver_at(&delivery(), 1_720_785_600)
+        .await
+        .unwrap_err()
+}
+
+#[tokio::test]
+async fn client_errors_are_terminal_except_throttling_and_request_timeout() {
+    for status in [400, 401, 403, 404, 422] {
+        assert_eq!(
+            delivery_error_for_status(status).await,
+            WebhookError::TerminalHttp,
+            "{status} must not be retried forever"
+        );
+    }
+    for status in [408, 429, 500, 502, 503] {
+        assert_eq!(
+            delivery_error_for_status(status).await,
+            WebhookError::RetryableHttp,
+            "{status} must stay retryable"
+        );
+    }
+}

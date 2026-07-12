@@ -6,10 +6,10 @@ use std::{
 
 use media_core::{
     PRIMARY_USER_ID, EpisodeDiscoveryPort, EpisodeSnapshot, NewTrackingCommand,
-    NewTrackingSubscription, NotificationDelivery, NotificationDispatcher, NotificationEventType,
-    NotificationId, NotificationOutboxPort, NotificationRecipient, NotificationSink, OperationKey,
-    PortError, Provider, TrackingId, TrackingRuntime, TrackingScheduleStore, TrackingScope,
-    TrackingSubscription,
+    NewTrackingSubscription, NotificationDelivery, NotificationDeliveryFailure,
+    NotificationDispatcher, NotificationEventType, NotificationId, NotificationOutboxPort,
+    NotificationRecipient, NotificationSink, OperationKey, PortError, Provider, TrackingId,
+    TrackingRuntime, TrackingScheduleStore, TrackingScope, TrackingSubscription,
 };
 
 struct ScheduleStore {
@@ -112,6 +112,18 @@ struct Outbox {
     delivery: NotificationDelivery,
     delivered: Mutex<Vec<NotificationId>>,
     failed: Mutex<Vec<NotificationId>>,
+    dead: Mutex<Vec<NotificationId>>,
+}
+
+impl Outbox {
+    fn new(delivery: NotificationDelivery) -> Self {
+        Self {
+            delivery,
+            delivered: Mutex::new(Vec::new()),
+            failed: Mutex::new(Vec::new()),
+            dead: Mutex::new(Vec::new()),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -141,34 +153,48 @@ impl NotificationOutboxPort for Outbox {
         self.failed.lock().unwrap().push(id);
         Ok(())
     }
+
+    async fn mark_dead(
+        &self,
+        id: NotificationId,
+        _: NotificationId,
+        _: time::OffsetDateTime,
+        _: &str,
+    ) -> Result<(), PortError> {
+        self.dead.lock().unwrap().push(id);
+        Ok(())
+    }
 }
 
-struct Sink;
+struct Sink {
+    outcome: Result<(), NotificationDeliveryFailure>,
+}
 
 #[async_trait::async_trait]
 impl NotificationSink for Sink {
-    async fn deliver(&self, _: &NotificationDelivery) -> Result<(), &'static str> {
-        Ok(())
+    async fn deliver(&self, _: &NotificationDelivery) -> Result<(), NotificationDeliveryFailure> {
+        self.outcome
     }
+}
+
+fn started_delivery() -> NotificationDelivery {
+    NotificationDelivery::rehydrate(
+        NotificationId::new(),
+        NotificationRecipient::Primary,
+        NotificationEventType::Started,
+        "Media job started.".to_owned(),
+        0,
+    )
+    .unwrap()
 }
 
 #[test]
 fn dispatcher_marks_exact_stable_delivery_id_after_sink_success() {
     block_on(async {
-        let delivery = NotificationDelivery::rehydrate(
-            NotificationId::new(),
-            NotificationRecipient::Primary,
-            NotificationEventType::Started,
-            "Media job started.".to_owned(),
-            0,
-        )
-        .unwrap();
-        let outbox = Arc::new(Outbox {
-            delivery: delivery.clone(),
-            delivered: Mutex::new(Vec::new()),
-            failed: Mutex::new(Vec::new()),
-        });
-        let dispatcher = NotificationDispatcher::new(outbox.clone(), Arc::new(Sink));
+        let delivery = started_delivery();
+        let outbox = Arc::new(Outbox::new(delivery.clone()));
+        let dispatcher =
+            NotificationDispatcher::new(outbox.clone(), Arc::new(Sink { outcome: Ok(()) }));
 
         let result = dispatcher
             .run_once(NotificationId::new(), time::OffsetDateTime::now_utc(), 10)
@@ -177,6 +203,46 @@ fn dispatcher_marks_exact_stable_delivery_id_after_sink_success() {
 
         assert_eq!(result.delivered, 1);
         assert_eq!(*outbox.delivered.lock().unwrap(), vec![delivery.id()]);
+        assert!(outbox.failed.lock().unwrap().is_empty());
+        assert!(outbox.dead.lock().unwrap().is_empty());
+    });
+}
+
+#[test]
+fn dispatcher_retries_retryable_failures_and_buries_terminal_ones() {
+    block_on(async {
+        let retryable = started_delivery();
+        let outbox = Arc::new(Outbox::new(retryable.clone()));
+        let dispatcher = NotificationDispatcher::new(
+            outbox.clone(),
+            Arc::new(Sink {
+                outcome: Err(NotificationDeliveryFailure::retryable("webhook_http")),
+            }),
+        );
+        let result = dispatcher
+            .run_once(NotificationId::new(), time::OffsetDateTime::now_utc(), 10)
+            .await
+            .unwrap();
+        assert_eq!(result.failed, 1);
+        assert_eq!(result.dead, 0);
+        assert_eq!(*outbox.failed.lock().unwrap(), vec![retryable.id()]);
+        assert!(outbox.dead.lock().unwrap().is_empty());
+
+        let terminal = started_delivery();
+        let outbox = Arc::new(Outbox::new(terminal.clone()));
+        let dispatcher = NotificationDispatcher::new(
+            outbox.clone(),
+            Arc::new(Sink {
+                outcome: Err(NotificationDeliveryFailure::terminal("webhook_rejected")),
+            }),
+        );
+        let result = dispatcher
+            .run_once(NotificationId::new(), time::OffsetDateTime::now_utc(), 10)
+            .await
+            .unwrap();
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.dead, 1);
+        assert_eq!(*outbox.dead.lock().unwrap(), vec![terminal.id()]);
         assert!(outbox.failed.lock().unwrap().is_empty());
     });
 }

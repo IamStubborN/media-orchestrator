@@ -8,6 +8,7 @@ mod m20260712_000007_search_sessions;
 mod m20260712_000008_tracking_notifications;
 mod m20260712_000009_blocked_storage_notification;
 mod m20260712_000010_search_scope;
+mod m20260712_000011_notification_dead_letter;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseTransaction;
@@ -28,6 +29,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260712_000008_tracking_notifications::Migration),
             Box::new(m20260712_000009_blocked_storage_notification::Migration),
             Box::new(m20260712_000010_search_scope::Migration),
+            Box::new(m20260712_000011_notification_dead_letter::Migration),
         ]
     }
 }

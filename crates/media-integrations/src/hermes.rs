@@ -2,7 +2,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hmac::{Hmac, KeyInit, Mac};
 use media_contract::HermesDeliverOnlyWebhook;
-use media_core::{NotificationDelivery, NotificationRecipient, NotificationSink};
+use media_core::{
+    NotificationDelivery, NotificationDeliveryFailure, NotificationRecipient, NotificationSink,
+};
 use secrecy::{ExposeSecret, SecretString};
 use sha2::Sha256;
 
@@ -93,10 +95,11 @@ impl HermesWebhookClient {
             .send()
             .await
             .map_err(classify_request_error)?;
-        if response.status().is_success() {
+        let status = response.status();
+        if status.is_success() {
             Ok(())
         } else {
-            Err(WebhookError::RetryableHttp)
+            Err(classify_status_error(status))
         }
     }
 
@@ -135,6 +138,8 @@ pub enum WebhookError {
     Request,
     #[error("webhook endpoint rejected delivery")]
     RetryableHttp,
+    #[error("webhook endpoint permanently rejected delivery")]
+    TerminalHttp,
 }
 
 fn validate_endpoint(endpoint: &url::Url) -> Result<(), WebhookError> {
@@ -170,18 +175,41 @@ fn classify_request_error(error: reqwest::Error) -> WebhookError {
     }
 }
 
+/// Classifies a non-success HTTP response. A 4xx other than 408 and 429 signals
+/// a request the endpoint will never accept on replay (a signature, auth, or
+/// payload rejection), so it is terminal; everything else stays retryable.
+fn classify_status_error(status: reqwest::StatusCode) -> WebhookError {
+    if status.is_client_error()
+        && status != reqwest::StatusCode::REQUEST_TIMEOUT
+        && status != reqwest::StatusCode::TOO_MANY_REQUESTS
+    {
+        WebhookError::TerminalHttp
+    } else {
+        WebhookError::RetryableHttp
+    }
+}
+
 #[async_trait::async_trait]
 impl NotificationSink for HermesWebhookClient {
-    async fn deliver(&self, delivery: &NotificationDelivery) -> Result<(), &'static str> {
+    async fn deliver(
+        &self,
+        delivery: &NotificationDelivery,
+    ) -> Result<(), NotificationDeliveryFailure> {
         HermesWebhookClient::deliver(self, delivery)
             .await
             .map_err(|error| match error {
-                WebhookError::Timeout => "webhook_timeout",
-                WebhookError::Connect => "webhook_connect",
-                WebhookError::RetryableHttp => "webhook_http",
-                WebhookError::Request => "webhook_request",
-                WebhookError::Clock | WebhookError::Configuration | WebhookError::Serialization => {
-                    "webhook_internal"
+                WebhookError::Timeout => NotificationDeliveryFailure::retryable("webhook_timeout"),
+                WebhookError::Connect => NotificationDeliveryFailure::retryable("webhook_connect"),
+                WebhookError::RetryableHttp => {
+                    NotificationDeliveryFailure::retryable("webhook_http")
+                }
+                WebhookError::Request => NotificationDeliveryFailure::retryable("webhook_request"),
+                WebhookError::Clock => NotificationDeliveryFailure::retryable("webhook_clock"),
+                WebhookError::TerminalHttp => {
+                    NotificationDeliveryFailure::terminal("webhook_rejected")
+                }
+                WebhookError::Configuration | WebhookError::Serialization => {
+                    NotificationDeliveryFailure::terminal("webhook_internal")
                 }
             })
     }

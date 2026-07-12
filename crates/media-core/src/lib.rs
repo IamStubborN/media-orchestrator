@@ -36,9 +36,9 @@ pub use job::{
     NotifyScope, Provider, QueueStatus,
 };
 pub use notification::{
-    NotificationDelivery, NotificationDispatchResult, NotificationDispatcher,
-    NotificationEventType, NotificationOutboxPort, NotificationRecipient, NotificationSink,
-    NotificationValidationError,
+    NotificationDelivery, NotificationDeliveryFailure, NotificationDispatchResult,
+    NotificationDispatcher, NotificationEventType, NotificationOutboxPort, NotificationRecipient,
+    NotificationSink, NotificationValidationError,
 };
 pub use operation::OperationKey;
 pub use orchestration::{
