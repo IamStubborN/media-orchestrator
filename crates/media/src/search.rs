@@ -261,11 +261,17 @@ impl ConcreteSearchProvider {
                 &prepared.probe,
             )
             .await
-            .map_err(|_| SearchError::Provider)?;
+            .map_err(|error| {
+                tracing::warn!(stage = "authentication", error_code = ?error.code(), "Rezka search failed");
+                SearchError::Provider
+            })?;
         let snapshot = prepared
             .client
             .export_session()
-            .map_err(|_| SearchError::Provider)?;
+            .map_err(|error| {
+                tracing::warn!(stage = "session_export", error_code = ?error.code(), "Rezka search failed");
+                SearchError::Provider
+            })?;
         prepared
             .store
             .save(&snapshot)
@@ -280,7 +286,10 @@ impl ConcreteSearchProvider {
             }
             None => prepared.client.search(&query).await,
         }
-        .map_err(|_| SearchError::Provider)?;
+        .map_err(|error| {
+            tracing::warn!(stage = "catalog", error_code = ?error.code(), "Rezka search failed");
+            SearchError::Provider
+        })?;
         let provider_continuation = page.continuation().map(|value| value.as_str().to_owned());
         let mut results = Vec::new();
         for entry in page.entries() {
@@ -288,7 +297,10 @@ impl ConcreteSearchProvider {
                 .client
                 .title(entry.locator())
                 .await
-                .map_err(|_| SearchError::Provider)?;
+                .map_err(|error| {
+                    tracing::warn!(stage = "title", error_code = ?error.code(), "Rezka search failed");
+                    SearchError::Provider
+                })?;
             let media_kind = match details.kind() {
                 rezka_client::RezkaMediaKind::Movie => MediaKindDto::Movie,
                 rezka_client::RezkaMediaKind::Series => MediaKindDto::Series,
@@ -322,7 +334,10 @@ impl ConcreteSearchProvider {
                         .client
                         .series_availability(&selection.map_err(|_| SearchError::Provider)?)
                         .await
-                        .map_err(|_| SearchError::Provider)?;
+                        .map_err(|error| {
+                            tracing::warn!(stage = "availability", error_code = ?error.code(), "Rezka search failed");
+                            SearchError::Provider
+                        })?;
                     by_translation.insert(
                         translation_id,
                         availability
