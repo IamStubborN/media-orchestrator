@@ -37,6 +37,41 @@ async fn mount_login(server: &MockServer) {
 }
 
 #[tokio::test]
+async fn subnet_whitelist_does_not_require_a_login_cookie() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/app/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("v5.0.4"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/add"))
+        .and(body_string_contains("media-tv"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("Ok."))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = QbittorrentClient::connect(config(&server)).await.unwrap();
+    let selection = ExplicitTorrentSelection::new(
+        "prowlarr:3:indexer-guid-a",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    )
+    .unwrap();
+    client.submit_selected(selection).await.unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.url.path() != "/api/v2/auth/login")
+    );
+    assert!(requests.iter().all(|request| !request.headers.contains_key("cookie")));
+}
+
+#[tokio::test]
 async fn only_explicit_selection_is_submitted_to_the_configured_category() {
     let server = MockServer::start().await;
     mount_login(&server).await;
@@ -158,6 +193,7 @@ async fn monitoring_and_path_discovery_are_read_only() {
 
     let requests = server.received_requests().await.unwrap();
     let allowed = [
+        "/api/v2/app/version",
         "/api/v2/auth/login",
         "/api/v2/torrents/info",
         "/api/v2/torrents/files",

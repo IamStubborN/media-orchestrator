@@ -230,7 +230,7 @@ pub struct TorrentContent {
 pub struct QbittorrentClient {
     client: reqwest::Client,
     config: QbittorrentConfig,
-    cookie: SecretString,
+    cookie: Option<SecretString>,
 }
 
 impl QbittorrentClient {
@@ -242,6 +242,19 @@ impl QbittorrentClient {
             .map_err(|_| QbittorrentError::Configuration {
                 message: "HTTP client could not be configured",
             })?;
+        let whitelist_probe = client
+            .get(endpoint(&config.base_url, "api/v2/app/version")?)
+            .header(REFERER, config.base_url.as_str())
+            .send()
+            .await
+            .map_err(|_| QbittorrentError::Transport)?;
+        if whitelist_probe.status().is_success() {
+            return Ok(Self {
+                client,
+                config,
+                cookie: None,
+            });
+        }
         let endpoint = endpoint(&config.base_url, "api/v2/auth/login")?;
         let response = client
             .post(endpoint)
@@ -274,7 +287,7 @@ impl QbittorrentClient {
         Ok(Self {
             client,
             config,
-            cookie: SecretString::from(cookie),
+            cookie: Some(SecretString::from(cookie)),
         })
     }
 
@@ -285,11 +298,14 @@ impl QbittorrentClient {
         let form = reqwest::multipart::Form::new()
             .text("urls", selection.uri.as_str().to_owned())
             .text("category", self.config.category.clone());
-        let response = self
+        let mut request = self
             .client
             .post(endpoint(&self.config.base_url, "api/v2/torrents/add")?)
-            .header(COOKIE, self.cookie.expose_secret())
-            .header(REFERER, self.config.base_url.as_str())
+            .header(REFERER, self.config.base_url.as_str());
+        if let Some(cookie) = &self.cookie {
+            request = request.header(COOKIE, cookie.expose_secret());
+        }
+        let response = request
             .multipart(form)
             .send()
             .await
@@ -386,11 +402,14 @@ impl QbittorrentClient {
     }
 
     async fn get(&self, url: Url) -> Result<reqwest::Response, QbittorrentError> {
-        let response = self
+        let mut request = self
             .client
             .get(url)
-            .header(COOKIE, self.cookie.expose_secret())
-            .header(REFERER, self.config.base_url.as_str())
+            .header(REFERER, self.config.base_url.as_str());
+        if let Some(cookie) = &self.cookie {
+            request = request.header(COOKIE, cookie.expose_secret());
+        }
+        let response = request
             .send()
             .await
             .map_err(|_| QbittorrentError::Transport)?;
