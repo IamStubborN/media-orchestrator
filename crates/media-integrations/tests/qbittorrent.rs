@@ -76,6 +76,36 @@ async fn subnet_whitelist_does_not_require_a_login_cookie() {
 }
 
 #[tokio::test]
+async fn qbittorrent_5_2_pending_add_response_is_accepted() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/app/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("v5.2.3"))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/add"))
+        .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+            "added_torrent_ids": [],
+            "failure_count": 0,
+            "pending_count": 1,
+            "success_count": 0
+        })))
+        .mount(&server)
+        .await;
+
+    let client = QbittorrentClient::connect(config(&server)).await.unwrap();
+    let selection = ExplicitTorrentSelection::new(
+        "prowlarr:3:indexer-guid-a",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    )
+    .unwrap();
+
+    client.submit_selected(selection).await.unwrap();
+}
+
+#[tokio::test]
 async fn only_explicit_selection_is_submitted_to_the_configured_category() {
     let server = MockServer::start().await;
     mount_login(&server).await;

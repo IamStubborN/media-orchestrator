@@ -688,7 +688,10 @@ impl MediaJobExecutor {
         let handle = client
             .submit_selected_to_category(selection, category)
             .await
-            .map_err(|_| RunnerError::Execution)?;
+            .map_err(|error| {
+                tracing::warn!(error_code = ?error.code(), "qBittorrent submit failed");
+                RunnerError::Execution
+            })?;
         control.stage_completed(0, "torrent_submit", 0).await?;
         control.stage_started(0, "torrent_monitor", 1).await?;
         loop {
@@ -698,7 +701,10 @@ impl MediaJobExecutor {
             let snapshot = client
                 .monitor(&handle)
                 .await
-                .map_err(|_| RunnerError::Execution)?;
+                .map_err(|error| {
+                    tracing::warn!(error_code = ?error.code(), "qBittorrent monitor failed");
+                    RunnerError::Execution
+                })?;
             match snapshot.state {
                 media_integrations::qbittorrent::TorrentState::Complete => break,
                 media_integrations::qbittorrent::TorrentState::Error => {

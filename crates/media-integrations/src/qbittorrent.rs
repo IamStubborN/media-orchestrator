@@ -342,7 +342,7 @@ impl QbittorrentClient {
             .text()
             .await
             .map_err(|_| QbittorrentError::Transport)?;
-        if body.trim() != "Ok." {
+        if !add_response_accepted(status, &body) {
             return Err(QbittorrentError::ProviderResponse { status });
         }
         Ok(TorrentHandle {
@@ -482,6 +482,26 @@ impl QbittorrentClient {
         }
         Ok(())
     }
+}
+
+#[derive(Deserialize)]
+struct AddResponse {
+    failure_count: u64,
+    pending_count: u64,
+    success_count: u64,
+}
+
+fn add_response_accepted(status: StatusCode, body: &str) -> bool {
+    if body.trim() == "Ok." {
+        return true;
+    }
+    if status != StatusCode::ACCEPTED {
+        return false;
+    }
+    serde_json::from_str::<AddResponse>(body).is_ok_and(|response| {
+        response.failure_count == 0
+            && response.pending_count.saturating_add(response.success_count) > 0
+    })
 }
 
 #[derive(Deserialize)]
