@@ -202,7 +202,7 @@ async fn duplicate_event_id_does_not_duplicate_transition_event_or_outbox() {
         payload["message"]
             .as_str()
             .unwrap()
-            .contains("Источник загрузки: Rezka")
+            .contains("Источник: Rezka")
     );
     assert!(!payload.to_string().contains("http"));
 }
@@ -707,13 +707,15 @@ async fn storage_block_notifies_both_family_recipients_once() {
         assert_sanitized_message(row, &["blocked-private-reference"]);
         let payload = row.try_get::<serde_json::Value>("", "payload").unwrap();
         let message = payload["message"].as_str().unwrap();
-        assert!(message.contains("Название: Случайная любовь"));
-        assert!(message.contains("Источник загрузки: Rezka"));
-        assert!(message.contains("Тип: сериал"));
-        assert!(message.contains("Серия: S01E01"));
+        assert!(message.contains("Медиа: Случайная любовь"));
+        assert!(message.contains("Источник: Rezka"));
+        assert!(message.contains("Что скачивается: сериал, серия S01E01"));
         assert!(message.contains("Перевод: Оригинал (+субтитры)"));
         assert!(message.contains("Качество: максимальное доступное"));
-        assert!(message.contains("Маршрут: Rezka -> staging -> VAAPI -> Plex / Сериалы"));
+        assert!(message.contains("Куда попадёт: Plex / Сериалы (после staging и VAAPI)"));
+        assert!(message.contains("Статус:"));
+        assert!(message.contains("Этап:"));
+        assert!(message.contains("Что дальше:"));
         if row.try_get::<String>("", "event_type").unwrap() == "blocked-storage" {
             assert!(message.contains("Свободно: 23.0 ГБ"));
             assert!(message.contains("Нужно: 24.0 ГБ"));

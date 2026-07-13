@@ -250,28 +250,32 @@ struct JobNotificationContext {
 impl JobNotificationContext {
     fn details(&self, job: &Job) -> String {
         let mut lines = Vec::with_capacity(10);
-        if let Some(title) = &self.title {
-            lines.push(format!("Название: {title}"));
-        }
         lines.push(format!(
-            "Источник загрузки: {}",
-            match job.provider() {
-                media_core::Provider::Rezka => "Rezka",
-                media_core::Provider::Prowlarr => "Prowlarr",
-            }
+            "Медиа: {}",
+            self.title.as_deref().unwrap_or("название недоступно")
         ));
-        if let Some(kind) = &self.media_kind {
-            lines.push(format!("Тип: {kind}"));
-        }
+        lines.push(format!("Источник: {}", provider_label(job)));
+
+        let mut content = self.media_kind.clone();
         match (self.season, self.episode) {
             (Some(season), Some(episode)) => {
-                lines.push(format!("Серия: S{season:02}E{episode:02}"));
+                let episode = format!("S{season:02}E{episode:02}");
+                content = Some(match content {
+                    Some(kind) => format!("{kind}, серия {episode}"),
+                    None => format!("серия {episode}"),
+                });
             }
             _ => {
                 if let Some(count) = self.episode_count.filter(|count| *count > 0) {
-                    lines.push(format!("Серий в задаче: {count}"));
+                    content = Some(match content {
+                        Some(kind) => format!("{kind}, серий в задаче: {count}"),
+                        None => format!("серий в задаче: {count}"),
+                    });
                 }
             }
+        }
+        if let Some(content) = content {
+            lines.push(format!("Что скачивается: {content}"));
         }
         if let Some(translation) = &self.translation {
             lines.push(format!("Перевод: {translation}"));
@@ -283,7 +287,7 @@ impl JobNotificationContext {
                 lines.push("Качество: максимальное доступное".to_owned());
                 lines.push("Субтитры: все доступные для выбранного перевода".to_owned());
                 lines.push(format!(
-                    "Маршрут: Rezka -> staging -> VAAPI -> Plex / {}",
+                    "Куда попадёт: Plex / {} (после staging и VAAPI)",
                     if self.media_kind.as_deref() == Some("фильм") {
                         "Фильмы"
                     } else {
@@ -292,7 +296,7 @@ impl JobNotificationContext {
                 ));
             }
             media_core::Provider::Prowlarr => lines.push(format!(
-                "Маршрут: Prowlarr -> qBittorrent -> Plex / {}",
+                "Куда попадёт: Plex / {} (через qBittorrent)",
                 if self.media_kind.as_deref() == Some("фильм") {
                     "Фильмы"
                 } else {
@@ -304,8 +308,43 @@ impl JobNotificationContext {
         lines.join("\n")
     }
 
-    fn message(&self, job: &Job, summary: &str) -> String {
-        format!("{summary}\n{}", self.details(job))
+    fn message(&self, job: &Job, summary: &str, status: &str, stage: &str, next: &str) -> String {
+        format!(
+            "{summary}\n\nСтатус: {status}\nЭтап: {stage}\n{}\n\nЧто дальше: {next}",
+            self.details(job)
+        )
+    }
+}
+
+fn provider_label(job: &Job) -> &'static str {
+    match job.provider() {
+        media_core::Provider::Rezka => "Rezka",
+        media_core::Provider::Prowlarr => "Prowlarr",
+    }
+}
+
+fn stage_label(stage: &str) -> &'static str {
+    match stage {
+        "download" => "скачивание исходного видео",
+        "torrent_monitor" => "ожидание загрузки в qBittorrent",
+        "media_pipeline" => "проверка места и обработка медиа",
+        "encode" | "encoding" | "transcode" => "перекодирование Rezka-видео через VAAPI",
+        "publish" | "publishing" => "публикация в Plex",
+        "subtitles" => "скачивание субтитров",
+        "resolve_manifest" => "получение ссылки на видеопоток",
+        "resolve_identity" => "сопоставление сезона и серии",
+        _ => "обработка медиа",
+    }
+}
+
+fn after_download(job: &Job) -> &'static str {
+    match job.provider() {
+        media_core::Provider::Rezka => {
+            "после загрузки видео будет обработано через VAAPI и опубликовано в Plex"
+        }
+        media_core::Provider::Prowlarr => {
+            "после завершения qBittorrent файл будет опубликован в Plex без перекодирования"
+        }
     }
 }
 
@@ -384,12 +423,12 @@ fn storage_blocked_description(context: &JobNotificationContext) -> String {
         context.storage_required_bytes,
     ) {
         (Some(available), Some(required)) => format!(
-            "Загрузка остановлена до скачивания: проверка свободного места не пройдена.\nСвободно: {}\nНужно: {} (включая настроенный резерв)\nНе хватает: {}\nЧто делать: освободите место и повторно запустите этот Job.",
+            "Свободно: {}\nНужно: {} (исходное видео, обработка и резерв)\nНе хватает: {}",
             format_bytes(available),
             format_bytes(required),
             format_bytes(required.saturating_sub(available)),
         ),
-        _ => "Загрузка остановлена до скачивания: недостаточно места для исходного файла, перекодирования и настроенного резерва. Освободите место и повторно запустите этот Job.".to_owned(),
+        _ => "Недостаточно места для исходного файла, обработки и настроенного резерва. Точные значения не сохранились в checkpoint этой задачи.".to_owned(),
     }
 }
 
@@ -417,7 +456,13 @@ fn notifications_for_event(
         }
         JobEventKind::Started => vec![(
             "started",
-            context.message(job, "Runner взял задачу в обработку."),
+            context.message(
+                job,
+                "Задача принята download-runner.",
+                "выполняется",
+                "подготовка загрузки",
+                "runner проверит источник, место на диске и начнёт скачивание",
+            ),
         )],
         // Intermediate progress. A stage start marks the beginning of a phase, so
         // it maps to a "started" notification. Deduplication on
@@ -432,7 +477,13 @@ fn notifications_for_event(
         {
             vec![(
                 "downloading-started",
-                context.message(job, "Скачивание исходного видео началось."),
+                context.message(
+                    job,
+                    "Скачивание исходного видео началось.",
+                    "скачивается",
+                    stage_label(stage.name()),
+                    after_download(job),
+                ),
             )]
         }
         JobEventKind::StageStarted(stage)
@@ -440,7 +491,13 @@ fn notifications_for_event(
         {
             vec![(
                 "transcoding-started",
-                context.message(job, "Перекодирование Rezka-видео через VAAPI началось."),
+                context.message(
+                    job,
+                    "Перекодирование Rezka-видео через VAAPI началось.",
+                    "обрабатывается",
+                    stage_label(stage.name()),
+                    "после проверки результата видео и субтитры будут опубликованы в Plex",
+                ),
             )]
         }
         JobEventKind::StageCompleted { stage, .. }
@@ -448,7 +505,13 @@ fn notifications_for_event(
         {
             vec![(
                 "downloaded",
-                context.message(job, "Скачивание завершено."),
+                context.message(
+                    job,
+                    "Скачивание исходного видео завершено.",
+                    "скачано",
+                    stage_label(stage.name()),
+                    "начнётся обработка и публикация в Plex",
+                ),
             )]
         }
         JobEventKind::StageCompleted { stage, .. }
@@ -456,7 +519,13 @@ fn notifications_for_event(
         {
             vec![(
                 "encoding-complete",
-                context.message(job, "Перекодирование завершено."),
+                context.message(
+                    job,
+                    "Перекодирование завершено.",
+                    "обработано",
+                    stage_label(stage.name()),
+                    "видео и субтитры будут опубликованы в Plex",
+                ),
             )]
         }
         JobEventKind::StageFailed { error_code, .. }
@@ -468,11 +537,19 @@ fn notifications_for_event(
                 format!("Rezka session refresh {id} failed ({error_code})."),
             )]
         }
-        JobEventKind::StageFailed { error_code, .. } if job.state() == JobState::Failed => {
+        JobEventKind::StageFailed {
+            stage, error_code, ..
+        } if job.state() == JobState::Failed => {
             let error_code = sanitized_error_code(error_code);
             vec![(
                 "failed",
-                context.message(job, &failure_description(error_code)),
+                context.message(
+                    job,
+                    &failure_description(error_code),
+                    "ошибка",
+                    stage_label(stage.name()),
+                    "повторите задачу; при повторной ошибке используйте Job ID для проверки журналов",
+                ),
             )]
         }
         JobEventKind::JobTransition {
@@ -489,34 +566,70 @@ fn notifications_for_event(
                     }
                     None => "Нужен дополнительный выбор, чтобы продолжить задачу.",
                 };
-                vec![("choice-needed", context.message(job, description))]
+                vec![(
+                    "choice-needed",
+                    context.message(
+                        job,
+                        description,
+                        "нужно действие",
+                        "сопоставление медиа",
+                        "укажите правильный сезон и эпизод, затем повторите задачу",
+                    ),
+                )]
             }
             JobState::BlockedStorage => vec![(
                 "blocked-storage",
-                context.message(job, &storage_blocked_description(context)),
+                context.message(
+                    job,
+                    &format!(
+                        "Недостаточно свободного места: задача приостановлена до скачивания.\n{}",
+                        storage_blocked_description(context)
+                    ),
+                    "приостановлено",
+                    "проверка свободного места",
+                    "освободите место и повторно запустите этот Job; готовые данные автоматически не удаляются",
+                ),
             )],
             JobState::Publishing if session_refresh => Vec::new(),
             JobState::Publishing => {
                 let mut notifications = vec![(
                     "downloaded",
-                    context.message(job, "Скачивание завершено."),
+                    context.message(
+                        job,
+                        "Скачивание завершено.",
+                        "публикуется",
+                        "подготовка библиотеки Plex",
+                        "файл будет перемещён в библиотеку и проверен в Plex",
+                    ),
                 )];
                 if job.provider() == media_core::Provider::Rezka {
                     notifications.push((
                         "encoding-complete",
-                        context.message(job, "Перекодирование завершено."),
+                        context.message(
+                            job,
+                            "Перекодирование завершено.",
+                            "публикуется",
+                            "подготовка библиотеки Plex",
+                            "видео и субтитры будут перемещены в библиотеку и проверены в Plex",
+                        ),
                     ));
                 }
                 notifications
             }
             JobState::Partial => vec![
-                ("plex-added", context.message(job, "Видео добавлено в Plex.")),
                 (
-                    "partial",
+                    "plex-added",
                     context.message(
                         job,
-                        "Видео готово и добавлено в Plex, но часть субтитров скачать не удалось. Повторите задачу: уже готовое видео не будет скачиваться или перекодироваться заново.",
+                        "Видео добавлено в Plex.",
+                        "доступно",
+                        "публикация в Plex",
+                        "можно смотреть видео; список недостающих субтитров сохранён для повтора",
                     ),
+                ),
+                (
+                    "partial",
+                    context.message(job, "Видео готово и добавлено в Plex, но часть субтитров скачать не удалось.", "завершено частично", "скачивание субтитров", "повторите задачу: готовое видео не будет скачиваться или перекодироваться заново"),
                 ),
             ],
             JobState::Completed if session_refresh => vec![(
@@ -525,16 +638,19 @@ fn notifications_for_event(
             )],
             JobState::Completed => {
                 vec![
-                    ("plex-added", context.message(job, "Видео добавлено в Plex.")),
+                    (
+                        "plex-added",
+                        context.message(job, "Видео добавлено в Plex.", "доступно", "публикация в Plex", "можно смотреть в Plex"),
+                    ),
                     (
                         "completed",
-                        context.message(job, "Задача полностью завершена: видео и доступные субтитры готовы."),
+                        context.message(job, "Задача полностью завершена: видео и доступные субтитры готовы.", "завершено", "проверка результата", "дополнительных действий не требуется"),
                     ),
                 ]
             }
             JobState::Failed => vec![(
                 "failed",
-                context.message(job, "Задача завершилась ошибкой."),
+                context.message(job, "Задача завершилась ошибкой.", "ошибка", "обработка медиа", "повторите задачу; при повторной ошибке используйте Job ID для проверки журналов"),
             )],
             _ => Vec::new(),
         },
