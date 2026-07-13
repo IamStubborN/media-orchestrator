@@ -29,32 +29,28 @@ must not close it.
 - Storage reserve enforcement against the real media volume: a Rezka episode job
   entered `blocked_storage`, published no files, released its lease, and remained
   parked without consuming additional attempts.
+- A subtitle-present Rezka episode completed through VAAPI and Plex publication;
+  a controlled subtitle-CDN failure then proved the full
+  `partial -> owner retry -> completed` path without changing the published
+  video's inode, size, or mtime.
 
 ### Remaining Acceptance Work
 
-1. Resume one small real Rezka episode with available subtitles and verify all
-   sidecar naming rules. The additional free-space reserve is disabled by product
-   decision; preflight must still cover the estimated source and VAAPI output.
-2. Induce a real provider-side subtitle failure and prove the complete `partial -> retry -> completed` transition without touching completed video work.
-3. Exercise primary Telegram media commands from both profiles and verify rejection of an unapproved external Telegram account when such an account is available.
-4. Live-verify storage recovery after space becomes available, expired-stream
+1. Exercise primary Telegram media commands from both profiles and verify rejection of an unapproved external Telegram account when such an account is available.
+2. Live-verify storage recovery after space becomes available, expired-stream
    recovery, ambiguous numbering, persistent canonical mapping, and Specials/OVA
    handling. Entry into stable `blocked_storage` is already live-verified.
-5. Re-run the complete local deployment verification on the final revisions and confirm all containers, migrations, wrappers, and health gates.
-6. Audit specs, architecture, runbook, plans, and evidence; then publish one final acceptance report that distinguishes implemented, deployed, and live-verified behavior.
+3. Re-run the complete local deployment verification on the final revisions and confirm all containers, migrations, wrappers, and health gates.
+4. Audit specs, architecture, runbook, plans, and evidence; then publish one final acceptance report that distinguishes implemented, deployed, and live-verified behavior.
 
 ### Immediate Execution Queue
 
-1. Add an owner-scoped resume path for `blocked_storage` that re-runs storage
-   preflight and unfinished work, then complete the already selected
-   subtitle-present Rezka episode through Hermes and Plex.
-2. Produce a natural subtitle failure and verify selective recovery.
-3. Execute expired-stream, numbering, mapping, and Specials/OVA scenarios with
+1. Execute expired-stream, numbering, mapping, and Specials/OVA scenarios with
    cleanup after each run.
-4. Complete Secondary command coverage and the external unknown-user gate, or
+2. Complete Secondary command coverage and the external unknown-user gate, or
    record the latter as an explicit external-account blocker rather than claiming
    it passed.
-5. Re-run deployment verification on final revisions, reconcile every acceptance
+3. Re-run deployment verification on final revisions, reconcile every acceptance
    item with dated evidence, and close the goal only after no required work remains.
 
 ## Status Model
@@ -113,9 +109,9 @@ Unit tests or a healthy container do not satisfy a live-verification gate.
 **Priority:** Critical  
 **Current state:** Search, explicit translation selection, full download, VAAPI,
 publication, Plex identity, and initiator notifications are live-verified for one
-real episode. The authenticated non-premium session exposed advertised 1080p only
-as a rejected 60-second preview; its highest complete stream measured 854x480.
-Subtitle-present live verification remains pending. Full-catalog pagination is
+real episode. A subtitle-present `Food Wars` episode also completed with a
+Plex-compatible Russian WebVTT sidecar. Its selected advertised `720p` stream
+measured 854x480, so the measured probe remains authoritative. Full-catalog pagination is
 implemented, deployed, and live-verified through a two-turn Hermes conversation:
 the first and second pages each returned five distinct results while preserving
 the Rezka search session.
@@ -163,8 +159,10 @@ implemented. The owner-scoped, idempotent `POST /v1/jobs/{id}/retry` endpoint an
 matching `media jobs retry` command are deployed and live-verified through the
 Hermes wrapper. Missing-sidecar recovery is live-verified against a published
 Rezka movie: the VTT was restored byte-for-byte while video inode, size, and
-mtime remained unchanged. A naturally induced subtitle failure that creates the
-initial `partial` transition remains pending.
+mtime remained unchanged. A controlled real-network rejection of only the
+subtitle CDN produced `partial`; owner retry fetched a valid Russian sidecar and
+moved the same job to `completed` while video inode, size, and mtime remained
+unchanged.
 
 ### Implementation and Verification
 
@@ -223,8 +221,10 @@ tracking discovery notified only Secondary. A real family discovery notified
 Primary and Secondary with one shared source dedupe key. The remaining gate is a
 message from an unapproved external Telegram account. Rich media-job messages
 with safe title, source, media kind, season/episode, translation, phase, and Job
-ID are implemented and locally verified; deployment and Telegram verification
-remain pending.
+ID are deployed and live-verified on the real subtitle recovery job. Explicit
+subtitle-partial guidance and a final fully-completed recovery message are
+deployed; the latter awaits observation on the next real recovery because the
+verified job completed before that event type was deployed.
 
 ### Implementation
 
