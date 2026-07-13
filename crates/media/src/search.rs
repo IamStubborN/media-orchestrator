@@ -300,14 +300,28 @@ impl ConcreteSearchProvider {
         while cursor < entries.len() && results.len() < MAX_SEARCH_RESULTS_PER_PAGE {
             let entry = &entries[cursor];
             cursor += 1;
-            let details = prepared
-                .client
-                .title(entry.locator())
-                .await
-                .map_err(|error| {
+            let details = match prepared.client.title(entry.locator()).await {
+                Ok(details) => details,
+                Err(error)
+                    if matches!(
+                        error.code(),
+                        rezka_client::RezkaErrorCode::ProviderResponseInvalid
+                            | rezka_client::RezkaErrorCode::TitleNotFound
+                    ) =>
+                {
+                    tracing::warn!(
+                        stage = "title",
+                        error_code = ?error.code(),
+                        error = %error,
+                        "skipping unusable Rezka search result"
+                    );
+                    continue;
+                }
+                Err(error) => {
                     tracing::warn!(stage = "title", error_code = ?error.code(), error = %error, "Rezka search failed");
-                    SearchError::Provider
-                })?;
+                    return Err(SearchError::Provider);
+                }
+            };
             let media_kind = match details.kind() {
                 rezka_client::RezkaMediaKind::Movie => MediaKindDto::Movie,
                 rezka_client::RezkaMediaKind::Series => MediaKindDto::Series,
