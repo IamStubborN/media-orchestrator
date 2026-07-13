@@ -178,7 +178,8 @@ initial `partial` transition remains pending.
 5. Treat failed or invalid subtitle downloads as `partial` after publishing a valid video.
 6. Retry only missing or invalid subtitle tracks.
 7. Preserve completed video and valid subtitle files during retry.
-8. Allow only the job owner to requeue `partial` or `failed` jobs.
+8. Allow only the job owner to requeue `blocked_storage`, `partial`, or `failed`
+   jobs, with a full orchestration-ledger reset only for storage-blocked work.
 9. Make retry idempotent and reject retries for non-retryable states.
 
 ### Live Gate

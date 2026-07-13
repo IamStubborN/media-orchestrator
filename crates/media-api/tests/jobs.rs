@@ -236,7 +236,7 @@ async fn owner_can_cancel_a_queued_job_immediately() {
 }
 
 #[tokio::test]
-async fn owner_can_retry_only_a_partial_or_failed_job() {
+async fn owner_can_retry_only_a_blocked_partial_or_failed_job() {
     let partial = Job::rehydrate(
         JobId::new(),
         PRIMARY_USER_ID,
@@ -252,6 +252,32 @@ async fn owner_can_retry_only_a_partial_or_failed_job() {
             Request::post(format!("/v1/jobs/{}/retry", partial.id()))
                 .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
                 .header("idempotency-key", "retry-partial-job")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(value["state"], "queued");
+
+    let blocked = Job::rehydrate(
+        JobId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        "blocked-selection".to_owned(),
+        JobState::BlockedStorage,
+        None,
+        NotifyScope::Initiator,
+    )
+    .unwrap();
+    let response = app(FakeJobStore::with_job(blocked.clone()))
+        .oneshot(
+            Request::post(format!("/v1/jobs/{}/retry", blocked.id()))
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header("idempotency-key", "retry-blocked-job")
                 .header("content-type", "application/json")
                 .body(Body::from("{}"))
                 .unwrap(),

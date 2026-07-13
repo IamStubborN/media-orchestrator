@@ -961,6 +961,102 @@ async fn owner_retry_requeues_failed_work_idempotently() {
 }
 
 #[tokio::test]
+async fn owner_retry_requeues_storage_blocked_work_and_resets_pipeline_ledger() {
+    let (test_db, jobs, leases) = setup().await;
+    let created = jobs
+        .create(operation_key(), new_job("storage-resume"))
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::stage_started(JobEventId::new(), 0, "resolve_manifest".to_owned(), 0).unwrap(),
+        JobEvent::stage_completed(
+            JobEventId::new(),
+            0,
+            "resolve_manifest".to_owned(),
+            0,
+            Default::default(),
+        )
+        .unwrap(),
+        JobEvent::stage_started(JobEventId::new(), 0, "media_pipeline".to_owned(), 1).unwrap(),
+        JobEvent::stage_completed(
+            JobEventId::new(),
+            0,
+            "media_pipeline".to_owned(),
+            1,
+            Default::default(),
+        )
+        .unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::BlockedStorage, None).unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    let operation = operation_key();
+    let retried = jobs
+        .retry(operation, created.id(), PRIMARY_USER_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    let replay = jobs
+        .retry(operation, created.id(), PRIMARY_USER_ID)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(retried.state(), JobState::Queued);
+    assert_eq!(replay, retried);
+    let tasks = query(
+        test_db.connection(),
+        "SELECT state, attempt_count, checkpoint FROM job_tasks WHERE job_id = \
+         (SELECT id FROM jobs WHERE result_ref = 'storage-resume')",
+    )
+    .await;
+    assert_eq!(tasks[0].try_get::<String>("", "state").unwrap(), "pending");
+    assert_eq!(tasks[0].try_get::<i32>("", "attempt_count").unwrap(), 0);
+    assert_eq!(
+        tasks[0]
+            .try_get::<serde_json::Value>("", "checkpoint")
+            .unwrap(),
+        serde_json::json!({})
+    );
+    let stages = query(
+        test_db.connection(),
+        "SELECT state, attempt_count, checkpoint FROM job_stages ORDER BY ordinal",
+    )
+    .await;
+    assert_eq!(stages.len(), 2);
+    for stage in stages {
+        assert_eq!(stage.try_get::<String>("", "state").unwrap(), "pending");
+        assert_eq!(stage.try_get::<i32>("", "attempt_count").unwrap(), 0);
+        assert_eq!(
+            stage
+                .try_get::<serde_json::Value>("", "checkpoint")
+                .unwrap(),
+            serde_json::json!({})
+        );
+    }
+    assert!(
+        jobs.retry(operation_key(), created.id(), SECONDARY_USER_ID)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn completed_job_retry_is_a_conflict() {
     let (_test_db, jobs, leases) = setup().await;
     let created = jobs

@@ -294,7 +294,10 @@ impl JobStore for FakeJobStore {
             return Ok(None);
         };
         let current = &jobs[index];
-        if !matches!(current.state(), JobState::Partial | JobState::Failed) {
+        if !matches!(
+            current.state(),
+            JobState::BlockedStorage | JobState::Partial | JobState::Failed
+        ) {
             return Err(PortError::Conflict);
         }
         let updated = Job::rehydrate(

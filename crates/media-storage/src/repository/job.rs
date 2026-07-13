@@ -13,7 +13,7 @@ use crate::{
     },
 };
 
-const JOB_NOT_RETRYABLE: &str = "only partial or failed jobs can be retried";
+const JOB_NOT_RETRYABLE: &str = "only blocked-storage, partial, or failed jobs can be retried";
 
 #[derive(Clone)]
 pub struct SeaOrmJobStore {
@@ -266,8 +266,33 @@ impl JobStore for SeaOrmJobStore {
                 return Ok(None);
             };
             let state = row.try_get::<String>("", "state")?;
-            if !matches!(state.as_str(), "partial" | "failed") {
+            if !matches!(state.as_str(), "blocked_storage" | "partial" | "failed") {
                 return Err(sea_orm::DbErr::Custom(JOB_NOT_RETRYABLE.to_owned()));
+            }
+            if state == "blocked_storage" {
+                // A blocked outcome completes the runner's wrapper stages before
+                // the job transition is reported. Reset the whole task ledger so
+                // the next lease enters the pipeline and runs storage preflight
+                // again instead of treating that wrapper completion as progress.
+                transaction
+                    .execute_raw(Statement::from_sql_and_values(
+                        DatabaseBackend::Postgres,
+                        "UPDATE job_stages SET state = 'pending', attempt_count = 0, \
+                         checkpoint = '{}'::jsonb, error_snapshot = NULL, started_at = NULL, \
+                         completed_at = NULL, updated_at = now() WHERE task_id IN \
+                         (SELECT id FROM job_tasks WHERE job_id = $1)",
+                        [id.into_uuid().into()],
+                    ))
+                    .await?;
+                transaction
+                    .execute_raw(Statement::from_sql_and_values(
+                        DatabaseBackend::Postgres,
+                        "UPDATE job_tasks SET state = 'pending', attempt_count = 0, \
+                         checkpoint = '{}'::jsonb, error_snapshot = NULL, started_at = NULL, \
+                         completed_at = NULL, updated_at = now() WHERE job_id = $1",
+                        [id.into_uuid().into()],
+                    ))
+                    .await?;
             }
             transaction
                 .execute_raw(Statement::from_sql_and_values(
