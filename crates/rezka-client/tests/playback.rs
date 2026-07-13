@@ -120,6 +120,9 @@ fn parser_requires_strict_success_and_non_empty_stream_payload() {
             RezkaErrorCode::ProviderResponseInvalid
         );
     }
+
+    let error = parse_playback_manifest(r#"{"success":true}"#, movie_request()).unwrap_err();
+    assert!(error.to_string().contains("playback streams missing"));
 }
 
 #[test]

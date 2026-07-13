@@ -71,6 +71,10 @@ pub fn sanitize_provider_text(input: &str) -> SanitizedSnippet {
     SanitizedSnippet("[REDACTED_PROVIDER_TEXT]".to_owned())
 }
 
+pub(crate) fn trusted_internal_text(input: &'static str) -> SanitizedSnippet {
+    SanitizedSnippet(input.to_owned())
+}
+
 #[must_use]
 pub(crate) fn sanitize_http_status(status: u16, url: &RedactedUrl) -> SanitizedSnippet {
     SanitizedSnippet(format!("HTTP {status} at {url}"))

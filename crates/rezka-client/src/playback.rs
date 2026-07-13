@@ -3,7 +3,6 @@ use std::fmt;
 use crate::{
     ProviderFailureReason, RezkaError, StreamVariant, SubtitleTrack,
     catalog::{RezkaMediaKind, RezkaTitleId, TitleLocator, Translation, TranslationKey},
-    redaction::sanitize_provider_text,
     session::RezkaClient,
 };
 
@@ -441,8 +440,8 @@ fn playback_form(request: &PlaybackRequest) -> Vec<(&'static str, String)> {
     }
 }
 
-pub(crate) fn invalid_playback(reason: &str) -> RezkaError {
+pub(crate) fn invalid_playback(reason: &'static str) -> RezkaError {
     RezkaError::ProviderResponseInvalid {
-        context: sanitize_provider_text(reason),
+        context: crate::redaction::trusted_internal_text(reason),
     }
 }
