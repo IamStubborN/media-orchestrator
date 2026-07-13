@@ -138,6 +138,11 @@ enum JobsCommand {
         #[arg(long)]
         json: bool,
     },
+    Retry {
+        job_id: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -488,6 +493,12 @@ async fn run_jobs(args: JobsArgs) -> Result<(), RunError> {
             let output = client.cancel_job(&job_id).await?;
             emit(&output, json, |value| {
                 render::job(value, Some("Cancelled job"))
+            });
+        }
+        JobsCommand::Retry { job_id, json } => {
+            let output = client.retry_job(&job_id).await?;
+            emit(&output, json, |value| {
+                render::job(value, Some("Retried job"))
             });
         }
     }

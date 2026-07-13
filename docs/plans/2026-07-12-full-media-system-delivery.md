@@ -9,6 +9,30 @@ goal must remain active until every item in the Completion Gate is satisfied;
 partial implementation, passing unit tests, or a successful deployment alone
 must not close it.
 
+## Delivery Snapshot (2026-07-13)
+
+### Live-Verified
+
+- Real VPN session rotation with a sticky address within each job.
+- Rezka episode download, VAAPI processing, publication, Plex identity, and initiator notification.
+- Rezka movie download, VAAPI processing, subtitle sidecar, canonical year-qualified naming, and Plex identity.
+- Prowlarr TV search, selection, qBittorrent category routing, restart recovery, seeding, and Plex discovery of all season episodes.
+- TVmaze release lookup, personal tracking notification, and shared family tracking management.
+- Owner isolation for jobs and search sessions across the Primary and Secondary profiles.
+- Local status and verification commands and fail-closed deployment while a job is active.
+
+### Remaining Acceptance Work
+
+1. Complete and verify the active Prowlarr movie in qBittorrent and Plex.
+2. Finish the owner-scoped retry API and CLI for `partial` and `failed` jobs.
+3. Force a subtitle failure and prove retry downloads only the missing track.
+4. Verify Rezka subtitle-present episode handling and five-item pagination through Hermes.
+5. Verify initiator and family Telegram delivery for both profiles, plus unknown-user rejection.
+6. Exercise the ongoing-series Hermes conversation and release-date answers.
+7. Live-verify storage blocking, ambiguous numbering, Specials/OVA mapping, and expired-stream recovery.
+8. Deploy the final immutable images after the active job becomes terminal, then verify a complete deploy and rollback cycle.
+9. Audit all documentation and publish the final acceptance report with dated evidence.
+
 ## Status Model
 
 Every workstream must track three independent states:
@@ -95,6 +119,12 @@ Subtitle-present and pagination live gates remain pending.
 
 **Priority:** High
 
+**Current state:** Subtitle response-shape compatibility, unknown-language
+degradation, partial stage semantics, and checkpoint-preserving execution are
+implemented. An owner-scoped `POST /v1/jobs/{id}/retry` endpoint and matching
+`media jobs retry` command are in progress. The forced-failure live gate remains
+pending.
+
 ### Implementation and Verification
 
 1. Confirm the current Rezka subtitle response shapes against live data.
@@ -104,6 +134,8 @@ Subtitle-present and pagination live gates remain pending.
 5. Treat failed or invalid subtitle downloads as `partial` after publishing a valid video.
 6. Retry only missing or invalid subtitle tracks.
 7. Preserve completed video and valid subtitle files during retry.
+8. Allow only the job owner to requeue `partial` or `failed` jobs.
+9. Make retry idempotent and reject retries for non-retryable states.
 
 ### Live Gate
 

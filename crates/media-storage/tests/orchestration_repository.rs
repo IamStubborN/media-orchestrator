@@ -403,9 +403,11 @@ async fn session_refresh_emits_only_session_lifecycle_notifications() {
         .await
         .unwrap();
     assert_eq!(deliveries.len(), 2);
-    assert!(deliveries.iter().any(|delivery| {
-        delivery.event_type() == NotificationEventType::SessionRefreshed
-    }));
+    assert!(
+        deliveries
+            .iter()
+            .any(|delivery| { delivery.event_type() == NotificationEventType::SessionRefreshed })
+    );
 }
 
 #[tokio::test]
@@ -863,6 +865,117 @@ async fn retryable_stage_fails_terminally_on_third_attempt_and_releases_lease() 
         .unwrap()
         .unwrap();
     assert_eq!(persisted.state(), JobState::Failed);
+}
+
+#[tokio::test]
+async fn owner_retry_requeues_failed_work_idempotently() {
+    let (test_db, jobs, leases) = setup().await;
+    let created = jobs
+        .create(operation_key(), new_job("explicit-retry"))
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        let lease = leases
+            .lease_next(
+                operation_key(),
+                RUNNER_CLIENT_ID,
+                time::Duration::seconds(60),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        for event in [
+            JobEvent::started(JobEventId::new()),
+            JobEvent::stage_started(JobEventId::new(), 0, "download".to_owned(), 0).unwrap(),
+            JobEvent::stage_failed(
+                JobEventId::new(),
+                0,
+                "download".to_owned(),
+                0,
+                true,
+                "network_timeout".to_owned(),
+            )
+            .unwrap(),
+        ] {
+            leases
+                .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+                .await
+                .unwrap();
+        }
+    }
+
+    let operation = operation_key();
+    let retried = jobs
+        .retry(operation, created.id(), PRIMARY_USER_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    let replay = jobs
+        .retry(operation, created.id(), PRIMARY_USER_ID)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(retried.state(), JobState::Queued);
+    assert_eq!(replay, retried);
+    assert!(
+        jobs.retry(operation_key(), created.id(), SECONDARY_USER_ID)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let stages = query(
+        test_db.connection(),
+        "SELECT state, attempt_count FROM job_stages WHERE name = 'download'",
+    )
+    .await;
+    assert_eq!(stages[0].try_get::<String>("", "state").unwrap(), "pending");
+    assert_eq!(stages[0].try_get::<i32>("", "attempt_count").unwrap(), 0);
+    assert_eq!(
+        query(
+            test_db.connection(),
+            "SELECT id FROM outbox_events WHERE event_type = 'job.retried'",
+        )
+        .await
+        .len(),
+        1,
+    );
+}
+
+#[tokio::test]
+async fn completed_job_retry_is_a_conflict() {
+    let (_test_db, jobs, leases) = setup().await;
+    let created = jobs
+        .create(operation_key(), new_job("completed-no-retry"))
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::transition(JobEventId::new(), JobState::Publishing, None).unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::PlexPending, None).unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::Completed, None).unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        jobs.retry(operation_key(), created.id(), PRIMARY_USER_ID)
+            .await
+            .unwrap_err(),
+        media_core::PortError::Conflict,
+    );
 }
 
 #[tokio::test]

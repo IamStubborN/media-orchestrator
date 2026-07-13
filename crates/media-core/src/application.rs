@@ -157,6 +157,21 @@ impl JobApplication {
             .ok_or(ApplicationError::NotFound)
     }
 
+    pub async fn retry_job(
+        &self,
+        actor: &Actor,
+        operation: OperationKey,
+        id: JobId,
+    ) -> Result<Job, ApplicationError> {
+        let owner_id = actor
+            .require_user()
+            .map_err(|_| ApplicationError::Forbidden)?;
+        self.store
+            .retry(operation, id, owner_id)
+            .await?
+            .ok_or(ApplicationError::NotFound)
+    }
+
     pub async fn queue_status(&self, actor: &Actor) -> Result<QueueStatus, ApplicationError> {
         actor
             .require_user()

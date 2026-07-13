@@ -15,6 +15,7 @@ pub(super) fn routes() -> Router<ApiState> {
         .route("/v1/jobs", get(list).post(create))
         .route("/v1/jobs/{job_id}", get(get_job))
         .route("/v1/jobs/{job_id}/cancel", post(cancel))
+        .route("/v1/jobs/{job_id}/retry", post(retry))
 }
 
 async fn list(
@@ -102,6 +103,38 @@ async fn cancel(
                 return ApiError::invalid_request(&request_id, "job ID is invalid").into_response();
             };
             match state.jobs().cancel_job(&actor, operation, job_id).await {
+                Ok(job) => Json(convert::job(&job)).into_response(),
+                Err(error) => application_error(error, &request_id),
+            }
+        },
+    )
+    .await
+}
+
+async fn retry(
+    State(state): State<ApiState>,
+    Extension(actor): Extension<Actor>,
+    Extension(request_id): Extension<RequestId>,
+    Path(job_id): Path<String>,
+    request: Request,
+) -> Response {
+    idempotency::execute(
+        state,
+        actor,
+        request_id,
+        request,
+        move |state, actor, request_id, operation, body| async move {
+            let valid_body = body.is_empty()
+                || serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&body)
+                    .is_ok_and(|body| body.is_empty());
+            if !valid_body {
+                return ApiError::invalid_request(&request_id, "request JSON is invalid")
+                    .into_response();
+            }
+            let Ok(job_id) = job_id.parse::<JobId>() else {
+                return ApiError::invalid_request(&request_id, "job ID is invalid").into_response();
+            };
+            match state.jobs().retry_job(&actor, operation, job_id).await {
                 Ok(job) => Json(convert::job(&job)).into_response(),
                 Err(error) => application_error(error, &request_id),
             }

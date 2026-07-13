@@ -280,6 +280,37 @@ impl JobStore for FakeJobStore {
         Ok(Some(updated))
     }
 
+    async fn retry(
+        &self,
+        _: OperationKey,
+        id: JobId,
+        owner: UserId,
+    ) -> Result<Option<Job>, PortError> {
+        let mut jobs = self.jobs.lock().unwrap();
+        let Some(index) = jobs
+            .iter()
+            .position(|job| job.id() == id && job.owner_id() == owner)
+        else {
+            return Ok(None);
+        };
+        let current = &jobs[index];
+        if !matches!(current.state(), JobState::Partial | JobState::Failed) {
+            return Err(PortError::Conflict);
+        }
+        let updated = Job::rehydrate(
+            current.id(),
+            current.owner_id(),
+            current.provider(),
+            current.result_ref().to_owned(),
+            JobState::Queued,
+            None,
+            current.notify_scope(),
+        )
+        .map_err(|_| PortError::Infrastructure)?;
+        jobs[index] = updated.clone();
+        Ok(Some(updated))
+    }
+
     async fn queue_status(&self) -> Result<QueueStatus, PortError> {
         Ok(*self.status.lock().unwrap())
     }

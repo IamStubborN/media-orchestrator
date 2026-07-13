@@ -50,6 +50,7 @@ impl SeaOrmOperationReceiptRepository {
 pub(crate) enum OperationKind {
     CreateJob,
     CancelJob,
+    RetryJob,
     LeaseNext,
     Heartbeat,
     ReportEvent,
@@ -60,6 +61,7 @@ impl OperationKind {
         match self {
             Self::CreateJob => "create_job",
             Self::CancelJob => "cancel_job",
+            Self::RetryJob => "retry_job",
             Self::LeaseNext => "lease_next",
             Self::Heartbeat => "heartbeat",
             Self::ReportEvent => "report_event",
@@ -159,7 +161,7 @@ const fn result_matches_kind(kind: OperationKind, result: &OperationResult) -> b
         (kind, result),
         (OperationKind::CreateJob, OperationResult::Job(_))
             | (
-                OperationKind::CancelJob | OperationKind::ReportEvent,
+                OperationKind::CancelJob | OperationKind::RetryJob | OperationKind::ReportEvent,
                 OperationResult::Job(_) | OperationResult::None
             )
             | (

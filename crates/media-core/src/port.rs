@@ -49,6 +49,15 @@ pub trait JobStore: Send + Sync {
         owner: UserId,
     ) -> Result<Option<Job>, PortError>;
 
+    async fn retry(
+        &self,
+        _operation: OperationKey,
+        _id: JobId,
+        _owner: UserId,
+    ) -> Result<Option<Job>, PortError> {
+        Err(PortError::Conflict)
+    }
+
     async fn queue_status(&self) -> Result<QueueStatus, PortError>;
 }
 

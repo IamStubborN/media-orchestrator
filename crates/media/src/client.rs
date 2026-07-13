@@ -71,6 +71,16 @@ impl HttpClient {
         .await
     }
 
+    pub async fn retry_job(&self, job_id: &str) -> Result<String, ClientError> {
+        let path = format!("v1/jobs/{job_id}/retry");
+        self.execute(
+            self.request(reqwest::Method::POST, &path)?
+                .header(IDEMPOTENCY_KEY_HEADER, generated_identifier())
+                .json(&serde_json::json!({})),
+        )
+        .await
+    }
+
     pub async fn queue_status(&self) -> Result<String, ClientError> {
         self.execute(self.request(reqwest::Method::GET, "v1/queue/status")?)
             .await

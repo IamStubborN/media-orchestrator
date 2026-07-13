@@ -234,3 +234,54 @@ async fn owner_can_cancel_a_queued_job_immediately() {
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(value["state"], "cancelled");
 }
+
+#[tokio::test]
+async fn owner_can_retry_only_a_partial_or_failed_job() {
+    let partial = Job::rehydrate(
+        JobId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        "partial-selection".to_owned(),
+        JobState::Partial,
+        None,
+        NotifyScope::Initiator,
+    )
+    .unwrap();
+    let response = app(FakeJobStore::with_job(partial.clone()))
+        .oneshot(
+            Request::post(format!("/v1/jobs/{}/retry", partial.id()))
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header("idempotency-key", "retry-partial-job")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(value["state"], "queued");
+
+    let completed = Job::rehydrate(
+        JobId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        "completed-selection".to_owned(),
+        JobState::Completed,
+        None,
+        NotifyScope::Initiator,
+    )
+    .unwrap();
+    let response = app(FakeJobStore::with_job(completed.clone()))
+        .oneshot(
+            Request::post(format!("/v1/jobs/{}/retry", completed.id()))
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header("idempotency-key", "retry-completed-job")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}

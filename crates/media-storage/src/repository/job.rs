@@ -13,6 +13,8 @@ use crate::{
     },
 };
 
+const JOB_NOT_RETRYABLE: &str = "only partial or failed jobs can be retried";
+
 #[derive(Clone)]
 pub struct SeaOrmJobStore {
     database: DatabaseConnection,
@@ -226,6 +228,113 @@ impl JobStore for SeaOrmJobStore {
         }
         .await;
         finish(transaction, result).await
+    }
+
+    async fn retry(
+        &self,
+        operation: OperationKey,
+        id: JobId,
+        owner: UserId,
+    ) -> Result<Option<Job>, PortError> {
+        let transaction = self.database.begin().await.map_err(map_database_error)?;
+        let result = async {
+            match operation::claim(&transaction, operation, OperationKind::RetryJob).await? {
+                OperationClaim::Replay(OperationResult::Job(job)) => return Ok(Some(job)),
+                OperationClaim::Replay(OperationResult::None) => return Ok(None),
+                OperationClaim::Replay(OperationResult::Lease(_)) => {
+                    return Err(sea_orm::DbErr::Type(
+                        "retry-job operation has an invalid result".to_owned(),
+                    ));
+                }
+                OperationClaim::Fresh => {}
+            }
+            let Some(row) = transaction
+                .query_one_raw(Statement::from_sql_and_values(
+                    DatabaseBackend::Postgres,
+                    "SELECT state FROM jobs WHERE id = $1 AND owner_id = $2 FOR UPDATE",
+                    [id.into_uuid().into(), owner.into_uuid().into()],
+                ))
+                .await?
+            else {
+                operation::complete(
+                    &transaction,
+                    operation,
+                    OperationKind::RetryJob,
+                    &OperationResult::None,
+                )
+                .await?;
+                return Ok(None);
+            };
+            let state = row.try_get::<String>("", "state")?;
+            if !matches!(state.as_str(), "partial" | "failed") {
+                return Err(sea_orm::DbErr::Custom(JOB_NOT_RETRYABLE.to_owned()));
+            }
+            transaction
+                .execute_raw(Statement::from_sql_and_values(
+                    DatabaseBackend::Postgres,
+                    "UPDATE job_stages SET state = 'pending', attempt_count = 0, \
+                     error_snapshot = NULL, started_at = NULL, completed_at = NULL, updated_at = now() \
+                     WHERE task_id IN (SELECT id FROM job_tasks WHERE job_id = $1) \
+                     AND state = 'failed'",
+                    [id.into_uuid().into()],
+                ))
+                .await?;
+            transaction
+                .execute_raw(Statement::from_sql_and_values(
+                    DatabaseBackend::Postgres,
+                    "UPDATE job_tasks SET state = 'pending', attempt_count = 0, \
+                     error_snapshot = NULL, started_at = NULL, completed_at = NULL, updated_at = now() \
+                     WHERE job_id = $1 AND state = 'failed'",
+                    [id.into_uuid().into()],
+                ))
+                .await?;
+            transaction
+                .execute_raw(Statement::from_sql_and_values(
+                    DatabaseBackend::Postgres,
+                    "UPDATE jobs SET state = 'queued', needs_action_reason = NULL, \
+                     error_snapshot = NULL, attempt_count = 0, started_at = NULL, \
+                     completed_at = NULL, updated_at = now() WHERE id = $1",
+                    [id.into_uuid().into()],
+                ))
+                .await?;
+            insert_outbox(
+                &transaction,
+                id,
+                "job.retried",
+                operation.as_bytes().to_vec(),
+                serde_json::json!({"state": "queued"}),
+            )
+            .await?;
+            let model = job::Entity::find_by_id(id.into_uuid())
+                .one(&transaction)
+                .await?
+                .ok_or_else(|| sea_orm::DbErr::RecordNotFound("job disappeared".to_owned()))?;
+            let job = Job::try_from(model)
+                .map_err(|_| sea_orm::DbErr::Type("invalid persisted job".to_owned()))?;
+            operation::complete(
+                &transaction,
+                operation,
+                OperationKind::RetryJob,
+                &OperationResult::Job(job.clone()),
+            )
+            .await?;
+            Ok(Some(job))
+        }
+        .await;
+        match result {
+            Ok(value) => {
+                transaction.commit().await.map_err(map_database_error)?;
+                Ok(value)
+            }
+            Err(sea_orm::DbErr::Custom(message)) if message == JOB_NOT_RETRYABLE => {
+                transaction.rollback().await.map_err(map_database_error)?;
+                Err(PortError::Conflict)
+            }
+            Err(error) => {
+                transaction.rollback().await.map_err(map_database_error)?;
+                Err(map_database_error(error))
+            }
+        }
     }
 
     async fn queue_status(&self) -> Result<QueueStatus, PortError> {

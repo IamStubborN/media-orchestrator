@@ -591,6 +591,23 @@ async fn jobs_list_show_and_cancel_use_json_http_contracts() {
                     json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#)
                 }
             }),
+        )
+        .route(
+            "/v1/jobs/{job_id}/retry",
+            any(|request: Request| async move {
+                let valid_headers = request.method() == Method::POST
+                    && request.headers().contains_key("authorization")
+                    && request.headers().contains_key("x-request-id")
+                    && request.headers().contains_key("idempotency-key");
+                let body = to_bytes(request.into_body(), 4096).await.unwrap();
+                let valid_body = serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+                    == serde_json::json!({});
+                if valid_headers && valid_body {
+                    json_response(StatusCode::OK, r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","provider":"rezka","result_ref":"item","state":"queued","notify_scope":"initiator"}"#)
+                } else {
+                    json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#)
+                }
+            }),
         );
     let server = TestServer::start(router).await;
     let token_file = SecretFile::new("cli-secret");
@@ -622,6 +639,18 @@ async fn jobs_list_show_and_cancel_use_json_http_contracts() {
     ))
     .await
     .unwrap();
+    let retry = command_output(command(
+        &server,
+        &token_file,
+        [
+            "jobs",
+            "retry",
+            "018f3f86-7b4c-7b4f-9b6a-6d62f45bb111",
+            "--json",
+        ],
+    ))
+    .await
+    .unwrap();
     server.stop().await;
 
     assert!(
@@ -643,6 +672,15 @@ async fn jobs_list_show_and_cancel_use_json_http_contracts() {
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&cancel.stdout).unwrap()["state"],
         "cancelled",
+    );
+    assert!(
+        retry.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&retry.stdout).unwrap()["state"],
+        "queued",
     );
 }
 
