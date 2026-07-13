@@ -822,12 +822,33 @@ fn parse_entry(
         .and_then(|source| parse_thumbnail(source, selected_origin).ok());
 
     Ok(CatalogEntry::new(
-        TitleLocator::new(href)?,
+        parse_catalog_title_locator(href, selected_origin)?,
         title,
         description,
         info,
         thumbnail,
     ))
+}
+
+fn parse_catalog_title_locator(
+    href: &str,
+    selected_origin: &Url,
+) -> Result<TitleLocator, RezkaError> {
+    let locator = match Url::parse(href) {
+        Ok(url)
+            if same_origin(&url, selected_origin)
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none() =>
+        {
+            url.path().to_owned()
+        }
+        Ok(_) => return Err(invalid_catalog("invalid title locator")),
+        Err(url::ParseError::RelativeUrlWithoutBase) => href.to_owned(),
+        Err(_) => return Err(invalid_catalog("invalid title locator")),
+    };
+    TitleLocator::new(&locator)
 }
 
 fn parse_thumbnail(source: &str, selected_origin: &Url) -> Result<PublicImageUrl, RezkaError> {

@@ -229,6 +229,29 @@ fn fixture_page_preserves_provider_order_and_normalizes_display_fields() {
 }
 
 #[test]
+fn catalog_normalizes_same_origin_absolute_title_locators() {
+    let html = r#"<div class="b-content__inline_items">
+        <div class="b-content__inline_item">
+          <div class="b-content__inline_item-link"><a href="https://rezka.test/films/1-title.html">Title</a></div>
+        </div>
+    </div>"#;
+    let page = parse_catalog_page(html, &query(), &origin()).unwrap();
+    assert_eq!(page.entries()[0].locator().as_str(), "/films/1-title.html");
+
+    for href in [
+        "https://foreign.test/films/1-title.html",
+        "https://user@rezka.test/films/1-title.html",
+        "https://rezka.test/films/1-title.html?token=secret",
+        "https://rezka.test/films/1-title.html#fragment",
+    ] {
+        let html = format!(
+            r#"<div class="b-content__inline_items"><div class="b-content__inline_item"><div class="b-content__inline_item-link"><a href="{href}">Title</a></div></div></div>"#
+        );
+        assert_invalid(parse_catalog_page(&html, &query(), &origin()));
+    }
+}
+
+#[test]
 fn invalid_optional_thumbnail_degrades_to_none_without_failing_the_page() {
     let html = r#"<div class="b-content__inline_items">
         <div class="b-content__inline_item">
