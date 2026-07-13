@@ -1,7 +1,7 @@
 # Acceptance Status
 
 **Audited:** 2026-07-13  
-**Runtime revision:** `27b3cfc`  
+**Runtime revision:** `187e4dd`
 **Hermes revision:** `4e5a586`
 
 This is the authoritative completion matrix for the active media-system goal.
@@ -17,7 +17,7 @@ live result keeps the goal open even when its code and deployment are complete.
 | 5. Notifications | Yes | Yes | Yes | [routing](evidence/2026-07-13-notification-routing.md), [rich delivery](evidence/2026-07-13-storage-resume-and-rich-notifications.md) |
 | 6. Tracking and release dates | Yes | Yes | Yes | [tracking E2E](evidence/2026-07-13-tracking-e2e.md), [release query](evidence/2026-07-13-release-query.md), [Hermes conversation](evidence/2026-07-13-hermes-release-conversation.md) |
 | 7. Movie flow | Yes | Yes | Yes | [Rezka movie](evidence/2026-07-13-rezka-movie-e2e.md), [Prowlarr movie](evidence/2026-07-13-prowlarr-movie-e2e.md) |
-| 8. Recovery, storage, mapping | Yes | Yes | Partial | [retry and deploy](evidence/2026-07-13-job-retry-and-local-deploy.md), [storage resume](evidence/2026-07-13-storage-resume-and-rich-notifications.md), [OVA mapping](evidence/2026-07-13-episode-mapping-and-ova.md) |
+| 8. Recovery, storage, mapping | Yes | Yes | Partial | [retry and deploy](evidence/2026-07-13-job-retry-and-local-deploy.md), [storage resume](evidence/2026-07-13-storage-resume-and-rich-notifications.md), [OVA mapping](evidence/2026-07-13-episode-mapping-and-ova.md), [deterministic stream and Specials recovery](evidence/2026-07-13-expired-stream-and-specials-deterministic.md) |
 | 9. Multi-user Hermes | Yes | Yes | Partial | [API and ownership isolation](evidence/2026-07-13-multi-user-isolation.md), [notification routing](evidence/2026-07-13-notification-routing.md) |
 | 10. Local operations | Yes | Yes | Yes | [final deploy and rollback](evidence/2026-07-13-final-local-deployment.md) |
 | 11. Documentation truthfulness | Yes | N/A | Yes | This matrix, [architecture](ARCHITECTURE.md), [runbook](RUNBOOK.md), and the [canonical plan](plans/2026-07-12-full-media-system-delivery.md) |
@@ -27,11 +27,14 @@ live result keeps the goal open even when its code and deployment are complete.
 ### Expired Stream and Specials Publication
 
 The bounded expired-stream code path and persistent `S00E01` mapping are
-implemented and deployed. A real OVA reached `needs_action`, accepted the
-mapping, and reused it later, but no mapped OVA has yet completed download,
-VAAPI processing, publication under Plex `Specials`, and exact Plex identity
-verification. A controlled real expired stream has also not completed a
-refresh-and-resume cycle.
+implemented and deployed. Deterministic cross-boundary tests prove that an
+expired transfer publishes nothing, a fresh lease can complete, and mapped
+video plus subtitle sidecars publish under `Specials` with a Plex expectation
+for season `0`. A real OVA reached `needs_action`, accepted the mapping, and
+reused it later, but no mapped OVA has yet completed download, VAAPI processing,
+publication under Plex `Specials`, and exact Plex identity verification. A
+controlled real expired stream has also not completed a refresh-and-resume
+cycle.
 
 This gate requires an explicitly approved real Rezka download. It must record
 the old and refreshed stream behavior, final `S00E..` path, ffprobe output,
