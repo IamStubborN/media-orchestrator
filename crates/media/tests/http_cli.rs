@@ -445,6 +445,88 @@ async fn jobs_get_and_queue_status_use_the_expected_paths() {
 }
 
 #[tokio::test]
+async fn episode_mapping_commands_use_owner_scoped_job_endpoint() {
+    const JOB_ID: &str = "018f3f86-7b4c-7b4f-9b6a-6d62f45bb111";
+    let router = Router::new().route(
+        "/v1/jobs/{job_id}/episode-mapping-action",
+        any(|request: Request| async move {
+            let authorized = request
+                .headers()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                == Some("Bearer cli-secret");
+            match *request.method() {
+                Method::GET if authorized => json_response(
+                    StatusCode::OK,
+                    r#"{"job_id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","title":"Show OVA","provider_media_ref":"42","provider":{"season":1,"episode":14},"label":"OVA"}"#,
+                ),
+                Method::POST if authorized => {
+                    let idempotent = request.headers().contains_key("idempotency-key");
+                    let body = to_bytes(request.into_body(), 4096).await.unwrap();
+                    let valid = serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+                        == serde_json::json!({
+                            "canonical_season":0,
+                            "canonical_episode":1,
+                            "canonical_title":"My Hero Academia"
+                        });
+                    if idempotent && valid {
+                        json_response(
+                            StatusCode::OK,
+                            r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","provider":"rezka","result_ref":"selection:42","state":"queued","notify_scope":"initiator"}"#,
+                        )
+                    } else {
+                        json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#)
+                    }
+                }
+                _ => json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#),
+            }
+        }),
+    );
+    let server = TestServer::start(router).await;
+    let token_file = SecretFile::new("cli-secret\n");
+
+    let action = command_output(command(
+        &server,
+        &token_file,
+        ["jobs", "mapping-action", JOB_ID, "--json"],
+    ))
+    .await
+    .unwrap();
+    assert!(action.status.success());
+    assert!(
+        String::from_utf8(action.stdout)
+            .unwrap()
+            .contains("Show OVA")
+    );
+
+    let resolved = command_output(command(
+        &server,
+        &token_file,
+        [
+            "jobs",
+            "resolve-episode",
+            JOB_ID,
+            "--season",
+            "0",
+            "--episode",
+            "1",
+            "--title",
+            "My Hero Academia",
+            "--json",
+        ],
+    ))
+    .await
+    .unwrap();
+    assert!(resolved.status.success());
+    assert!(
+        String::from_utf8(resolved.stdout)
+            .unwrap()
+            .contains("queued")
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
 async fn search_continue_and_download_use_stable_json_and_exact_selection() {
     let router = Router::new()
         .route(

@@ -845,11 +845,11 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
                 )),
             ));
         }
-        state = state.with_search(Arc::new(DurableSearchService::new(
-            persistence,
-            provider,
-            jobs,
-        )));
+        state = state.with_search(Arc::new(
+            DurableSearchService::new(persistence, provider, jobs).with_identity(Arc::new(
+                media_storage::SeaOrmIdentityStore::new(database.clone()),
+            )),
+        ));
     }
     if let Some(config) = config.plex() {
         let plex_config = media_integrations::plex::PlexConfig::new(

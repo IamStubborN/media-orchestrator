@@ -14,8 +14,10 @@ use media_contract::{
     SeriesAvailabilityDto, StartSearchRequest, TrackingPromptDto,
 };
 use media_core::{
-    PRIMARY_USER_ID, EpisodeDiscoveryPort, Job, JobApplication, JobId, JobStore, NewJob,
-    OperationKey, PortError, Provider, QueueStatus, TrackingId, TrackingScope,
+    PRIMARY_USER_ID, CanonicalEpisode, CanonicalEpisodeCoordinates, CanonicalMedia, CanonicalSeason,
+    EpisodeDiscoveryPort, EpisodeId, EpisodeMappingConfirmation, EpisodeProviderMapping,
+    ExternalNamespace, IdentityStore, Job, JobApplication, JobId, JobStore, MediaExternalReference,
+    NewJob, NotifyScope, OperationKey, PortError, Provider, QueueStatus, TrackingId, TrackingScope,
     TrackingSubscription, UserId, SECONDARY_USER_ID,
 };
 
@@ -137,6 +139,19 @@ impl SearchPersistence for MemorySearchPersistence {
             .cloned()
             .ok_or(SearchError::NotFound)
     }
+
+    async fn update_execution(
+        &self,
+        result_ref: &str,
+        execution: media_contract::ExecutionSelectionDto,
+    ) -> Result<(), SearchError> {
+        let mut executions = self.executions.lock().unwrap();
+        let stored = executions
+            .get_mut(result_ref)
+            .ok_or(SearchError::NotFound)?;
+        *stored = execution;
+        Ok(())
+    }
 }
 
 struct FakeProvider {
@@ -204,12 +219,196 @@ impl JobStore for MemoryJobStore {
     async fn cancel(&self, _: OperationKey, _: JobId, _: UserId) -> Result<Option<Job>, PortError> {
         Ok(None)
     }
+    async fn retry(
+        &self,
+        _: OperationKey,
+        id: JobId,
+        owner: UserId,
+    ) -> Result<Option<Job>, PortError> {
+        let mut jobs = self.jobs.lock().unwrap();
+        let Some(position) = jobs
+            .iter()
+            .position(|job| job.id() == id && job.owner_id() == owner)
+        else {
+            return Ok(None);
+        };
+        let current = &jobs[position];
+        if current.state() != media_core::JobState::NeedsAction {
+            return Err(PortError::Conflict);
+        }
+        let queued = Job::rehydrate(
+            current.id(),
+            current.owner_id(),
+            current.provider(),
+            current.result_ref().to_owned(),
+            media_core::JobState::Queued,
+            None,
+            current.notify_scope(),
+        )
+        .map_err(|_| PortError::Infrastructure)?;
+        jobs[position] = queued.clone();
+        Ok(Some(queued))
+    }
     async fn queue_status(&self) -> Result<QueueStatus, PortError> {
         Ok(QueueStatus {
             queued: 0,
             active: false,
         })
     }
+}
+
+#[derive(Default)]
+struct MemoryIdentityStore {
+    confirmations: Mutex<Vec<EpisodeMappingConfirmation>>,
+}
+
+#[async_trait::async_trait]
+impl IdentityStore for MemoryIdentityStore {
+    async fn create_media(&self, _: CanonicalMedia) -> Result<CanonicalMedia, PortError> {
+        Err(PortError::Infrastructure)
+    }
+    async fn add_external_reference(
+        &self,
+        _: MediaExternalReference,
+    ) -> Result<MediaExternalReference, PortError> {
+        Err(PortError::Infrastructure)
+    }
+    async fn find_media_by_external_reference(
+        &self,
+        _: ExternalNamespace,
+        _: &str,
+    ) -> Result<Option<CanonicalMedia>, PortError> {
+        Ok(None)
+    }
+    async fn create_season(&self, _: CanonicalSeason) -> Result<CanonicalSeason, PortError> {
+        Err(PortError::Infrastructure)
+    }
+    async fn create_episode(&self, _: CanonicalEpisode) -> Result<CanonicalEpisode, PortError> {
+        Err(PortError::Infrastructure)
+    }
+    async fn save_episode_mapping(
+        &self,
+        _: EpisodeProviderMapping,
+    ) -> Result<EpisodeProviderMapping, PortError> {
+        Err(PortError::Infrastructure)
+    }
+    async fn find_episode_mapping(
+        &self,
+        _: Provider,
+        _: &str,
+        _: u32,
+        _: u32,
+    ) -> Result<Option<CanonicalEpisodeCoordinates>, PortError> {
+        Ok(None)
+    }
+    async fn confirm_episode_mapping(
+        &self,
+        confirmation: EpisodeMappingConfirmation,
+    ) -> Result<CanonicalEpisodeCoordinates, PortError> {
+        let coordinates = CanonicalEpisodeCoordinates::new(
+            EpisodeId::new(),
+            confirmation.canonical_season(),
+            confirmation.canonical_episode(),
+            confirmation.title().to_owned(),
+        );
+        self.confirmations.lock().unwrap().push(confirmation);
+        Ok(coordinates)
+    }
+}
+
+#[tokio::test]
+async fn ambiguous_episode_is_resolved_persisted_in_execution_and_requeued() {
+    let persistence = Arc::new(MemorySearchPersistence::default());
+    let jobs = Arc::new(MemoryJobStore::default());
+    let identity = Arc::new(MemoryIdentityStore::default());
+    let job_id = JobId::new();
+    let result_ref = "selection:ambiguous-ova";
+    jobs.jobs.lock().unwrap().push(
+        Job::rehydrate(
+            job_id,
+            PRIMARY_USER_ID,
+            Provider::Rezka,
+            result_ref.to_owned(),
+            media_core::JobState::NeedsAction,
+            Some(media_core::NeedsActionReason::IdentityAmbiguous),
+            NotifyScope::Initiator,
+        )
+        .unwrap(),
+    );
+    persistence
+        .insert_execution(
+            result_ref.to_owned(),
+            media_contract::ExecutionSelectionDto::Rezka {
+                locator: "/ova.html".to_owned(),
+                title_id: 42,
+                media_kind: MediaKindDto::Series,
+                translation_id: 19,
+                translation: Some("AniLibria".to_owned()),
+                director: false,
+                camrip: false,
+                has_ads: false,
+                season: Some(1),
+                episode: Some(14),
+                episodes: vec![media_contract::EpisodeSnapshotDto {
+                    season: 1,
+                    episode: 14,
+                }],
+                episode_mappings: Vec::new(),
+                ambiguous_episodes: vec![media_contract::AmbiguousEpisodeDto {
+                    provider: media_contract::EpisodeCoordinateDto {
+                        season: 1,
+                        episode: 14,
+                    },
+                    label: "OVA".to_owned(),
+                }],
+                release_year: Some(2016),
+                title: "Separate OVA title".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+    let service = DurableSearchService::new(
+        persistence.clone(),
+        Arc::new(FakeProvider {
+            pages: Mutex::new(HashMap::new()),
+        }),
+        Arc::new(JobApplication::new(jobs)),
+    )
+    .with_identity(identity.clone());
+
+    let action = service
+        .episode_mapping_action(PRIMARY_USER_ID, job_id)
+        .await
+        .unwrap();
+    assert_eq!((action.provider.season, action.provider.episode), (1, 14));
+    let queued = service
+        .resolve_episode_mapping(
+            PRIMARY_USER_ID,
+            OperationKey::from_bytes([91; 32]),
+            job_id,
+            media_contract::ResolveEpisodeMappingRequest {
+                canonical_season: 0,
+                canonical_episode: 1,
+                canonical_title: Some("My Hero Academia".to_owned()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(queued.state, media_contract::JobStateDto::Queued);
+    let execution = persistence.execution_for(result_ref).await.unwrap();
+    let media_contract::ExecutionSelectionDto::Rezka {
+        episode_mappings,
+        ambiguous_episodes,
+        ..
+    } = execution
+    else {
+        panic!("expected Rezka execution");
+    };
+    assert!(ambiguous_episodes.is_empty());
+    assert_eq!(episode_mappings[0].canonical.season, 0);
+    assert_eq!(episode_mappings[0].canonical.episode, 1);
+    assert_eq!(episode_mappings[0].canonical_title, "My Hero Academia");
+    assert_eq!(identity.confirmations.lock().unwrap().len(), 1);
 }
 
 fn request(source: ProviderDto) -> StartSearchRequest {

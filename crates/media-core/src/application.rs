@@ -117,6 +117,17 @@ impl JobApplication {
             .ok_or(ApplicationError::NotFound)
     }
 
+    pub async fn get_job_for_owner(
+        &self,
+        owner_id: crate::UserId,
+        id: JobId,
+    ) -> Result<Job, ApplicationError> {
+        self.store
+            .find_for_owner(id, owner_id)
+            .await?
+            .ok_or(ApplicationError::NotFound)
+    }
+
     pub async fn get_job_detail(
         &self,
         actor: &Actor,
@@ -166,6 +177,18 @@ impl JobApplication {
         let owner_id = actor
             .require_user()
             .map_err(|_| ApplicationError::Forbidden)?;
+        self.store
+            .retry(operation, id, owner_id)
+            .await?
+            .ok_or(ApplicationError::NotFound)
+    }
+
+    pub async fn retry_job_for_owner(
+        &self,
+        owner_id: crate::UserId,
+        operation: OperationKey,
+        id: JobId,
+    ) -> Result<Job, ApplicationError> {
         self.store
             .retry(operation, id, owner_id)
             .await?

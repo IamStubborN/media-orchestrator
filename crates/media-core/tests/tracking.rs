@@ -150,9 +150,9 @@ fn ongoing_series_exposes_choice_prompt_without_enabling_tracking() {
 }
 
 #[test]
-fn known_episode_snapshot_is_canonical_and_rejects_zero_numbers() {
+fn known_episode_snapshot_accepts_specials_but_rejects_zero_episode() {
     assert_eq!(EpisodeSnapshot::new(2, 7).unwrap().season(), 2);
     assert_eq!(EpisodeSnapshot::new(2, 7).unwrap().episode(), 7);
-    assert!(EpisodeSnapshot::new(0, 7).is_err());
+    assert_eq!(EpisodeSnapshot::new(0, 7).unwrap().season(), 0);
     assert!(EpisodeSnapshot::new(2, 0).is_err());
 }

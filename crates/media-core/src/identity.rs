@@ -186,9 +186,9 @@ impl CanonicalEpisode {
         absolute_number: Option<u32>,
         title: Option<String>,
     ) -> Result<Self, IdentityValidationError> {
-        validate_number(episode_number)?;
+        validate_positive_number(episode_number)?;
         if let Some(number) = absolute_number {
-            validate_number(number)?;
+            validate_positive_number(number)?;
         }
         Ok(Self {
             id,
@@ -290,6 +290,135 @@ pub struct EpisodeProviderMapping {
     source: MappingSource,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CanonicalEpisodeCoordinates {
+    episode_id: EpisodeId,
+    season: u32,
+    episode: u32,
+    media_title: String,
+}
+
+impl CanonicalEpisodeCoordinates {
+    #[must_use]
+    pub fn new(episode_id: EpisodeId, season: u32, episode: u32, media_title: String) -> Self {
+        Self {
+            episode_id,
+            season,
+            episode,
+            media_title,
+        }
+    }
+
+    #[must_use]
+    pub const fn episode_id(&self) -> EpisodeId {
+        self.episode_id
+    }
+
+    #[must_use]
+    pub const fn season(&self) -> u32 {
+        self.season
+    }
+
+    #[must_use]
+    pub const fn episode(&self) -> u32 {
+        self.episode
+    }
+
+    #[must_use]
+    pub fn media_title(&self) -> &str {
+        &self.media_title
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct EpisodeMappingConfirmation {
+    provider: Provider,
+    provider_media_ref: String,
+    provider_season: u32,
+    provider_episode: u32,
+    title: String,
+    release_year: Option<i32>,
+    canonical_season: u32,
+    canonical_episode: u32,
+}
+
+impl EpisodeMappingConfirmation {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        provider: Provider,
+        provider_media_ref: String,
+        provider_season: u32,
+        provider_episode: u32,
+        title: String,
+        release_year: Option<i32>,
+        canonical_season: u32,
+        canonical_episode: u32,
+    ) -> Result<Self, IdentityValidationError> {
+        let provider_media_ref = normalized_required(
+            provider_media_ref,
+            IdentityValidationError::EmptyProviderMediaReference,
+        )?;
+        let title = normalized_required(title, IdentityValidationError::EmptyTitle)?;
+        validate_number(provider_season)?;
+        validate_positive_number(provider_episode)?;
+        validate_number(canonical_season)?;
+        validate_positive_number(canonical_episode)?;
+        if release_year.is_some_and(|year| !(1878..=9999).contains(&year)) {
+            return Err(IdentityValidationError::InvalidReleaseYear);
+        }
+        Ok(Self {
+            provider,
+            provider_media_ref,
+            provider_season,
+            provider_episode,
+            title,
+            release_year,
+            canonical_season,
+            canonical_episode,
+        })
+    }
+
+    #[must_use]
+    pub const fn provider(&self) -> Provider {
+        self.provider
+    }
+
+    #[must_use]
+    pub fn provider_media_ref(&self) -> &str {
+        &self.provider_media_ref
+    }
+
+    #[must_use]
+    pub const fn provider_season(&self) -> u32 {
+        self.provider_season
+    }
+
+    #[must_use]
+    pub const fn provider_episode(&self) -> u32 {
+        self.provider_episode
+    }
+
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    #[must_use]
+    pub const fn release_year(&self) -> Option<i32> {
+        self.release_year
+    }
+
+    #[must_use]
+    pub const fn canonical_season(&self) -> u32 {
+        self.canonical_season
+    }
+
+    #[must_use]
+    pub const fn canonical_episode(&self) -> u32 {
+        self.canonical_episode
+    }
+}
+
 impl EpisodeProviderMapping {
     pub fn new(
         episode_id: EpisodeId,
@@ -300,7 +429,7 @@ impl EpisodeProviderMapping {
         source: MappingSource,
     ) -> Result<Self, IdentityValidationError> {
         validate_number(provider_season_number)?;
-        validate_number(provider_episode_number)?;
+        validate_positive_number(provider_episode_number)?;
         Ok(Self {
             episode_id,
             provider,
@@ -367,6 +496,13 @@ fn validate_number(value: u32) -> Result<(), IdentityValidationError> {
     i32::try_from(value)
         .map(|_| ())
         .map_err(|_| IdentityValidationError::NumberOutOfRange)
+}
+
+fn validate_positive_number(value: u32) -> Result<(), IdentityValidationError> {
+    if value == 0 {
+        return Err(IdentityValidationError::NumberOutOfRange);
+    }
+    validate_number(value)
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -464,6 +600,22 @@ mod tests {
 
         assert_eq!(
             CanonicalSeason::new(SeasonId::new(), MediaId::new(), too_large, None).unwrap_err(),
+            IdentityValidationError::NumberOutOfRange,
+        );
+        assert_eq!(
+            CanonicalEpisode::new(EpisodeId::new(), SeasonId::new(), 0, None, None).unwrap_err(),
+            IdentityValidationError::NumberOutOfRange,
+        );
+        assert_eq!(
+            EpisodeProviderMapping::new(
+                EpisodeId::new(),
+                Provider::Rezka,
+                "provider-ref".to_owned(),
+                0,
+                0,
+                MappingSource::Discovered,
+            )
+            .unwrap_err(),
             IdentityValidationError::NumberOutOfRange,
         );
         assert_eq!(

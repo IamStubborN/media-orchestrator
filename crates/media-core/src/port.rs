@@ -1,7 +1,8 @@
 use crate::{
-    Actor, BootstrapClient, CanonicalEpisode, CanonicalMedia, CanonicalSeason, ClientId,
-    CredentialDigest, EpisodeProviderMapping, ExternalNamespace, Job, JobDetail, JobEvent, JobId,
-    JobLease, LeaseId, MediaExternalReference, NewJob, OperationKey, QueueStatus, RunnerLifecycle,
+    Actor, BootstrapClient, CanonicalEpisode, CanonicalEpisodeCoordinates, CanonicalMedia,
+    CanonicalSeason, ClientId, CredentialDigest, EpisodeMappingConfirmation,
+    EpisodeProviderMapping, ExternalNamespace, Job, JobDetail, JobEvent, JobId, JobLease, LeaseId,
+    MediaExternalReference, NewJob, OperationKey, Provider, QueueStatus, RunnerLifecycle,
     RunnerLifecycleUpdate, UserId,
 };
 
@@ -124,6 +125,19 @@ pub trait IdentityStore: Send + Sync {
         &self,
         mapping: EpisodeProviderMapping,
     ) -> Result<EpisodeProviderMapping, PortError>;
+
+    async fn find_episode_mapping(
+        &self,
+        provider: Provider,
+        provider_media_ref: &str,
+        provider_season: u32,
+        provider_episode: u32,
+    ) -> Result<Option<CanonicalEpisodeCoordinates>, PortError>;
+
+    async fn confirm_episode_mapping(
+        &self,
+        confirmation: EpisodeMappingConfirmation,
+    ) -> Result<CanonicalEpisodeCoordinates, PortError>;
 }
 
 #[cfg(test)]

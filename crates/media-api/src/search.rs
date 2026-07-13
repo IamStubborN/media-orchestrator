@@ -1,8 +1,9 @@
 use media_contract::{
-    ContinueSearchRequest, ExecutionSelectionDto, JobDto, RezkaSessionRefreshRequest,
-    SearchPageDto, SelectResultRequest, StartSearchRequest,
+    ContinueSearchRequest, EpisodeMappingActionDto, ExecutionSelectionDto, JobDto,
+    ResolveEpisodeMappingRequest, RezkaSessionRefreshRequest, SearchPageDto, SelectResultRequest,
+    StartSearchRequest,
 };
-use media_core::{OperationKey, UserId};
+use media_core::{JobId, OperationKey, UserId};
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
 pub enum SearchError {
@@ -49,6 +50,20 @@ pub trait SearchService: Send + Sync {
     ) -> Result<JobDto, SearchError>;
 
     async fn execution_for(&self, result_ref: &str) -> Result<ExecutionSelectionDto, SearchError>;
+
+    async fn episode_mapping_action(
+        &self,
+        owner: UserId,
+        job_id: JobId,
+    ) -> Result<EpisodeMappingActionDto, SearchError>;
+
+    async fn resolve_episode_mapping(
+        &self,
+        owner: UserId,
+        operation: OperationKey,
+        job_id: JobId,
+        request: ResolveEpisodeMappingRequest,
+    ) -> Result<JobDto, SearchError>;
 }
 
 pub(crate) struct UnavailableSearchService;
@@ -86,6 +101,24 @@ impl SearchService for UnavailableSearchService {
     }
 
     async fn execution_for(&self, _: &str) -> Result<ExecutionSelectionDto, SearchError> {
+        Err(SearchError::NotFound)
+    }
+
+    async fn episode_mapping_action(
+        &self,
+        _: UserId,
+        _: JobId,
+    ) -> Result<EpisodeMappingActionDto, SearchError> {
+        Err(SearchError::NotFound)
+    }
+
+    async fn resolve_episode_mapping(
+        &self,
+        _: UserId,
+        _: OperationKey,
+        _: JobId,
+        _: ResolveEpisodeMappingRequest,
+    ) -> Result<JobDto, SearchError> {
         Err(SearchError::NotFound)
     }
 }

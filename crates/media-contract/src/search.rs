@@ -172,6 +172,47 @@ pub struct RezkaSessionRefreshRequest {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EpisodeCoordinateDto {
+    pub season: u32,
+    pub episode: u32,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EpisodeCoordinateMappingDto {
+    pub provider: EpisodeCoordinateDto,
+    pub canonical: EpisodeCoordinateDto,
+    pub canonical_title: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AmbiguousEpisodeDto {
+    pub provider: EpisodeCoordinateDto,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EpisodeMappingActionDto {
+    pub job_id: crate::PublicId,
+    pub title: String,
+    pub provider_media_ref: String,
+    pub provider: EpisodeCoordinateDto,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveEpisodeMappingRequest {
+    pub canonical_season: u32,
+    pub canonical_episode: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_title: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum ExecutionSelectionDto {
     RezkaSessionRefresh {
@@ -193,6 +234,12 @@ pub enum ExecutionSelectionDto {
         episode: Option<u32>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         episodes: Vec<crate::EpisodeSnapshotDto>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        episode_mappings: Vec<EpisodeCoordinateMappingDto>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ambiguous_episodes: Vec<AmbiguousEpisodeDto>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        release_year: Option<u16>,
         title: String,
     },
     Prowlarr {

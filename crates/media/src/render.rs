@@ -157,6 +157,24 @@ pub fn queue_status(value: &Value) -> String {
     key_value_block("Queue", &pairs)
 }
 
+pub fn episode_mapping_action(value: &Value) -> String {
+    let title = get_str(value, "title").unwrap_or_else(|| "Unknown title".to_owned());
+    let label = get_str(value, "label").unwrap_or_else(|| "Unknown episode".to_owned());
+    let provider = value.get("provider").and_then(Value::as_object);
+    let season = provider
+        .and_then(|value| value.get("season"))
+        .and_then(Value::as_u64);
+    let episode = provider
+        .and_then(|value| value.get("episode"))
+        .and_then(Value::as_u64);
+    match (season, episode) {
+        (Some(season), Some(episode)) => {
+            format!("{title}: provider S{season:02}E{episode:02} ({label}) needs canonical mapping")
+        }
+        _ => format!("{title}: {label} needs canonical episode mapping"),
+    }
+}
+
 /// Render a single tracking subscription as a key-value block. `action`
 /// labels a confirmation (for example `Added tracking`).
 #[must_use]

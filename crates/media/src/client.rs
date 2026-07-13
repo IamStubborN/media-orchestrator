@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use media_contract::{
     ContinueSearchRequest, CreateJobRequest, CreateTrackingRequest, EpisodeSnapshotDto,
-    NotifyScopeDto, ProviderDto, ReleaseQueryRequest, SelectResultRequest, StartSearchRequest,
-    TrackingScopeDto,
+    NotifyScopeDto, ProviderDto, ReleaseQueryRequest, ResolveEpisodeMappingRequest,
+    SelectResultRequest, StartSearchRequest, TrackingScopeDto,
 };
 use secrecy::{ExposeSecret, SecretString};
 
@@ -77,6 +77,32 @@ impl HttpClient {
             self.request(reqwest::Method::POST, &path)?
                 .header(IDEMPOTENCY_KEY_HEADER, generated_identifier())
                 .json(&serde_json::json!({})),
+        )
+        .await
+    }
+
+    pub async fn episode_mapping_action(&self, job_id: &str) -> Result<String, ClientError> {
+        let path = format!("v1/jobs/{job_id}/episode-mapping-action");
+        self.execute(self.request(reqwest::Method::GET, &path)?)
+            .await
+    }
+
+    pub async fn resolve_episode_mapping(
+        &self,
+        job_id: &str,
+        canonical_season: u32,
+        canonical_episode: u32,
+        canonical_title: Option<String>,
+    ) -> Result<String, ClientError> {
+        let path = format!("v1/jobs/{job_id}/episode-mapping-action");
+        self.execute(
+            self.request(reqwest::Method::POST, &path)?
+                .header(IDEMPOTENCY_KEY_HEADER, generated_identifier())
+                .json(&ResolveEpisodeMappingRequest {
+                    canonical_season,
+                    canonical_episode,
+                    canonical_title,
+                }),
         )
         .await
     }

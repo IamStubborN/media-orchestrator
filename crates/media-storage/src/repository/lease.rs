@@ -414,11 +414,22 @@ fn notifications_for_event(
                 context.message(job, &failure_description(error_code)),
             )]
         }
-        JobEventKind::JobTransition { state, .. } => match state {
-            JobState::NeedsAction => vec![(
-                "choice-needed",
-                context.message(job, "Нужен дополнительный выбор, чтобы продолжить задачу."),
-            )],
+        JobEventKind::JobTransition {
+            state,
+            needs_action_reason,
+        } => match state {
+            JobState::NeedsAction => {
+                let description = match needs_action_reason {
+                    Some(media_core::NeedsActionReason::IdentityAmbiguous) => {
+                        "Нумерация эпизода неоднозначна. Нужно указать, какому сезону и эпизоду Plex соответствует серия источника."
+                    }
+                    Some(media_core::NeedsActionReason::PlexMismatch) => {
+                        "Plex обнаружил файл, но его путь или идентичность серии не совпали с ожидаемыми. Нужна ручная проверка сопоставления."
+                    }
+                    None => "Нужен дополнительный выбор, чтобы продолжить задачу.",
+                };
+                vec![("choice-needed", context.message(job, description))]
+            }
             JobState::BlockedStorage => vec![(
                 "blocked-storage",
                 context.message(

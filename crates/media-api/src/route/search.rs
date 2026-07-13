@@ -1,14 +1,15 @@
 use axum::{
     Json, Router,
-    extract::{Extension, Request, State},
+    extract::{Extension, Path, Request, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
 };
 use media_contract::{
-    ContinueSearchRequest, RezkaSessionRefreshRequest, SelectResultRequest, StartSearchRequest,
+    ContinueSearchRequest, ResolveEpisodeMappingRequest, RezkaSessionRefreshRequest,
+    SelectResultRequest, StartSearchRequest,
 };
-use media_core::Actor;
+use media_core::{Actor, JobId};
 
 use crate::{ApiError, ApiState, RequestId, SearchError, idempotency};
 
@@ -18,6 +19,64 @@ pub(super) fn routes() -> Router<ApiState> {
         .route("/v1/searches/continue", post(continue_search))
         .route("/v1/selections", post(select))
         .route("/v1/rezka/session/refresh", post(refresh_rezka_session))
+        .route(
+            "/v1/jobs/{job_id}/episode-mapping-action",
+            get(get_episode_mapping_action).post(resolve_episode_mapping),
+        )
+}
+
+async fn get_episode_mapping_action(
+    State(state): State<ApiState>,
+    Extension(actor): Extension<Actor>,
+    Extension(request_id): Extension<RequestId>,
+    Path(job_id): Path<String>,
+) -> Response {
+    let Ok(owner) = actor.require_user() else {
+        return ApiError::forbidden(&request_id, "operation is forbidden").into_response();
+    };
+    let Ok(job_id) = job_id.parse::<JobId>() else {
+        return ApiError::invalid_request(&request_id, "job ID is invalid").into_response();
+    };
+    match state.search().episode_mapping_action(owner, job_id).await {
+        Ok(action) => Json(action).into_response(),
+        Err(error) => search_error(error, &request_id),
+    }
+}
+
+async fn resolve_episode_mapping(
+    State(state): State<ApiState>,
+    Extension(actor): Extension<Actor>,
+    Extension(request_id): Extension<RequestId>,
+    Path(job_id): Path<String>,
+    request: Request,
+) -> Response {
+    idempotency::execute(
+        state,
+        actor,
+        request_id,
+        request,
+        move |state, actor, request_id, operation, body| async move {
+            let Ok(owner) = actor.require_user() else {
+                return ApiError::forbidden(&request_id, "operation is forbidden").into_response();
+            };
+            let Ok(job_id) = job_id.parse::<JobId>() else {
+                return ApiError::invalid_request(&request_id, "job ID is invalid").into_response();
+            };
+            let Ok(request) = serde_json::from_slice::<ResolveEpisodeMappingRequest>(&body) else {
+                return ApiError::invalid_request(&request_id, "mapping request is invalid")
+                    .into_response();
+            };
+            match state
+                .search()
+                .resolve_episode_mapping(owner, operation, job_id, request)
+                .await
+            {
+                Ok(job) => Json(job).into_response(),
+                Err(error) => search_error(error, &request_id),
+            }
+        },
+    )
+    .await
 }
 
 async fn refresh_rezka_session(

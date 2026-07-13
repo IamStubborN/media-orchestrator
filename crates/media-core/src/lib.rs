@@ -31,9 +31,10 @@ pub use id::{
     SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
 };
 pub use identity::{
-    CanonicalEpisode, CanonicalMedia, CanonicalSeason, EpisodeProviderMapping, EpisodeResolution,
-    ExternalNamespace, ExternalReference, IdentityValidationError, MappingSource,
-    MediaExternalReference, MediaKind, SeriesOrdering, resolve_episode_candidates,
+    CanonicalEpisode, CanonicalEpisodeCoordinates, CanonicalMedia, CanonicalSeason,
+    EpisodeMappingConfirmation, EpisodeProviderMapping, EpisodeResolution, ExternalNamespace,
+    ExternalReference, IdentityValidationError, MappingSource, MediaExternalReference, MediaKind,
+    SeriesOrdering, resolve_episode_candidates,
 };
 pub use job::{
     Job, JobDetail, JobLease, JobState, JobTransitionError, JobValidationError,

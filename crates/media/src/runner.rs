@@ -49,6 +49,7 @@ pub enum ExecutionOutcome {
     BlockedStorage,
     PlexPending,
     NeedsActionPlexMismatch,
+    NeedsActionIdentityAmbiguous,
     Cancelled,
     Failed,
 }
@@ -327,9 +328,15 @@ impl MediaJobExecutor {
                 season,
                 episode,
                 episodes,
+                episode_mappings,
+                ambiguous_episodes,
                 title,
                 translation: _,
+                release_year: _,
             } => {
+                if !ambiguous_episodes.is_empty() {
+                    return Ok(ExecutionOutcome::NeedsActionIdentityAmbiguous);
+                }
                 self.execute_rezka(
                     lease,
                     control,
@@ -343,6 +350,7 @@ impl MediaJobExecutor {
                     *season,
                     *episode,
                     episodes,
+                    episode_mappings,
                     title,
                 )
                 .await
@@ -424,6 +432,7 @@ impl MediaJobExecutor {
         season: Option<u32>,
         episode: Option<u32>,
         episodes: &[media_contract::EpisodeSnapshotDto],
+        episode_mappings: &[media_contract::EpisodeCoordinateMappingDto],
         title: &str,
     ) -> Result<ExecutionOutcome, RunnerError> {
         let mut prepared = self.rezka.lock().await;
@@ -502,10 +511,23 @@ impl MediaJobExecutor {
                 let requests = targets
                     .into_iter()
                     .map(|(season, episode)| {
+                        let canonical = episode_mappings
+                            .iter()
+                            .find(|mapping| {
+                                mapping.provider.season == season
+                                    && mapping.provider.episode == episode
+                            })
+                            .map_or((season, episode), |mapping| {
+                                (mapping.canonical.season, mapping.canonical.episode)
+                            });
                         availability
                             .select_episode(season, episode)
                             .map(|selection| {
-                                (Some(season), Some(episode), selection.playback_request())
+                                (
+                                    Some(canonical.0),
+                                    Some(canonical.1),
+                                    selection.playback_request(),
+                                )
                             })
                             .map_err(|_| RunnerError::Execution)
                     })
@@ -546,10 +568,18 @@ impl MediaJobExecutor {
                 .stage_completed(task_ordinal, "resolve_manifest", 0)
                 .await?;
 
+            let canonical_title = season.zip(episode).and_then(|(season, episode)| {
+                episode_mappings
+                    .iter()
+                    .find(|mapping| {
+                        mapping.canonical.season == season && mapping.canonical.episode == episode
+                    })
+                    .map(|mapping| mapping.canonical_title.as_str())
+            });
             let work = self.rezka_work(
                 lease,
                 &manifest,
-                title,
+                canonical_title.unwrap_or(title),
                 details.release_year(),
                 season,
                 episode,
@@ -1135,6 +1165,9 @@ fn combine_episode_outcome(
     match (aggregate, current) {
         (_, ExecutionOutcome::Cancelled) => ExecutionOutcome::Cancelled,
         (_, ExecutionOutcome::NeedsActionPlexMismatch) => ExecutionOutcome::NeedsActionPlexMismatch,
+        (_, ExecutionOutcome::NeedsActionIdentityAmbiguous) => {
+            ExecutionOutcome::NeedsActionIdentityAmbiguous
+        }
         (_, ExecutionOutcome::BlockedStorage) => ExecutionOutcome::BlockedStorage,
         (_, ExecutionOutcome::PlexPending) => ExecutionOutcome::PlexPending,
         (_, ExecutionOutcome::Failed) => ExecutionOutcome::Failed,
@@ -1321,6 +1354,10 @@ pub async fn run_single_iteration(
                 Some(NeedsActionReasonDto::PlexMismatch),
             ),
         ],
+        ExecutionOutcome::NeedsActionIdentityAmbiguous => vec![(
+            JobStateDto::NeedsAction,
+            Some(NeedsActionReasonDto::IdentityAmbiguous),
+        )],
         ExecutionOutcome::Cancelled => vec![(JobStateDto::Cancelled, None)],
         ExecutionOutcome::Failed => vec![(JobStateDto::Failed, None)],
     };

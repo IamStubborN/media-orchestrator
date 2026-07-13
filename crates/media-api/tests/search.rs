@@ -10,7 +10,8 @@ use media_contract::{
     SearchPageDto, SearchResultDto, SelectResultRequest, StartSearchRequest,
 };
 use media_core::{
-    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole, OperationKey, RUNNER_CLIENT_ID, UserId,
+    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole, JobId, OperationKey, RUNNER_CLIENT_ID,
+    UserId,
 };
 use tower::ServiceExt as _;
 
@@ -59,6 +60,24 @@ impl SearchService for FakeSearchService {
     }
 
     async fn execution_for(&self, _: &str) -> Result<ExecutionSelectionDto, SearchError> {
+        Err(SearchError::NotFound)
+    }
+
+    async fn episode_mapping_action(
+        &self,
+        _: UserId,
+        _: JobId,
+    ) -> Result<media_contract::EpisodeMappingActionDto, SearchError> {
+        Err(SearchError::NotFound)
+    }
+
+    async fn resolve_episode_mapping(
+        &self,
+        _: UserId,
+        _: OperationKey,
+        _: JobId,
+        _: media_contract::ResolveEpisodeMappingRequest,
+    ) -> Result<JobDto, SearchError> {
         Err(SearchError::NotFound)
     }
 

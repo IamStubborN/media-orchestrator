@@ -1,9 +1,9 @@
 mod support;
 
 use media_core::{
-    CanonicalEpisode, CanonicalMedia, CanonicalSeason, EpisodeId, EpisodeProviderMapping,
-    ExternalNamespace, ExternalReference, IdentityStore, MappingSource, MediaExternalReference,
-    MediaId, MediaKind, PortError, Provider, SeasonId, SeriesOrdering,
+    CanonicalEpisode, CanonicalMedia, CanonicalSeason, EpisodeId, EpisodeMappingConfirmation,
+    EpisodeProviderMapping, ExternalNamespace, ExternalReference, IdentityStore, MappingSource,
+    MediaExternalReference, MediaId, MediaKind, PortError, Provider, SeasonId, SeriesOrdering,
 };
 use media_storage::SeaOrmIdentityStore;
 use support::{TestDatabase, query};
@@ -17,6 +17,47 @@ fn example_series(id: MediaId) -> CanonicalMedia {
         Some(SeriesOrdering::TmdbAired),
     )
     .unwrap()
+}
+
+#[tokio::test]
+async fn confirmed_mapping_creates_canonical_identity_and_is_reused_by_provider_coordinate() {
+    let test_db = TestDatabase::start_migrated().await;
+    let store = SeaOrmIdentityStore::new(test_db.connection().clone());
+    let confirmation = || {
+        EpisodeMappingConfirmation::new(
+            Provider::Rezka,
+            "15554".to_owned(),
+            1,
+            14,
+            "My Hero Academia".to_owned(),
+            Some(2016),
+            0,
+            1,
+        )
+        .unwrap()
+    };
+
+    let resolved = store.confirm_episode_mapping(confirmation()).await.unwrap();
+    assert_eq!((resolved.season(), resolved.episode()), (0, 1));
+    assert_eq!(
+        store
+            .find_episode_mapping(Provider::Rezka, "15554", 1, 14)
+            .await
+            .unwrap(),
+        Some(resolved.clone()),
+    );
+
+    let repeated = store.confirm_episode_mapping(confirmation()).await.unwrap();
+    assert_eq!(repeated, resolved);
+    assert_eq!(
+        query(
+            test_db.connection(),
+            "SELECT id FROM episode_provider_mappings WHERE provider_media_ref = '15554'",
+        )
+        .await
+        .len(),
+        1,
+    );
 }
 
 #[tokio::test]

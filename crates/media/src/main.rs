@@ -165,6 +165,22 @@ enum JobsCommand {
         #[arg(long)]
         json: bool,
     },
+    MappingAction {
+        job_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    ResolveEpisode {
+        job_id: String,
+        #[arg(long)]
+        season: u32,
+        #[arg(long)]
+        episode: u32,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -567,6 +583,24 @@ async fn run_jobs(args: JobsArgs) -> Result<(), RunError> {
             let output = client.retry_job(&job_id).await?;
             emit(&output, json, |value| {
                 render::job(value, Some("Retried job"))
+            });
+        }
+        JobsCommand::MappingAction { job_id, json } => {
+            let output = client.episode_mapping_action(&job_id).await?;
+            emit(&output, json, render::episode_mapping_action);
+        }
+        JobsCommand::ResolveEpisode {
+            job_id,
+            season,
+            episode,
+            title,
+            json,
+        } => {
+            let output = client
+                .resolve_episode_mapping(&job_id, season, episode, title)
+                .await?;
+            emit(&output, json, |value| {
+                render::job(value, Some("Resolved episode mapping"))
             });
         }
     }

@@ -3,13 +3,15 @@ use std::{collections::BTreeMap, sync::Arc};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use media_api::{SearchError, SearchService};
 use media_contract::{
-    ContinueSearchRequest, ExecutionSelectionDto, JobDto, JobStateDto, MAX_SEARCH_RESULTS_PER_PAGE,
-    MediaKindDto, NotifyScopeDto, ProviderDto, SearchPageDto, SearchResultDto, SelectResultRequest,
+    ContinueSearchRequest, EpisodeMappingActionDto, ExecutionSelectionDto, JobDto, JobStateDto,
+    MAX_SEARCH_RESULTS_PER_PAGE, MediaKindDto, NotifyScopeDto, ProviderDto,
+    ResolveEpisodeMappingRequest, SearchPageDto, SearchResultDto, SelectResultRequest,
     StartSearchRequest,
 };
 use media_core::{
-    EpisodeDiscoveryPort, EpisodeSnapshot, Job, JobApplication, JobState, NewJobCommand,
-    NotifyScope, OperationKey, PortError, Provider, TrackingSubscription, UserId,
+    EpisodeDiscoveryPort, EpisodeMappingConfirmation, EpisodeSnapshot, IdentityStore, Job,
+    JobApplication, JobId, JobState, NeedsActionReason, NewJobCommand, NotifyScope, OperationKey,
+    PortError, Provider, TrackingSubscription, UserId,
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -34,6 +36,7 @@ enum PrivateResult {
         locator: String,
         title_id: u64,
         translation_episodes: BTreeMap<u64, Vec<(u32, Vec<u32>)>>,
+        translation_episode_labels: BTreeMap<u64, Vec<ProviderEpisodeLabel>>,
     },
     Prowlarr {
         source_identity: String,
@@ -41,6 +44,8 @@ enum PrivateResult {
         uri: String,
     },
 }
+
+type ProviderEpisodeLabel = media_contract::AmbiguousEpisodeDto;
 
 impl ProviderResult {
     #[must_use]
@@ -71,6 +76,7 @@ impl ProviderResult {
                 locator,
                 title_id,
                 translation_episodes,
+                translation_episode_labels: BTreeMap::new(),
             },
         }
     }
@@ -80,6 +86,7 @@ impl ProviderResult {
         locator: String,
         title_id: u64,
         translation_episodes: BTreeMap<u64, Vec<(u32, Vec<u32>)>>,
+        translation_episode_labels: BTreeMap<u64, Vec<ProviderEpisodeLabel>>,
     ) -> Self {
         Self {
             public,
@@ -87,6 +94,7 @@ impl ProviderResult {
                 locator,
                 title_id,
                 translation_episodes,
+                translation_episode_labels,
             },
         }
     }
@@ -134,6 +142,11 @@ pub trait SearchPersistence: Send + Sync {
         execution: ExecutionSelectionDto,
     ) -> Result<(), SearchError>;
     async fn execution_for(&self, result_ref: &str) -> Result<ExecutionSelectionDto, SearchError>;
+    async fn update_execution(
+        &self,
+        result_ref: &str,
+        execution: ExecutionSelectionDto,
+    ) -> Result<(), SearchError>;
 }
 
 #[async_trait::async_trait]
@@ -352,6 +365,7 @@ impl ConcreteSearchProvider {
                 })
                 .collect::<Vec<_>>();
             let mut by_translation = BTreeMap::new();
+            let mut labels_by_translation = BTreeMap::new();
             if media_kind == MediaKindDto::Series {
                 let selections = details
                     .translations()
@@ -397,6 +411,25 @@ impl ConcreteSearchProvider {
                                 )
                             })
                             .collect::<Vec<_>>(),
+                    );
+                    labels_by_translation.insert(
+                        translation_id,
+                        availability
+                            .seasons()
+                            .iter()
+                            .flat_map(|season| {
+                                season
+                                    .episodes()
+                                    .iter()
+                                    .map(move |episode| ProviderEpisodeLabel {
+                                        provider: media_contract::EpisodeCoordinateDto {
+                                            season: season.number(),
+                                            episode: episode.number(),
+                                        },
+                                        label: episode.label().to_owned(),
+                                    })
+                            })
+                            .collect(),
                     );
                 }
                 if by_translation.is_empty() {
@@ -468,6 +501,7 @@ impl ConcreteSearchProvider {
                 details.locator().as_str().to_owned(),
                 details.id().get(),
                 by_translation,
+                labels_by_translation,
             ));
         }
         let provider_continuation = if cursor < entries.len() {
@@ -717,6 +751,18 @@ impl SearchPersistence for StorageSearchPersistence {
             .ok_or(SearchError::NotFound)?;
         serde_json::from_value(payload).map_err(|_| SearchError::Infrastructure)
     }
+
+    async fn update_execution(
+        &self,
+        result_ref: &str,
+        execution: ExecutionSelectionDto,
+    ) -> Result<(), SearchError> {
+        let payload = serde_json::to_value(execution).map_err(|_| SearchError::Infrastructure)?;
+        self.repository
+            .update_execution(result_ref, payload)
+            .await
+            .map_err(storage_error)
+    }
 }
 
 fn encode_session_payload(session: &StoredSearchSession) -> Result<serde_json::Value, SearchError> {
@@ -729,11 +775,13 @@ fn encode_session_payload(session: &StoredSearchSession) -> Result<serde_json::V
                     locator,
                     title_id,
                     translation_episodes,
+                    translation_episode_labels,
                 } => serde_json::json!({
                     "kind": "rezka",
                     "locator": locator,
                     "title_id": title_id,
                     "translation_episodes": translation_episodes,
+                    "translation_episode_labels": translation_episode_labels,
                 }),
                 PrivateResult::Prowlarr {
                     source_identity,
@@ -818,6 +866,13 @@ fn decode_session_payload(
                         .ok_or(SearchError::Infrastructure)?,
                 )
                 .map_err(|_| SearchError::Infrastructure)?,
+                translation_episode_labels: private
+                    .get("translation_episode_labels")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|_| SearchError::Infrastructure)?
+                    .unwrap_or_default(),
             },
             Some("prowlarr") => PrivateResult::Prowlarr {
                 source_identity: string("source_identity")?,
@@ -842,6 +897,7 @@ pub struct DurableSearchService {
     persistence: Arc<dyn SearchPersistence>,
     provider: Arc<dyn SearchProvider>,
     jobs: Arc<JobApplication>,
+    identity: Option<Arc<dyn IdentityStore>>,
 }
 
 impl DurableSearchService {
@@ -855,7 +911,14 @@ impl DurableSearchService {
             persistence,
             provider,
             jobs,
+            identity: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_identity(mut self, identity: Arc<dyn IdentityStore>) -> Self {
+        self.identity = Some(identity);
+        self
     }
 
     fn validate_request(request: &StartSearchRequest) -> Result<(), SearchError> {
@@ -1031,12 +1094,15 @@ impl SearchService for DurableSearchService {
             .iter()
             .find(|result| result.public.result_id() == request.result_id)
             .ok_or(SearchError::NotFound)?;
-        let execution = execution(
+        let mut execution = execution(
             result,
             &request,
             session.request.media_kind,
             session.request.season,
         )?;
+        if let Some(identity) = self.identity.as_deref() {
+            apply_persisted_episode_mappings(identity, &mut execution).await?;
+        }
         let result_ref = format!("selection:{}", uuid::Uuid::new_v4());
         self.persistence
             .insert_execution(result_ref.clone(), execution)
@@ -1069,6 +1135,140 @@ impl SearchService for DurableSearchService {
 
     async fn execution_for(&self, result_ref: &str) -> Result<ExecutionSelectionDto, SearchError> {
         self.persistence.execution_for(result_ref).await
+    }
+
+    async fn episode_mapping_action(
+        &self,
+        owner: UserId,
+        job_id: JobId,
+    ) -> Result<EpisodeMappingActionDto, SearchError> {
+        let job = self
+            .jobs
+            .get_job_for_owner(owner, job_id)
+            .await
+            .map_err(application_error)?;
+        if job.state() != JobState::NeedsAction
+            || job.needs_action_reason() != Some(NeedsActionReason::IdentityAmbiguous)
+        {
+            return Err(SearchError::Conflict);
+        }
+        let execution = self.persistence.execution_for(job.result_ref()).await?;
+        mapping_action_dto(job_id, &execution)
+    }
+
+    async fn resolve_episode_mapping(
+        &self,
+        owner: UserId,
+        operation: OperationKey,
+        job_id: JobId,
+        request: ResolveEpisodeMappingRequest,
+    ) -> Result<JobDto, SearchError> {
+        if request.canonical_episode == 0
+            || request.canonical_title.as_ref().is_some_and(|title| {
+                title.trim().is_empty() || title.len() > 512 || title.chars().any(char::is_control)
+            })
+        {
+            return Err(SearchError::InvalidRequest);
+        }
+        let identity = self
+            .identity
+            .as_deref()
+            .ok_or(SearchError::Infrastructure)?;
+        let job = self
+            .jobs
+            .get_job_for_owner(owner, job_id)
+            .await
+            .map_err(application_error)?;
+        if job.state() != JobState::NeedsAction
+            || job.needs_action_reason() != Some(NeedsActionReason::IdentityAmbiguous)
+        {
+            return Err(SearchError::Conflict);
+        }
+        let mut execution = self.persistence.execution_for(job.result_ref()).await?;
+        let action = mapping_action_dto(job_id, &execution)?;
+        let ExecutionSelectionDto::Rezka {
+            title_id,
+            title,
+            release_year,
+            episode_mappings,
+            ambiguous_episodes,
+            ..
+        } = &mut execution
+        else {
+            return Err(SearchError::Conflict);
+        };
+        let canonical = identity
+            .confirm_episode_mapping(
+                EpisodeMappingConfirmation::new(
+                    Provider::Rezka,
+                    title_id.to_string(),
+                    action.provider.season,
+                    action.provider.episode,
+                    request
+                        .canonical_title
+                        .clone()
+                        .unwrap_or_else(|| title.clone()),
+                    release_year.map(i32::from),
+                    request.canonical_season,
+                    request.canonical_episode,
+                )
+                .map_err(|_| SearchError::InvalidRequest)?,
+            )
+            .await
+            .map_err(storage_error)?;
+        episode_mappings.retain(|mapping| mapping.provider != action.provider);
+        episode_mappings.push(media_contract::EpisodeCoordinateMappingDto {
+            provider: action.provider.clone(),
+            canonical: media_contract::EpisodeCoordinateDto {
+                season: canonical.season(),
+                episode: canonical.episode(),
+            },
+            canonical_title: canonical.media_title().to_owned(),
+        });
+        ambiguous_episodes.retain(|candidate| candidate.provider != action.provider);
+        self.persistence
+            .update_execution(job.result_ref(), execution)
+            .await?;
+        let job = self
+            .jobs
+            .retry_job_for_owner(owner, operation, job_id)
+            .await
+            .map_err(application_error)?;
+        Ok(job_dto(&job))
+    }
+}
+
+fn mapping_action_dto(
+    job_id: JobId,
+    execution: &ExecutionSelectionDto,
+) -> Result<EpisodeMappingActionDto, SearchError> {
+    let ExecutionSelectionDto::Rezka {
+        title_id,
+        title,
+        ambiguous_episodes,
+        ..
+    } = execution
+    else {
+        return Err(SearchError::Conflict);
+    };
+    let candidate = ambiguous_episodes.first().ok_or(SearchError::Conflict)?;
+    Ok(EpisodeMappingActionDto {
+        job_id: media_contract::PublicId::parse(&job_id.to_string())
+            .map_err(|_| SearchError::Infrastructure)?,
+        title: title.clone(),
+        provider_media_ref: title_id.to_string(),
+        provider: candidate.provider.clone(),
+        label: candidate.label.clone(),
+    })
+}
+
+fn application_error(error: media_core::ApplicationError) -> SearchError {
+    match error {
+        media_core::ApplicationError::Conflict => SearchError::Conflict,
+        media_core::ApplicationError::InvalidInput(_) => SearchError::InvalidRequest,
+        media_core::ApplicationError::Forbidden => SearchError::Forbidden,
+        media_core::ApplicationError::NotFound => SearchError::NotFound,
+        media_core::ApplicationError::Infrastructure => SearchError::Infrastructure,
     }
 }
 
@@ -1105,6 +1305,7 @@ fn execution(
         (
             SearchResultDto::Rezka {
                 title,
+                year,
                 media_kind,
                 translations,
                 ..
@@ -1113,6 +1314,7 @@ fn execution(
                 locator,
                 title_id,
                 translation_episodes,
+                translation_episode_labels,
             },
         ) => {
             let translation_id = request.translation_id.ok_or(SearchError::InvalidRequest)?;
@@ -1174,6 +1376,24 @@ fn execution(
                     _ => return Err(SearchError::InvalidRequest),
                 },
             };
+            let selected_labels = translation_episode_labels
+                .get(&translation_id)
+                .into_iter()
+                .flatten()
+                .filter(|candidate| {
+                    episodes.iter().any(|episode| {
+                        episode.season == candidate.provider.season
+                            && episode.episode == candidate.provider.episode
+                    })
+                });
+            let ambiguous_episodes = selected_labels
+                .filter(|candidate| {
+                    candidate.provider.season != 0
+                        && (ambiguous_episode_label(&candidate.label)
+                            || ambiguous_episode_label(title))
+                })
+                .cloned()
+                .collect();
             Ok(ExecutionSelectionDto::Rezka {
                 locator: locator.clone(),
                 title_id: *title_id,
@@ -1186,11 +1406,68 @@ fn execution(
                 season: request.season,
                 episode: request.episode,
                 episodes,
+                episode_mappings: Vec::new(),
+                ambiguous_episodes,
+                release_year: *year,
                 title: title.clone(),
             })
         }
         _ => Err(SearchError::Infrastructure),
     }
+}
+
+fn ambiguous_episode_label(label: &str) -> bool {
+    let normalized = label.to_lowercase();
+    ["ova", "oad", "ona", "special", "спец", "экстра"]
+        .iter()
+        .any(|marker| normalized.contains(marker))
+}
+
+async fn apply_persisted_episode_mappings(
+    identity: &dyn IdentityStore,
+    execution: &mut ExecutionSelectionDto,
+) -> Result<(), SearchError> {
+    let ExecutionSelectionDto::Rezka {
+        title_id,
+        episodes,
+        episode_mappings,
+        ambiguous_episodes,
+        ..
+    } = execution
+    else {
+        return Ok(());
+    };
+    let provider_media_ref = title_id.to_string();
+    for episode in episodes.iter() {
+        let Some(canonical) = identity
+            .find_episode_mapping(
+                Provider::Rezka,
+                &provider_media_ref,
+                episode.season,
+                episode.episode,
+            )
+            .await
+            .map_err(storage_error)?
+        else {
+            continue;
+        };
+        episode_mappings.push(media_contract::EpisodeCoordinateMappingDto {
+            provider: media_contract::EpisodeCoordinateDto {
+                season: episode.season,
+                episode: episode.episode,
+            },
+            canonical: media_contract::EpisodeCoordinateDto {
+                season: canonical.season(),
+                episode: canonical.episode(),
+            },
+            canonical_title: canonical.media_title().to_owned(),
+        });
+        ambiguous_episodes.retain(|candidate| {
+            candidate.provider.season != episode.season
+                || candidate.provider.episode != episode.episode
+        });
+    }
+    Ok(())
 }
 
 fn job_dto(job: &Job) -> JobDto {
@@ -1218,5 +1495,23 @@ fn job_dto(job: &Job) -> JobDto {
         },
         needs_action_reason: None,
         notify_scope: NotifyScopeDto::Initiator,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ambiguous_episode_label;
+
+    #[test]
+    fn only_explicit_special_markers_trigger_manual_episode_mapping() {
+        for label in ["OVA 1", "OAD", "Special episode", "Спецвыпуск", "ONA"] {
+            assert!(
+                ambiguous_episode_label(label),
+                "marker not detected: {label}"
+            );
+        }
+        for label in ["Episode 1", "Серия 14", "Final", "Extraordinary"] {
+            assert!(!ambiguous_episode_label(label), "false positive: {label}");
+        }
     }
 }

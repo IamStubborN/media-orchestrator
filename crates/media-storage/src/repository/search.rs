@@ -104,6 +104,27 @@ impl SeaOrmSearchRepository {
             .map(|row| row.try_get("", "payload").map_err(map_database_error))
             .transpose()
     }
+
+    pub async fn update_execution(
+        &self,
+        result_ref: &str,
+        payload: serde_json::Value,
+    ) -> Result<(), PortError> {
+        let result = self
+            .database
+            .execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "UPDATE search_executions SET payload = $2 WHERE result_ref = $1",
+                [result_ref.into(), payload.into()],
+            ))
+            .await
+            .map_err(map_database_error)?;
+        if result.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(PortError::Conflict)
+        }
+    }
 }
 
 impl std::fmt::Debug for SeaOrmSearchRepository {
