@@ -18,7 +18,7 @@ live result keeps the goal open even when its code and deployment are complete.
 | 6. Tracking and release dates | Yes | Yes | Yes | [tracking E2E](evidence/2026-07-13-tracking-e2e.md), [release query](evidence/2026-07-13-release-query.md), [Hermes conversation](evidence/2026-07-13-hermes-release-conversation.md) |
 | 7. Movie flow | Yes | Yes | Yes | [Rezka movie](evidence/2026-07-13-rezka-movie-e2e.md), [Prowlarr movie](evidence/2026-07-13-prowlarr-movie-e2e.md) |
 | 8. Recovery, storage, mapping | Yes | Yes | Partial | [retry and deploy](evidence/2026-07-13-job-retry-and-local-deploy.md), [storage resume](evidence/2026-07-13-storage-resume-and-rich-notifications.md), [OVA mapping](evidence/2026-07-13-episode-mapping-and-ova.md), [deterministic stream and Specials recovery](evidence/2026-07-13-expired-stream-and-specials-deterministic.md) |
-| 9. Multi-user Hermes | Yes | Yes | Partial | [API and ownership isolation](evidence/2026-07-13-multi-user-isolation.md), [notification routing](evidence/2026-07-13-notification-routing.md) |
+| 9. Multi-user Hermes | Yes | Yes | Partial | [API and ownership isolation](evidence/2026-07-13-multi-user-isolation.md), [notification routing](evidence/2026-07-13-notification-routing.md), [unknown-sender rejection](evidence/2026-07-13-telegram-unknown-sender.md) |
 | 10. Local operations | Yes | Yes | Yes | [final deploy and rollback](evidence/2026-07-13-final-local-deployment.md) |
 | 11. Documentation truthfulness | Yes | N/A | Yes | This matrix, [architecture](ARCHITECTURE.md), [runbook](RUNBOOK.md), and the [canonical plan](plans/2026-07-12-full-media-system-delivery.md) |
 
@@ -45,17 +45,19 @@ subtitle result, Plex metadata identity, notifications, and cleanup state.
 Both containers have distinct allowlists, tokens, profiles, memories, and media
 client credentials. API-level private ownership and family sharing are proven.
 Primary's primary Telegram and direct notification paths are live-verified, and
-Secondary received real personal and family tracking notifications.
+Secondary received real personal and family tracking notifications. An
+authenticated Primary Telegram Web session also sent `/start` to
+`hermes-secondary`; the adapter rejected the absent-from-allowlist sender before
+LLM or tool execution and produced no bot response.
 
 Still required:
 
 - one primary natural-language media command sent by Secondary to
   `hermes-secondary`, with the resulting media API read recorded;
-- one command from an identity absent from the target bot's allowlist, proving
-  rejection before LLM or tool execution.
 
-Opening the target bot chat without successfully sending the command is not
-evidence and does not satisfy this gate.
+The unknown-sender half of this gate is complete. Opening Secondary's bot from
+Primary's account cannot substitute for the remaining command from Secondary's
+own account.
 
 ## Completion Verdict
 
