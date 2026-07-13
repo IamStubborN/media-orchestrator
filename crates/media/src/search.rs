@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use media_api::{SearchError, SearchService};
 use media_contract::{
     ContinueSearchRequest, ExecutionSelectionDto, JobDto, JobStateDto, MAX_SEARCH_RESULTS_PER_PAGE,
@@ -13,6 +14,7 @@ use media_core::{
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 const SEARCH_TTL: time::Duration = time::Duration::hours(24);
+const REZKA_CATALOG_CONTINUATION_PREFIX: &str = "catalog:";
 
 #[derive(Debug, Clone)]
 pub struct ProviderPage {
@@ -279,19 +281,24 @@ impl ConcreteSearchProvider {
             .store
             .save(&snapshot)
             .map_err(|_| SearchError::Infrastructure)?;
-        let offset = continuation.map_or(Ok(0), |value| {
-            value
-                .strip_prefix("quick:")
-                .ok_or(SearchError::InvalidRequest)?
-                .parse::<usize>()
-                .map_err(|_| SearchError::InvalidRequest)
+        let (offset, current_target) = continuation.map_or(Ok((0, None)), |value| {
+            decode_rezka_catalog_continuation(value)
         })?;
-        let query = rezka_client::QuickSearchQuery::new(&request.query)
+        let query = rezka_client::CatalogQuery::new(&request.query)
             .map_err(|_| SearchError::InvalidRequest)?;
-        let entries = prepared.client.quick_search(&query).await.map_err(|error| {
-            tracing::warn!(stage = "quick_search", error_code = ?error.code(), error = %error, "Rezka search failed");
+        let page = match current_target.as_deref() {
+            Some(target) => {
+                let continuation = rezka_client::CatalogContinuation::new(target, &request.query)
+                    .map_err(|_| SearchError::InvalidRequest)?;
+                prepared.client.search_next(&continuation).await
+            }
+            None => prepared.client.search(&query).await,
+        }
+        .map_err(|error| {
+            tracing::warn!(stage = "catalog_search", error_code = ?error.code(), error = %error, "Rezka search failed");
             SearchError::Provider
         })?;
+        let entries = page.entries();
         if offset > entries.len() {
             return Err(SearchError::InvalidRequest);
         }
@@ -461,7 +468,16 @@ impl ConcreteSearchProvider {
                 by_translation,
             ));
         }
-        let provider_continuation = (cursor < entries.len()).then(|| format!("quick:{cursor}"));
+        let provider_continuation = if cursor < entries.len() {
+            Some(encode_rezka_catalog_continuation(
+                cursor,
+                current_target.as_deref(),
+            ))
+        } else {
+            page.continuation().map(|continuation| {
+                encode_rezka_catalog_continuation(0, Some(continuation.as_str()))
+            })
+        };
         Ok(ProviderPage {
             results,
             provider_continuation,
@@ -558,6 +574,30 @@ impl ConcreteSearchProvider {
             provider_continuation,
         })
     }
+}
+
+fn encode_rezka_catalog_continuation(offset: usize, target: Option<&str>) -> String {
+    let target = target.map_or_else(String::new, |value| URL_SAFE_NO_PAD.encode(value));
+    format!("{REZKA_CATALOG_CONTINUATION_PREFIX}{offset}:{target}")
+}
+
+fn decode_rezka_catalog_continuation(value: &str) -> Result<(usize, Option<String>), SearchError> {
+    let (offset, target) = value
+        .strip_prefix(REZKA_CATALOG_CONTINUATION_PREFIX)
+        .and_then(|value| value.split_once(':'))
+        .ok_or(SearchError::InvalidRequest)?;
+    let offset = offset
+        .parse::<usize>()
+        .map_err(|_| SearchError::InvalidRequest)?;
+    let target = if target.is_empty() {
+        None
+    } else {
+        let bytes = URL_SAFE_NO_PAD
+            .decode(target)
+            .map_err(|_| SearchError::InvalidRequest)?;
+        Some(String::from_utf8(bytes).map_err(|_| SearchError::InvalidRequest)?)
+    };
+    Ok((offset, target))
 }
 
 #[async_trait::async_trait]
