@@ -1048,6 +1048,62 @@ async fn owner_retry_requeues_failed_work_idempotently() {
 }
 
 #[tokio::test]
+async fn owner_retry_requeues_needs_action_work_and_resets_running_task() {
+    let (test_db, jobs, leases) = setup().await;
+    let created = jobs
+        .create(operation_key(), new_job("resolved-identity"))
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::stage_started(JobEventId::new(), 0, "resolve_identity".to_owned(), 0).unwrap(),
+        JobEvent::transition(
+            JobEventId::new(),
+            JobState::NeedsAction,
+            Some(media_core::NeedsActionReason::IdentityAmbiguous),
+        )
+        .unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    let retried = jobs
+        .retry(operation_key(), created.id(), PRIMARY_USER_ID)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(retried.state(), JobState::Queued);
+    assert_eq!(retried.needs_action_reason(), None);
+    let tasks = query(
+        test_db.connection(),
+        "SELECT state, attempt_count FROM job_tasks",
+    )
+    .await;
+    assert_eq!(tasks[0].try_get::<String>("", "state").unwrap(), "pending");
+    assert_eq!(tasks[0].try_get::<i32>("", "attempt_count").unwrap(), 0);
+    let stages = query(
+        test_db.connection(),
+        "SELECT state, attempt_count FROM job_stages WHERE name = 'resolve_identity'",
+    )
+    .await;
+    assert_eq!(stages[0].try_get::<String>("", "state").unwrap(), "pending");
+    assert_eq!(stages[0].try_get::<i32>("", "attempt_count").unwrap(), 0);
+}
+
+#[tokio::test]
 async fn owner_retry_requeues_storage_blocked_work_and_resets_pipeline_ledger() {
     let (test_db, jobs, leases) = setup().await;
     let created = jobs

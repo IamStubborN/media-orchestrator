@@ -13,7 +13,8 @@ use crate::{
     },
 };
 
-const JOB_NOT_RETRYABLE: &str = "only blocked-storage, partial, or failed jobs can be retried";
+const JOB_NOT_RETRYABLE: &str =
+    "only blocked-storage, partial, failed, or needs-action jobs can be retried";
 
 #[derive(Clone)]
 pub struct SeaOrmJobStore {
@@ -266,14 +267,17 @@ impl JobStore for SeaOrmJobStore {
                 return Ok(None);
             };
             let state = row.try_get::<String>("", "state")?;
-            if !matches!(state.as_str(), "blocked_storage" | "partial" | "failed") {
+            if !matches!(
+                state.as_str(),
+                "blocked_storage" | "partial" | "failed" | "needs_action"
+            ) {
                 return Err(sea_orm::DbErr::Custom(JOB_NOT_RETRYABLE.to_owned()));
             }
-            if state == "blocked_storage" {
+            if matches!(state.as_str(), "blocked_storage" | "needs_action") {
                 // A blocked outcome completes the runner's wrapper stages before
-                // the job transition is reported. Reset the whole task ledger so
-                // the next lease enters the pipeline and runs storage preflight
-                // again instead of treating that wrapper completion as progress.
+                // the job transition is reported, while a manual-action outcome
+                // can leave its active task running. Reset the whole task ledger
+                // so the next lease re-enters the pipeline with the new input.
                 transaction
                     .execute_raw(Statement::from_sql_and_values(
                         DatabaseBackend::Postgres,
