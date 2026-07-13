@@ -33,19 +33,22 @@ must not close it.
   a controlled subtitle-CDN failure then proved the full
   `partial -> owner retry -> completed` path without changing the published
   video's inode, size, or mtime.
+- A real Rezka OVA stopped at `needs_action` before transfer, accepted an
+  owner-confirmed `S00E01` mapping, resumed with a reset task ledger, and reused
+  the persisted mapping in a later selection without downloading media.
 
 ### Remaining Acceptance Work
 
 1. Exercise primary Telegram media commands from both profiles and verify rejection of an unapproved external Telegram account when such an account is available.
-2. Live-verify storage recovery after space becomes available, expired-stream
-   recovery, ambiguous numbering, persistent canonical mapping, and Specials/OVA
-   handling. Entry into stable `blocked_storage` is already live-verified.
+2. Live-verify expired-stream recovery and Plex publication of a mapped
+   Specials/OVA episode. Storage recovery, ambiguous numbering, and persistent
+   canonical mapping are already live-verified.
 3. Re-run the complete local deployment verification on the final revisions and confirm all containers, migrations, wrappers, and health gates.
 4. Audit specs, architecture, runbook, plans, and evidence; then publish one final acceptance report that distinguishes implemented, deployed, and live-verified behavior.
 
 ### Immediate Execution Queue
 
-1. Execute expired-stream, numbering, mapping, and Specials/OVA scenarios with
+1. Execute expired-stream recovery and Specials/OVA Plex publication with
    cleanup after each run.
 2. Complete Secondary command coverage and the external unknown-user gate, or
    record the latter as an explicit external-account blocker rather than claiming
@@ -304,9 +307,11 @@ recovery, qBittorrent completion, and exact Plex discovery are also live-verifie
 live-verified. A
 subtitle-present Rezka episode job entered `blocked_storage` before download or
 publication. The lease was released, the attempt count remained stable, and the
-job did not requeue after lease expiry. Recovery after capacity becomes available,
-expired-stream behavior, ambiguous numbering, persistent mapping, and Specials/OVA
-remain pending.
+job did not requeue after lease expiry. Explicit storage recovery after capacity
+became available is live-verified. A real OVA also entered `needs_action` before
+transfer, accepted an owner-confirmed `S00E01` mapping, resumed with a reset task
+ledger, and reused that mapping on a later selection. Expired-stream recovery and
+actual Plex publication under `Specials` remain pending.
 
 ### Implementation and Verification
 
@@ -319,8 +324,11 @@ remain pending.
    job to the queue only after re-running storage preflight and unfinished stages.
 6. Verify bounded retry for expired streams and transient provider failures.
 7. Convert ambiguous absolute/season numbering to `needs_action`.
+   **Live-verified with a real Rezka OVA.**
 8. Persist a resolved canonical mapping and reuse it for later episodes.
+   **Live-verified with `S01E01 -> S00E01`.**
 9. Verify OVA and Specials mapping rather than treating them as duplicates.
+   **Mapping live-verified; Plex publication remains pending.**
 
 ### Live Gate
 
