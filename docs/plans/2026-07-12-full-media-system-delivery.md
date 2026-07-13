@@ -46,8 +46,7 @@ must not close it.
 2. Live-verify expired-stream recovery and Plex publication of a mapped
    Specials/OVA episode. Storage recovery, ambiguous numbering, and persistent
    canonical mapping are already live-verified.
-3. Re-run the complete local deployment verification on the final revisions and confirm all containers, migrations, wrappers, and health gates.
-4. Audit specs, architecture, runbook, plans, and evidence; then publish one final acceptance report that distinguishes implemented, deployed, and live-verified behavior.
+3. Audit specs, architecture, runbook, plans, and evidence; then publish one final acceptance report that distinguishes implemented, deployed, and live-verified behavior.
 
 ### Immediate Execution Queue
 
@@ -56,8 +55,8 @@ must not close it.
 2. Complete Secondary command coverage and the external unknown-user gate, or
    record the latter as an explicit external-account blocker rather than claiming
    it passed.
-3. Re-run deployment verification on final revisions, reconcile every acceptance
-   item with dated evidence, and close the goal only after no required work remains.
+3. Reconcile every acceptance item with dated evidence and close the goal only
+   after no required work remains.
 
 ## Status Model
 
@@ -382,7 +381,10 @@ credential-free operational runbook, and `mise` status/verify/deploy/rollback
 tasks are implemented. A complete deploy, migration, backend health check,
 Hermes CLI refresh, Hermes health check, rollback to the previous image pair,
 and redeploy to the current pair are live-verified. Deploy was also verified to
-fail closed before build while a movie job was active.
+fail closed before build while a movie job was active. The final `27b3cfc`
+revision was rolled back to `7cda138`, verified healthy through both profile
+wrappers, and redeployed; service and both Hermes CLI copies had an identical
+binary checksum and the notification outbox was clean.
 
 ### Implementation
 
