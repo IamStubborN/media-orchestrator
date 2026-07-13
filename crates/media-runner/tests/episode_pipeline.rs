@@ -14,13 +14,23 @@ use media_runner::{
 
 #[derive(Default)]
 struct RecordingReporter {
-    stages: Mutex<Vec<String>>,
+    events: Mutex<Vec<String>>,
 }
 
 #[async_trait]
 impl StageReporter for RecordingReporter {
     async fn stage_started(&self, stage_name: &str) {
-        self.stages.lock().unwrap().push(stage_name.to_owned());
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("started:{stage_name}"));
+    }
+
+    async fn stage_completed(&self, stage_name: &str) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("completed:{stage_name}"));
     }
 }
 
@@ -346,8 +356,13 @@ async fn rezka_hls_fallback_uses_ffmpeg_ingest_without_http_range_download() {
     );
     assert!(!format!("{:?}", commands[0]).contains("token=secret"));
     assert_eq!(
-        reporter.stages.lock().unwrap().as_slice(),
-        &["download", "transcode"]
+        reporter.events.lock().unwrap().as_slice(),
+        &[
+            "started:download",
+            "completed:download",
+            "started:transcode",
+            "completed:transcode"
+        ]
     );
 }
 
@@ -504,8 +519,11 @@ async fn rezka_transcode_emits_a_transcode_stage_start() {
     );
     // Exactly one "transcode" milestone fires when the ffmpeg step runs.
     assert_eq!(
-        reporter.stages.lock().unwrap().as_slice(),
-        &["transcode".to_owned()]
+        reporter.events.lock().unwrap().as_slice(),
+        &[
+            "started:transcode".to_owned(),
+            "completed:transcode".to_owned()
+        ]
     );
 }
 
@@ -543,7 +561,7 @@ async fn skipped_transcode_emits_no_transcode_stage_start() {
         .await
         .unwrap();
 
-    assert!(reporter.stages.lock().unwrap().is_empty());
+    assert!(reporter.events.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

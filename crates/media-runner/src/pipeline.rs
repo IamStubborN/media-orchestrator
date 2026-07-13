@@ -223,6 +223,7 @@ impl EpisodePipeline {
                     if let Err(error) = self.process.run(&command, cancellation).await {
                         return cancellation_outcome(error);
                     }
+                    reporter.stage_completed("download").await;
                 }
             }
             if cancellation.is_cancelled() {
@@ -259,6 +260,7 @@ impl EpisodePipeline {
                 Err(error) => return cancellation_outcome(error),
             };
             validate_encoded_probe(&source_probe, &encoded_probe)?;
+            reporter.stage_completed("transcode").await;
         }
 
         let missing_subtitles = match self.recover_subtitles(work, cancellation).await {

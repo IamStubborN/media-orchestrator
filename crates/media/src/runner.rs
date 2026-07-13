@@ -211,6 +211,13 @@ impl media_runner::StageReporter for ControlStageReporter<'_> {
             .stage_started(self.task_ordinal, stage_name, TRANSCODE_STAGE_ORDINAL)
             .await;
     }
+
+    async fn stage_completed(&self, stage_name: &str) {
+        let _ = self
+            .control
+            .stage_completed(self.task_ordinal, stage_name, TRANSCODE_STAGE_ORDINAL)
+            .await;
+    }
 }
 
 pub struct MediaJobExecutor {

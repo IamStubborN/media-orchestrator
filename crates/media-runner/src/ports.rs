@@ -30,12 +30,14 @@ pub trait Cancellation: Send + Sync {
 #[async_trait]
 pub trait StageReporter: Send + Sync {
     async fn stage_started(&self, stage_name: &str);
+    async fn stage_completed(&self, stage_name: &str);
 }
 
 /// No-op reporter for callers (such as tests) that do not surface progress.
 #[async_trait]
 impl StageReporter for () {
     async fn stage_started(&self, _stage_name: &str) {}
+    async fn stage_completed(&self, _stage_name: &str) {}
 }
 
 #[async_trait]

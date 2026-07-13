@@ -14,6 +14,7 @@ mod m20260712_000013_session_refresh_notification;
 mod m20260712_000014_runner_lifecycle;
 mod m20260713_000015_job_retry;
 mod m20260713_000016_parked_storage_jobs;
+mod m20260713_000017_complete_terminal_stages;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseTransaction;
@@ -40,6 +41,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260712_000014_runner_lifecycle::Migration),
             Box::new(m20260713_000015_job_retry::Migration),
             Box::new(m20260713_000016_parked_storage_jobs::Migration),
+            Box::new(m20260713_000017_complete_terminal_stages::Migration),
         ]
     }
 }
