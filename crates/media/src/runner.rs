@@ -523,6 +523,7 @@ impl MediaJobExecutor {
                 lease,
                 &manifest,
                 title,
+                details.release_year(),
                 season,
                 episode,
                 premium_status,
@@ -562,6 +563,7 @@ impl MediaJobExecutor {
         lease: &LeaseDto,
         manifest: &rezka_client::PlaybackManifest,
         title: &str,
+        release_year: Option<u16>,
         season: Option<u32>,
         episode: Option<u32>,
         premium_status: rezka_client::PremiumStatus,
@@ -577,7 +579,10 @@ impl MediaJobExecutor {
             .join(lease.job.id.to_string())
             .join(&episode_id);
         let final_video = season.zip(episode).map_or_else(
-            || self.roots.movies().join(format!("{safe_title}.mkv")),
+            || {
+                let movie_name = canonical_movie_name(&safe_title, release_year);
+                self.roots.movies().join(format!("{movie_name}.mkv"))
+            },
             |(s, e)| {
                 self.roots
                     .tv()
@@ -978,6 +983,13 @@ fn safe_name(value: &str) -> String {
     } else {
         value
     }
+}
+
+fn canonical_movie_name(safe_title: &str, release_year: Option<u16>) -> String {
+    release_year.map_or_else(
+        || safe_title.to_owned(),
+        |year| format!("{safe_title} ({year})"),
+    )
 }
 
 fn is_video_path(path: &std::path::Path) -> bool {
@@ -1413,9 +1425,15 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        ExecutionOutcome, combine_episode_outcome, matching_episode_videos,
+        ExecutionOutcome, canonical_movie_name, combine_episode_outcome, matching_episode_videos,
         parse_episode_coordinates,
     };
+
+    #[test]
+    fn movie_names_include_the_release_year_when_known() {
+        assert_eq!(canonical_movie_name("WALL E", Some(2008)), "WALL E (2008)");
+        assert_eq!(canonical_movie_name("WALL E", None), "WALL E");
+    }
 
     #[test]
     fn series_outcomes_preserve_partial_and_stop_on_blocking_states() {
