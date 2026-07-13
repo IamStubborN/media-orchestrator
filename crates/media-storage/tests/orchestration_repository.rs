@@ -627,6 +627,24 @@ async fn storage_block_notifies_both_family_recipients_once() {
             .unwrap();
     }
 
+    let blocked = jobs
+        .find_for_owner(lease.job().id(), SECONDARY_USER_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(blocked.state(), JobState::BlockedStorage);
+    assert!(
+        leases
+            .lease_next(
+                operation_key(),
+                RUNNER_CLIENT_ID,
+                time::Duration::seconds(60),
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+
     let notifications = notification_rows(&test_db).await;
     assert_eq!(
         notifications

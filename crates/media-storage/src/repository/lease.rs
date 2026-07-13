@@ -416,7 +416,8 @@ async fn apply_event(
             transition_job(transaction, &current, *state, *needs_action_reason).await?;
             if matches!(
                 state,
-                JobState::NeedsAction
+                JobState::BlockedStorage
+                    | JobState::NeedsAction
                     | JobState::Partial
                     | JobState::Completed
                     | JobState::Failed
@@ -840,7 +841,7 @@ async fn lease_next_in_transaction(
                  WHEN state = 'cancel_requested' THEN 'cancelled' ELSE 'queued' END, \
                  completed_at = CASE WHEN state = 'cancel_requested' THEN now() \
                  ELSE completed_at END, updated_at = now() WHERE id = $1 \
-                 AND state IN ('leased', 'running', 'blocked_storage', 'publishing', \
+                 AND state IN ('leased', 'running', 'publishing', \
                  'plex_pending', 'cancel_requested')",
                 [expired_job.into()],
             ))
