@@ -60,6 +60,7 @@ impl QbittorrentError {
     }
 }
 
+#[derive(Clone)]
 pub struct QbittorrentConfig {
     base_url: Url,
     category: String,

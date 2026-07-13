@@ -116,11 +116,7 @@ pub async fn run_runner(config: RunnerConfig) -> Result<(), RunnerError> {
                 Duration::from_secs(30),
             )
             .map_err(|_| RunnerError::Configuration)?;
-            Some(Arc::new(
-                media_integrations::qbittorrent::QbittorrentClient::connect(config)
-                    .await
-                    .map_err(|_| RunnerError::Configuration)?,
-            ))
+            Some(Arc::new(connect_qbittorrent(config).await?))
         }
         None => None,
     };
@@ -175,6 +171,31 @@ pub async fn run_runner(config: RunnerConfig) -> Result<(), RunnerError> {
         config.exit_after_job(),
     )
     .await
+}
+
+async fn connect_qbittorrent(
+    config: media_integrations::qbittorrent::QbittorrentConfig,
+) -> Result<media_integrations::qbittorrent::QbittorrentClient, RunnerError> {
+    const ATTEMPTS: usize = 12;
+    const RETRY_DELAY: Duration = Duration::from_secs(5);
+
+    for attempt in 1..=ATTEMPTS {
+        match media_integrations::qbittorrent::QbittorrentClient::connect(config.clone()).await {
+            Ok(client) => return Ok(client),
+            Err(error)
+                if error.code()
+                    == media_integrations::qbittorrent::QbittorrentErrorCode::Transport =>
+            {
+                if attempt == ATTEMPTS {
+                    return Err(RunnerError::Execution);
+                }
+                tracing::warn!(attempt, "qBittorrent is not ready; retrying connection");
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
+            Err(_) => return Err(RunnerError::Configuration),
+        }
+    }
+    Err(RunnerError::Execution)
 }
 
 pub struct PreparedRunnerSession {
