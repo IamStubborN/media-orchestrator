@@ -127,7 +127,9 @@ the Rezka search session.
 3. Show every available translation and require explicit selection.
 4. Resolve one real episode and select the highest available stream.
 5. Estimate peak source and VAAPI output usage before download. An optional
-   runtime reserve is supported and configured to zero in the homelab.
+   runtime reserve is supported and configured to zero in the homelab. Streams
+   without a discoverable byte length use a duration-aware conservative bitrate
+   estimate rather than a fixed per-file allocation.
 6. Download with bounded resume/range behavior.
 7. Probe the actual file and treat its measured dimensions as authoritative.
 8. Download all valid subtitles for the selected translation.

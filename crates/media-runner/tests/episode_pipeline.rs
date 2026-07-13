@@ -128,6 +128,7 @@ impl FileSystemPort for FakeFs {
 #[derive(Default)]
 struct FakeHttp {
     video_size: Option<u64>,
+    probe_fails: bool,
     video_offsets: Mutex<Vec<u64>>,
     subtitle_failures: Mutex<HashSet<String>>,
     subtitle_requests: Mutex<Vec<String>>,
@@ -137,6 +138,9 @@ struct FakeHttp {
 #[async_trait]
 impl HttpPort for FakeHttp {
     async fn probe_video_size(&self, _url: &SensitiveUrl) -> Result<u64, RunnerPortError> {
+        if self.probe_fails {
+            return Err(RunnerPortError::Http);
+        }
         Ok(self.video_size.unwrap_or(2 * GIB))
     }
 
@@ -372,6 +376,37 @@ async fn storage_preflight_uses_the_probed_source_size() {
         EpisodeOutcome::BlockedStorage
     );
     assert!(http.video_offsets.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn unknown_source_size_uses_duration_instead_of_a_fixed_twenty_gib_peak() {
+    let mut work = work();
+    work.expected_duration_seconds = Some(45.0 * 60.0);
+    let filesystem = Arc::new(FakeFs::with_available(9 * GIB));
+    let http = Arc::new(FakeHttp {
+        probe_fails: true,
+        ..FakeHttp::default()
+    });
+    let mut source_probe = probe("h264");
+    source_probe.duration_seconds = 45.0 * 60.0;
+    let mut encoded_probe = probe("hevc");
+    encoded_probe.duration_seconds = 45.0 * 60.0;
+    let process = Arc::new(FakeProcess {
+        probes: Mutex::new(VecDeque::from([source_probe, encoded_probe])),
+        commands: Mutex::default(),
+        filesystem: filesystem.clone(),
+    });
+    let service = Arc::new(FakeService {
+        checks: Mutex::new(VecDeque::from([matched(&work.plex)])),
+        scans: Mutex::default(),
+    });
+    let pipeline = EpisodePipeline::new(filesystem, http.clone(), process, service);
+
+    assert_eq!(
+        pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
+        EpisodeOutcome::Completed
+    );
+    assert_eq!(http.video_offsets.lock().unwrap().as_slice(), &[0]);
 }
 
 #[tokio::test]

@@ -1,14 +1,17 @@
 use std::{path::PathBuf, sync::Arc};
 
 use crate::{
-    Cancellation, FileSystemPort, GIB, HttpPort, MediaProbe, PeakEstimate, PlexCheck,
-    PlexExpectation, ProcessPort, RunnerPortError, RunnerServicePort, StageReporter,
-    StoragePreflight, build_hls_ingest_command, build_rezka_vaapi_command,
-    validate_plex_observation, validate_webvtt,
+    Cancellation, FileSystemPort, HttpPort, MediaProbe, PeakEstimate, PlexCheck, PlexExpectation,
+    ProcessPort, RunnerPortError, RunnerServicePort, StageReporter, StoragePreflight,
+    build_hls_ingest_command, build_rezka_vaapi_command, validate_plex_observation,
+    validate_webvtt,
 };
 
 const DEFAULT_RESERVE_BYTES: u64 = 0;
-const HLS_SOURCE_ESTIMATE_BYTES: u64 = 10 * GIB;
+const UNKNOWN_SOURCE_BYTES_PER_SECOND: u64 = 1_500_000;
+const UNKNOWN_SOURCE_MINIMUM_BYTES: u64 = 512 * 1024 * 1024;
+const UNKNOWN_SOURCE_DEFAULT_SECONDS: u64 = 60 * 60;
+const UNKNOWN_SOURCE_MAX_SECONDS: f64 = 6.0 * 60.0 * 60.0;
 
 #[derive(Clone)]
 pub struct SensitiveUrl {
@@ -157,8 +160,12 @@ impl EpisodePipeline {
                     .http
                     .probe_video_size(source_url)
                     .await
-                    .unwrap_or(HLS_SOURCE_ESTIMATE_BYTES),
-                VideoSourceKind::Hls => HLS_SOURCE_ESTIMATE_BYTES,
+                    .unwrap_or_else(|_| {
+                        estimate_unknown_source_bytes(work.expected_duration_seconds)
+                    }),
+                VideoSourceKind::Hls => {
+                    estimate_unknown_source_bytes(work.expected_duration_seconds)
+                }
             };
             self.filesystem
                 .create_dir_all(&work.staging_directory)
@@ -377,6 +384,22 @@ impl EpisodePipeline {
             PlexCheck::Matched(_) | PlexCheck::Mismatch => EpisodeOutcome::NeedsActionPlexMismatch,
         })
     }
+}
+
+fn estimate_unknown_source_bytes(expected_duration_seconds: Option<f64>) -> u64 {
+    let seconds = expected_duration_seconds
+        .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+        .map(|seconds| seconds.min(UNKNOWN_SOURCE_MAX_SECONDS))
+        .and_then(|seconds| std::time::Duration::try_from_secs_f64(seconds).ok())
+        .map(|duration| {
+            duration
+                .as_secs()
+                .saturating_add(u64::from(duration.subsec_nanos() > 0))
+        })
+        .unwrap_or(UNKNOWN_SOURCE_DEFAULT_SECONDS);
+    seconds
+        .saturating_mul(UNKNOWN_SOURCE_BYTES_PER_SECOND)
+        .max(UNKNOWN_SOURCE_MINIMUM_BYTES)
 }
 
 fn validate_source_duration(
