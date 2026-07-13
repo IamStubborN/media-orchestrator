@@ -39,10 +39,14 @@ must not close it.
 - Queue status exposes durable runner availability and a safe blocking reason;
   a controlled `vpn_rotation_failed` state parked a diagnostic job without a
   lease until it was cancelled and lifecycle readiness was restored.
+- Telegram Web live verification proved that `hermes-secondary` rejects an
+  authenticated sender absent from its allowlist before LLM or tool execution.
 
 ### Remaining Acceptance Work
 
-1. Exercise primary Telegram media commands from both profiles and verify rejection of an unapproved external Telegram account when such an account is available.
+1. Exercise one primary Telegram media command from Secondary's profile. The
+   unknown-sender rejection half is already live-verified from Primary's account
+   against `hermes-secondary`.
 2. Live-verify expired-stream recovery and Plex publication of a mapped
    Specials/OVA episode. Storage recovery, ambiguous numbering, and persistent
    canonical mapping are already live-verified.
@@ -51,9 +55,8 @@ must not close it.
 
 1. Execute expired-stream recovery and Specials/OVA Plex publication with
    cleanup after each run.
-2. Complete Secondary command coverage and the external unknown-user gate, or
-   record the latter as an explicit external-account blocker rather than claiming
-   it passed.
+2. Complete Secondary command coverage after her account is available in Web
+   Telegram.
 
 ## Status Model
 
@@ -227,8 +230,9 @@ qBittorrent-managed path.
 **Current state:** Job-kind-aware session-refresh notifications are implemented,
 deployed, and live-verified for Primary with outbox deduplication. A real personal
 tracking discovery notified only Secondary. A real family discovery notified
-Primary and Secondary with one shared source dedupe key. The remaining gate is a
-message from an unapproved external Telegram account. Rich media-job messages
+Primary and Secondary with one shared source dedupe key. A Web Telegram `/start`
+from an authenticated identity absent from the Secondary allowlist was rejected
+before LLM or tool execution. Rich media-job messages
 with safe title, source, media kind, season/episode, translation, phase, and Job
 ID are deployed and live-verified on the real subtitle recovery job. Explicit
 subtitle-partial guidance and a final fully-completed recovery message are
@@ -351,8 +355,9 @@ actual Plex publication under `Specials` remain pending.
 
 **Current state:** Both Hermes containers are healthy with one distinct numeric
 Telegram allowlist identity each. Live API checks prove private job/search
-isolation and shared family tracking management. Full Telegram command coverage
-from Secondary and an unknown-sender rejection check remain pending.
+isolation and shared family tracking management. An authenticated Primary Web
+Telegram session was rejected by `hermes-secondary` before LLM or tool execution.
+Full primary Telegram command coverage from Secondary remains pending.
 
 ### Implementation and Verification
 
