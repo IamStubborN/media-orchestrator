@@ -135,6 +135,7 @@ impl fmt::Debug for QbittorrentConfig {
     }
 }
 
+#[derive(Clone)]
 pub struct ExplicitTorrentSelection {
     source_identity: String,
     info_hash: String,

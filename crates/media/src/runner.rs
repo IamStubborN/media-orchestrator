@@ -693,13 +693,7 @@ impl MediaJobExecutor {
             media_contract::MediaKindDto::Movie => &self.torrent_movies_category,
             media_contract::MediaKindDto::Series => &self.torrent_tv_category,
         };
-        let handle = client
-            .submit_selected_to_category(selection, category)
-            .await
-            .map_err(|error| {
-                tracing::warn!(error_code = ?error.code(), "qBittorrent submit failed");
-                RunnerError::Execution
-            })?;
+        let handle = submit_torrent_with_retry(client, selection, category).await?;
         control.stage_completed(0, "torrent_submit", 0).await?;
         control.stage_started(0, "torrent_monitor", 1).await?;
         // qBittorrent 5.2 can acknowledge an add request before the torrent is
@@ -828,6 +822,35 @@ impl MediaJobExecutor {
         let _ = request.title;
         Ok(aggregate)
     }
+}
+
+async fn submit_torrent_with_retry(
+    client: &media_integrations::qbittorrent::QbittorrentClient,
+    selection: media_integrations::qbittorrent::ExplicitTorrentSelection,
+    category: &str,
+) -> Result<media_integrations::qbittorrent::TorrentHandle, RunnerError> {
+    const ATTEMPTS: usize = 12;
+    for attempt in 1..=ATTEMPTS {
+        match client
+            .submit_selected_to_category(selection.clone(), category)
+            .await
+        {
+            Ok(handle) => return Ok(handle),
+            Err(error)
+                if error.code()
+                    == media_integrations::qbittorrent::QbittorrentErrorCode::Transport
+                    && attempt < ATTEMPTS =>
+            {
+                tracing::warn!(attempt, "qBittorrent submit transport failed; retrying");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            Err(error) => {
+                tracing::warn!(error_code = ?error.code(), "qBittorrent submit failed");
+                return Err(RunnerError::Execution);
+            }
+        }
+    }
+    Err(RunnerError::Execution)
 }
 
 #[async_trait::async_trait]
