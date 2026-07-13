@@ -202,7 +202,7 @@ async fn duplicate_event_id_does_not_duplicate_transition_event_or_outbox() {
         payload["message"]
             .as_str()
             .unwrap()
-            .contains("Источник: Rezka")
+            .contains("Источник загрузки: Rezka")
     );
     assert!(!payload.to_string().contains("http"));
 }
@@ -580,7 +580,7 @@ async fn progress_notifications_fire_once_per_phase_across_retries_and_to_initia
             .unwrap()["message"]
             .as_str()
             .unwrap()
-            .contains("Скачивание началось")
+            .contains("Скачивание исходного видео началось")
     );
     assert!(
         progress[1]
