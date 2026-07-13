@@ -413,6 +413,11 @@ async fn session_refresh_emits_only_session_lifecycle_notifications() {
         .await
         .unwrap();
     assert_eq!(deliveries.len(), 2);
+    assert!(deliveries.iter().all(|delivery| {
+        delivery
+            .status_key()
+            .is_some_and(|key| key.starts_with("media-job:"))
+    }));
     assert!(
         deliveries
             .iter()
@@ -742,6 +747,11 @@ async fn storage_block_notifies_both_family_recipients_once() {
             .count(),
         2
     );
+    let status_keys = deliveries
+        .iter()
+        .map(|delivery| delivery.status_key().unwrap())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(status_keys.len(), 1, "all events for one job edit one card");
 }
 
 #[tokio::test]

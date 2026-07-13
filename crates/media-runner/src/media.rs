@@ -104,7 +104,7 @@ pub fn build_rezka_vaapi_command(
             "-i".to_owned(),
             input.to_owned(),
             "-vf".to_owned(),
-            "format=nv12,hwupload".to_owned(),
+            "format=nv12,hwupload,scale_vaapi=w=1920:h=1080:mode=fast".to_owned(),
             "-c:v".to_owned(),
             "hevc_vaapi".to_owned(),
             "-c:a".to_owned(),

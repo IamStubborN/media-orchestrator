@@ -181,6 +181,7 @@ async fn outbox_leases_once_retries_with_backoff_and_keeps_stable_delivery_id() 
 
     assert_eq!(leased.len(), 1);
     assert_eq!(leased[0].recipient(), NotificationRecipient::Primary);
+    assert_eq!(leased[0].status_key(), None);
     assert_eq!(
         leased[0].event_type(),
         NotificationEventType::FutureEpisodeFound

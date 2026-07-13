@@ -203,7 +203,7 @@ impl SeaOrmNotificationOutbox {
         }
         self.database.query_all_raw(Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
-            "WITH pending AS (SELECT id FROM notification_outbox WHERE delivered_at IS NULL AND dead_at IS NULL AND next_attempt_at <= $1 AND (lease_expires_at IS NULL OR lease_expires_at <= $1) ORDER BY next_attempt_at, created_at FOR UPDATE SKIP LOCKED LIMIT $2) UPDATE notification_outbox n SET lease_owner = $3, lease_expires_at = $1 + make_interval(secs => $4) FROM pending WHERE n.id = pending.id RETURNING n.id, n.recipient, n.event_type, n.payload, n.attempt_count",
+            "WITH pending AS (SELECT id FROM notification_outbox WHERE delivered_at IS NULL AND dead_at IS NULL AND next_attempt_at <= $1 AND (lease_expires_at IS NULL OR lease_expires_at <= $1) ORDER BY next_attempt_at, created_at FOR UPDATE SKIP LOCKED LIMIT $2) UPDATE notification_outbox n SET lease_owner = $3, lease_expires_at = $1 + make_interval(secs => $4) FROM pending WHERE n.id = pending.id RETURNING n.id, n.aggregate_type, n.aggregate_id, n.recipient, n.event_type, n.payload, n.attempt_count",
             [now.into(), i64::from(limit).into(), worker.into_uuid().into(), ttl_seconds.into()],
         )).await.map_err(map_database_error)?.iter().map(delivery_from_row).collect()
     }
@@ -381,6 +381,19 @@ fn delivery_from_row(row: &sea_orm::QueryResult) -> Result<NotificationDelivery,
             &row.try_get::<String>("", "event_type")
                 .map_err(|_| PortError::Infrastructure)?,
         )?,
+        match row
+            .try_get::<String>("", "aggregate_type")
+            .map_err(|_| PortError::Infrastructure)?
+            .as_str()
+        {
+            "job" => Some(format!(
+                "media-job:{}",
+                row.try_get::<uuid::Uuid>("", "aggregate_id")
+                    .map_err(|_| PortError::Infrastructure)?
+            )),
+            "tracking" => None,
+            _ => return Err(PortError::Infrastructure),
+        },
         payload
             .get("message")
             .and_then(serde_json::Value::as_str)

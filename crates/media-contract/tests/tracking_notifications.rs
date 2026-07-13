@@ -76,6 +76,7 @@ fn notification_event_types_are_stable_and_complete() {
 fn hermes_payload_is_deliver_only_compatible_and_contains_no_routing_or_secret_fields() {
     let payload = HermesDeliverOnlyWebhook {
         event_type: "media.notification".to_owned(),
+        status_key: None,
         message: "Episode 5 is now available. Choose Rezka or Prowlarr.".to_owned(),
     };
     assert_eq!(

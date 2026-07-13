@@ -15,6 +15,7 @@ fn delivery() -> NotificationDelivery {
         ),
         NotificationRecipient::Primary,
         NotificationEventType::Started,
+        Some("media-job:00000000-0000-0000-0000-000000000999".to_owned()),
         "Media job 00000000-0000-0000-0000-000000000123 started.".to_owned(),
         0,
     )
@@ -43,7 +44,7 @@ async fn posts_exact_deliver_only_payload_with_generic_hmac_v2_headers() {
         .and(header("x-webhook-timestamp", "1720785600"))
         .and(header(
             "x-webhook-signature-v2",
-            "49731e3f577c64593519baf26df584814ec45092839957081c1377349a97a677",
+            "d6ba9e250497a0a96d8cc101e2a9b6784db9db5cdd583dab0d896d0108e4a21a",
         ))
         .and(header(
             "x-request-id",
@@ -51,6 +52,7 @@ async fn posts_exact_deliver_only_payload_with_generic_hmac_v2_headers() {
         ))
         .and(body_json(serde_json::json!({
             "event_type": "media.notification",
+            "status_key": "media-job:00000000-0000-0000-0000-000000000999",
             "message": "Media job 00000000-0000-0000-0000-000000000123 started."
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({

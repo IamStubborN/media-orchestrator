@@ -65,6 +65,7 @@ pub struct NotificationDelivery {
     id: NotificationId,
     recipient: NotificationRecipient,
     event_type: NotificationEventType,
+    status_key: Option<String>,
     message: String,
     attempt_count: u32,
 }
@@ -75,6 +76,8 @@ pub enum NotificationValidationError {
     EmptyMessage,
     #[error("notification message cannot contain a URL")]
     UrlNotAllowed,
+    #[error("notification status key is invalid")]
+    InvalidStatusKey,
 }
 
 impl NotificationDelivery {
@@ -82,6 +85,7 @@ impl NotificationDelivery {
         id: NotificationId,
         recipient: NotificationRecipient,
         event_type: NotificationEventType,
+        status_key: Option<String>,
         message: String,
         attempt_count: u32,
     ) -> Result<Self, NotificationValidationError> {
@@ -91,10 +95,20 @@ impl NotificationDelivery {
         if message.contains("://") {
             return Err(NotificationValidationError::UrlNotAllowed);
         }
+        if status_key.as_ref().is_some_and(|key| {
+            key.is_empty()
+                || key.len() > 96
+                || !key.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, ':' | '-')
+                })
+        }) {
+            return Err(NotificationValidationError::InvalidStatusKey);
+        }
         Ok(Self {
             id,
             recipient,
             event_type,
+            status_key,
             message,
             attempt_count,
         })
@@ -111,6 +125,10 @@ impl NotificationDelivery {
     #[must_use]
     pub const fn event_type(&self) -> NotificationEventType {
         self.event_type
+    }
+    #[must_use]
+    pub fn status_key(&self) -> Option<&str> {
+        self.status_key.as_deref()
     }
     #[must_use]
     pub fn message(&self) -> &str {

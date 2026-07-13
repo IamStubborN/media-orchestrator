@@ -182,6 +182,7 @@ fn started_delivery() -> NotificationDelivery {
         NotificationId::new(),
         NotificationRecipient::Primary,
         NotificationEventType::Started,
+        None,
         "Media job started.".to_owned(),
         0,
     )

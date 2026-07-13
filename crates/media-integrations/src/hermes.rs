@@ -78,6 +78,7 @@ impl HermesWebhookClient {
     ) -> Result<(), WebhookError> {
         let body = serde_json::to_vec(&HermesDeliverOnlyWebhook {
             event_type: "media.notification".to_owned(),
+            status_key: delivery.status_key().map(ToOwned::to_owned),
             message: delivery.message().to_owned(),
         })
         .map_err(|_| WebhookError::Serialization)?;

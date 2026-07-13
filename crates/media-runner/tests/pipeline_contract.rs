@@ -43,7 +43,7 @@ fn resumed_download_appends_only_for_matching_partial_response() {
 }
 
 #[test]
-fn rezka_vaapi_command_preserves_actual_dimensions_without_scaling() {
+fn rezka_vaapi_command_uses_low_power_full_hd_upscale() {
     let probe = MediaProbe {
         codec: "h264".to_owned(),
         width: 1280,
@@ -73,12 +73,11 @@ fn rezka_vaapi_command_preserves_actual_dimensions_without_scaling() {
             .windows(2)
             .any(|args| args == ["-vaapi_device", "/dev/dri/renderD129"])
     );
-    assert!(!command.args().iter().any(|arg| arg.contains("scale")));
     assert!(
-        !command
+        command
             .args()
             .iter()
-            .any(|arg| arg.contains("1920") || arg.contains("1080"))
+            .any(|arg| arg == "format=nv12,hwupload,scale_vaapi=w=1920:h=1080:mode=fast")
     );
 }
 

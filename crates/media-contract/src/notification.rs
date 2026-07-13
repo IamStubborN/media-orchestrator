@@ -18,5 +18,7 @@ pub enum NotificationEventTypeDto {
 #[serde(deny_unknown_fields)]
 pub struct HermesDeliverOnlyWebhook {
     pub event_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_key: Option<String>,
     pub message: String,
 }
