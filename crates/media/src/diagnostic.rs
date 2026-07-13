@@ -27,6 +27,7 @@ pub struct VariantInspection {
     pub advertised_height: Option<u16>,
     pub premium: bool,
     pub stream_kinds: Vec<String>,
+    pub stream_hosts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -68,6 +69,7 @@ impl PlaybackInspection {
                 "advertised_height": variant.advertised_height,
                 "premium": variant.premium,
                 "stream_kinds": variant.stream_kinds,
+                "stream_hosts": variant.stream_hosts,
             })).collect::<Vec<_>>(),
             "subtitles": self.subtitles.iter().map(|subtitle| serde_json::json!({
                 "label": subtitle.label,
@@ -168,6 +170,15 @@ pub async fn inspect_playback(
                     .map(|endpoint| match endpoint.kind() {
                         rezka_client::StreamKind::Hls => "hls".to_owned(),
                         rezka_client::StreamKind::Mp4 => "mp4".to_owned(),
+                    })
+                    .collect(),
+                stream_hosts: variant
+                    .endpoints()
+                    .iter()
+                    .filter_map(|endpoint| {
+                        endpoint
+                            .url()
+                            .with_url(|url| url.host_str().map(str::to_owned))
                     })
                     .collect(),
             })
