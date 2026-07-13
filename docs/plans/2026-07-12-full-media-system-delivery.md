@@ -239,6 +239,11 @@ completion/Plex gate remains pending.
 
 **Priority:** High
 
+**Current state:** Both Hermes containers are healthy with one distinct numeric
+Telegram allowlist identity each. Live API checks prove private job/search
+isolation and shared family tracking management. Full Telegram command coverage
+from Secondary and an unknown-sender rejection check remain pending.
+
 ### Implementation and Verification
 
 1. Verify fixed Telegram chat and user allowlists for both bots.
@@ -257,6 +262,12 @@ completion/Plex gate remains pending.
 ## Workstream 10: Local Delivery and Operations
 
 **Priority:** Medium
+
+**Current state:** Local immutable Docker builds, cached runner packages, a
+credential-free operational runbook, and `mise` status/verify/deploy/rollback
+tasks are implemented. Status and verify pass live. Deploy was live-verified to
+fail closed before build while a movie job was active. A complete no-active-job
+deploy and rollback cycle remains pending.
 
 ### Implementation
 
