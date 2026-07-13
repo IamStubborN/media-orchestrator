@@ -283,6 +283,42 @@ async fn prowlarr_series_search_requires_an_explicit_season() {
 }
 
 #[tokio::test]
+async fn rezka_accepts_media_kind_as_a_search_filter() {
+    let public = SearchResultDto::Rezka {
+        result_id: "rezka-movie".to_owned(),
+        title: "Movie".to_owned(),
+        original_title: None,
+        year: Some(2026),
+        media_kind: MediaKindDto::Movie,
+        thumbnail_url: None,
+        translations: vec![],
+        availability: None,
+    };
+    let mut pages = HashMap::new();
+    pages.insert(
+        ProviderDto::Rezka,
+        vec![ProviderPage {
+            results: vec![ProviderResult::rezka(public, "/movie.html".to_owned(), 42)],
+            provider_continuation: None,
+        }],
+    );
+    let service = service(pages);
+    let mut request = request(ProviderDto::Rezka);
+    request.media_kind = Some(MediaKindDto::Movie);
+
+    let page = service.start(PRIMARY_USER_ID, request).await.unwrap();
+
+    assert_eq!(page.results.len(), 1);
+    assert!(matches!(
+        page.results.first(),
+        Some(SearchResultDto::Rezka {
+            media_kind: MediaKindDto::Movie,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
 async fn prowlarr_paginates_five_and_runner_gets_only_the_exact_selected_result() {
     let mut pages = HashMap::new();
     pages.insert(

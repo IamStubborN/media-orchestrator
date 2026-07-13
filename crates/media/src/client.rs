@@ -112,6 +112,7 @@ impl HttpClient {
         self.execute(
             self.request(reqwest::Method::POST, "v1/searches")?
                 .header(IDEMPOTENCY_KEY_HEADER, generated_identifier())
+                .timeout(Duration::from_secs(150))
                 .json(&request),
         )
         .await
@@ -139,6 +140,7 @@ impl HttpClient {
         self.execute(
             self.request(reqwest::Method::POST, "v1/searches/continue")?
                 .header(IDEMPOTENCY_KEY_HEADER, generated_identifier())
+                .timeout(Duration::from_secs(150))
                 .json(&ContinueSearchRequest {
                     continuation,
                     scope,

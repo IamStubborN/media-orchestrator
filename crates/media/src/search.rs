@@ -286,9 +286,6 @@ impl ConcreteSearchProvider {
                 .parse::<usize>()
                 .map_err(|_| SearchError::InvalidRequest)
         })?;
-        if !offset.is_multiple_of(MAX_SEARCH_RESULTS_PER_PAGE) {
-            return Err(SearchError::InvalidRequest);
-        }
         let query = rezka_client::QuickSearchQuery::new(&request.query)
             .map_err(|_| SearchError::InvalidRequest)?;
         let entries = prepared.client.quick_search(&query).await.map_err(|error| {
@@ -298,10 +295,11 @@ impl ConcreteSearchProvider {
         if offset > entries.len() {
             return Err(SearchError::InvalidRequest);
         }
-        let end = (offset + MAX_SEARCH_RESULTS_PER_PAGE).min(entries.len());
-        let provider_continuation = (end < entries.len()).then(|| format!("quick:{end}"));
         let mut results = Vec::new();
-        for entry in &entries[offset..end] {
+        let mut cursor = offset;
+        while cursor < entries.len() && results.len() < MAX_SEARCH_RESULTS_PER_PAGE {
+            let entry = &entries[cursor];
+            cursor += 1;
             let details = prepared
                 .client
                 .title(entry.locator())
@@ -314,6 +312,12 @@ impl ConcreteSearchProvider {
                 rezka_client::RezkaMediaKind::Movie => MediaKindDto::Movie,
                 rezka_client::RezkaMediaKind::Series => MediaKindDto::Series,
             };
+            if request
+                .media_kind
+                .is_some_and(|requested| requested != media_kind)
+            {
+                continue;
+            }
             let translations = details
                 .translations()
                 .iter()
@@ -428,6 +432,7 @@ impl ConcreteSearchProvider {
                 by_translation,
             ));
         }
+        let provider_continuation = (cursor < entries.len()).then(|| format!("quick:{cursor}"));
         Ok(ProviderPage {
             results,
             provider_continuation,
@@ -786,8 +791,7 @@ impl DurableSearchService {
         if request.query.trim().is_empty()
             || request.query.len() > 512
             || request.query.chars().any(char::is_control)
-            || (request.source == ProviderDto::Rezka
-                && (request.season.is_some() || request.media_kind.is_some()))
+            || (request.source == ProviderDto::Rezka && request.season.is_some())
             || (request.source == ProviderDto::Prowlarr
                 && !matches!(
                     (request.media_kind, request.season),
