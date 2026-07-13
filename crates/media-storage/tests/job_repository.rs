@@ -1,8 +1,8 @@
 mod support;
 
 use media_core::{
-    PRIMARY_USER_ID, JobId, JobState, JobStore, NewJob, NotifyScope, Provider,
-    RunnerLifecycleState, SECONDARY_USER_ID,
+    PRIMARY_USER_ID, JobId, JobState, JobStore, NewJob, NotifyScope, Provider, RunnerLifecycleState,
+    SECONDARY_USER_ID,
 };
 use media_storage::{SeaOrmJobStore, SeaOrmOperationReceiptRepository};
 use sea_orm::ConnectionTrait;
@@ -108,7 +108,10 @@ async fn queue_status_exposes_the_durable_runner_blocking_reason() {
     let status = store.queue_status().await.unwrap();
 
     assert_eq!(status.runner_state, RunnerLifecycleState::Blocked);
-    assert_eq!(status.blocked_reason.as_deref(), Some("vpn_rotation_failed"));
+    assert_eq!(
+        status.blocked_reason.as_deref(),
+        Some("vpn_rotation_failed")
+    );
 }
 
 #[tokio::test]

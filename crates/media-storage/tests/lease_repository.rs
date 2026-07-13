@@ -55,12 +55,20 @@ async fn non_ready_lifecycle_denies_new_leases_without_mutating_the_job() {
 
     assert!(
         leases
-            .lease_next(operation_key(), RUNNER_CLIENT_ID, time::Duration::seconds(60))
+            .lease_next(
+                operation_key(),
+                RUNNER_CLIENT_ID,
+                time::Duration::seconds(60)
+            )
             .await
             .unwrap()
             .is_none()
     );
-    let stored = jobs.find_for_owner(job.id(), PRIMARY_USER_ID).await.unwrap().unwrap();
+    let stored = jobs
+        .find_for_owner(job.id(), PRIMARY_USER_ID)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(stored.state(), JobState::Queued);
 }
 

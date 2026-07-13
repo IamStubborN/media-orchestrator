@@ -281,6 +281,17 @@ struct TorrentExecution<'a> {
     title: &'a str,
 }
 
+struct RezkaWorkRequest<'a> {
+    lease: &'a LeaseDto,
+    manifest: &'a rezka_client::PlaybackManifest,
+    title: &'a str,
+    release_year: Option<u16>,
+    season: Option<u32>,
+    episode: Option<u32>,
+    premium_status: rezka_client::PremiumStatus,
+    expected_duration_seconds: Option<f64>,
+}
+
 impl MediaJobExecutor {
     #[must_use]
     pub(crate) fn new(
@@ -576,16 +587,16 @@ impl MediaJobExecutor {
                     })
                     .map(|mapping| mapping.canonical_title.as_str())
             });
-            let work = self.rezka_work(
+            let work = self.rezka_work(RezkaWorkRequest {
                 lease,
-                &manifest,
-                canonical_title.unwrap_or(title),
-                details.release_year(),
+                manifest: &manifest,
+                title: canonical_title.unwrap_or(title),
+                release_year: details.release_year(),
                 season,
                 episode,
                 premium_status,
                 expected_duration_seconds,
-            )?;
+            })?;
             control
                 .stage_started(task_ordinal, "media_pipeline", 1)
                 .await?;
@@ -617,15 +628,18 @@ impl MediaJobExecutor {
 
     fn rezka_work(
         &self,
-        lease: &LeaseDto,
-        manifest: &rezka_client::PlaybackManifest,
-        title: &str,
-        release_year: Option<u16>,
-        season: Option<u32>,
-        episode: Option<u32>,
-        premium_status: rezka_client::PremiumStatus,
-        expected_duration_seconds: Option<f64>,
+        request: RezkaWorkRequest<'_>,
     ) -> Result<media_runner::EpisodeWork, RunnerError> {
+        let RezkaWorkRequest {
+            lease,
+            manifest,
+            title,
+            release_year,
+            season,
+            episode,
+            premium_status,
+            expected_duration_seconds,
+        } = request;
         let safe_title = safe_name(title);
         let episode_id = season
             .zip(episode)
