@@ -182,6 +182,8 @@ pub enum ExecutionSelectionDto {
         title_id: u64,
         media_kind: MediaKindDto,
         translation_id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        translation: Option<String>,
         director: bool,
         camrip: bool,
         has_ads: bool,

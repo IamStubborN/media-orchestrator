@@ -302,6 +302,7 @@ impl MediaJobExecutor {
                 episode,
                 episodes,
                 title,
+                translation: _,
             } => {
                 self.execute_rezka(
                     lease,

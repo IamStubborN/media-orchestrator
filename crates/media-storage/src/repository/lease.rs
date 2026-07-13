@@ -181,7 +181,8 @@ async fn insert_notification_outbox(
     job: &Job,
     event: &JobEvent,
 ) -> Result<(), sea_orm::DbErr> {
-    let notifications = notifications_for_event(job, event);
+    let context = notification_context(transaction, job).await?;
+    let notifications = notifications_for_event(job, event, &context);
     if notifications.is_empty() {
         return Ok(());
     }
@@ -233,14 +234,130 @@ async fn insert_notification_outbox(
     Ok(())
 }
 
-fn notifications_for_event(job: &Job, event: &JobEvent) -> Vec<(&'static str, String)> {
+#[derive(Debug, Default)]
+struct JobNotificationContext {
+    title: Option<String>,
+    media_kind: Option<String>,
+    season: Option<u64>,
+    episode: Option<u64>,
+    episode_count: Option<usize>,
+    translation: Option<String>,
+    translation_id: Option<u64>,
+}
+
+impl JobNotificationContext {
+    fn details(&self, job: &Job) -> String {
+        let mut lines = Vec::with_capacity(6);
+        if let Some(title) = &self.title {
+            lines.push(format!("Название: {title}"));
+        }
+        lines.push(format!(
+            "Источник: {}",
+            match job.provider() {
+                media_core::Provider::Rezka => "Rezka",
+                media_core::Provider::Prowlarr => "Prowlarr",
+            }
+        ));
+        if let Some(kind) = &self.media_kind {
+            lines.push(format!("Тип: {kind}"));
+        }
+        match (self.season, self.episode) {
+            (Some(season), Some(episode)) => {
+                lines.push(format!("Серия: S{season:02}E{episode:02}"));
+            }
+            _ => {
+                if let Some(count) = self.episode_count.filter(|count| *count > 0) {
+                    lines.push(format!("Серий в задаче: {count}"));
+                }
+            }
+        }
+        if let Some(translation) = &self.translation {
+            lines.push(format!("Перевод: {translation}"));
+        } else if let Some(translation_id) = self.translation_id {
+            lines.push(format!("Перевод: ID {translation_id}"));
+        }
+        lines.push(format!("Job ID: {}", job.id()));
+        lines.join("\n")
+    }
+
+    fn message(&self, job: &Job, summary: &str) -> String {
+        format!("{summary}\n{}", self.details(job))
+    }
+}
+
+async fn notification_context(
+    transaction: &sea_orm::DatabaseTransaction,
+    job: &Job,
+) -> Result<JobNotificationContext, sea_orm::DbErr> {
+    let payload = transaction
+        .query_one_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "SELECT payload FROM search_executions WHERE result_ref = $1",
+            [job.result_ref().into()],
+        ))
+        .await?
+        .map(|row| row.try_get::<serde_json::Value>("", "payload"))
+        .transpose()?;
+    let Some(payload) = payload else {
+        return Ok(JobNotificationContext::default());
+    };
+    let safe = |name: &str| {
+        payload
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .map(safe_notification_field)
+            .filter(|value| !value.is_empty())
+    };
+    let episodes = payload
+        .get("episodes")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len);
+    Ok(JobNotificationContext {
+        title: safe("title"),
+        media_kind: payload
+            .get("media_kind")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|kind| match kind {
+                "movie" => Some("фильм".to_owned()),
+                "series" => Some("сериал".to_owned()),
+                _ => None,
+            }),
+        season: payload.get("season").and_then(serde_json::Value::as_u64),
+        episode: payload.get("episode").and_then(serde_json::Value::as_u64),
+        episode_count: episodes,
+        translation: safe("translation"),
+        translation_id: payload
+            .get("translation_id")
+            .and_then(serde_json::Value::as_u64),
+    })
+}
+
+fn safe_notification_field(value: &str) -> String {
+    let normalized = value.replace("://", " / ");
+    normalized
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(160)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+fn notifications_for_event(
+    job: &Job,
+    event: &JobEvent,
+    context: &JobNotificationContext,
+) -> Vec<(&'static str, String)> {
     let id = job.id();
     let session_refresh = job.result_ref().starts_with("selection:session-refresh:");
     match event.kind() {
         JobEventKind::Started if session_refresh => {
             vec![("started", format!("Rezka session refresh {id} started."))]
         }
-        JobEventKind::Started => vec![("started", format!("Media job {id} started."))],
+        JobEventKind::Started => vec![(
+            "started",
+            context.message(job, "Задача принята в обработку."),
+        )],
         // Intermediate progress. A stage start marks the beginning of a phase, so
         // it maps to a "started" notification. Deduplication on
         // (source_dedupe_key, recipient) collapses stage retries and per-episode
@@ -254,7 +371,7 @@ fn notifications_for_event(job: &Job, event: &JobEvent) -> Vec<(&'static str, St
         {
             vec![(
                 "downloading-started",
-                format!("Media job {id} started downloading."),
+                context.message(job, "Скачивание началось."),
             )]
         }
         JobEventKind::StageStarted(stage)
@@ -262,7 +379,7 @@ fn notifications_for_event(job: &Job, event: &JobEvent) -> Vec<(&'static str, St
         {
             vec![(
                 "transcoding-started",
-                format!("Media job {id} started transcoding."),
+                context.message(job, "Перекодирование Rezka-видео через VAAPI началось."),
             )]
         }
         JobEventKind::StageCompleted { stage, .. }
@@ -270,7 +387,7 @@ fn notifications_for_event(job: &Job, event: &JobEvent) -> Vec<(&'static str, St
         {
             vec![(
                 "downloaded",
-                format!("Media job {id} finished downloading."),
+                context.message(job, "Скачивание завершено."),
             )]
         }
         JobEventKind::StageCompleted { stage, .. }
@@ -278,7 +395,7 @@ fn notifications_for_event(job: &Job, event: &JobEvent) -> Vec<(&'static str, St
         {
             vec![(
                 "encoding-complete",
-                format!("Media job {id} finished encoding."),
+                context.message(job, "Перекодирование завершено."),
             )]
         }
         JobEventKind::StageFailed { error_code, .. }
@@ -292,36 +409,45 @@ fn notifications_for_event(job: &Job, event: &JobEvent) -> Vec<(&'static str, St
         }
         JobEventKind::StageFailed { error_code, .. } if job.state() == JobState::Failed => {
             let error_code = sanitized_error_code(error_code);
-            vec![("failed", format!("Media job {id} failed ({error_code})."))]
+            vec![(
+                "failed",
+                context.message(job, &format!("Задача завершилась ошибкой: {error_code}.")),
+            )]
         }
         JobEventKind::JobTransition { state, .. } => match state {
             JobState::NeedsAction => vec![(
                 "choice-needed",
-                format!("Media job {id} needs a choice before it can continue."),
+                context.message(job, "Нужен дополнительный выбор, чтобы продолжить задачу."),
             )],
             JobState::BlockedStorage => vec![(
                 "blocked-storage",
-                format!("Media job {id} is blocked because storage space is insufficient."),
+                context.message(
+                    job,
+                    "Загрузка приостановлена: недостаточно места для скачивания и перекодирования. Освободите место и повторите задачу.",
+                ),
             )],
             JobState::Publishing if session_refresh => Vec::new(),
             JobState::Publishing => {
                 let mut notifications = vec![(
                     "downloaded",
-                    format!("Media job {id} finished downloading."),
+                    context.message(job, "Скачивание завершено."),
                 )];
                 if job.provider() == media_core::Provider::Rezka {
                     notifications.push((
                         "encoding-complete",
-                        format!("Media job {id} finished encoding."),
+                        context.message(job, "Перекодирование завершено."),
                     ));
                 }
                 notifications
             }
             JobState::Partial => vec![
-                ("plex-added", format!("Media job {id} was added to Plex.")),
+                ("plex-added", context.message(job, "Видео добавлено в Plex.")),
                 (
                     "partial",
-                    format!("Media job {id} completed with partial results."),
+                    context.message(
+                        job,
+                        "Видео готово, но часть дополнительных файлов скачать не удалось. Можно повторить задачу для докачки.",
+                    ),
                 ),
             ],
             JobState::Completed if session_refresh => vec![(
@@ -329,9 +455,12 @@ fn notifications_for_event(job: &Job, event: &JobEvent) -> Vec<(&'static str, St
                 format!("Rezka session refresh {id} completed and was saved."),
             )],
             JobState::Completed => {
-                vec![("plex-added", format!("Media job {id} was added to Plex."))]
+                vec![("plex-added", context.message(job, "Видео добавлено в Plex."))]
             }
-            JobState::Failed => vec![("failed", format!("Media job {id} failed."))],
+            JobState::Failed => vec![(
+                "failed",
+                context.message(job, "Задача завершилась ошибкой."),
+            )],
             _ => Vec::new(),
         },
         _ => Vec::new(),

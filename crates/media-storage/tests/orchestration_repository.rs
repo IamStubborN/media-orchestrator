@@ -8,7 +8,7 @@ use media_core::{
 use media_storage::{
     SeaOrmClientStore, SeaOrmJobStore, SeaOrmLeaseStore, SeaOrmNotificationOutbox,
 };
-use sea_orm::{ConnectionTrait, Statement};
+use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use support::{TestDatabase, operation_key, query};
 
 async fn setup() -> (TestDatabase, SeaOrmJobStore, SeaOrmLeaseStore) {
@@ -198,7 +198,12 @@ async fn duplicate_event_id_does_not_duplicate_transition_event_or_outbox() {
         payload.as_object().unwrap().keys().collect::<Vec<_>>(),
         vec!["message"]
     );
-    assert!(!payload.to_string().contains("rezka"));
+    assert!(
+        payload["message"]
+            .as_str()
+            .unwrap()
+            .contains("Источник: Rezka")
+    );
     assert!(!payload.to_string().contains("http"));
 }
 
@@ -291,7 +296,7 @@ async fn rezka_runner_events_create_each_success_notification_once() {
     );
     for row in &notifications {
         assert_eq!(row.try_get::<String>("", "recipient").unwrap(), "primary");
-        assert_sanitized_message(row, &["private-provider-reference", "rezka"]);
+        assert_sanitized_message(row, &["private-provider-reference"]);
     }
 }
 
@@ -566,7 +571,7 @@ async fn progress_notifications_fire_once_per_phase_across_retries_and_to_initia
     )
     .await;
     for row in &progress {
-        assert_sanitized_message(row, &["progress-dedupe", "rezka"]);
+        assert_sanitized_message(row, &["progress-dedupe"]);
     }
     assert!(
         progress[0]
@@ -574,7 +579,7 @@ async fn progress_notifications_fire_once_per_phase_across_retries_and_to_initia
             .unwrap()["message"]
             .as_str()
             .unwrap()
-            .contains("started downloading")
+            .contains("Скачивание началось")
     );
     assert!(
         progress[1]
@@ -582,17 +587,38 @@ async fn progress_notifications_fire_once_per_phase_across_retries_and_to_initia
             .unwrap()["message"]
             .as_str()
             .unwrap()
-            .contains("started transcoding")
+            .contains("Перекодирование Rezka-видео через VAAPI началось")
     );
 }
 
 #[tokio::test]
 async fn storage_block_notifies_both_family_recipients_once() {
     let (test_db, jobs, leases) = setup().await;
+    test_db
+        .connection()
+        .execute_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "INSERT INTO search_executions (result_ref, payload) VALUES ($1, $2)",
+            [
+                "selection:blocked-private-reference".into(),
+                serde_json::json!({
+                    "source": "rezka",
+                    "title": "Случайная любовь",
+                    "media_kind": "series",
+                    "season": 1,
+                    "episode": 1,
+                    "translation_id": 238,
+                    "translation": "Оригинал (+субтитры)"
+                })
+                .into(),
+            ],
+        ))
+        .await
+        .unwrap();
     jobs.create(
         operation_key(),
         new_job_with_notifications(
-            "blocked-private-reference",
+            "selection:blocked-private-reference",
             SECONDARY_USER_ID,
             NotifyScope::Family,
         ),
@@ -667,6 +693,14 @@ async fn storage_block_notifies_both_family_recipients_once() {
     );
     for row in &notifications {
         assert_sanitized_message(row, &["blocked-private-reference"]);
+        let payload = row.try_get::<serde_json::Value>("", "payload").unwrap();
+        let message = payload["message"].as_str().unwrap();
+        assert!(message.contains("Название: Случайная любовь"));
+        assert!(message.contains("Источник: Rezka"));
+        assert!(message.contains("Тип: сериал"));
+        assert!(message.contains("Серия: S01E01"));
+        assert!(message.contains("Перевод: Оригинал (+субтитры)"));
+        assert!(message.contains("Job ID:"));
     }
 
     let deliveries = SeaOrmNotificationOutbox::new(test_db.connection().clone())

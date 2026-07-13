@@ -1178,6 +1178,7 @@ fn execution(
                 title_id: *title_id,
                 media_kind: *media_kind,
                 translation_id,
+                translation: Some(translation.name.clone()),
                 director: translation.director,
                 camrip: translation.camrip,
                 has_ads: translation.has_ads,

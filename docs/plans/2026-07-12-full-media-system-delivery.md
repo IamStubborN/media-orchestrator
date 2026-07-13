@@ -211,7 +211,10 @@ qBittorrent-managed path.
 deployed, and live-verified for Primary with outbox deduplication. A real personal
 tracking discovery notified only Secondary. A real family discovery notified
 Primary and Secondary with one shared source dedupe key. The remaining gate is a
-message from an unapproved external Telegram account.
+message from an unapproved external Telegram account. Rich media-job messages
+with safe title, source, media kind, season/episode, translation, phase, and Job
+ID are implemented and locally verified; deployment and Telegram verification
+remain pending.
 
 ### Implementation
 
