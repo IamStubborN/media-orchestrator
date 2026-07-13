@@ -38,6 +38,28 @@ struct RezkaArgs {
 #[derive(Debug, Subcommand)]
 enum RezkaCommand {
     Session(RezkaSessionArgs),
+    Inspect {
+        #[arg(long)]
+        locator: String,
+        #[arg(long)]
+        title_id: u64,
+        #[arg(long)]
+        translation_id: u64,
+        #[arg(long, value_enum)]
+        kind: MediaKind,
+        #[arg(long)]
+        season: Option<u32>,
+        #[arg(long)]
+        episode: Option<u32>,
+        #[arg(long, default_value_t = false)]
+        director: bool,
+        #[arg(long, default_value_t = false)]
+        camrip: bool,
+        #[arg(long, default_value_t = false)]
+        has_ads: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -251,6 +273,8 @@ enum RunError {
     Service(#[from] ServiceError),
     #[error(transparent)]
     Runner(#[from] composition::RunnerError),
+    #[error(transparent)]
+    Diagnostic(#[from] media::diagnostic::DiagnosticError),
 }
 
 #[tokio::main]
@@ -290,19 +314,63 @@ async fn run(cli: Cli) -> Result<(), RunError> {
 }
 
 async fn run_rezka(args: RezkaArgs) -> Result<(), RunError> {
-    let client = HttpClient::new(ClientConfig::load()?)?;
     match args.command {
-        RezkaCommand::Session(args) => match args.command {
-            RezkaSessionCommand::Refresh {
-                credential_request_id,
-                json,
-            } => {
-                let output = client.refresh_rezka_session(credential_request_id).await?;
-                emit(&output, json, |value| {
-                    render::job(value, Some("Queued session refresh"))
-                });
+        RezkaCommand::Session(args) => {
+            let client = HttpClient::new(ClientConfig::load()?)?;
+            match args.command {
+                RezkaSessionCommand::Refresh {
+                    credential_request_id,
+                    json,
+                } => {
+                    let output = client.refresh_rezka_session(credential_request_id).await?;
+                    emit(&output, json, |value| {
+                        render::job(value, Some("Queued session refresh"))
+                    });
+                }
             }
-        },
+        }
+        RezkaCommand::Inspect {
+            locator,
+            title_id,
+            translation_id,
+            kind,
+            season,
+            episode,
+            director,
+            camrip,
+            has_ads,
+            json,
+        } => {
+            let kind = match (kind, season, episode) {
+                (MediaKind::Movie, None, None) => media::diagnostic::InspectionKind::Movie {
+                    director,
+                    camrip,
+                    has_ads,
+                },
+                (MediaKind::Series, Some(season), Some(episode)) => {
+                    media::diagnostic::InspectionKind::Episode { season, episode }
+                }
+                _ => return Err(media::diagnostic::DiagnosticError::Episode.into()),
+            };
+            let inspection = media::diagnostic::inspect_playback(
+                &RunnerConfig::load()?,
+                &locator,
+                title_id,
+                translation_id,
+                kind,
+            )
+            .await?;
+            let inspection = inspection.as_json();
+            if json {
+                println!("{inspection}");
+            } else {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&inspection)
+                        .expect("playback inspection is always serializable")
+                );
+            }
+        }
     }
     Ok(())
 }
