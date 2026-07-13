@@ -114,11 +114,12 @@ Subtitle-present and pagination live gates remain pending.
 ## Workstream 4: Prowlarr and qBittorrent E2E
 
 **Priority:** Critical  
-**Current state:** Real Prowlarr search and ranking are live-verified. Support
-for slow provider responses, partially usable result pages, qBittorrent 5.2
-asynchronous add responses, and idempotent reuse of an exact existing torrent
-is implemented. The latest images are built but still require deployment and a
-recorded TV and movie completion through qBittorrent and Plex.
+**Current state:** Real Prowlarr search, ranking, explicit selection, magnet
+redirect verification, qBittorrent submission, TV category routing, managed save
+path, and active download monitoring are live-verified. Support for slow provider
+responses, partially usable result pages, qBittorrent 5.2 asynchronous adds, and
+idempotent reuse of exact pending/existing torrents is deployed. TV completion,
+Plex discovery, and the movie gate remain pending.
 
 ### Implementation and Verification
 
@@ -161,6 +162,12 @@ recorded TV and movie completion through qBittorrent and Plex.
 ## Workstream 6: Tracking and Release Dates
 
 **Priority:** High
+
+**Current state:** A read-only TVmaze release query is implemented, deployed,
+and live-verified with exact title/year matching, lifecycle, released/expected
+counts, next episode date/time, bounded schedule output, source, precision, and
+fetch timestamp. Durable tracking, owner/family routing, polling, and availability
+notifications remain pending.
 
 ### Implementation and Verification
 
