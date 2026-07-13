@@ -45,6 +45,23 @@ ssh host.example.invalid \
     select id,provider,state,attempt_count,updated_at from jobs order by created_at desc limit 10;\"'"
 ```
 
+Hermes-facing queue availability is available without direct database access:
+
+```sh
+ssh host.example.invalid \
+  'docker exec hermes-primary hermes-media queue status --json'
+```
+
+Interpret `runner_state` as follows:
+
+- `ready`: queued work may lease immediately;
+- `rotating`: the dedicated Rezka VPN is changing before the next job;
+- `blocked`: queued work is parked. Inspect the sanitized `blocked_reason`;
+  `vpn_rotation_failed` means bounded IP-rotation attempts were exhausted.
+
+Do not infer availability from `active=false` alone. An idle ready runner and a
+blocked runner both have no active lease, but require different operator action.
+
 ## Local Build
 
 Build immutable images directly on the Docker host without GitHub Actions:

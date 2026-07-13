@@ -300,7 +300,7 @@ impl JobStore for FakeJobStore {
         let current = &jobs[index];
         if !matches!(
             current.state(),
-            JobState::BlockedStorage | JobState::Partial | JobState::Failed
+            JobState::BlockedStorage | JobState::Partial | JobState::Failed | JobState::NeedsAction
         ) {
             return Err(PortError::Conflict);
         }

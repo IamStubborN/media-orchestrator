@@ -9,8 +9,8 @@ use axum::{
 use media_api::router;
 use media_contract::{ApiError, ApiErrorCode};
 use media_core::{
-    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole, Job, JobId, JobState, NotifyScope,
-    Provider, QueueStatus, RUNNER_CLIENT_ID, SECONDARY_USER_ID,
+    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole, Job, JobId, JobState, NeedsActionReason,
+    NotifyScope, Provider, QueueStatus, RUNNER_CLIENT_ID, SECONDARY_USER_ID,
 };
 use tower::ServiceExt;
 
@@ -246,7 +246,7 @@ async fn owner_can_cancel_a_queued_job_immediately() {
 }
 
 #[tokio::test]
-async fn owner_can_retry_only_a_blocked_partial_or_failed_job() {
+async fn owner_can_retry_partial_blocked_and_action_resolved_jobs() {
     let partial = Job::rehydrate(
         JobId::new(),
         PRIMARY_USER_ID,
@@ -288,6 +288,32 @@ async fn owner_can_retry_only_a_blocked_partial_or_failed_job() {
             Request::post(format!("/v1/jobs/{}/retry", blocked.id()))
                 .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
                 .header("idempotency-key", "retry-blocked-job")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(value["state"], "queued");
+
+    let needs_action = Job::rehydrate(
+        JobId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        "resolved-selection".to_owned(),
+        JobState::NeedsAction,
+        Some(NeedsActionReason::IdentityAmbiguous),
+        NotifyScope::Initiator,
+    )
+    .unwrap();
+    let response = app(FakeJobStore::with_job(needs_action.clone()))
+        .oneshot(
+            Request::post(format!("/v1/jobs/{}/retry", needs_action.id()))
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header("idempotency-key", "retry-resolved-job")
                 .header("content-type", "application/json")
                 .body(Body::from("{}"))
                 .unwrap(),
