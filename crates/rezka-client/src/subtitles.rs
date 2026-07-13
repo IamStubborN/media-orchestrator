@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fmt};
 
-use serde::de::{self, MapAccess, Visitor};
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use url::Url;
 
 use crate::{RezkaError, SecretSubtitleUrl, playback::invalid_playback};
@@ -291,6 +291,29 @@ impl<'de> Visitor<'de> for OptionalStringVisitor {
     fn visit_string<E: de::Error>(self, value: String) -> Result<Self::Value, E> {
         Ok(OptionalString((!value.is_empty()).then_some(value)))
     }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        if sequence.next_element::<de::IgnoredAny>()?.is_some() {
+            return Err(de::Error::custom("subtitle array must be empty"));
+        }
+        Ok(OptionalString(None))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        if map
+            .next_entry::<de::IgnoredAny, de::IgnoredAny>()?
+            .is_some()
+        {
+            return Err(de::Error::custom("subtitle object must be empty"));
+        }
+        Ok(OptionalString(None))
+    }
 }
 
 struct OptionalLanguages(Option<BTreeMap<String, SubtitleLanguage>>);
@@ -335,6 +358,16 @@ impl<'de> Visitor<'de> for OptionalLanguagesVisitor {
         } else {
             Err(E::custom("subtitle language string must be empty"))
         }
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        if sequence.next_element::<de::IgnoredAny>()?.is_some() {
+            return Err(de::Error::custom("subtitle language array must be empty"));
+        }
+        Ok(OptionalLanguages(None))
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>

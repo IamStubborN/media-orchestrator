@@ -9,16 +9,16 @@ fn assert_invalid(wrapper: &str) {
 
 #[test]
 fn empty_provider_forms_produce_no_tracks() {
-    for subtitle in ["false", "null", "\"\""] {
-        for languages in ["false", "null", "\"\"", "{}"] {
+    for subtitle in ["false", "null", "\"\"", "[]", "{}"] {
+        for languages in ["false", "null", "\"\"", "{}", "[]"] {
             let wrapper = format!(r#"{{"subtitle":{subtitle},"subtitle_lns":{languages}}}"#);
             assert!(parse_subtitle_fields(&wrapper).unwrap().is_empty());
         }
     }
     for wrapper in [
-        r#"{"subtitle":[],"subtitle_lns":{}}"#,
-        r#"{"subtitle":"[English]https://sub.example.com/a.vtt","subtitle_lns":[]}"#,
-        r#"{"subtitle":{},"subtitle_lns":{}}"#,
+        r#"{"subtitle":["unexpected"],"subtitle_lns":{}}"#,
+        r#"{"subtitle":{"unexpected":true},"subtitle_lns":{}}"#,
+        r#"{"subtitle":"[English]https://sub.example.com/a.vtt","subtitle_lns":["unexpected"]}"#,
     ] {
         assert_invalid(wrapper);
     }
