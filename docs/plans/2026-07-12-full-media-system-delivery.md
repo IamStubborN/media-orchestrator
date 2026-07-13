@@ -120,7 +120,10 @@ Subtitle-present and pagination live gates remain pending.
 degradation, partial stage semantics, and checkpoint-preserving execution are
 implemented. The owner-scoped, idempotent `POST /v1/jobs/{id}/retry` endpoint and
 matching `media jobs retry` command are deployed and live-verified through the
-Hermes wrapper. The forced subtitle-failure live gate remains pending.
+Hermes wrapper. Missing-sidecar recovery is live-verified against a published
+Rezka movie: the VTT was restored byte-for-byte while video inode, size, and
+mtime remained unchanged. A naturally induced subtitle failure that creates the
+initial `partial` transition remains pending.
 
 ### Implementation and Verification
 
