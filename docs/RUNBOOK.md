@@ -19,6 +19,17 @@ qBittorrent and Prowlarr use their existing independent Gluetun namespace.
 
 ## Status
 
+The repository exposes the operational commands through `mise`:
+
+```sh
+mise run homelab-status
+mise run homelab-verify
+mise run homelab-deploy
+mise run homelab-rollback
+```
+
+Deploy and rollback refuse to replace runtime containers while a job is active.
+
 ```sh
 ssh host.example.invalid \
   "docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}' | \

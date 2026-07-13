@@ -52,3 +52,15 @@ run = "ruby ./scripts/test-packaging.rb && docker compose config --quiet"
 
 [tasks.extract-linux-cli]
 run = "./scripts/extract-linux-cli.sh"
+
+[tasks.homelab-status]
+run = "./scripts/homelab.sh status"
+
+[tasks.homelab-verify]
+run = "./scripts/homelab.sh verify"
+
+[tasks.homelab-deploy]
+run = "./scripts/homelab.sh deploy"
+
+[tasks.homelab-rollback]
+run = "./scripts/homelab.sh rollback"
