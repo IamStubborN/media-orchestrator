@@ -139,6 +139,10 @@ async fn future_discovery_updates_snapshot_and_atomically_fans_out_family_notifi
             payload.as_object().unwrap().keys().collect::<Vec<_>>(),
             vec!["message"]
         );
+        let message = payload["message"].as_str().unwrap();
+        assert!(message.starts_with("📺 **Новая серия доступна**"));
+        assert!(message.contains("🔔 S01E05"));
+        assert!(message.contains("➡️ **Дальше:** выберите источник"));
         assert!(!payload.to_string().contains("http"));
     }
     assert!(

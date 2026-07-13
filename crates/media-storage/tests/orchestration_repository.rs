@@ -198,12 +198,7 @@ async fn duplicate_event_id_does_not_duplicate_transition_event_or_outbox() {
         payload.as_object().unwrap().keys().collect::<Vec<_>>(),
         vec!["message"]
     );
-    assert!(
-        payload["message"]
-            .as_str()
-            .unwrap()
-            .contains("Источник: Rezka")
-    );
+    assert!(payload["message"].as_str().unwrap().contains("📺 Rezka"));
     assert!(!payload.to_string().contains("http"));
 }
 
@@ -715,21 +710,20 @@ async fn storage_block_notifies_both_family_recipients_once() {
         assert_sanitized_message(row, &["blocked-private-reference"]);
         let payload = row.try_get::<serde_json::Value>("", "payload").unwrap();
         let message = payload["message"].as_str().unwrap();
-        assert!(message.contains("Медиа: Случайная любовь"));
-        assert!(message.contains("Источник: Rezka"));
-        assert!(message.contains("Что скачивается: сериал, серия S01E01"));
-        assert!(message.contains("Перевод: Оригинал (+субтитры)"));
-        assert!(message.contains("Качество: максимальное доступное"));
-        assert!(message.contains("Куда попадёт: Plex / Сериалы (после staging и VAAPI)"));
-        assert!(message.contains("Статус:"));
-        assert!(message.contains("Этап:"));
-        assert!(message.contains("Что дальше:"));
+        assert!(message.contains("🎬 Случайная любовь"));
+        assert!(message.contains("📺 сериал, серия S01E01 · Rezka"));
+        assert!(message.contains("🎙 Оригинал (+субтитры)"));
+        assert!(message.contains("✨ Лучшее доступное качество · все доступные субтитры"));
+        assert!(message.contains("📁 Plex / Сериалы · VAAPI"));
+        assert!(message.contains("🔄 **Этап:**"));
+        assert!(message.contains("➡️ **Дальше:**"));
         if row.try_get::<String>("", "event_type").unwrap() == "blocked-storage" {
+            assert!(message.starts_with("⏸️ **Недостаточно свободного места"));
             assert!(message.contains("Свободно: 23.0 ГБ"));
             assert!(message.contains("Нужно: 24.0 ГБ"));
             assert!(message.contains("Не хватает: 1.0 ГБ"));
         }
-        assert!(message.contains("Job ID:"));
+        assert!(message.contains("🆔 `Job "));
     }
 
     let deliveries = SeaOrmNotificationOutbox::new(test_db.connection().clone())

@@ -249,12 +249,11 @@ struct JobNotificationContext {
 
 impl JobNotificationContext {
     fn details(&self, job: &Job) -> String {
-        let mut lines = Vec::with_capacity(10);
+        let mut lines = Vec::with_capacity(6);
         lines.push(format!(
-            "Медиа: {}",
-            self.title.as_deref().unwrap_or("название недоступно")
+            "🎬 {}",
+            self.title.as_deref().unwrap_or("Название недоступно")
         ));
-        lines.push(format!("Источник: {}", provider_label(job)));
 
         let mut content = self.media_kind.clone();
         match (self.season, self.episode) {
@@ -275,19 +274,20 @@ impl JobNotificationContext {
             }
         }
         if let Some(content) = content {
-            lines.push(format!("Что скачивается: {content}"));
+            lines.push(format!("📺 {content} · {}", provider_label(job)));
+        } else {
+            lines.push(format!("📺 {}", provider_label(job)));
         }
         if let Some(translation) = &self.translation {
-            lines.push(format!("Перевод: {translation}"));
+            lines.push(format!("🎙 {translation}"));
         } else if let Some(translation_id) = self.translation_id {
-            lines.push(format!("Перевод: ID {translation_id}"));
+            lines.push(format!("🎙 Перевод ID {translation_id}"));
         }
         match job.provider() {
             media_core::Provider::Rezka => {
-                lines.push("Качество: максимальное доступное".to_owned());
-                lines.push("Субтитры: все доступные для выбранного перевода".to_owned());
+                lines.push("✨ Лучшее доступное качество · все доступные субтитры".to_owned());
                 lines.push(format!(
-                    "Куда попадёт: Plex / {} (после staging и VAAPI)",
+                    "📁 Plex / {} · VAAPI",
                     if self.media_kind.as_deref() == Some("фильм") {
                         "Фильмы"
                     } else {
@@ -296,7 +296,7 @@ impl JobNotificationContext {
                 ));
             }
             media_core::Provider::Prowlarr => lines.push(format!(
-                "Куда попадёт: Plex / {} (через qBittorrent)",
+                "📁 Plex / {} · qBittorrent",
                 if self.media_kind.as_deref() == Some("фильм") {
                     "Фильмы"
                 } else {
@@ -304,15 +304,36 @@ impl JobNotificationContext {
                 }
             )),
         }
-        lines.push(format!("Job ID: {}", job.id()));
         lines.join("\n")
     }
 
     fn message(&self, job: &Job, summary: &str, status: &str, stage: &str, next: &str) -> String {
+        let (headline, note) = summary
+            .split_once('\n')
+            .map_or((summary, None), |(headline, note)| (headline, Some(note)));
+        let headline = headline.trim_end_matches('.');
+        let note = note.map_or_else(String::new, |note| format!("\n\n{note}"));
         format!(
-            "{summary}\n\nСтатус: {status}\nЭтап: {stage}\n{}\n\nЧто дальше: {next}",
-            self.details(job)
+            "{} **{headline}**{note}\n\n{}\n\n🔄 **Этап:** {stage}\n➡️ **Дальше:** {next}\n🆔 `Job {}`",
+            status_icon(status),
+            self.details(job),
+            job.id(),
         )
+    }
+}
+
+fn status_icon(status: &str) -> &'static str {
+    match status {
+        "скачивается" => "⬇️",
+        "обрабатывается" | "публикуется" => "⚙️",
+        "скачано" | "обработано" | "доступно" | "завершено" => {
+            "✅"
+        }
+        "нужно действие" => "⚠️",
+        "приостановлено" => "⏸️",
+        "завершено частично" => "🟡",
+        "ошибка" => "❌",
+        _ => "⏳",
     }
 }
 
@@ -452,7 +473,10 @@ fn notifications_for_event(
     let session_refresh = job.result_ref().starts_with("selection:session-refresh:");
     match event.kind() {
         JobEventKind::Started if session_refresh => {
-            vec![("started", format!("Rezka session refresh {id} started."))]
+            vec![(
+                "started",
+                format!("🔐 **Обновляю сессию Rezka**\n\n🆔 `Job {id}`"),
+            )]
         }
         JobEventKind::Started => vec![(
             "started",
@@ -531,7 +555,9 @@ fn notifications_for_event(
             let error_code = sanitized_error_code(error_code);
             vec![(
                 "failed",
-                format!("Rezka session refresh {id} failed ({error_code})."),
+                format!(
+                    "❌ **Не удалось обновить сессию Rezka**\n\nПричина: `{error_code}`\n🆔 `Job {id}`"
+                ),
             )]
         }
         JobEventKind::StageFailed {
@@ -631,7 +657,7 @@ fn notifications_for_event(
             ],
             JobState::Completed if session_refresh => vec![(
                 "session-refreshed",
-                format!("Rezka session refresh {id} completed and was saved."),
+                format!("✅ **Сессия Rezka обновлена**\n\n🆔 `Job {id}`"),
             )],
             JobState::Completed => {
                 vec![

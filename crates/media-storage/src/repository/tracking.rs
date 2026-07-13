@@ -57,7 +57,7 @@ impl SeaOrmTrackingStore {
             let title: String = row.try_get("", "title")?;
             let scope: String = row.try_get("", "scope")?;
             let message = format!(
-                "{title}: season {}, episode {} is now available. Choose Rezka or Prowlarr.",
+                "📺 **Новая серия доступна**\n\n🎬 {title}\n🔔 S{:02}E{:02}\n\n➡️ **Дальше:** выберите источник — Rezka или Prowlarr",
                 episode.season(), episode.episode()
             );
             let recipients = notification_recipients(owner, &scope)?;
