@@ -12,6 +12,7 @@ pub enum TrackingScopeDto {
 pub enum TrackingStateDto {
     Active,
     ChoiceNeeded,
+    Removed,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

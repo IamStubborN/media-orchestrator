@@ -131,6 +131,9 @@ async fn authenticated_owner_can_add_list_and_other_family_user_can_remove() {
         .await
         .unwrap();
     assert_eq!(removed.status(), StatusCode::OK);
+    let removed: serde_json::Value =
+        serde_json::from_slice(&to_bytes(removed.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(removed["state"], "removed");
 }
 
 #[tokio::test]

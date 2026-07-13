@@ -175,7 +175,11 @@ qBittorrent-managed path.
 
 **Priority:** High
 
-**Current state:** Job-kind-aware session-refresh notifications are implemented, deployed, and live-verified for Primary with outbox deduplication. Secondary and family routing live gates remain pending.
+**Current state:** Job-kind-aware session-refresh notifications are implemented,
+deployed, and live-verified for Primary with outbox deduplication. A real personal
+tracking discovery notified only Secondary. A real family discovery notified
+Primary and Secondary with one shared source dedupe key. The remaining gate is a
+message from an unapproved external Telegram account.
 
 ### Implementation
 

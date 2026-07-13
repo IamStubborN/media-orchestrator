@@ -96,7 +96,11 @@ async fn remove(
                     .into_response();
             };
             match tracking.remove(&actor, operation, id).await {
-                Ok(value) => Json(convert::tracking(&value)).into_response(),
+                Ok(value) => {
+                    let mut value = convert::tracking(&value);
+                    value.state = media_contract::TrackingStateDto::Removed;
+                    Json(value).into_response()
+                }
                 Err(error) => application_error(error, &request_id),
             }
         },
