@@ -129,13 +129,21 @@ the Rezka search session.
 5. Estimate peak source and VAAPI output usage before download. An optional
    runtime reserve is supported and configured to zero in the homelab. Streams
    without a discoverable byte length use a duration-aware conservative bitrate
-   estimate rather than a fixed per-file allocation.
+   estimate rather than a fixed per-file allocation. Storage-blocked jobs are
+   parked outside the active execution slot and can be safely retried with a
+   fresh orchestration ledger.
 6. Download with bounded resume/range behavior.
 7. Probe the actual file and treat its measured dimensions as authoritative.
 8. Download all valid subtitles for the selected translation.
 9. Process one episode at a time through VAAPI HEVC.
 10. Publish atomically only after media validation succeeds.
 11. Scan Plex and verify the exact media-part path and canonical episode identity.
+
+Rich initiator notifications are deployed and live-verified for every stage of
+a real Rezka episode. They identify the media title, source, kind, episode,
+translation, and job ID without exposing provider locators or credentials.
+Successful download and transcode sub-stages now close explicitly; a forward
+migration repaired legacy running stage rows attached to terminal jobs.
 
 ### Live Gate
 
