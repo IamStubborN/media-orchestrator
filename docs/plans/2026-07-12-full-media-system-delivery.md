@@ -20,15 +20,30 @@ must not close it.
 - TVmaze release lookup, personal tracking notification, and shared family tracking management.
 - Owner isolation for jobs and search sessions across the Primary and Secondary profiles.
 - Local status and verification commands and fail-closed deployment while a job is active.
+- Owner-scoped explicit retry with idempotency and checkpoint preservation.
+- Subtitle-only recovery without re-downloading or re-encoding the published video.
+- Initiator-only and family Telegram notification routing with deduplicated delivery.
+- Local deploy, migration, Hermes CLI refresh, health gating, rollback, and redeploy.
 
 ### Remaining Acceptance Work
 
-1. Force a subtitle failure and prove retry downloads only the missing track.
-2. Verify Rezka subtitle-present episode handling and five-item pagination through Hermes.
-3. Verify initiator and family Telegram delivery for both profiles, plus unknown-user rejection.
-4. Exercise the ongoing-series Hermes conversation and release-date answers.
-5. Live-verify storage blocking, ambiguous numbering, Specials/OVA mapping, and expired-stream recovery.
-6. Audit all documentation and publish the final acceptance report with dated evidence.
+1. Deploy and live-verify the Hermes release workflow for an ongoing series. It must use structured release data, avoid guessed episode searches, offer `personal` or `family` tracking, and create nothing without confirmation.
+2. Verify a real Rezka episode with available subtitles, all sidecar naming rules, and five-item natural-language pagination through Hermes.
+3. Induce a real provider-side subtitle failure and prove the complete `partial -> retry -> completed` transition without touching completed video work.
+4. Exercise primary Telegram media commands from both profiles and verify rejection of an unapproved external Telegram account when such an account is available.
+5. Live-verify `blocked_storage`, expired-stream recovery, ambiguous numbering, persistent canonical mapping, and Specials/OVA handling.
+6. Re-run the complete local deployment verification on the final revisions and confirm all containers, migrations, wrappers, and health gates.
+7. Audit specs, architecture, runbook, plans, and evidence; then publish one final acceptance report that distinguishes implemented, deployed, and live-verified behavior.
+
+### Immediate Execution Queue
+
+1. Finish the currently running deployment and verify the deployed image revisions and container health.
+2. Run the ongoing `One Piece` Telegram conversation end to end through `hermes-primary`, including release lookup and the tracking choice prompt.
+3. Run Rezka search pagination and a subtitle-present episode flow through Hermes and Plex.
+4. Produce a natural subtitle failure and verify selective recovery.
+5. Execute storage, expired-stream, numbering, mapping, and Specials/OVA scenarios with cleanup after each run.
+6. Complete Secondary command coverage and the external unknown-user gate, or record the latter as an explicit external-account blocker rather than claiming it passed.
+7. Reconcile every acceptance item with dated evidence and close the goal only after no required work remains.
 
 ## Status Model
 
