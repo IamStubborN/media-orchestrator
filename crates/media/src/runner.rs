@@ -7,7 +7,8 @@ use std::{
 };
 
 use media_contract::{
-    JobStateDto, LeaseDto, NeedsActionReasonDto, RunnerEventDto, RunnerEventRequest,
+    CheckpointValueDto, JobStateDto, LeaseDto, NeedsActionReasonDto, RunnerEventDto,
+    RunnerEventRequest,
 };
 use secrecy::{ExposeSecret as _, SecretString};
 
@@ -46,7 +47,10 @@ impl RunnerError {
 pub enum ExecutionOutcome {
     Completed,
     Partial,
-    BlockedStorage,
+    BlockedStorage {
+        available_bytes: u64,
+        required_bytes: u64,
+    },
     PlexPending,
     NeedsActionPlexMismatch,
     NeedsActionIdentityAmbiguous,
@@ -131,6 +135,17 @@ impl RunnerControl {
         name: &str,
         stage_ordinal: u32,
     ) -> Result<(), RunnerError> {
+        self.stage_completed_with_checkpoint(task_ordinal, name, stage_ordinal, Default::default())
+            .await
+    }
+
+    async fn stage_completed_with_checkpoint(
+        &self,
+        task_ordinal: u32,
+        name: &str,
+        stage_ordinal: u32,
+        checkpoint: std::collections::BTreeMap<String, CheckpointValueDto>,
+    ) -> Result<(), RunnerError> {
         if let Err(error) = self
             .api
             .report(
@@ -139,7 +154,7 @@ impl RunnerControl {
                     task_ordinal,
                     stage_name: name.to_owned(),
                     stage_ordinal,
-                    checkpoint: Default::default(),
+                    checkpoint,
                 },
             )
             .await
@@ -612,8 +627,23 @@ impl MediaJobExecutor {
                     tracing::warn!(error = ?error, "Rezka media pipeline failed");
                     map_pipeline_error(error)
                 })?;
+            let checkpoint = match &outcome {
+                media_runner::EpisodeOutcome::BlockedStorage(blocked) => {
+                    std::collections::BTreeMap::from([
+                        (
+                            "storage_available_bytes".to_owned(),
+                            CheckpointValueDto::Unsigned(blocked.available_bytes()),
+                        ),
+                        (
+                            "storage_required_bytes".to_owned(),
+                            CheckpointValueDto::Unsigned(blocked.required_bytes()),
+                        ),
+                    ])
+                }
+                _ => Default::default(),
+            };
             control
-                .stage_completed(task_ordinal, "media_pipeline", 1)
+                .stage_completed_with_checkpoint(task_ordinal, "media_pipeline", 1, checkpoint)
                 .await?;
             aggregate = combine_episode_outcome(aggregate, map_pipeline_outcome(outcome));
             if !matches!(
@@ -1150,7 +1180,10 @@ fn map_pipeline_outcome(outcome: media_runner::EpisodeOutcome) -> ExecutionOutco
     match outcome {
         media_runner::EpisodeOutcome::Completed => ExecutionOutcome::Completed,
         media_runner::EpisodeOutcome::Partial { .. } => ExecutionOutcome::Partial,
-        media_runner::EpisodeOutcome::BlockedStorage => ExecutionOutcome::BlockedStorage,
+        media_runner::EpisodeOutcome::BlockedStorage(blocked) => ExecutionOutcome::BlockedStorage {
+            available_bytes: blocked.available_bytes(),
+            required_bytes: blocked.required_bytes(),
+        },
         media_runner::EpisodeOutcome::PlexPending => ExecutionOutcome::PlexPending,
         media_runner::EpisodeOutcome::NeedsActionPlexMismatch => {
             ExecutionOutcome::NeedsActionPlexMismatch
@@ -1182,7 +1215,7 @@ fn combine_episode_outcome(
         (_, ExecutionOutcome::NeedsActionIdentityAmbiguous) => {
             ExecutionOutcome::NeedsActionIdentityAmbiguous
         }
-        (_, ExecutionOutcome::BlockedStorage) => ExecutionOutcome::BlockedStorage,
+        (_, blocked @ ExecutionOutcome::BlockedStorage { .. }) => blocked,
         (_, ExecutionOutcome::PlexPending) => ExecutionOutcome::PlexPending,
         (_, ExecutionOutcome::Failed) => ExecutionOutcome::Failed,
         (ExecutionOutcome::Partial, ExecutionOutcome::Completed)
@@ -1355,7 +1388,7 @@ pub async fn run_single_iteration(
             (JobStateDto::PlexPending, None),
             (JobStateDto::Partial, None),
         ],
-        ExecutionOutcome::BlockedStorage => vec![(JobStateDto::BlockedStorage, None)],
+        ExecutionOutcome::BlockedStorage { .. } => vec![(JobStateDto::BlockedStorage, None)],
         ExecutionOutcome::PlexPending => vec![
             (JobStateDto::Publishing, None),
             (JobStateDto::PlexPending, None),
@@ -1564,8 +1597,17 @@ mod tests {
             ExecutionOutcome::Partial,
         );
         assert_eq!(
-            combine_episode_outcome(ExecutionOutcome::Partial, ExecutionOutcome::BlockedStorage),
-            ExecutionOutcome::BlockedStorage,
+            combine_episode_outcome(
+                ExecutionOutcome::Partial,
+                ExecutionOutcome::BlockedStorage {
+                    available_bytes: 1,
+                    required_bytes: 2,
+                },
+            ),
+            ExecutionOutcome::BlockedStorage {
+                available_bytes: 1,
+                required_bytes: 2,
+            },
         );
     }
 

@@ -2,9 +2,9 @@ use std::{path::PathBuf, sync::Arc};
 
 use crate::{
     Cancellation, FileSystemPort, HttpPort, MediaProbe, PeakEstimate, PlexCheck, PlexExpectation,
-    ProcessPort, RunnerPortError, RunnerServicePort, StageReporter, StoragePreflight,
-    build_hls_ingest_command, build_rezka_vaapi_command, validate_plex_observation,
-    validate_webvtt,
+    ProcessPort, RunnerPortError, RunnerServicePort, StageReporter, StorageBlocked,
+    StoragePreflight, build_hls_ingest_command, build_rezka_vaapi_command,
+    validate_plex_observation, validate_webvtt,
 };
 
 const DEFAULT_RESERVE_BYTES: u64 = 0;
@@ -98,7 +98,7 @@ pub struct EpisodeWork {
 pub enum EpisodeOutcome {
     Completed,
     Partial { missing_subtitles: Vec<String> },
-    BlockedStorage,
+    BlockedStorage(StorageBlocked),
     PlexPending,
     NeedsActionPlexMismatch,
     Cancelled,
@@ -176,8 +176,8 @@ impl EpisodePipeline {
                 .await?;
             let estimate = PeakEstimate::new(source_bytes, source_bytes, 0)
                 .map_err(|_| RunnerPortError::InvalidWork)?;
-            if self.storage.check(available, estimate).is_err() {
-                return Ok(EpisodeOutcome::BlockedStorage);
+            if let Err(blocked) = self.storage.check(available, estimate) {
+                return Ok(EpisodeOutcome::BlockedStorage(blocked));
             }
 
             let final_parent = work

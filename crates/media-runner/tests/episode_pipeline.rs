@@ -386,10 +386,13 @@ async fn storage_preflight_uses_the_probed_source_size() {
     let pipeline = EpisodePipeline::new(filesystem, http.clone(), process, service)
         .with_storage_reserve_bytes(20 * GIB);
 
-    assert_eq!(
-        pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
-        EpisodeOutcome::BlockedStorage
-    );
+    let EpisodeOutcome::BlockedStorage(blocked) =
+        pipeline.run(&work, &NeverCancelled, &()).await.unwrap()
+    else {
+        panic!("expected storage-blocked outcome");
+    };
+    assert_eq!(blocked.available_bytes(), 23 * GIB);
+    assert_eq!(blocked.required_bytes(), 24 * GIB);
     assert!(http.video_offsets.lock().unwrap().is_empty());
 }
 

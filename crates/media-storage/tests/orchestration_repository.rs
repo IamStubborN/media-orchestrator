@@ -643,7 +643,18 @@ async fn storage_block_notifies_both_family_recipients_once() {
             0,
             "media_pipeline".to_owned(),
             1,
-            Default::default(),
+            [
+                (
+                    "storage_available_bytes".to_owned(),
+                    CheckpointValue::Unsigned(23 * 1024 * 1024 * 1024),
+                ),
+                (
+                    "storage_required_bytes".to_owned(),
+                    CheckpointValue::Unsigned(24 * 1024 * 1024 * 1024),
+                ),
+            ]
+            .into_iter()
+            .collect(),
         )
         .unwrap(),
         JobEvent::transition(JobEventId::new(), JobState::BlockedStorage, None).unwrap(),
@@ -697,10 +708,17 @@ async fn storage_block_notifies_both_family_recipients_once() {
         let payload = row.try_get::<serde_json::Value>("", "payload").unwrap();
         let message = payload["message"].as_str().unwrap();
         assert!(message.contains("Название: Случайная любовь"));
-        assert!(message.contains("Источник: Rezka"));
+        assert!(message.contains("Источник загрузки: Rezka"));
         assert!(message.contains("Тип: сериал"));
         assert!(message.contains("Серия: S01E01"));
         assert!(message.contains("Перевод: Оригинал (+субтитры)"));
+        assert!(message.contains("Качество: максимальное доступное"));
+        assert!(message.contains("Маршрут: Rezka -> staging -> VAAPI -> Plex / Сериалы"));
+        if row.try_get::<String>("", "event_type").unwrap() == "blocked-storage" {
+            assert!(message.contains("Свободно: 23.0 ГБ"));
+            assert!(message.contains("Нужно: 24.0 ГБ"));
+            assert!(message.contains("Не хватает: 1.0 ГБ"));
+        }
         assert!(message.contains("Job ID:"));
     }
 

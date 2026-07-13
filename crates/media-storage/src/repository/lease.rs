@@ -243,16 +243,18 @@ struct JobNotificationContext {
     episode_count: Option<usize>,
     translation: Option<String>,
     translation_id: Option<u64>,
+    storage_available_bytes: Option<u64>,
+    storage_required_bytes: Option<u64>,
 }
 
 impl JobNotificationContext {
     fn details(&self, job: &Job) -> String {
-        let mut lines = Vec::with_capacity(6);
+        let mut lines = Vec::with_capacity(10);
         if let Some(title) = &self.title {
             lines.push(format!("Название: {title}"));
         }
         lines.push(format!(
-            "Источник: {}",
+            "Источник загрузки: {}",
             match job.provider() {
                 media_core::Provider::Rezka => "Rezka",
                 media_core::Provider::Prowlarr => "Prowlarr",
@@ -276,6 +278,28 @@ impl JobNotificationContext {
         } else if let Some(translation_id) = self.translation_id {
             lines.push(format!("Перевод: ID {translation_id}"));
         }
+        match job.provider() {
+            media_core::Provider::Rezka => {
+                lines.push("Качество: максимальное доступное".to_owned());
+                lines.push("Субтитры: все доступные для выбранного перевода".to_owned());
+                lines.push(format!(
+                    "Маршрут: Rezka -> staging -> VAAPI -> Plex / {}",
+                    if self.media_kind.as_deref() == Some("фильм") {
+                        "Фильмы"
+                    } else {
+                        "Сериалы"
+                    }
+                ));
+            }
+            media_core::Provider::Prowlarr => lines.push(format!(
+                "Маршрут: Prowlarr -> qBittorrent -> Plex / {}",
+                if self.media_kind.as_deref() == Some("фильм") {
+                    "Фильмы"
+                } else {
+                    "Сериалы"
+                }
+            )),
+        }
         lines.push(format!("Job ID: {}", job.id()));
         lines.join("\n")
     }
@@ -298,9 +322,20 @@ async fn notification_context(
         .await?
         .map(|row| row.try_get::<serde_json::Value>("", "payload"))
         .transpose()?;
-    let Some(payload) = payload else {
-        return Ok(JobNotificationContext::default());
-    };
+    let storage = transaction
+        .query_one_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "SELECT stage.checkpoint FROM job_stages AS stage \
+             JOIN job_tasks AS task ON task.id = stage.task_id \
+             WHERE task.job_id = $1 AND stage.name = 'media_pipeline' \
+             ORDER BY stage.updated_at DESC LIMIT 1",
+            [job.id().into_uuid().into()],
+        ))
+        .await?
+        .map(|row| row.try_get::<serde_json::Value>("", "checkpoint"))
+        .transpose()?
+        .unwrap_or_default();
+    let payload = payload.unwrap_or_default();
     let safe = |name: &str| {
         payload
             .get(name)
@@ -329,7 +364,33 @@ async fn notification_context(
         translation_id: payload
             .get("translation_id")
             .and_then(serde_json::Value::as_u64),
+        storage_available_bytes: storage
+            .get("storage_available_bytes")
+            .and_then(serde_json::Value::as_u64),
+        storage_required_bytes: storage
+            .get("storage_required_bytes")
+            .and_then(serde_json::Value::as_u64),
     })
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    format!("{:.1} ГБ", bytes as f64 / GIB)
+}
+
+fn storage_blocked_description(context: &JobNotificationContext) -> String {
+    match (
+        context.storage_available_bytes,
+        context.storage_required_bytes,
+    ) {
+        (Some(available), Some(required)) => format!(
+            "Загрузка остановлена до скачивания: проверка свободного места не пройдена.\nСвободно: {}\nНужно: {} (включая настроенный резерв)\nНе хватает: {}\nЧто делать: освободите место и повторно запустите этот Job.",
+            format_bytes(available),
+            format_bytes(required),
+            format_bytes(required.saturating_sub(available)),
+        ),
+        _ => "Загрузка остановлена до скачивания: недостаточно места для исходного файла, перекодирования и настроенного резерва. Освободите место и повторно запустите этот Job.".to_owned(),
+    }
 }
 
 fn safe_notification_field(value: &str) -> String {
@@ -356,7 +417,7 @@ fn notifications_for_event(
         }
         JobEventKind::Started => vec![(
             "started",
-            context.message(job, "Задача принята в обработку."),
+            context.message(job, "Runner взял задачу в обработку."),
         )],
         // Intermediate progress. A stage start marks the beginning of a phase, so
         // it maps to a "started" notification. Deduplication on
@@ -371,7 +432,7 @@ fn notifications_for_event(
         {
             vec![(
                 "downloading-started",
-                context.message(job, "Скачивание началось."),
+                context.message(job, "Скачивание исходного видео началось."),
             )]
         }
         JobEventKind::StageStarted(stage)
@@ -432,10 +493,7 @@ fn notifications_for_event(
             }
             JobState::BlockedStorage => vec![(
                 "blocked-storage",
-                context.message(
-                    job,
-                    "Загрузка приостановлена: недостаточно места для скачивания и перекодирования. Освободите место и повторите задачу.",
-                ),
+                context.message(job, &storage_blocked_description(context)),
             )],
             JobState::Publishing if session_refresh => Vec::new(),
             JobState::Publishing => {
