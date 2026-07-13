@@ -23,15 +23,14 @@ must not close it.
 
 ### Remaining Acceptance Work
 
-1. Complete and verify the active Prowlarr movie in qBittorrent and Plex.
-2. Finish the owner-scoped retry API and CLI for `partial` and `failed` jobs.
-3. Force a subtitle failure and prove retry downloads only the missing track.
-4. Verify Rezka subtitle-present episode handling and five-item pagination through Hermes.
-5. Verify initiator and family Telegram delivery for both profiles, plus unknown-user rejection.
-6. Exercise the ongoing-series Hermes conversation and release-date answers.
-7. Live-verify storage blocking, ambiguous numbering, Specials/OVA mapping, and expired-stream recovery.
-8. Deploy the final immutable images after the active job becomes terminal, then verify a complete deploy and rollback cycle.
-9. Audit all documentation and publish the final acceptance report with dated evidence.
+1. Deploy and live-verify the owner-scoped retry API and CLI for `partial` and `failed` jobs.
+2. Force a subtitle failure and prove retry downloads only the missing track.
+3. Verify Rezka subtitle-present episode handling and five-item pagination through Hermes.
+4. Verify initiator and family Telegram delivery for both profiles, plus unknown-user rejection.
+5. Exercise the ongoing-series Hermes conversation and release-date answers.
+6. Live-verify storage blocking, ambiguous numbering, Specials/OVA mapping, and expired-stream recovery.
+7. Verify a complete deploy and rollback cycle.
+8. Audit all documentation and publish the final acceptance report with dated evidence.
 
 ## Status Model
 
@@ -151,8 +150,9 @@ redirect verification, qBittorrent submission, TV category routing, managed save
 path, restart recovery, completion, seeding, and exact Plex discovery of all nine
 season episodes are live-verified. Support for slow provider
 responses, partially usable result pages, qBittorrent 5.2 asynchronous adds, and
-idempotent reuse of exact pending/existing torrents is deployed. The Prowlarr
-movie gate remains pending.
+idempotent reuse of exact pending/existing torrents is deployed. A real Prowlarr
+movie also completed on attempt 2 and was verified in Plex at its exact
+qBittorrent-managed path.
 
 ### Implementation and Verification
 
@@ -228,9 +228,8 @@ conversation that offers tracking after explaining an ongoing series.
 **Current state:** Rezka movie search, explicit translation selection, real
 movie playback resolution, subtitle parsing, full download, VAAPI transcode,
 year-qualified naming, movie-root publication, and exact Plex movie/subtitle
-discovery are live-verified. Prowlarr movie search/selection is live-verified;
-submission encountered transient qBittorrent transport failures and its
-completion/Plex gate remains pending.
+discovery are live-verified. Prowlarr movie search, selection, transient-failure
+recovery, qBittorrent completion, and exact Plex discovery are also live-verified.
 
 ### Implementation and Verification
 

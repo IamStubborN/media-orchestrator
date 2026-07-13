@@ -29,10 +29,7 @@ RUN --mount=type=cache,id=media-cargo-registry,target=/usr/local/cargo/registry,
 FROM scratch AS cli-artifact
 COPY --from=builder /out/media /media
 
-FROM ${RUNTIME_IMAGE} AS certificates
-RUN apt-get update && \
-    apt-get install --yes --no-install-recommends ca-certificates=20230311+deb12u1 && \
-    rm -rf /var/lib/apt/lists/*
+FROM ${RUST_IMAGE} AS certificates
 
 FROM ${RUNTIME_IMAGE} AS runtime-common
 ARG OCI_CREATED="unknown"
@@ -61,8 +58,16 @@ ENTRYPOINT ["/usr/local/bin/media"]
 CMD ["serve"]
 
 FROM runtime-common AS runner-packages
-RUN apt-get update && \
-    apt-get install --yes --no-install-recommends \
+RUN apt-get \
+      -o Acquire::Retries=3 \
+      -o Acquire::http::Timeout=20 \
+      -o Acquire::https::Timeout=20 \
+      update && \
+    apt-get \
+      -o Acquire::Retries=3 \
+      -o Acquire::http::Timeout=20 \
+      -o Acquire::https::Timeout=20 \
+      install --yes --no-install-recommends \
       ffmpeg=7:5.1.9-0+deb12u1 \
       intel-media-va-driver=23.1.1+dfsg1-1 \
       libva-drm2=2.17.0-1 \
