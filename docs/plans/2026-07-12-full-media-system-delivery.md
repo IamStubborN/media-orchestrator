@@ -24,23 +24,52 @@ must not close it.
 - Subtitle-only recovery without re-downloading or re-encoding the published video.
 - Initiator-only and family Telegram notification routing with deduplicated delivery.
 - Local deploy, migration, Hermes CLI refresh, health gating, rollback, and redeploy.
+- Rezka full-catalog search with five-result pages and natural-language next-page
+  navigation through Hermes, including isolated provider continuation state.
+- Storage reserve enforcement against the real media volume: a Rezka episode job
+  entered `blocked_storage`, published no files, released its lease, and remained
+  parked without consuming additional attempts.
 
 ### Remaining Acceptance Work
 
-1. Verify a real Rezka episode with available subtitles, all sidecar naming rules, and five-item natural-language pagination through Hermes.
+1. Free enough media-volume capacity to satisfy the fixed 20 GiB post-operation
+   reserve, then resume a real Rezka episode with available subtitles and verify
+   all sidecar naming rules. Five-item natural-language pagination is already
+   live-verified.
 2. Induce a real provider-side subtitle failure and prove the complete `partial -> retry -> completed` transition without touching completed video work.
 3. Exercise primary Telegram media commands from both profiles and verify rejection of an unapproved external Telegram account when such an account is available.
-4. Live-verify `blocked_storage`, expired-stream recovery, ambiguous numbering, persistent canonical mapping, and Specials/OVA handling.
+4. Live-verify storage recovery after space becomes available, expired-stream
+   recovery, ambiguous numbering, persistent canonical mapping, and Specials/OVA
+   handling. Entry into stable `blocked_storage` is already live-verified.
 5. Re-run the complete local deployment verification on the final revisions and confirm all containers, migrations, wrappers, and health gates.
 6. Audit specs, architecture, runbook, plans, and evidence; then publish one final acceptance report that distinguishes implemented, deployed, and live-verified behavior.
 
 ### Immediate Execution Queue
 
-1. Run Rezka search pagination and a subtitle-present episode flow through Hermes and Plex.
-2. Produce a natural subtitle failure and verify selective recovery.
-3. Execute storage, expired-stream, numbering, mapping, and Specials/OVA scenarios with cleanup after each run.
-4. Complete Secondary command coverage and the external unknown-user gate, or record the latter as an explicit external-account blocker rather than claiming it passed.
-5. Reconcile every acceptance item with dated evidence and close the goal only after no required work remains.
+1. Inventory only orchestrator-owned staging artifacts, remove completed-job
+   residue when publication is verified, and determine whether the media volume
+   can safely reach the required 20 GiB reserve without deleting user media.
+2. Add an owner-scoped resume path for `blocked_storage` that re-runs storage
+   preflight and unfinished work, then complete the already selected
+   subtitle-present Rezka episode through Hermes and Plex.
+3. Produce a natural subtitle failure and verify selective recovery.
+4. Execute expired-stream, numbering, mapping, and Specials/OVA scenarios with
+   cleanup after each run.
+5. Complete Secondary command coverage and the external unknown-user gate, or
+   record the latter as an explicit external-account blocker rather than claiming
+   it passed.
+6. Re-run deployment verification on final revisions, reconcile every acceptance
+   item with dated evidence, and close the goal only after no required work remains.
+
+### Current Operational Blocker
+
+- The real media filesystem currently reports approximately 18 GiB available,
+  below the fixed 20 GiB post-operation reserve.
+- No published media, torrent data, or user-owned files may be removed to make a
+  test pass.
+- Cleanup is limited to verified redundant artifacts owned by media-orchestrator.
+- The blocked subtitle test job must remain resumable; creating repeated jobs to
+  bypass the gate is not an acceptable workaround.
 
 ## Status Model
 
@@ -100,12 +129,15 @@ Unit tests or a healthy container do not satisfy a live-verification gate.
 publication, Plex identity, and initiator notifications are live-verified for one
 real episode. The authenticated non-premium session exposed advertised 1080p only
 as a rejected 60-second preview; its highest complete stream measured 854x480.
-Subtitle-present and pagination live gates remain pending.
+Subtitle-present live verification remains pending. Full-catalog pagination is
+implemented, deployed, and live-verified through a two-turn Hermes conversation:
+the first and second pages each returned five distinct results while preserving
+the Rezka search session.
 
 ### Implementation and Verification
 
 1. Search a real multi-season series through Hermes.
-2. Verify five-result pagination and isolated search state.
+2. Verify five-result pagination and isolated search state. **Live-verified.**
 3. Show every available translation and require explicit selection.
 4. Resolve one real episode and select the highest available stream.
 5. Estimate download size and enforce the 20 GiB post-operation reserve.
@@ -267,21 +299,32 @@ recovery, qBittorrent completion, and exact Plex discovery are also live-verifie
 
 **Priority:** High
 
+**Current state:** The real 20 GiB storage reserve gate is live-verified. A
+subtitle-present Rezka episode job entered `blocked_storage` before download or
+publication. The lease was released, the attempt count remained stable, and the
+job did not requeue after lease expiry. Recovery after capacity becomes available,
+expired-stream behavior, ambiguous numbering, persistent mapping, and Specials/OVA
+remain pending.
+
 ### Implementation and Verification
 
 1. Prove lease expiry and restart recovery with a killed runner.
 2. Resume only unfinished download or processing work.
 3. Prevent duplicate publication and duplicate events.
-4. Verify `blocked_storage` before violating the 20 GiB reserve.
-5. Verify bounded retry for expired streams and transient provider failures.
-6. Convert ambiguous absolute/season numbering to `needs_action`.
-7. Persist a resolved canonical mapping and reuse it for later episodes.
-8. Verify OVA and Specials mapping rather than treating them as duplicates.
+4. Verify `blocked_storage` before violating the 20 GiB reserve. **Live-verified.**
+5. Provide an explicit owner-scoped resume operation that returns a storage-blocked
+   job to the queue only after re-running storage preflight and unfinished stages.
+6. Verify bounded retry for expired streams and transient provider failures.
+7. Convert ambiguous absolute/season numbering to `needs_action`.
+8. Persist a resolved canonical mapping and reuse it for later episodes.
+9. Verify OVA and Specials mapping rather than treating them as duplicates.
 
 ### Live Gate
 
 - A killed runner resumes from its durable checkpoint.
 - A storage-blocked job performs no partial publication.
+- A storage-blocked job can be resumed explicitly after capacity is restored,
+  without bypassing preflight or repeating completed work.
 - A resolved season/episode mapping is reused by a subsequent job.
 - Published media is never automatically deleted.
 
@@ -366,16 +409,13 @@ Secrets, cookies, Telegram tokens, Vaultwarden values, and signed URLs must neve
 ## Execution Order
 
 ```text
-1. Notification semantics and VPN lifecycle foundation
-2. Rezka episode E2E
-3. Subtitle partial recovery and Plex verification
-4. Prowlarr/qBittorrent TV E2E
-5. Tracking and release-date flow
-6. Rezka and Prowlarr movie E2E
-7. Recovery, storage, and numbering scenarios
-8. Multi-user Hermes verification
-9. Local deployment tooling and rollback
-10. Documentation audit and final acceptance report
+1. Safely reclaim orchestrator-owned staging space and implement storage resume
+2. Complete subtitle-present Rezka episode E2E and Plex verification
+3. Prove natural subtitle failure and selective recovery
+4. Prove expired-stream, numbering, mapping, and Specials/OVA behavior
+5. Complete both-profile Telegram coverage and unknown-user rejection
+6. Re-run final local deployment, rollback, and health verification
+7. Audit documentation and publish the final acceptance report
 ```
 
 Notification cleanup is first so later E2E runs produce truthful user-visible evidence. VPN lifecycle precedes downloads because the next-job IP contract affects every Rezka live test.
