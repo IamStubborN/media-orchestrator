@@ -116,10 +116,11 @@ Subtitle-present and pagination live gates remain pending.
 **Priority:** Critical  
 **Current state:** Real Prowlarr search, ranking, explicit selection, magnet
 redirect verification, qBittorrent submission, TV category routing, managed save
-path, and active download monitoring are live-verified. Support for slow provider
+path, restart recovery, completion, seeding, and exact Plex discovery of all nine
+season episodes are live-verified. Support for slow provider
 responses, partially usable result pages, qBittorrent 5.2 asynchronous adds, and
-idempotent reuse of exact pending/existing torrents is deployed. TV completion,
-Plex discovery, and the movie gate remain pending.
+idempotent reuse of exact pending/existing torrents is deployed. The Prowlarr
+movie gate remains pending.
 
 ### Implementation and Verification
 

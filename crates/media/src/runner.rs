@@ -498,11 +498,14 @@ impl MediaJobExecutor {
                 .stage_started(task_ordinal, "resolve_manifest", 0)
                 .await?;
             let mut prepared = self.rezka.lock().await;
-            let manifest = prepared
-                .client
-                .resolve(request)
-                .await
-                .map_err(|_| RunnerError::Execution)?;
+            let manifest = prepared.client.resolve(request).await.map_err(|error| {
+                tracing::warn!(
+                    error_code = ?error.code(),
+                    error = %error,
+                    "Rezka playback resolve failed"
+                );
+                RunnerError::Execution
+            })?;
             let snapshot = prepared
                 .client
                 .export_session()
