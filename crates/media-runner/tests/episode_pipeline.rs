@@ -250,6 +250,8 @@ fn probe(codec: &str) -> MediaProbe {
         height: 682,
         duration_seconds: 60.0,
         bitrate: Some(1_000_000),
+        audio_language: None,
+        audio_title: None,
     }
 }
 
@@ -260,6 +262,8 @@ fn encoded_probe() -> MediaProbe {
         height: 1080,
         duration_seconds: 60.0,
         bitrate: Some(1_000_000),
+        audio_language: None,
+        audio_title: None,
     }
 }
 
@@ -278,6 +282,7 @@ fn work() -> EpisodeWork {
         final_video: PathBuf::from("/plex/tv/Show/Season 01/Show - S01E01.mkv"),
         vaapi_device: PathBuf::from("/dev/dri/renderD128"),
         expected_duration_seconds: None,
+        audio: None,
         subtitles: vec![
             SubtitleTrack {
                 id: "en".to_owned(),
@@ -683,6 +688,54 @@ async fn rezka_transcode_emits_a_transcode_stage_start() {
             "started:transcode".to_owned(),
             "completed:transcode".to_owned()
         ]
+    );
+}
+
+#[tokio::test]
+async fn publication_without_expected_audio_metadata_is_replaced() {
+    let mut work = work();
+    work.audio = Some(media_runner::AudioTrackMetadata {
+        language: "rus".to_owned(),
+        title: "DEEP".to_owned(),
+    });
+    let filesystem = Arc::new(FakeFs::with_available(30 * GIB));
+    filesystem
+        .files
+        .lock()
+        .unwrap()
+        .insert(work.final_video.clone(), b"untagged".to_vec());
+    let mut tagged = encoded_probe();
+    tagged.audio_language = Some("rus".to_owned());
+    tagged.audio_title = Some("DEEP".to_owned());
+    let http = Arc::new(FakeHttp::default());
+    let process = Arc::new(FakeProcess {
+        probes: Mutex::new(VecDeque::from([encoded_probe(), probe("h264"), tagged])),
+        commands: Mutex::default(),
+        filesystem: filesystem.clone(),
+    });
+    let service = Arc::new(FakeService {
+        checks: Mutex::new(VecDeque::from([matched(&work.plex)])),
+        scans: Mutex::default(),
+    });
+    let pipeline = EpisodePipeline::new(filesystem, http.clone(), process.clone(), service);
+
+    assert_eq!(
+        pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
+        EpisodeOutcome::Completed
+    );
+    assert_eq!(http.video_offsets.lock().unwrap().as_slice(), &[0]);
+    let commands = process.commands.lock().unwrap();
+    assert!(
+        commands[0]
+            .args()
+            .windows(2)
+            .any(|args| { args == ["-metadata:s:a:0", "language=rus"] })
+    );
+    assert!(
+        commands[0]
+            .args()
+            .windows(2)
+            .any(|args| { args == ["-metadata:s:a:0", "title=DEEP"] })
     );
 }
 

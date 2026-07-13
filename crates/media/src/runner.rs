@@ -328,6 +328,7 @@ struct RezkaWorkRequest<'a> {
     episode: Option<u32>,
     premium_status: rezka_client::PremiumStatus,
     expected_duration_seconds: Option<f64>,
+    translation: &'a str,
 }
 
 impl MediaJobExecutor {
@@ -523,6 +524,7 @@ impl MediaJobExecutor {
         let selection = details
             .select_translation(&key)
             .map_err(|_| RunnerError::Execution)?;
+        let translation = selection.translation().name().to_owned();
         let requests = match media_kind {
             media_contract::MediaKindDto::Movie => vec![(
                 None,
@@ -634,6 +636,7 @@ impl MediaJobExecutor {
                 episode,
                 premium_status,
                 expected_duration_seconds,
+                translation: &translation,
             })?;
             control
                 .stage_started(task_ordinal, "media_pipeline", 1)
@@ -692,6 +695,7 @@ impl MediaJobExecutor {
             episode,
             premium_status,
             expected_duration_seconds,
+            translation,
         } = request;
         let safe_title = safe_name(title);
         let episode_id = season
@@ -768,6 +772,12 @@ impl MediaJobExecutor {
             final_video: final_video.clone(),
             vaapi_device: self.vaapi_device.clone(),
             expected_duration_seconds,
+            audio: rezka_audio_language(translation).map(|language| {
+                media_runner::AudioTrackMetadata {
+                    language: language.to_owned(),
+                    title: translation.to_owned(),
+                }
+            }),
             subtitles,
             plex: media_runner::PlexExpectation {
                 path: final_video,
@@ -899,6 +909,7 @@ impl MediaJobExecutor {
                 final_video: final_video.clone(),
                 vaapi_device: self.vaapi_device.clone(),
                 expected_duration_seconds: None,
+                audio: None,
                 subtitles: Vec::new(),
                 plex: media_runner::PlexExpectation {
                     path: final_video,
@@ -936,6 +947,30 @@ fn highest_standard_variant(
     variants
         .iter()
         .find(|variant| variant.advertised_quality().tier() == rezka_client::QualityTier::Standard)
+}
+
+fn rezka_audio_language(translation: &str) -> Option<&'static str> {
+    let normalized = translation.to_lowercase();
+    if normalized.contains("оригинал") || normalized.contains("original") {
+        None
+    } else if normalized.contains("україн")
+        || normalized.contains("украин")
+        || normalized.contains("ukrain")
+        || normalized
+            .split(|character: char| !character.is_alphanumeric())
+            .any(|part| part == "ukr")
+    {
+        Some("ukr")
+    } else if normalized.contains("англий")
+        || normalized.contains("english")
+        || normalized
+            .split(|character: char| !character.is_alphanumeric())
+            .any(|part| part == "eng")
+    {
+        Some("eng")
+    } else {
+        Some("rus")
+    }
 }
 
 async fn submit_torrent_with_retry(
@@ -1612,7 +1647,8 @@ mod tests {
 
     use super::{
         ExecutionOutcome, canonical_movie_name, combine_episode_outcome, highest_standard_variant,
-        matching_episode_videos, parse_episode_coordinates, rezka_final_video_path,
+        matching_episode_videos, parse_episode_coordinates, rezka_audio_language,
+        rezka_final_video_path,
     };
 
     #[test]
@@ -1639,6 +1675,14 @@ mod tests {
         .expect("quality listing is valid");
 
         assert!(highest_standard_variant(&variants).is_none());
+    }
+
+    #[test]
+    fn rezka_translation_names_produce_conservative_audio_language_tags() {
+        assert_eq!(rezka_audio_language("DEEP"), Some("rus"));
+        assert_eq!(rezka_audio_language("Український дубляж"), Some("ukr"));
+        assert_eq!(rezka_audio_language("English"), Some("eng"));
+        assert_eq!(rezka_audio_language("Оригинал (+субтитры)"), None);
     }
 
     #[test]

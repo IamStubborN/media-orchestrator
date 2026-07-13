@@ -16,7 +16,7 @@ pub use adapters::{
 };
 pub use download::{ResumeAction, ResumeError, decide_resume};
 pub use media::{
-    MediaProbe, MediaProbeError, ProcessCommand, build_hls_ingest_command,
+    AudioTrackMetadata, MediaProbe, MediaProbeError, ProcessCommand, build_hls_ingest_command,
     build_rezka_vaapi_command,
 };
 pub use pipeline::{

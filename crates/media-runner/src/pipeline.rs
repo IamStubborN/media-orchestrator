@@ -1,9 +1,9 @@
 use std::{path::PathBuf, sync::Arc};
 
 use crate::{
-    Cancellation, FileSystemPort, HttpPort, MediaProbe, PeakEstimate, PlexCheck, PlexExpectation,
-    ProcessPort, RunnerPortError, RunnerServicePort, StageReporter, StorageBlocked,
-    StoragePreflight, build_hls_ingest_command, build_rezka_vaapi_command,
+    AudioTrackMetadata, Cancellation, FileSystemPort, HttpPort, MediaProbe, PeakEstimate,
+    PlexCheck, PlexExpectation, ProcessPort, RunnerPortError, RunnerServicePort, StageReporter,
+    StorageBlocked, StoragePreflight, build_hls_ingest_command, build_rezka_vaapi_command,
     validate_plex_observation, validate_webvtt,
 };
 
@@ -90,6 +90,7 @@ pub struct EpisodeWork {
     pub final_video: PathBuf,
     pub vaapi_device: PathBuf,
     pub expected_duration_seconds: Option<f64>,
+    pub audio: Option<AudioTrackMetadata>,
     pub subtitles: Vec<SubtitleTrack>,
     pub plex: PlexExpectation,
 }
@@ -154,7 +155,7 @@ impl EpisodePipeline {
             self.process
                 .probe(&work.final_video, cancellation)
                 .await
-                .is_ok_and(|probe| is_full_hd_rezka_output(&probe))
+                .is_ok_and(|probe| is_full_hd_rezka_output(&probe, work.audio.as_ref()))
         } else {
             false
         };
@@ -251,6 +252,7 @@ impl EpisodePipeline {
                 &work.encoded_partial,
                 &work.vaapi_device,
                 &source_probe,
+                work.audio.as_ref(),
             )
             .map_err(|_| RunnerPortError::Process)?;
             // Milestone marking the start of the VAAPI/ffmpeg transcode; drives
@@ -270,7 +272,7 @@ impl EpisodePipeline {
                 Ok(probe) => probe,
                 Err(error) => return cancellation_outcome(error),
             };
-            validate_encoded_probe(&source_probe, &encoded_probe)?;
+            validate_encoded_probe(&source_probe, &encoded_probe, work.audio.as_ref())?;
             reporter.stage_completed("transcode").await;
         }
 
@@ -444,17 +446,29 @@ fn cancellation_outcome(error: RunnerPortError) -> Result<EpisodeOutcome, Runner
 fn validate_encoded_probe(
     _source: &MediaProbe,
     encoded: &MediaProbe,
+    audio: Option<&AudioTrackMetadata>,
 ) -> Result<(), RunnerPortError> {
-    if !is_full_hd_rezka_output(encoded) {
+    if !is_full_hd_rezka_output(encoded, audio) {
         return Err(RunnerPortError::Process);
     }
     Ok(())
 }
 
-fn is_full_hd_rezka_output(probe: &MediaProbe) -> bool {
+fn is_full_hd_rezka_output(probe: &MediaProbe, audio: Option<&AudioTrackMetadata>) -> bool {
+    let audio_matches = audio.is_none_or(|expected| {
+        probe
+            .audio_language
+            .as_deref()
+            .is_some_and(|language| language.eq_ignore_ascii_case(&expected.language))
+            && probe
+                .audio_title
+                .as_deref()
+                .is_some_and(|title| title == expected.title.trim())
+    });
     probe.codec.eq_ignore_ascii_case("hevc")
         && probe.width == 1920
         && probe.height == 1080
         && probe.duration_seconds.is_finite()
         && probe.duration_seconds > 0.0
+        && audio_matches
 }

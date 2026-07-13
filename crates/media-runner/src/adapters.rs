@@ -446,10 +446,8 @@ impl ProcessPort for TokioProcessAdapter {
             .args([
                 "-v",
                 "error",
-                "-select_streams",
-                "v:0",
                 "-show_entries",
-                "stream=codec_name,width,height,bit_rate:format=duration,bit_rate",
+                "stream=codec_type,codec_name,width,height,bit_rate:stream_tags=language,title:format=duration,bit_rate",
                 "-of",
                 "json",
             ])
@@ -518,10 +516,19 @@ struct ProbeDocument {
 
 #[derive(serde::Deserialize)]
 struct ProbeStream {
+    codec_type: String,
     codec_name: String,
-    width: u32,
-    height: u32,
+    width: Option<u32>,
+    height: Option<u32>,
     bit_rate: Option<String>,
+    #[serde(default)]
+    tags: ProbeTags,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct ProbeTags {
+    language: Option<String>,
+    title: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -535,9 +542,14 @@ fn parse_probe(contents: &[u8]) -> Result<MediaProbe, RunnerPortError> {
         serde_json::from_slice(contents).map_err(|_| RunnerPortError::Process)?;
     let stream = document
         .streams
-        .into_iter()
-        .next()
+        .iter()
+        .find(|stream| stream.codec_type == "video")
         .ok_or(RunnerPortError::Process)?;
+    let audio = document
+        .streams
+        .iter()
+        .find(|stream| stream.codec_type == "audio")
+        .map(|stream| &stream.tags);
     let duration_seconds = document
         .format
         .duration
@@ -545,23 +557,26 @@ fn parse_probe(contents: &[u8]) -> Result<MediaProbe, RunnerPortError> {
         .map_err(|_| RunnerPortError::Process)?;
     let bitrate = stream
         .bit_rate
+        .clone()
         .or(document.format.bit_rate)
         .map(|value| value.parse::<u64>().map_err(|_| RunnerPortError::Process))
         .transpose()?;
     if stream.codec_name.is_empty()
-        || stream.width == 0
-        || stream.height == 0
+        || stream.width.is_none_or(|width| width == 0)
+        || stream.height.is_none_or(|height| height == 0)
         || !duration_seconds.is_finite()
         || duration_seconds <= 0.0
     {
         return Err(RunnerPortError::Process);
     }
     Ok(MediaProbe {
-        codec: stream.codec_name,
-        width: stream.width,
-        height: stream.height,
+        codec: stream.codec_name.clone(),
+        width: stream.width.ok_or(RunnerPortError::Process)?,
+        height: stream.height.ok_or(RunnerPortError::Process)?,
         duration_seconds,
         bitrate,
+        audio_language: audio.and_then(|tags| tags.language.clone()),
+        audio_title: audio.and_then(|tags| tags.title.clone()),
     })
 }
 

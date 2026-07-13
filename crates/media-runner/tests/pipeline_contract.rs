@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use media_runner::{
-    GIB, MediaProbe, PeakEstimate, PlexExpectation, PlexObservation, ResumeAction,
-    StoragePreflight, StorageRoots, build_rezka_vaapi_command, decide_resume,
+    AudioTrackMetadata, GIB, MediaProbe, PeakEstimate, PlexExpectation, PlexObservation,
+    ResumeAction, StoragePreflight, StorageRoots, build_rezka_vaapi_command, decide_resume,
     validate_plex_observation, validate_webvtt,
 };
 
@@ -50,6 +50,8 @@ fn rezka_vaapi_command_uses_low_power_full_hd_upscale() {
         height: 682,
         duration_seconds: 1_234.5,
         bitrate: Some(4_000_000),
+        audio_language: None,
+        audio_title: None,
     };
 
     let command = build_rezka_vaapi_command(
@@ -57,6 +59,10 @@ fn rezka_vaapi_command_uses_low_power_full_hd_upscale() {
         &PathBuf::from("/staging/encoded.partial"),
         &PathBuf::from("/dev/dri/renderD129"),
         &probe,
+        Some(&AudioTrackMetadata {
+            language: "rus".to_owned(),
+            title: "DEEP".to_owned(),
+        }),
     )
     .unwrap();
 
@@ -90,6 +96,18 @@ fn rezka_vaapi_command_uses_low_power_full_hd_upscale() {
             .args()
             .windows(2)
             .any(|args| args == ["-hwaccel_output_format", "vaapi"])
+    );
+    assert!(
+        command
+            .args()
+            .windows(2)
+            .any(|args| args == ["-metadata:s:a:0", "language=rus"])
+    );
+    assert!(
+        command
+            .args()
+            .windows(2)
+            .any(|args| args == ["-metadata:s:a:0", "title=DEEP"])
     );
 }
 

@@ -299,7 +299,7 @@ async fn process_adapter_parses_truthful_ffprobe_dimensions() {
     std::fs::write(
         &ffprobe,
         r#"#!/bin/sh
-printf '%s' '{"streams":[{"codec_name":"h264","width":1280,"height":682,"bit_rate":"4000000"}],"format":{"duration":"61.25","bit_rate":"4100000"}}'
+printf '%s' '{"streams":[{"codec_type":"video","codec_name":"h264","width":1280,"height":682,"bit_rate":"4000000"},{"codec_type":"audio","codec_name":"aac","tags":{"language":"rus","title":"DEEP"}}],"format":{"duration":"61.25","bit_rate":"4100000"}}'
 "#,
     )
     .unwrap();
@@ -318,6 +318,8 @@ printf '%s' '{"streams":[{"codec_name":"h264","width":1280,"height":682,"bit_rat
     assert_eq!((probe.width, probe.height), (1280, 682));
     assert_eq!(probe.codec, "h264");
     assert_eq!(probe.duration_seconds, 61.25);
+    assert_eq!(probe.audio_language.as_deref(), Some("rus"));
+    assert_eq!(probe.audio_title.as_deref(), Some("DEEP"));
 }
 
 #[tokio::test]
