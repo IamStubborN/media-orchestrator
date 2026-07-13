@@ -7,7 +7,7 @@ use url::Url;
 use crate::{
     ProviderFailureReason, PublicImageUrl, RezkaError,
     playback::{SelectedTranslation, TitlePlaybackRef},
-    redaction::sanitize_provider_text,
+    redaction::{sanitize_provider_text, trusted_internal_text},
     session::{RezkaClient, anubis::detect_challenge},
 };
 
@@ -923,9 +923,9 @@ impl fmt::Debug for CatalogPage {
     }
 }
 
-pub(crate) fn invalid_catalog(reason: &str) -> RezkaError {
+pub(crate) fn invalid_catalog(reason: &'static str) -> RezkaError {
     RezkaError::ProviderResponseInvalid {
-        context: sanitize_provider_text(reason),
+        context: trusted_internal_text(reason),
     }
 }
 

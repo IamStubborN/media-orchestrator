@@ -490,7 +490,7 @@ fn exact_player_call_kind(call: &CallExpression<'_>) -> Option<RezkaMediaKind> {
 
 fn player_integer_argument(
     argument: Option<&Argument<'_>>,
-    reason: &str,
+    reason: &'static str,
 ) -> Result<u64, RezkaError> {
     let Some(Argument::NumericLiteral(literal)) = argument else {
         return Err(invalid_catalog(reason));
@@ -743,7 +743,7 @@ fn parse_title_thumbnail(
 fn required_element_text(
     document: &Html,
     selector_value: &str,
-    missing_reason: &str,
+    missing_reason: &'static str,
 ) -> Result<String, RezkaError> {
     optional_element_text(document, selector_value)?.ok_or_else(|| invalid_catalog(missing_reason))
 }
@@ -760,7 +760,7 @@ fn optional_element_text(
         .map(Option::flatten)
 }
 
-fn parse_positive_decimal(value: &str, reason: &str) -> Result<u64, RezkaError> {
+fn parse_positive_decimal(value: &str, reason: &'static str) -> Result<u64, RezkaError> {
     let value = value.trim();
     if value.is_empty() || !value.as_bytes().iter().all(u8::is_ascii_digit) {
         return Err(invalid_catalog(reason));
@@ -772,7 +772,7 @@ fn parse_positive_decimal(value: &str, reason: &str) -> Result<u64, RezkaError> 
     Ok(parsed)
 }
 
-fn equal_value<T: Copy + Eq>(values: Vec<T>, reason: &str) -> Result<T, RezkaError> {
+fn equal_value<T: Copy + Eq>(values: Vec<T>, reason: &'static str) -> Result<T, RezkaError> {
     let Some(first) = values.first().copied() else {
         return Err(invalid_catalog(reason));
     };
