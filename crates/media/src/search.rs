@@ -370,21 +370,15 @@ impl ConcreteSearchProvider {
                     })?;
                     let availability = match prepared.client.series_availability(&selection).await {
                         Ok(availability) => availability,
-                        Err(error)
-                            if error.code()
-                                == rezka_client::RezkaErrorCode::ProviderResponseInvalid =>
-                        {
+                        Err(error) => {
                             tracing::warn!(
                                 stage = "availability",
+                                translation_id,
                                 error_code = ?error.code(),
                                 error = %error,
-                                "skipping unusable Rezka search result"
+                                "skipping unavailable Rezka translation"
                             );
-                            continue 'entries;
-                        }
-                        Err(error) => {
-                            tracing::warn!(stage = "availability", error_code = ?error.code(), error = %error, "Rezka search failed");
-                            return Err(SearchError::Provider);
+                            continue;
                         }
                     };
                     by_translation.insert(
@@ -404,6 +398,14 @@ impl ConcreteSearchProvider {
                             })
                             .collect::<Vec<_>>(),
                     );
+                }
+                if by_translation.is_empty() {
+                    tracing::warn!(
+                        stage = "availability",
+                        title_id = details.id().get(),
+                        "skipping Rezka series with no usable translation availability"
+                    );
+                    continue 'entries;
                 }
             }
             let union = union_availability(&by_translation);
