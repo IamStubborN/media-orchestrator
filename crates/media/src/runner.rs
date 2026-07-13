@@ -706,16 +706,9 @@ impl MediaJobExecutor {
             rezka_final_video_path(&self.roots, &safe_title, release_year, season, episode);
         let variant = match premium_status {
             rezka_client::PremiumStatus::Active => manifest.preferred_variant(),
-            rezka_client::PremiumStatus::Inactive => manifest
-                .variants()
-                .iter()
-                .find(|variant| {
-                    variant
-                        .advertised_quality()
-                        .vertical_hint()
-                        .is_some_and(|height| height <= 720)
-                })
-                .ok_or(RunnerError::Execution)?,
+            rezka_client::PremiumStatus::Inactive => {
+                highest_standard_variant(manifest.variants()).ok_or(RunnerError::Execution)?
+            }
         };
         tracing::info!(
             advertised_height = variant.advertised_quality().vertical_hint(),
@@ -935,6 +928,14 @@ impl MediaJobExecutor {
         let _ = request.title;
         Ok(aggregate)
     }
+}
+
+fn highest_standard_variant(
+    variants: &[rezka_client::StreamVariant],
+) -> Option<&rezka_client::StreamVariant> {
+    variants
+        .iter()
+        .find(|variant| variant.advertised_quality().tier() == rezka_client::QualityTier::Standard)
 }
 
 async fn submit_torrent_with_retry(
@@ -1610,9 +1611,35 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        ExecutionOutcome, canonical_movie_name, combine_episode_outcome, matching_episode_videos,
-        parse_episode_coordinates, rezka_final_video_path,
+        ExecutionOutcome, canonical_movie_name, combine_episode_outcome, highest_standard_variant,
+        matching_episode_videos, parse_episode_coordinates, rezka_final_video_path,
     };
+
+    #[test]
+    fn non_premium_accounts_choose_the_highest_standard_quality() {
+        let variants = rezka_client::parse_stream_variants(
+            "[<span class='premium'>1080p Ultra</span>]https://cdn.example/u.m3u8,[1080p]https://cdn.example/1080.m3u8,[720p]https://cdn.example/720.m3u8",
+        )
+        .expect("quality listing is valid");
+
+        let selected = highest_standard_variant(&variants).expect("standard quality exists");
+
+        assert_eq!(selected.advertised_quality().label(), "1080p");
+        assert_eq!(
+            selected.advertised_quality().tier(),
+            rezka_client::QualityTier::Standard
+        );
+    }
+
+    #[test]
+    fn non_premium_accounts_fail_closed_when_only_premium_quality_exists() {
+        let variants = rezka_client::parse_stream_variants(
+            "[<span class='premium'>1080p Ultra</span>]https://cdn.example/u.m3u8",
+        )
+        .expect("quality listing is valid");
+
+        assert!(highest_standard_variant(&variants).is_none());
+    }
 
     #[test]
     fn movie_names_include_the_release_year_when_known() {
