@@ -722,6 +722,58 @@ async fn storage_block_notifies_both_family_recipients_once() {
 }
 
 #[tokio::test]
+async fn storage_blocked_job_does_not_occupy_the_execution_slot() {
+    let (_test_db, jobs, leases) = setup().await;
+    let blocked = jobs
+        .create(operation_key(), new_job("selection:parked-storage"))
+        .await
+        .unwrap();
+    let first = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::transition(JobEventId::new(), JobState::BlockedStorage, None).unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), first.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    let queued = jobs
+        .create(operation_key(), new_job("selection:next-after-storage"))
+        .await
+        .unwrap();
+    let second = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(second.job().id(), queued.id());
+    assert_ne!(second.job().id(), blocked.id());
+    assert_eq!(
+        jobs.find_for_owner(blocked.id(), PRIMARY_USER_ID)
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        JobState::BlockedStorage
+    );
+}
+
+#[tokio::test]
 async fn terminal_stage_failure_creates_one_sanitized_failure_notification() {
     let (test_db, jobs, leases) = setup().await;
     jobs.create(operation_key(), new_job("failure-private-reference"))
