@@ -34,6 +34,7 @@ pub struct SubtitleInspection {
     pub label: String,
     pub language: Option<String>,
     pub alternatives: usize,
+    pub hosts: Vec<String>,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
@@ -72,6 +73,7 @@ impl PlaybackInspection {
                 "label": subtitle.label,
                 "language": subtitle.language,
                 "alternatives": subtitle.alternatives,
+                "hosts": subtitle.hosts,
             })).collect::<Vec<_>>(),
         })
     }
@@ -179,6 +181,11 @@ pub async fn inspect_playback(
                     .language()
                     .map(|language| language.as_str().to_owned()),
                 alternatives: track.alternatives().len(),
+                hosts: track
+                    .alternatives()
+                    .iter()
+                    .filter_map(|url| url.with_url(|url| url.host_str().map(str::to_owned)))
+                    .collect(),
             })
             .collect(),
     })
