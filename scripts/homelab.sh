@@ -62,7 +62,7 @@ REMOTE
 
 assert_no_active_job() {
     states=$(remote "docker exec media-postgres sh -lc 'psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -Atc \"select state from jobs;\"'")
-    active=$(printf '%s\n' "$states" | grep -Ec '^(leased|running|cancel_requested|blocked_storage|publishing|plex_pending)$' || true)
+    active=$(printf '%s\n' "$states" | grep -Ec '^(leased|running|cancel_requested|publishing|plex_pending)$' || true)
     test "$active" = 0 || {
         echo "refusing runtime replacement while $active job is active" >&2
         exit 1

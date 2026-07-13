@@ -147,3 +147,6 @@ ssh host.example.invalid 'docker logs --since 10m gluetun-rezka-watcher'
 Logs may contain safe job IDs and static error codes. They must never contain
 cookies, credentials, signed media URLs, magnet URIs, API keys, or raw provider
 response bodies.
+Jobs parked in `blocked_storage` do not hold a runner lease and do not prevent a
+deployment. The deployment guard still refuses replacement while any job is
+`leased`, `running`, `cancel_requested`, `publishing`, or `plex_pending`.
