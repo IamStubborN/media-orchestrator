@@ -317,18 +317,15 @@ impl ConcreteSearchProvider {
         }
         let mut results = Vec::new();
         let mut cursor = offset;
+        let mut title_failures = 0_usize;
+        let mut usable_titles = 0_usize;
         'entries: while cursor < entries.len() && results.len() < MAX_SEARCH_RESULTS_PER_PAGE {
             let entry = &entries[cursor];
             cursor += 1;
             let details = match prepared.client.title(entry.locator()).await {
                 Ok(details) => details,
-                Err(error)
-                    if matches!(
-                        error.code(),
-                        rezka_client::RezkaErrorCode::ProviderResponseInvalid
-                            | rezka_client::RezkaErrorCode::TitleNotFound
-                    ) =>
-                {
+                Err(error) if skippable_title_error(error.code()) => {
+                    title_failures += 1;
                     tracing::warn!(
                         stage = "title",
                         error_code = ?error.code(),
@@ -342,6 +339,7 @@ impl ConcreteSearchProvider {
                     return Err(SearchError::Provider);
                 }
             };
+            usable_titles += 1;
             let media_kind = match details.kind() {
                 rezka_client::RezkaMediaKind::Movie => MediaKindDto::Movie,
                 rezka_client::RezkaMediaKind::Series => MediaKindDto::Series,
@@ -504,6 +502,9 @@ impl ConcreteSearchProvider {
                 labels_by_translation,
             ));
         }
+        if results.is_empty() && title_failures > 0 && usable_titles == 0 {
+            return Err(SearchError::Provider);
+        }
         let provider_continuation = if cursor < entries.len() {
             Some(encode_rezka_catalog_continuation(
                 cursor,
@@ -610,6 +611,15 @@ impl ConcreteSearchProvider {
             provider_continuation,
         })
     }
+}
+
+fn skippable_title_error(code: rezka_client::RezkaErrorCode) -> bool {
+    matches!(
+        code,
+        rezka_client::RezkaErrorCode::ProviderResponseInvalid
+            | rezka_client::RezkaErrorCode::TitleNotFound
+            | rezka_client::RezkaErrorCode::Transport
+    )
 }
 
 fn encode_rezka_catalog_continuation(offset: usize, target: Option<&str>) -> String {
@@ -1500,7 +1510,7 @@ fn job_dto(job: &Job) -> JobDto {
 
 #[cfg(test)]
 mod tests {
-    use super::ambiguous_episode_label;
+    use super::{ambiguous_episode_label, skippable_title_error};
 
     #[test]
     fn only_explicit_special_markers_trigger_manual_episode_mapping() {
@@ -1513,5 +1523,21 @@ mod tests {
         for label in ["Episode 1", "Серия 14", "Final", "Extraordinary"] {
             assert!(!ambiguous_episode_label(label), "false positive: {label}");
         }
+    }
+
+    #[test]
+    fn one_broken_title_can_be_skipped_without_hiding_authentication_failures() {
+        assert!(skippable_title_error(
+            rezka_client::RezkaErrorCode::Transport
+        ));
+        assert!(skippable_title_error(
+            rezka_client::RezkaErrorCode::TitleNotFound
+        ));
+        assert!(!skippable_title_error(
+            rezka_client::RezkaErrorCode::AuthenticationRequired
+        ));
+        assert!(!skippable_title_error(
+            rezka_client::RezkaErrorCode::RateLimited
+        ));
     }
 }
