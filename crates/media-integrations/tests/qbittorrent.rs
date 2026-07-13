@@ -1,7 +1,7 @@
 use std::{path::Path, time::Duration};
 
 use media_integrations::qbittorrent::{
-    ExplicitTorrentSelection, QbittorrentClient, QbittorrentConfig, TorrentState,
+    ExplicitTorrentSelection, QbittorrentClient, QbittorrentConfig, QbittorrentError, TorrentState,
 };
 use secrecy::SecretString;
 use url::Url;
@@ -565,4 +565,22 @@ fn magnet_identity_must_match_the_preserved_info_hash() {
         error.code(),
         media_integrations::qbittorrent::QbittorrentErrorCode::IdentityMismatch
     );
+}
+
+#[test]
+fn only_bounded_startup_failures_are_transient() {
+    assert!(QbittorrentError::Transport.is_transient());
+    assert!(
+        QbittorrentError::ProviderResponse {
+            status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        }
+        .is_transient()
+    );
+    assert!(
+        !QbittorrentError::ProviderResponse {
+            status: reqwest::StatusCode::BAD_REQUEST,
+        }
+        .is_transient()
+    );
+    assert!(!QbittorrentError::Unauthorized.is_transient());
 }

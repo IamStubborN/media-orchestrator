@@ -58,6 +58,21 @@ impl QbittorrentError {
             Self::IdentityMismatch => QbittorrentErrorCode::IdentityMismatch,
         }
     }
+
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Transport | Self::TorrentNotFound => true,
+            Self::ProviderResponse { status } => {
+                status.is_server_error()
+                    || matches!(
+                        *status,
+                        StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+                    )
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone)]

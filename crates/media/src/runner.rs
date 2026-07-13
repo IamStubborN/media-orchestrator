@@ -836,11 +836,7 @@ async fn submit_torrent_with_retry(
             .await
         {
             Ok(handle) => return Ok(handle),
-            Err(error)
-                if error.code()
-                    == media_integrations::qbittorrent::QbittorrentErrorCode::Transport
-                    && attempt < ATTEMPTS =>
-            {
+            Err(error) if error.is_transient() && attempt < ATTEMPTS => {
                 tracing::warn!(attempt, "qBittorrent submit transport failed; retrying");
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
