@@ -44,10 +44,7 @@ must not close it.
 
 ### Remaining Acceptance Work
 
-1. Exercise one primary Telegram media command from Secondary's profile. The
-   unknown-sender rejection half is already live-verified from Primary's account
-   against `hermes-secondary`.
-2. Live-verify expired-stream recovery and Plex publication of a mapped
+1. Live-verify expired-stream recovery and Plex publication of a mapped
    Specials/OVA episode. Storage recovery, ambiguous numbering, and persistent
    canonical mapping are already live-verified.
 
@@ -55,8 +52,6 @@ must not close it.
 
 1. Execute expired-stream recovery and Specials/OVA Plex publication with
    cleanup after each run.
-2. Complete Secondary command coverage after her account is available in Web
-   Telegram.
 
 ## Status Model
 
@@ -357,7 +352,9 @@ actual Plex publication under `Specials` remain pending.
 Telegram allowlist identity each. Live API checks prove private job/search
 isolation and shared family tracking management. An authenticated Primary Web
 Telegram session was rejected by `hermes-secondary` before LLM or tool execution.
-Full primary Telegram command coverage from Secondary remains pending.
+The user moved Secondary's own primary Telegram conversation to a separate
+follow-up; the implemented multi-user isolation gate is complete without using
+that deferred conversation as evidence.
 
 ### Implementation and Verification
 
@@ -444,7 +441,7 @@ Secrets, cookies, Telegram tokens, Vaultwarden values, and signed URLs must neve
 2. Complete one subtitle-present Rezka episode E2E and Plex verification
 3. Prove natural subtitle failure and selective recovery
 4. Prove expired-stream, numbering, mapping, and Specials/OVA behavior
-5. Complete both-profile Telegram coverage and unknown-user rejection
+5. Complete Telegram isolation, routing, and unknown-user rejection
 6. Re-run final local deployment, rollback, and health verification
 7. Audit documentation and publish the final acceptance report
 ```
@@ -457,7 +454,8 @@ The goal is complete only when:
 
 1. All eleven workstreams are implemented and deployed.
 2. Every live gate has a dated evidence record.
-3. Both Hermes profiles pass their isolation and primary workflow checks.
+3. Both Hermes profiles pass isolation and routing checks; Secondary's own
+   natural-language conversation remains a separate follow-up.
 4. A Rezka episode, Rezka movie, Prowlarr TV result, and Prowlarr movie result are verified in Plex.
 5. VPN identity changes between consecutive Rezka jobs while remaining sticky within each job.
 6. Subtitle partial recovery, runner restart recovery, storage blocking, and ambiguous numbering are demonstrated.
