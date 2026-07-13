@@ -24,13 +24,13 @@ pub struct EpisodeSnapshot {
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
 pub enum EpisodeSnapshotError {
-    #[error("season and episode numbers must be greater than zero")]
+    #[error("episode number must be greater than zero")]
     ZeroNumber,
 }
 
 impl EpisodeSnapshot {
     pub const fn new(season: u32, episode: u32) -> Result<Self, EpisodeSnapshotError> {
-        if season == 0 || episode == 0 {
+        if episode == 0 {
             return Err(EpisodeSnapshotError::ZeroNumber);
         }
         Ok(Self { season, episode })

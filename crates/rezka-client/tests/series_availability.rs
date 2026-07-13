@@ -92,11 +92,26 @@ fn parser_accepts_explicit_empty_but_rejects_missing_wrong_or_orphan_fields() {
 }
 
 #[test]
-fn parser_rejects_duplicate_zero_overflow_and_duplicate_json_fields() {
+fn parser_accepts_specials_season_but_rejects_zero_episode() {
+    let availability = parse_series_availability(
+        r#"{"success":true,"seasons":"<li data-tab_id='0'>Specials</li>","episodes":"<li data-season_id='0' data-episode_id='1'>OVA</li>"}"#,
+        selected_series(),
+    )
+    .unwrap();
+    assert_eq!(availability.seasons()[0].number(), 0);
+    assert_eq!(availability.seasons()[0].episodes()[0].number(), 1);
+
+    assert_invalid(parse_series_availability(
+        r#"{"success":true,"seasons":"<li data-tab_id='0'>Specials</li>","episodes":"<li data-season_id='0' data-episode_id='0'>Invalid</li>"}"#,
+        selected_series(),
+    ));
+}
+
+#[test]
+fn parser_rejects_duplicates_overflow_and_duplicate_json_fields() {
     for malformed in [
         r#"{"success":true,"seasons":"<li data-tab_id='1'>One</li><li data-tab_id='1'>Again</li>","episodes":""}"#,
         r#"{"success":true,"seasons":"<li data-tab_id='1'>One</li>","episodes":"<li data-season_id='1' data-episode_id='1'>One</li><li data-season_id='1' data-episode_id='1'>Again</li>"}"#,
-        r#"{"success":true,"seasons":"<li data-tab_id='0'>Zero</li>","episodes":""}"#,
         r#"{"success":true,"seasons":"<li data-tab_id='2147483648'>Large</li>","episodes":""}"#,
         r#"{"success":true,"success":true,"seasons":"","episodes":""}"#,
         r#"{"success":true,"seasons":"","seasons":"","episodes":""}"#,

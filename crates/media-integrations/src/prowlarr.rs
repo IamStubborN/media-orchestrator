@@ -199,11 +199,6 @@ impl SearchSession {
                 message: "search title must not be empty",
             });
         }
-        if matches!(session.query.kind, MediaKind::Series { season: 0 }) {
-            return Err(ProwlarrError::InvalidRequest {
-                message: "season must be positive",
-            });
-        }
         Ok(session)
     }
 }

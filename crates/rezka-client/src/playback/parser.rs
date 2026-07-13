@@ -181,7 +181,7 @@ fn parse_seasons(
     let selector = Selector::parse("[data-tab_id]").expect("static selector is valid");
     let mut seasons = BTreeMap::new();
     for element in document.select(&selector) {
-        let number = parse_number(element.value().attr("data-tab_id"))?;
+        let number = parse_season_number(element.value().attr("data-tab_id"))?;
         let label = normalized_label(element.text())?;
         if seasons.insert(number, (label, Vec::new())).is_some() {
             return Err(invalid_playback("duplicate season"));
@@ -199,8 +199,8 @@ fn parse_episodes(fragment: &str) -> Result<BTreeMap<(u32, u32), String>, RezkaE
         Selector::parse("[data-season_id][data-episode_id]").expect("static selector is valid");
     let mut episodes = BTreeMap::new();
     for element in document.select(&selector) {
-        let season = parse_number(element.value().attr("data-season_id"))?;
-        let episode = parse_number(element.value().attr("data-episode_id"))?;
+        let season = parse_season_number(element.value().attr("data-season_id"))?;
+        let episode = parse_episode_number(element.value().attr("data-episode_id"))?;
         let label = normalized_label(element.text())?;
         if episodes.insert((season, episode), label).is_some() {
             return Err(invalid_playback("duplicate episode"));
@@ -212,12 +212,20 @@ fn parse_episodes(fragment: &str) -> Result<BTreeMap<(u32, u32), String>, RezkaE
     Ok(episodes)
 }
 
-fn parse_number(value: Option<&str>) -> Result<u32, RezkaError> {
+fn parse_season_number(value: Option<&str>) -> Result<u32, RezkaError> {
+    parse_number(value, true)
+}
+
+fn parse_episode_number(value: Option<&str>) -> Result<u32, RezkaError> {
+    parse_number(value, false)
+}
+
+fn parse_number(value: Option<&str>, allow_zero: bool) -> Result<u32, RezkaError> {
     let value = value
         .ok_or_else(|| invalid_playback("availability number missing"))?
         .parse::<u32>()
         .map_err(|_| invalid_playback("invalid availability number"))?;
-    if value == 0 || value > i32::MAX as u32 {
+    if (!allow_zero && value == 0) || value > i32::MAX as u32 {
         return Err(invalid_playback("invalid availability number"));
     }
     Ok(value)

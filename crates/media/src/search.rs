@@ -868,7 +868,6 @@ impl DurableSearchService {
                     (request.media_kind, request.season),
                     (Some(MediaKindDto::Movie), None) | (Some(MediaKindDto::Series), Some(_))
                 ))
-            || request.season == Some(0)
         {
             return Err(SearchError::InvalidRequest);
         }

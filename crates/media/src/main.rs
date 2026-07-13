@@ -493,8 +493,8 @@ fn parse_known_episode(value: &str) -> Result<media_contract::EpisodeSnapshotDto
     let episode = episode
         .parse::<u32>()
         .map_err(|_| "episode must be a positive integer".to_owned())?;
-    if season == 0 || episode == 0 {
-        return Err("season and episode must be greater than zero".to_owned());
+    if episode == 0 {
+        return Err("episode must be greater than zero".to_owned());
     }
     Ok(media_contract::EpisodeSnapshotDto { season, episode })
 }

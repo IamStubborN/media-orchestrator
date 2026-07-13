@@ -158,9 +158,9 @@ impl ExpectedPlexItem {
         season: u16,
         episode: u16,
     ) -> Result<Self, PlexError> {
-        if season == 0 || episode == 0 {
+        if episode == 0 {
             return Err(PlexError::InvalidRequest {
-                message: "season and episode must be positive",
+                message: "episode must be positive",
             });
         }
         Self::new(

@@ -124,6 +124,45 @@ async fn mismatch_is_reported_without_any_mutating_followup() {
 }
 
 #[tokio::test]
+async fn specials_episode_accepts_zero_season_and_verifies_parent_index() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/library/metadata/45"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "MediaContainer": {
+                "size": 1,
+                "Metadata": [{
+                    "ratingKey": "45",
+                    "guid": "plex://episode/special",
+                    "type": "episode",
+                    "parentIndex": 0,
+                    "index": 1,
+                    "Guid": [{"id": "tvdb://special-1"}],
+                    "Media": [{"Part": [{"file": "/tv/Show/Specials/Show - S00E01.mkv"}]}]
+                }]
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = PlexClient::new(config(&server)).unwrap();
+    let expected = ExpectedPlexItem::episode(
+        45,
+        "/tv/Show/Specials/Show - S00E01.mkv",
+        "tvdb://special-1",
+        0,
+        1,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        client.verify(&expected).await.unwrap(),
+        PlexVerification::Matched { rating_key: 45, .. }
+    ));
+}
+
+#[tokio::test]
 async fn path_verification_finds_the_exact_scanned_episode_without_a_rating_key() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

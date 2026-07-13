@@ -611,10 +611,15 @@ impl MediaJobExecutor {
                 self.roots.movies().join(format!("{movie_name}.mkv"))
             },
             |(s, e)| {
+                let season_directory = if s == 0 {
+                    "Specials".to_owned()
+                } else {
+                    format!("Season {s:02}")
+                };
                 self.roots
                     .tv()
                     .join(&safe_title)
-                    .join(format!("Season {s:02}"))
+                    .join(season_directory)
                     .join(format!("{safe_title} - S{s:02}E{e:02}.mkv"))
             },
         );
@@ -1077,7 +1082,7 @@ fn parse_episode_coordinates(path: &std::path::Path) -> Option<(u32, u32)> {
         let episode = name[episode_start..episode_start + episode_len]
             .parse::<u32>()
             .ok()?;
-        if season > 0 && episode > 0 {
+        if episode > 0 {
             return Some((season, episode));
         }
     }
