@@ -77,7 +77,19 @@ fn rezka_vaapi_command_uses_low_power_full_hd_upscale() {
         command
             .args()
             .iter()
-            .any(|arg| arg == "format=nv12,hwupload,scale_vaapi=w=1920:h=1080:mode=fast")
+            .any(|arg| arg == "scale_vaapi=w=1920:h=1080:mode=fast")
+    );
+    assert!(
+        command
+            .args()
+            .windows(2)
+            .any(|args| args == ["-hwaccel", "vaapi"])
+    );
+    assert!(
+        command
+            .args()
+            .windows(2)
+            .any(|args| args == ["-hwaccel_output_format", "vaapi"])
     );
 }
 
