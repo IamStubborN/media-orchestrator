@@ -367,6 +367,13 @@ impl QbittorrentClient {
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             return Err(QbittorrentError::Unauthorized);
         }
+        // qBittorrent 5.2 returns 409 when the exact magnet is already queued
+        // for asynchronous processing. The runner monitors the preserved hash
+        // and category next, so a stale or mismatched conflict still fails
+        // within the bounded visibility grace.
+        if status == StatusCode::CONFLICT {
+            return Ok(handle);
+        }
         if !status.is_success() {
             return Err(QbittorrentError::ProviderResponse { status });
         }

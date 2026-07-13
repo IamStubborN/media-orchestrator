@@ -190,6 +190,39 @@ async fn prowlarr_redirect_to_matching_magnet_is_submitted() {
 }
 
 #[tokio::test]
+async fn already_pending_exact_magnet_conflict_is_monitored_idempotently() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/app/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("v5.2.3"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/info"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/add"))
+        .and(body_string_contains(TORRENT_INFO_HASH))
+        .respond_with(ResponseTemplate::new(409).set_body_string("Conflict"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = QbittorrentClient::connect(config(&server)).await.unwrap();
+    let selection = ExplicitTorrentSelection::new(
+        "prowlarr:3:indexer-guid-a",
+        TORRENT_INFO_HASH,
+        format!("magnet:?xt=urn:btih:{TORRENT_INFO_HASH}"),
+    )
+    .unwrap();
+
+    let handle = client.submit_selected(selection).await.unwrap();
+    assert_eq!(handle.hash, TORRENT_INFO_HASH);
+}
+
+#[tokio::test]
 async fn an_existing_exact_torrent_is_reused_without_duplicate_submission() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
