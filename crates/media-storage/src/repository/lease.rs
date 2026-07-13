@@ -446,7 +446,7 @@ fn notifications_for_event(
                     "partial",
                     context.message(
                         job,
-                        "Видео готово, но часть дополнительных файлов скачать не удалось. Можно повторить задачу для докачки.",
+                        "Видео готово и добавлено в Plex, но часть субтитров скачать не удалось. Повторите задачу: уже готовое видео не будет скачиваться или перекодироваться заново.",
                     ),
                 ),
             ],
@@ -455,7 +455,13 @@ fn notifications_for_event(
                 format!("Rezka session refresh {id} completed and was saved."),
             )],
             JobState::Completed => {
-                vec![("plex-added", context.message(job, "Видео добавлено в Plex."))]
+                vec![
+                    ("plex-added", context.message(job, "Видео добавлено в Plex.")),
+                    (
+                        "completed",
+                        context.message(job, "Задача полностью завершена: видео и доступные субтитры готовы."),
+                    ),
+                ]
             }
             JobState::Failed => vec![(
                 "failed",

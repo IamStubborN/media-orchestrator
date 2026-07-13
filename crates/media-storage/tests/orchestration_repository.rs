@@ -287,6 +287,7 @@ async fn rezka_runner_events_create_each_success_notification_once() {
     assert_eq!(
         event_types,
         vec![
+            "completed",
             "downloaded",
             "downloading-started",
             "encoding-complete",
