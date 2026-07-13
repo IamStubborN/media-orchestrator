@@ -52,7 +52,7 @@ service = services.fetch("service")
 runner = services.fetch("runner")
 assert(service.fetch("networks").sort == ["backend"], "service must only join the backend network")
 assert(!service.key?("network_mode"), "service must not use a VPN network namespace")
-assert(runner.fetch("secrets").none? { |secret| secret.to_s.include?("database") },
+assert(runner.fetch("secrets", []).none? { |secret| secret.to_s.include?("database") },
        "runner must not receive the database secret")
 assert(runner.fetch("devices").any? { |device| device.to_s.include?("/dev/dri") },
        "runner must receive /dev/dri")
