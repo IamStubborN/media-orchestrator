@@ -28,6 +28,7 @@ fn client(origin: Url) -> RezkaClient {
         request_timeout: Duration::seconds(2),
         max_retries: 0,
         anubis_max_nonce: 1,
+        proxy_url: None,
     })
     .unwrap()
 }

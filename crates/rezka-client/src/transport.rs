@@ -92,11 +92,22 @@ impl ResponseStatusPolicy {
 
 impl Transport {
     pub fn new(
+        mirrors: MirrorSet,
+        jar: SessionJar,
+        user_agent: String,
+        request_timeout: Duration,
+        max_retries: u8,
+    ) -> Result<Self, RezkaError> {
+        Self::new_with_proxy(mirrors, jar, user_agent, request_timeout, max_retries, None)
+    }
+
+    pub fn new_with_proxy(
         mut mirrors: MirrorSet,
         mut jar: SessionJar,
         user_agent: String,
         request_timeout: Duration,
         max_retries: u8,
+        proxy_url: Option<Url>,
     ) -> Result<Self, RezkaError> {
         let request_timeout =
             StdDuration::try_from(request_timeout).map_err(|_| RezkaError::Configuration {
@@ -123,14 +134,20 @@ impl Transport {
         let held_authenticated_session =
             jar.contains_cookie_for_url(mirrors.selected_origin(), DLE_SESSION_COOKIE);
 
-        let client = Client::builder()
+        let mut client = Client::builder()
             .redirect(Policy::none())
             .timeout(request_timeout)
-            .user_agent(user_agent)
-            .build()
-            .map_err(|_| RezkaError::Configuration {
-                message: "invalid transport configuration",
-            })?;
+            .user_agent(user_agent);
+        if let Some(proxy_url) = proxy_url {
+            client = client.proxy(reqwest::Proxy::all(proxy_url).map_err(|_| {
+                RezkaError::Configuration {
+                    message: "invalid proxy URL",
+                }
+            })?);
+        }
+        let client = client.build().map_err(|_| RezkaError::Configuration {
+            message: "invalid transport configuration",
+        })?;
 
         Ok(Self {
             client,
@@ -149,12 +166,31 @@ impl Transport {
         request_timeout: Duration,
         max_retries: u8,
     ) -> Result<Self, RezkaError> {
-        Self::new(
+        Self::from_snapshot_with_proxy(
+            mirrors,
+            snapshot,
+            user_agent,
+            request_timeout,
+            max_retries,
+            None,
+        )
+    }
+
+    pub fn from_snapshot_with_proxy(
+        mirrors: MirrorSet,
+        snapshot: &SessionSnapshot,
+        user_agent: String,
+        request_timeout: Duration,
+        max_retries: u8,
+        proxy_url: Option<Url>,
+    ) -> Result<Self, RezkaError> {
+        Self::new_with_proxy(
             mirrors,
             SessionJar::import(snapshot)?,
             user_agent,
             request_timeout,
             max_retries,
+            proxy_url,
         )
     }
 
@@ -626,6 +662,34 @@ mod tests {
             assert_eq!(response.body, "title-status-body");
             assert!(response.stored_cookie_names().contains("title_status"));
         }
+    }
+
+    #[tokio::test]
+    async fn explicit_proxy_routes_only_the_rezka_transport() {
+        let proxy = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/title"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("proxied"))
+            .expect(1)
+            .mount(&proxy)
+            .await;
+        let origin = Url::parse("http://127.0.0.1:9").unwrap();
+        let mut transport = Transport::new_with_proxy(
+            MirrorSet::new(vec![origin.clone()]).unwrap(),
+            SessionJar::empty(),
+            "media-orchestrator-test".to_owned(),
+            Duration::seconds(2),
+            0,
+            Some(Url::parse(&proxy.uri()).unwrap()),
+        )
+        .unwrap();
+
+        let response = transport
+            .get_first_with_failover_accepting(origin.join("/title").unwrap(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(response.body, "proxied");
     }
 
     #[tokio::test]

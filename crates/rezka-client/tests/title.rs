@@ -630,6 +630,7 @@ fn test_client(server: &MockServer) -> RezkaClient {
         request_timeout: Duration::seconds(2),
         max_retries: 0,
         anubis_max_nonce: 1,
+        proxy_url: None,
     })
     .unwrap()
 }
@@ -820,6 +821,7 @@ async fn title_rewrites_the_locator_to_the_failover_origin() {
         request_timeout: Duration::seconds(2),
         max_retries: 1,
         anubis_max_nonce: 1,
+        proxy_url: None,
     })
     .unwrap();
 

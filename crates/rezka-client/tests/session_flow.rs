@@ -26,6 +26,7 @@ fn config(base: Url) -> RezkaClientConfig {
         request_timeout: Duration::seconds(10),
         max_retries: 0,
         anubis_max_nonce: 100_000,
+        proxy_url: None,
     }
 }
 

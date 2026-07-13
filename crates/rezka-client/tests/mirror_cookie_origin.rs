@@ -284,6 +284,7 @@ async fn snapshot_restart_selects_its_configured_alternate_origin() {
         request_timeout: Duration::seconds(2),
         max_retries: 1,
         anubis_max_nonce: 1,
+        proxy_url: None,
     };
     let probe = SessionValidationProbe::new(
         alternate_origin.join("/account/probe").unwrap(),
@@ -347,6 +348,7 @@ async fn restored_last_origin_can_fail_over_to_the_former_primary_without_cookie
         request_timeout: Duration::seconds(2),
         max_retries: 1,
         anubis_max_nonce: 1,
+        proxy_url: None,
     };
     let probe = SessionValidationProbe::new(
         last_origin.join("/account/probe").unwrap(),
@@ -718,6 +720,7 @@ fn snapshot_origin_absent_from_configured_mirrors_fails_closed() {
         request_timeout: Duration::seconds(2),
         max_retries: 0,
         anubis_max_nonce: 1,
+        proxy_url: None,
     };
 
     let error = match RezkaClient::from_snapshot(config, &snapshot) {
@@ -1616,6 +1619,7 @@ async fn non_title_operations_continue_to_reject_not_found_statuses() {
         request_timeout: Duration::seconds(2),
         max_retries: 0,
         anubis_max_nonce: 1,
+        proxy_url: None,
     })
     .unwrap();
     let error = client.fetch_probe(&probe).await.unwrap_err();

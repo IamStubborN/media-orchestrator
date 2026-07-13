@@ -259,6 +259,7 @@ fn prepare_rezka_session_inner(
         request_timeout: time::Duration::seconds(30),
         max_retries: 2,
         anubis_max_nonce: 5_000_000,
+        proxy_url: config.proxy_url().cloned(),
     };
     let credentials = include_credentials.then(|| rezka_client::RezkaCredentials {
         username: config.username().clone(),

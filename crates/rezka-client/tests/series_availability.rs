@@ -164,6 +164,7 @@ fn config(origin: Url) -> RezkaClientConfig {
         request_timeout: Duration::seconds(2),
         max_retries: 0,
         anubis_max_nonce: 1,
+        proxy_url: None,
     }
 }
 
@@ -259,6 +260,7 @@ async fn series_availability_fails_over_to_the_next_mirror() {
         request_timeout: Duration::seconds(2),
         max_retries: 1,
         anubis_max_nonce: 1,
+        proxy_url: None,
     };
     let mut client = RezkaClient::new(config).unwrap();
 

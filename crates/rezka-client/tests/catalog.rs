@@ -29,6 +29,7 @@ fn client_config(origins: Vec<Url>, max_retries: u8) -> RezkaClientConfig {
         request_timeout: Duration::seconds(2),
         max_retries,
         anubis_max_nonce: 1,
+        proxy_url: None,
     }
 }
 

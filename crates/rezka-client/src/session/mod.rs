@@ -9,6 +9,7 @@ use std::{
 
 use secrecy::SecretString;
 use time::Duration;
+use url::Url;
 
 use crate::{
     RezkaError,
@@ -35,6 +36,7 @@ pub struct RezkaClientConfig {
     pub request_timeout: Duration,
     pub max_retries: u8,
     pub anubis_max_nonce: u64,
+    pub proxy_url: Option<Url>,
 }
 
 pub struct RezkaCredentials {
@@ -62,12 +64,13 @@ impl RezkaClient {
         config: RezkaClientConfig,
         snapshot: &SessionSnapshot,
     ) -> Result<Self, RezkaError> {
-        let transport = Transport::from_snapshot(
+        let transport = Transport::from_snapshot_with_proxy(
             config.mirrors,
             snapshot,
             config.user_agent,
             config.request_timeout,
             config.max_retries,
+            config.proxy_url,
         )?;
         Ok(Self {
             transport,
@@ -173,12 +176,13 @@ impl RezkaClient {
     }
 
     fn with_jar(config: RezkaClientConfig, jar: SessionJar) -> Result<Self, RezkaError> {
-        let transport = Transport::new(
+        let transport = Transport::new_with_proxy(
             config.mirrors,
             jar,
             config.user_agent,
             config.request_timeout,
             config.max_retries,
+            config.proxy_url,
         )?;
         Ok(Self {
             transport,

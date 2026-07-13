@@ -41,6 +41,7 @@ const REZKA_COOKIE_KEY: &str = "MEDIA_REZKA_COOKIE_KEY";
 const REZKA_COOKIE_KEY_FILE: &str = "MEDIA_REZKA_COOKIE_KEY_FILE";
 const REZKA_SESSION_STORE_FILE: &str = "MEDIA_REZKA_SESSION_STORE_FILE";
 const REZKA_USER_AGENT: &str = "MEDIA_REZKA_USER_AGENT";
+const REZKA_PROXY_URL: &str = "MEDIA_REZKA_PROXY_URL";
 const CREDENTIAL_BROKER_URL: &str = "MEDIA_REZKA_CREDENTIAL_BROKER_URL";
 const CREDENTIAL_BROKER_TOKEN: &str = "MEDIA_REZKA_CREDENTIAL_BROKER_TOKEN";
 const CREDENTIAL_BROKER_TOKEN_FILE: &str = "MEDIA_REZKA_CREDENTIAL_BROKER_TOKEN_FILE";
@@ -802,6 +803,27 @@ fn parse_service_url(
     Ok(url)
 }
 
+fn parse_rezka_proxy_url(value: &str) -> Result<url::Url, ConfigError> {
+    let url = value
+        .parse::<url::Url>()
+        .map_err(|_| ConfigError::InvalidEnvironment {
+            name: REZKA_PROXY_URL,
+        })?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/"
+    {
+        return Err(ConfigError::InvalidEnvironment {
+            name: REZKA_PROXY_URL,
+        });
+    }
+    Ok(url)
+}
+
 fn load_rezka_config(source: &impl ConfigSource) -> Result<RezkaCompositionConfig, ConfigError> {
     load_rezka_config_with_credentials(source, true)
 }
@@ -867,6 +889,9 @@ fn load_rezka_config_with_credentials(
         session_store_path: required_path_environment(source, REZKA_SESSION_STORE_FILE)?,
         user_agent: optional_environment(source, REZKA_USER_AGENT)?
             .unwrap_or_else(|| DEFAULT_REZKA_USER_AGENT.to_owned()),
+        proxy_url: optional_environment(source, REZKA_PROXY_URL)?
+            .map(|value| parse_rezka_proxy_url(&value))
+            .transpose()?,
     })
 }
 
@@ -929,6 +954,7 @@ pub struct RezkaCompositionConfig {
     cookie_key: SecretBox<[u8; 32]>,
     session_store_path: PathBuf,
     user_agent: String,
+    proxy_url: Option<url::Url>,
 }
 
 impl RezkaCompositionConfig {
@@ -979,6 +1005,11 @@ impl RezkaCompositionConfig {
     #[must_use]
     pub fn user_agent(&self) -> &str {
         &self.user_agent
+    }
+
+    #[must_use]
+    pub const fn proxy_url(&self) -> Option<&url::Url> {
+        self.proxy_url.as_ref()
     }
 }
 

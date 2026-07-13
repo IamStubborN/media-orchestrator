@@ -51,6 +51,7 @@ async fn live_probe_rezka_session_authentication_contract() {
         request_timeout: time::Duration::seconds(30),
         max_retries: 1,
         anubis_max_nonce: 5_000_000,
+        proxy_url: None,
     };
     let probe = rezka_client::session::SessionValidationProbe::new(
         probe_url,
@@ -130,6 +131,7 @@ async fn explicit_catalog_playback_live_probe() {
         request_timeout: time::Duration::seconds(30),
         max_retries: 1,
         anubis_max_nonce: 5_000_000,
+        proxy_url: None,
     };
     let probe = rezka_client::session::SessionValidationProbe::new(
         probe_url,
@@ -376,6 +378,7 @@ async fn live_equivalent_client_path_rejects_probe_outside_configured_mirrors() 
         request_timeout: time::Duration::seconds(1),
         max_retries: 0,
         anubis_max_nonce: 1,
+        proxy_url: None,
     };
     let probe = rezka_client::session::SessionValidationProbe::new(
         unconfigured_probe,

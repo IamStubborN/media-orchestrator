@@ -61,6 +61,7 @@ fn composition_constructs_typed_rezka_dependencies_without_network_calls() {
     );
     source.set_env("MEDIA_REZKA_SESSION_STORE_FILE", store_path);
     source.set_env("MEDIA_REZKA_USER_AGENT", "composition-test-agent/1.0");
+    source.set_env("MEDIA_REZKA_PROXY_URL", "http://rezka-proxy.internal:8888");
     source.set_secret("MEDIA_REZKA_USERNAME_FILE", b"rezka-user");
     source.set_secret("MEDIA_REZKA_PASSWORD_FILE", b"rezka-password");
     source.set_env(
@@ -72,6 +73,10 @@ fn composition_constructs_typed_rezka_dependencies_without_network_calls() {
 
     let config = RunnerConfig::load_from(&source).unwrap();
     let prepared = media::composition::prepare_runner_session(&config).unwrap();
+    assert_eq!(
+        config.rezka().proxy_url().map(url::Url::as_str),
+        Some("http://rezka-proxy.internal:8888/")
+    );
     let _: &rezka_client::RezkaClient = &prepared.client;
     assert!(prepared.credentials.is_none());
     let _: &rezka_client::SessionValidationProbe = &prepared.probe;
@@ -88,6 +93,7 @@ fn composition_constructs_typed_rezka_dependencies_without_network_calls() {
         "rezka-password",
         encoded_key.as_str(),
         store_path,
+        "rezka-proxy.internal",
     ] {
         assert!(
             !debug.contains(forbidden),
