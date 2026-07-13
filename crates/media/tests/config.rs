@@ -122,6 +122,34 @@ fn runner_config_does_not_require_static_rezka_credentials() {
 }
 
 #[test]
+fn runner_storage_reserve_defaults_to_zero_and_accepts_explicit_bytes() {
+    let source = valid_runner_source();
+    assert_eq!(
+        RunnerConfig::load_from(&source)
+            .unwrap()
+            .storage_reserve_bytes(),
+        0
+    );
+
+    let mut source = valid_runner_source();
+    source.set_env("MEDIA_STORAGE_RESERVE_BYTES", "1073741824");
+    assert_eq!(
+        RunnerConfig::load_from(&source)
+            .unwrap()
+            .storage_reserve_bytes(),
+        1_073_741_824
+    );
+
+    source.set_env("MEDIA_STORAGE_RESERVE_BYTES", "-1");
+    assert_eq!(
+        RunnerConfig::load_from(&source).unwrap_err(),
+        ConfigError::InvalidEnvironment {
+            name: "MEDIA_STORAGE_RESERVE_BYTES"
+        }
+    );
+}
+
+#[test]
 fn database_config_requires_the_database_url_setting() {
     let error = DatabaseConfig::load_from(&FakeSource::default()).unwrap_err();
 

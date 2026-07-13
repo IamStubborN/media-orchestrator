@@ -63,6 +63,7 @@ const GLUETUN_API_KEY_FILE: &str = "MEDIA_GLUETUN_API_KEY_FILE";
 const STAGING_ROOT: &str = "MEDIA_STAGING_ROOT";
 const TV_ROOT: &str = "MEDIA_TV_ROOT";
 const MOVIES_ROOT: &str = "MEDIA_MOVIES_ROOT";
+const STORAGE_RESERVE_BYTES: &str = "MEDIA_STORAGE_RESERVE_BYTES";
 const VAAPI_DEVICE: &str = "MEDIA_VAAPI_DEVICE";
 const RUNNER_EXIT_AFTER_JOB: &str = "MEDIA_RUNNER_EXIT_AFTER_JOB";
 const PLEX_URL: &str = "MEDIA_PLEX_URL";
@@ -475,6 +476,7 @@ pub struct RunnerConfig {
     service: ClientConfig,
     rezka: RezkaCompositionConfig,
     storage_roots: media_runner::StorageRoots,
+    storage_reserve_bytes: u64,
     vaapi_device: PathBuf,
     qbittorrent: Option<QbittorrentCompositionConfig>,
     gluetun: Option<GluetunCompositionConfig>,
@@ -502,6 +504,12 @@ impl RunnerConfig {
             .map_err(|_| ConfigError::InvalidConfiguration {
                 message: "runner storage roots are invalid",
             })?,
+            storage_reserve_bytes: optional_environment(source, STORAGE_RESERVE_BYTES)?
+                .unwrap_or_else(|| "0".to_owned())
+                .parse()
+                .map_err(|_| ConfigError::InvalidEnvironment {
+                    name: STORAGE_RESERVE_BYTES,
+                })?,
             vaapi_device: PathBuf::from(
                 optional_environment(source, VAAPI_DEVICE)?
                     .unwrap_or_else(|| "/dev/dri/renderD128".to_owned()),
@@ -531,6 +539,9 @@ impl RunnerConfig {
 
     pub const fn storage_roots(&self) -> &media_runner::StorageRoots {
         &self.storage_roots
+    }
+    pub const fn storage_reserve_bytes(&self) -> u64 {
+        self.storage_reserve_bytes
     }
     pub fn vaapi_device(&self) -> &Path {
         &self.vaapi_device
@@ -896,6 +907,7 @@ impl std::fmt::Debug for RunnerConfig {
             .field("service", &"[REDACTED]")
             .field("rezka", &"[REDACTED]")
             .field("storage_roots", &"[REDACTED]")
+            .field("storage_reserve_bytes", &self.storage_reserve_bytes)
             .field("vaapi_device", &"[REDACTED]")
             .field(
                 "qbittorrent",

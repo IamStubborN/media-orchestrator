@@ -105,7 +105,8 @@ pub async fn run_runner(config: RunnerConfig) -> Result<(), RunnerError> {
         )
         .map_err(|_| RunnerError::Configuration)?,
     );
-    let pipeline = media_runner::EpisodePipeline::new(filesystem, http, process, plex_service);
+    let pipeline = media_runner::EpisodePipeline::new(filesystem, http, process, plex_service)
+        .with_storage_reserve_bytes(config.storage_reserve_bytes());
     let qbittorrent = match config.qbittorrent() {
         Some(config) => {
             let config = media_integrations::qbittorrent::QbittorrentConfig::new(

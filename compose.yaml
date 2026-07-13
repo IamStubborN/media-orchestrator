@@ -73,6 +73,7 @@ services:
       # filesystem; the defaults (/staging/rezka, /plex/tv, /plex/movies) would
       # hit the read-only rootfs and fail the same-filesystem preflight.
       MEDIA_STAGING_ROOT: /media/staging
+      MEDIA_STORAGE_RESERVE_BYTES: ${MEDIA_STORAGE_RESERVE_BYTES:-0}
       MEDIA_TV_ROOT: /media/tv
       MEDIA_MOVIES_ROOT: /media/movies
     volumes:

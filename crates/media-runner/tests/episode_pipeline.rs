@@ -364,7 +364,8 @@ async fn storage_preflight_uses_the_probed_source_size() {
         checks: Mutex::default(),
         scans: Mutex::default(),
     });
-    let pipeline = EpisodePipeline::new(filesystem, http.clone(), process, service);
+    let pipeline = EpisodePipeline::new(filesystem, http.clone(), process, service)
+        .with_storage_reserve_bytes(20 * GIB);
 
     assert_eq!(
         pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),

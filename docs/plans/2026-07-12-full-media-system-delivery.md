@@ -32,10 +32,9 @@ must not close it.
 
 ### Remaining Acceptance Work
 
-1. Free enough media-volume capacity to satisfy the fixed 20 GiB post-operation
-   reserve, then resume a real Rezka episode with available subtitles and verify
-   all sidecar naming rules. Five-item natural-language pagination is already
-   live-verified.
+1. Resume one small real Rezka episode with available subtitles and verify all
+   sidecar naming rules. The additional free-space reserve is disabled by product
+   decision; preflight must still cover the estimated source and VAAPI output.
 2. Induce a real provider-side subtitle failure and prove the complete `partial -> retry -> completed` transition without touching completed video work.
 3. Exercise primary Telegram media commands from both profiles and verify rejection of an unapproved external Telegram account when such an account is available.
 4. Live-verify storage recovery after space becomes available, expired-stream
@@ -46,30 +45,17 @@ must not close it.
 
 ### Immediate Execution Queue
 
-1. Inventory only orchestrator-owned staging artifacts, remove completed-job
-   residue when publication is verified, and determine whether the media volume
-   can safely reach the required 20 GiB reserve without deleting user media.
-2. Add an owner-scoped resume path for `blocked_storage` that re-runs storage
+1. Add an owner-scoped resume path for `blocked_storage` that re-runs storage
    preflight and unfinished work, then complete the already selected
    subtitle-present Rezka episode through Hermes and Plex.
-3. Produce a natural subtitle failure and verify selective recovery.
-4. Execute expired-stream, numbering, mapping, and Specials/OVA scenarios with
+2. Produce a natural subtitle failure and verify selective recovery.
+3. Execute expired-stream, numbering, mapping, and Specials/OVA scenarios with
    cleanup after each run.
-5. Complete Secondary command coverage and the external unknown-user gate, or
+4. Complete Secondary command coverage and the external unknown-user gate, or
    record the latter as an explicit external-account blocker rather than claiming
    it passed.
-6. Re-run deployment verification on final revisions, reconcile every acceptance
+5. Re-run deployment verification on final revisions, reconcile every acceptance
    item with dated evidence, and close the goal only after no required work remains.
-
-### Current Operational Blocker
-
-- The real media filesystem currently reports approximately 18 GiB available,
-  below the fixed 20 GiB post-operation reserve.
-- No published media, torrent data, or user-owned files may be removed to make a
-  test pass.
-- Cleanup is limited to verified redundant artifacts owned by media-orchestrator.
-- The blocked subtitle test job must remain resumable; creating repeated jobs to
-  bypass the gate is not an acceptable workaround.
 
 ## Status Model
 
@@ -140,7 +126,8 @@ the Rezka search session.
 2. Verify five-result pagination and isolated search state. **Live-verified.**
 3. Show every available translation and require explicit selection.
 4. Resolve one real episode and select the highest available stream.
-5. Estimate download size and enforce the 20 GiB post-operation reserve.
+5. Estimate peak source and VAAPI output usage before download. An optional
+   runtime reserve is supported and configured to zero in the homelab.
 6. Download with bounded resume/range behavior.
 7. Probe the actual file and treat its measured dimensions as authoritative.
 8. Download all valid subtitles for the selected translation.
@@ -300,7 +287,8 @@ recovery, qBittorrent completion, and exact Plex discovery are also live-verifie
 
 **Priority:** High
 
-**Current state:** The real 20 GiB storage reserve gate is live-verified. A
+**Current state:** The formerly configured 20 GiB storage reserve gate is
+live-verified. A
 subtitle-present Rezka episode job entered `blocked_storage` before download or
 publication. The lease was released, the attempt count remained stable, and the
 job did not requeue after lease expiry. Recovery after capacity becomes available,
@@ -312,7 +300,8 @@ remain pending.
 1. Prove lease expiry and restart recovery with a killed runner.
 2. Resume only unfinished download or processing work.
 3. Prevent duplicate publication and duplicate events.
-4. Verify `blocked_storage` before violating the 20 GiB reserve. **Live-verified.**
+4. Verify `blocked_storage` before violating estimated operation space plus the
+   configured reserve. **Live-verified with the former 20 GiB configuration.**
 5. Provide an explicit owner-scoped resume operation that returns a storage-blocked
    job to the queue only after re-running storage preflight and unfinished stages.
 6. Verify bounded retry for expired streams and transient provider failures.
@@ -410,8 +399,8 @@ Secrets, cookies, Telegram tokens, Vaultwarden values, and signed URLs must neve
 ## Execution Order
 
 ```text
-1. Safely reclaim orchestrator-owned staging space and implement storage resume
-2. Complete subtitle-present Rezka episode E2E and Plex verification
+1. Deploy the zero-reserve runtime configuration and storage resume
+2. Complete one subtitle-present Rezka episode E2E and Plex verification
 3. Prove natural subtitle failure and selective recovery
 4. Prove expired-stream, numbering, mapping, and Specials/OVA behavior
 5. Complete both-profile Telegram coverage and unknown-user rejection

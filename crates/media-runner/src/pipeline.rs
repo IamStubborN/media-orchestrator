@@ -7,7 +7,7 @@ use crate::{
     validate_plex_observation, validate_webvtt,
 };
 
-const DEFAULT_RESERVE_BYTES: u64 = 20 * GIB;
+const DEFAULT_RESERVE_BYTES: u64 = 0;
 const HLS_SOURCE_ESTIMATE_BYTES: u64 = 10 * GIB;
 
 #[derive(Clone)]
@@ -124,6 +124,12 @@ impl EpisodePipeline {
             service,
             storage: StoragePreflight::new(DEFAULT_RESERVE_BYTES),
         }
+    }
+
+    #[must_use]
+    pub const fn with_storage_reserve_bytes(mut self, reserve_bytes: u64) -> Self {
+        self.storage = StoragePreflight::new(reserve_bytes);
+        self
     }
 
     pub async fn run(
