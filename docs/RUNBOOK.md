@@ -67,12 +67,19 @@ and VAAPI packages remain cached across normal Rust-only changes.
 1. Confirm no job is active before replacing the runner. `queued` is safe;
    `leased`, `running`, `publishing`, `plex_pending`, or `cancel_requested` is not.
 2. Build both immutable image tags.
-3. Record the current `MEDIA_SERVICE_IMAGE` and `DOWNLOAD_RUNNER_IMAGE` values.
-4. Update only those two lines in the private root `.env`.
-5. Recreate `media-service` and wait for health.
-6. Stop `gluetun-rezka-watcher` only while lifecycle is `ready`.
-7. Recreate `download-runner`, wait for health, then start the watcher again.
-8. Verify lifecycle `ready`, watcher health, image tags, queue state, and logs.
+3. Extract the Linux `media` binary from the service image, verify its SHA-256
+   while rebuilding the shared Hermes image, and keep both agents on the old
+   image until the backend rollout passes.
+4. Record the current `MEDIA_SERVICE_IMAGE` and `DOWNLOAD_RUNNER_IMAGE` values.
+5. Update only those two lines in the private root `.env`.
+6. Run the new service image as a one-shot `media migrate` container. Stop the
+   rollout if migration fails.
+7. Recreate `media-service` and wait for health.
+8. Stop `gluetun-rezka-watcher` only while lifecycle is `ready`.
+9. Recreate `download-runner`, wait for health, then start the watcher again.
+10. Recreate both Hermes profiles from the prepared image and wait for both
+    health checks.
+11. Verify lifecycle `ready`, watcher health, image tags, queue state, and logs.
 
 Never replace the runner merely to deploy documentation or service-only changes.
 For an active torrent job, qBittorrent can continue independently, but runner
