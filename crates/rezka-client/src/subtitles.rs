@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use url::Url;
@@ -375,11 +378,14 @@ impl<'de> Visitor<'de> for OptionalLanguagesVisitor {
         A: MapAccess<'de>,
     {
         let mut languages = BTreeMap::new();
+        let mut seen = BTreeSet::new();
         while let Some(key) = map.next_key::<String>()? {
             let value = map.next_value::<String>()?;
-            let language = normalize_language(value).map_err(de::Error::custom)?;
-            if languages.insert(key, language).is_some() {
+            if !seen.insert(key.clone()) {
                 return Err(de::Error::custom("duplicate subtitle language key"));
+            }
+            if let Ok(language) = normalize_language(value) {
+                languages.insert(key, language);
             }
         }
         Ok(OptionalLanguages(Some(languages)))

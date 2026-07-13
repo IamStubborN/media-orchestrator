@@ -63,13 +63,18 @@ fn track_with_an_insecure_alternative_is_skipped_while_valid_tracks_survive() {
 #[test]
 fn malformed_alternatives_languages_and_duplicate_json_keys_fail_atomically() {
     for wrapper in [
-        r#"{"subtitle":"[English]https://sub.example.com/a.vtt","subtitle_lns":{"English":"-en"}}"#,
         r#"{"subtitle":"[English]https://sub.example.com/a.vtt","subtitle_lns":{"English":"en","English":"fr"}}"#,
         r#"{"subtitle":"","subtitle":"","subtitle_lns":{}}"#,
-        r#"{"subtitle":"[English]https://sub.example.com/a.vtt","subtitle_lns":{"English":"abcdefghijklmnopqrstuvwxyzabcdefghij"}}"#,
     ] {
         assert_invalid(wrapper);
     }
+
+    let tracks = parse_subtitle_fields(
+        r#"{"subtitle":"[English]https://sub.example.com/a.vtt","subtitle_lns":{"English":"-en"}}"#,
+    )
+    .unwrap();
+    assert_eq!(tracks.len(), 1);
+    assert!(tracks[0].language().is_none());
 }
 
 #[test]
