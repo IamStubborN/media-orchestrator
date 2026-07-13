@@ -139,6 +139,7 @@ impl FileSystemPort for FakeFs {
 struct FakeHttp {
     video_size: Option<u64>,
     probe_fails: bool,
+    video_failures: Mutex<VecDeque<RunnerPortError>>,
     video_offsets: Mutex<Vec<u64>>,
     subtitle_failures: Mutex<HashSet<String>>,
     subtitle_requests: Mutex<Vec<String>>,
@@ -162,6 +163,9 @@ impl HttpPort for FakeHttp {
         filesystem: &dyn FileSystemPort,
         _cancellation: &dyn Cancellation,
     ) -> Result<(), RunnerPortError> {
+        if let Some(error) = self.video_failures.lock().unwrap().pop_front() {
+            return Err(error);
+        }
         if self.cancel_video {
             return Err(RunnerPortError::Cancelled);
         }
@@ -319,6 +323,101 @@ async fn rezka_episode_runs_one_pipeline_and_publishes_video_last() {
     assert_eq!(http.video_offsets.lock().unwrap().as_slice(), &[0]);
     let published = filesystem.published.lock().unwrap();
     assert_eq!(published.last(), Some(&work.final_video));
+}
+
+#[tokio::test]
+async fn expired_source_retry_downloads_and_publishes_only_after_a_fresh_attempt() {
+    let work = work();
+    let filesystem = Arc::new(FakeFs::with_available(30 * GIB));
+    let http = Arc::new(FakeHttp {
+        video_failures: Mutex::new(VecDeque::from([RunnerPortError::SourceExpired])),
+        ..FakeHttp::default()
+    });
+    let process = Arc::new(FakeProcess {
+        probes: Mutex::new(VecDeque::from([probe("h264"), probe("hevc")])),
+        commands: Mutex::default(),
+        filesystem: filesystem.clone(),
+    });
+    let service = Arc::new(FakeService {
+        checks: Mutex::new(VecDeque::from([matched(&work.plex)])),
+        scans: Mutex::default(),
+    });
+    let pipeline = EpisodePipeline::new(filesystem.clone(), http.clone(), process, service);
+    let reporter = RecordingReporter::default();
+
+    assert_eq!(
+        pipeline
+            .run(&work, &NeverCancelled, &reporter)
+            .await
+            .unwrap_err(),
+        RunnerPortError::SourceExpired
+    );
+    assert!(filesystem.published.lock().unwrap().is_empty());
+    assert!(http.video_offsets.lock().unwrap().is_empty());
+
+    assert_eq!(
+        pipeline
+            .run(&work, &NeverCancelled, &reporter)
+            .await
+            .unwrap(),
+        EpisodeOutcome::Completed
+    );
+    assert_eq!(http.video_offsets.lock().unwrap().as_slice(), &[0]);
+    assert_eq!(
+        filesystem.published.lock().unwrap().last(),
+        Some(&work.final_video)
+    );
+    assert_eq!(
+        reporter.events.lock().unwrap().as_slice(),
+        &[
+            "started:download",
+            "started:download",
+            "completed:download",
+            "started:transcode",
+            "completed:transcode",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn mapped_special_publishes_video_and_subtitles_to_plex_specials() {
+    let mut work = work();
+    let special = PathBuf::from("/plex/tv/Show/Specials/Show - S00E01.mkv");
+    work.episode_id = "s00e01".to_owned();
+    work.final_video = special.clone();
+    work.plex.path = special.clone();
+    work.plex.season = Some(0);
+    work.plex.episode = Some(1);
+    for track in &mut work.subtitles {
+        track.final_path = special.with_extension(format!("{}.vtt", track.id));
+    }
+
+    let filesystem = Arc::new(FakeFs::with_available(30 * GIB));
+    let http = Arc::new(FakeHttp::default());
+    let process = Arc::new(FakeProcess {
+        probes: Mutex::new(VecDeque::from([probe("h264"), probe("hevc")])),
+        commands: Mutex::default(),
+        filesystem: filesystem.clone(),
+    });
+    let service = Arc::new(FakeService {
+        checks: Mutex::new(VecDeque::from([matched(&work.plex)])),
+        scans: Mutex::default(),
+    });
+    let pipeline = EpisodePipeline::new(filesystem.clone(), http, process, service.clone());
+
+    assert_eq!(
+        pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
+        EpisodeOutcome::Completed
+    );
+    assert_eq!(filesystem.published.lock().unwrap().last(), Some(&special));
+    assert!(work.subtitles.iter().all(|track| {
+        filesystem
+            .files
+            .lock()
+            .unwrap()
+            .contains_key(&track.final_path)
+    }));
+    assert_eq!(service.scans.lock().unwrap().as_slice(), &[work.plex]);
 }
 
 #[tokio::test]

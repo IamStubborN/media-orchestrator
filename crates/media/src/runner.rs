@@ -702,24 +702,8 @@ impl MediaJobExecutor {
             .staging()
             .join(lease.job.id.to_string())
             .join(&episode_id);
-        let final_video = season.zip(episode).map_or_else(
-            || {
-                let movie_name = canonical_movie_name(&safe_title, release_year);
-                self.roots.movies().join(format!("{movie_name}.mkv"))
-            },
-            |(s, e)| {
-                let season_directory = if s == 0 {
-                    "Specials".to_owned()
-                } else {
-                    format!("Season {s:02}")
-                };
-                self.roots
-                    .tv()
-                    .join(&safe_title)
-                    .join(season_directory)
-                    .join(format!("{safe_title} - S{s:02}E{e:02}.mkv"))
-            },
-        );
+        let final_video =
+            rezka_final_video_path(&self.roots, &safe_title, release_year, season, episode);
         let variant = match premium_status {
             rezka_client::PremiumStatus::Active => manifest.preferred_variant(),
             rezka_client::PremiumStatus::Inactive => manifest
@@ -1137,6 +1121,33 @@ fn canonical_movie_name(safe_title: &str, release_year: Option<u16>) -> String {
     release_year.map_or_else(
         || safe_title.to_owned(),
         |year| format!("{safe_title} ({year})"),
+    )
+}
+
+fn rezka_final_video_path(
+    roots: &media_runner::StorageRoots,
+    safe_title: &str,
+    release_year: Option<u16>,
+    season: Option<u32>,
+    episode: Option<u32>,
+) -> std::path::PathBuf {
+    season.zip(episode).map_or_else(
+        || {
+            let movie_name = canonical_movie_name(safe_title, release_year);
+            roots.movies().join(format!("{movie_name}.mkv"))
+        },
+        |(season, episode)| {
+            let season_directory = if season == 0 {
+                "Specials".to_owned()
+            } else {
+                format!("Season {season:02}")
+            };
+            roots
+                .tv()
+                .join(safe_title)
+                .join(season_directory)
+                .join(format!("{safe_title} - S{season:02}E{episode:02}.mkv"))
+        },
     )
 }
 
@@ -1600,13 +1611,26 @@ mod tests {
 
     use super::{
         ExecutionOutcome, canonical_movie_name, combine_episode_outcome, matching_episode_videos,
-        parse_episode_coordinates,
+        parse_episode_coordinates, rezka_final_video_path,
     };
 
     #[test]
     fn movie_names_include_the_release_year_when_known() {
         assert_eq!(canonical_movie_name("WALL E", Some(2008)), "WALL E (2008)");
         assert_eq!(canonical_movie_name("WALL E", None), "WALL E");
+    }
+
+    #[test]
+    fn mapped_special_uses_plex_specials_path_and_zero_season_coordinate() {
+        let roots = media_runner::StorageRoots::new("/staging", "/plex/tv", "/plex/movies")
+            .expect("test roots are disjoint");
+
+        assert_eq!(
+            rezka_final_video_path(&roots, "Attack on Titan", None, Some(0), Some(1)),
+            std::path::PathBuf::from(
+                "/plex/tv/Attack on Titan/Specials/Attack on Titan - S00E01.mkv"
+            )
+        );
     }
 
     #[test]

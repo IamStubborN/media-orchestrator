@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -57,6 +58,10 @@ struct FailingExecutor;
 
 struct TypedFailingExecutor(media::runner::RunnerError);
 
+struct ExpireOnceExecutor {
+    attempts: AtomicUsize,
+}
+
 #[async_trait::async_trait]
 impl JobExecutor for FailingExecutor {
     async fn execute(
@@ -76,6 +81,54 @@ impl JobExecutor for TypedFailingExecutor {
         _: &RunnerControl,
     ) -> Result<ExecutionOutcome, media::runner::RunnerError> {
         Err(self.0)
+    }
+}
+
+#[async_trait::async_trait]
+impl JobExecutor for ExpireOnceExecutor {
+    async fn execute(
+        &self,
+        _: &LeaseDto,
+        _: &RunnerControl,
+    ) -> Result<ExecutionOutcome, media::runner::RunnerError> {
+        if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err(media::runner::RunnerError::SourceExpired)
+        } else {
+            Ok(ExecutionOutcome::Completed)
+        }
+    }
+}
+
+struct ReleasingApi {
+    leases: Mutex<VecDeque<LeaseDto>>,
+    events: Mutex<Vec<RunnerEventDto>>,
+}
+
+#[async_trait::async_trait]
+impl RunnerApi for ReleasingApi {
+    async fn lease_next(&self) -> Result<Option<LeaseDto>, media::runner::RunnerError> {
+        Ok(self.leases.lock().unwrap().pop_front())
+    }
+
+    async fn heartbeat(&self, lease: &LeaseDto) -> Result<LeaseDto, media::runner::RunnerError> {
+        Ok(lease.clone())
+    }
+
+    async fn report(
+        &self,
+        lease: &LeaseDto,
+        event: RunnerEventDto,
+    ) -> Result<JobDto, media::runner::RunnerError> {
+        let mut job = lease.job.clone();
+        match &event {
+            RunnerEventDto::StageFailed { retryable, .. } if *retryable => {
+                job.state = JobStateDto::Queued;
+            }
+            RunnerEventDto::JobTransition { state, .. } => job.state = *state,
+            _ => {}
+        }
+        self.events.lock().unwrap().push(event);
+        Ok(job)
     }
 }
 
@@ -106,6 +159,50 @@ async fn expired_source_reports_a_stable_retryable_error_code() {
             error_code,
             ..
         } if error_code == "stream_expired"
+    )));
+}
+
+#[tokio::test]
+async fn expired_source_is_released_and_a_fresh_lease_completes() {
+    let first = lease();
+    let mut second = lease();
+    second.lease_id =
+        media_contract::PublicId::parse("018f3f86-7b4c-7b4f-9b6a-6d62f45bb114").unwrap();
+    let api = Arc::new(ReleasingApi {
+        leases: Mutex::new(VecDeque::from([first, second])),
+        events: Mutex::default(),
+    });
+    let executor = Arc::new(ExpireOnceExecutor {
+        attempts: AtomicUsize::new(0),
+    });
+
+    assert!(
+        run_single_iteration(api.clone(), executor.clone(), Duration::from_millis(1))
+            .await
+            .unwrap()
+    );
+    assert!(
+        run_single_iteration(api.clone(), executor.clone(), Duration::from_millis(1))
+            .await
+            .unwrap()
+    );
+
+    assert_eq!(executor.attempts.load(Ordering::SeqCst), 2);
+    let events = api.events.lock().unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RunnerEventDto::StageFailed {
+            retryable: true,
+            error_code,
+            ..
+        } if error_code == "stream_expired"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RunnerEventDto::JobTransition {
+            state: JobStateDto::Completed,
+            ..
+        }
     )));
 }
 
