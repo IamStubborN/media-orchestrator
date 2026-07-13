@@ -31,7 +31,13 @@ COPY --from=builder /out/media /media
 
 FROM ${RUST_IMAGE} AS certificates
 
-FROM ${RUNTIME_IMAGE} AS runtime-common
+FROM ${RUNTIME_IMAGE} AS runtime-base
+COPY --from=certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+RUN groupadd --gid 65532 media && \
+    useradd --uid 65532 --gid 65532 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin media
+WORKDIR /var/empty
+
+FROM runtime-base AS runtime-common
 ARG OCI_CREATED="unknown"
 ARG OCI_REVISION="unknown"
 ARG OCI_SOURCE="https://github.com/iamstubborn/media-orchestrator"
@@ -43,10 +49,6 @@ LABEL org.opencontainers.image.created=$OCI_CREATED \
       org.opencontainers.image.source=$OCI_SOURCE \
       org.opencontainers.image.title="media-orchestrator" \
       org.opencontainers.image.version=$OCI_VERSION
-COPY --from=certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-RUN groupadd --gid 65532 media && \
-    useradd --uid 65532 --gid 65532 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin media
-WORKDIR /var/empty
 
 FROM runtime-common AS service
 COPY --from=builder --chown=65532:65532 /out/media /usr/local/bin/media
@@ -57,7 +59,7 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=6 \
 ENTRYPOINT ["/usr/local/bin/media"]
 CMD ["serve"]
 
-FROM runtime-common AS runner-packages
+FROM runtime-base AS runner-packages
 RUN apt-get \
       -o Acquire::Retries=3 \
       -o Acquire::http::Timeout=20 \
@@ -75,6 +77,17 @@ RUN apt-get \
     rm -rf /var/lib/apt/lists/*
 
 FROM runner-packages AS runner
+ARG OCI_CREATED="unknown"
+ARG OCI_REVISION="unknown"
+ARG OCI_SOURCE="https://github.com/iamstubborn/media-orchestrator"
+ARG OCI_VERSION="0.1.0-dev"
+LABEL org.opencontainers.image.created=$OCI_CREATED \
+      org.opencontainers.image.description="Personal media orchestration runtime" \
+      org.opencontainers.image.licenses="LicenseRef-Proprietary" \
+      org.opencontainers.image.revision=$OCI_REVISION \
+      org.opencontainers.image.source=$OCI_SOURCE \
+      org.opencontainers.image.title="media-orchestrator" \
+      org.opencontainers.image.version=$OCI_VERSION
 COPY --from=builder --chown=65532:65532 /out/media /usr/local/bin/media
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/media"]

@@ -30,11 +30,17 @@ verify() {
     remote sh -s <<'REMOTE'
 set -eu
 healthy() {
-    state=$(docker inspect "$1" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}')
-    test "$state" = healthy || {
-        echo "$1 is not healthy: $state" >&2
-        exit 1
-    }
+    attempts=0
+    while :; do
+        state=$(docker inspect "$1" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}')
+        test "$state" = healthy && return
+        attempts=$((attempts + 1))
+        test "$attempts" -lt 30 || {
+            echo "$1 is not healthy: $state" >&2
+            exit 1
+        }
+        sleep 5
+    done
 }
 healthy media-postgres
 healthy media-service
