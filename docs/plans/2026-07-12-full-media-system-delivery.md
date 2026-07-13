@@ -36,6 +36,9 @@ must not close it.
 - A real Rezka OVA stopped at `needs_action` before transfer, accepted an
   owner-confirmed `S00E01` mapping, resumed with a reset task ledger, and reused
   the persisted mapping in a later selection without downloading media.
+- Queue status exposes durable runner availability and a safe blocking reason;
+  a controlled `vpn_rotation_failed` state parked a diagnostic job without a
+  lease until it was cancelled and lifecycle readiness was restored.
 
 ### Remaining Acceptance Work
 
@@ -86,7 +89,11 @@ Unit tests or a healthy container do not satisfy a live-verification gate.
 ## Workstream 1: Real VPN Lifecycle
 
 **Priority:** Critical  
-**Current state:** Implemented and deployed. Two consecutive session-refresh jobs live-verified sticky per-job IPs and successful between-job rotation. The explicit durable VPN lifecycle blocking reason remains pending.
+**Current state:** Implemented, deployed, and live-verified. Two consecutive
+session-refresh jobs proved sticky per-job IPs and successful between-job
+rotation. A controlled durable `vpn_rotation_failed` state was exposed through
+queue status, prevented a queued diagnostic job from leasing, and returned to
+`ready` without provider activity.
 
 ### Implementation
 
@@ -98,6 +105,7 @@ Unit tests or a healthy container do not satisfy a live-verification gate.
 6. Record the previous and current public IP without storing provider credentials.
 7. Retry a bounded number of times when the public IP did not change.
 8. Keep the queue blocked with an explicit VPN lifecycle reason if rotation cannot complete.
+   **Live-verified with `vpn_rotation_failed`.**
 
 ### Live Gate
 
