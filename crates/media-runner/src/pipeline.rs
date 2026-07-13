@@ -149,7 +149,15 @@ impl EpisodePipeline {
             return self.reconcile(&work.plex).await;
         }
 
-        let video_published = self.filesystem.file_len(&work.final_video).await?.is_some();
+        let existing_video = self.filesystem.file_len(&work.final_video).await?.is_some();
+        let video_published = if existing_video {
+            self.process
+                .probe(&work.final_video, cancellation)
+                .await
+                .is_ok_and(|probe| is_full_hd_rezka_output(&probe))
+        } else {
+            false
+        };
         if !video_published {
             let source_url = work
                 .source_url
@@ -274,9 +282,15 @@ impl EpisodePipeline {
             return Ok(EpisodeOutcome::Cancelled);
         }
         if !video_published {
-            self.filesystem
-                .publish_atomic(&work.encoded_partial, &work.final_video)
-                .await?;
+            if existing_video {
+                self.filesystem
+                    .replace_atomic(&work.encoded_partial, &work.final_video)
+                    .await?;
+            } else {
+                self.filesystem
+                    .publish_atomic(&work.encoded_partial, &work.final_video)
+                    .await?;
+            }
         }
 
         match self.reconcile(&work.plex).await? {
@@ -428,15 +442,19 @@ fn cancellation_outcome(error: RunnerPortError) -> Result<EpisodeOutcome, Runner
 }
 
 fn validate_encoded_probe(
-    source: &MediaProbe,
+    _source: &MediaProbe,
     encoded: &MediaProbe,
 ) -> Result<(), RunnerPortError> {
-    if !encoded.codec.eq_ignore_ascii_case("hevc")
-        || source.width != encoded.width
-        || source.height != encoded.height
-        || encoded.duration_seconds <= 0.0
-    {
+    if !is_full_hd_rezka_output(encoded) {
         return Err(RunnerPortError::Process);
     }
     Ok(())
+}
+
+fn is_full_hd_rezka_output(probe: &MediaProbe) -> bool {
+    probe.codec.eq_ignore_ascii_case("hevc")
+        && probe.width == 1920
+        && probe.height == 1080
+        && probe.duration_seconds.is_finite()
+        && probe.duration_seconds > 0.0
 }

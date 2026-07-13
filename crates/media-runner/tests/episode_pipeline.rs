@@ -253,6 +253,16 @@ fn probe(codec: &str) -> MediaProbe {
     }
 }
 
+fn encoded_probe() -> MediaProbe {
+    MediaProbe {
+        codec: "hevc".to_owned(),
+        width: 1920,
+        height: 1080,
+        duration_seconds: 60.0,
+        bitrate: Some(1_000_000),
+    }
+}
+
 fn work() -> EpisodeWork {
     EpisodeWork {
         provider: ProviderKind::Rezka,
@@ -306,7 +316,7 @@ async fn rezka_episode_runs_one_pipeline_and_publishes_video_last() {
     let filesystem = Arc::new(FakeFs::with_available(30 * GIB));
     let http = Arc::new(FakeHttp::default());
     let process = Arc::new(FakeProcess {
-        probes: Mutex::new(VecDeque::from([probe("h264"), probe("hevc")])),
+        probes: Mutex::new(VecDeque::from([probe("h264"), encoded_probe()])),
         commands: Mutex::default(),
         filesystem: filesystem.clone(),
     });
@@ -334,7 +344,7 @@ async fn expired_source_retry_downloads_and_publishes_only_after_a_fresh_attempt
         ..FakeHttp::default()
     });
     let process = Arc::new(FakeProcess {
-        probes: Mutex::new(VecDeque::from([probe("h264"), probe("hevc")])),
+        probes: Mutex::new(VecDeque::from([probe("h264"), encoded_probe()])),
         commands: Mutex::default(),
         filesystem: filesystem.clone(),
     });
@@ -395,7 +405,7 @@ async fn mapped_special_publishes_video_and_subtitles_to_plex_specials() {
     let filesystem = Arc::new(FakeFs::with_available(30 * GIB));
     let http = Arc::new(FakeHttp::default());
     let process = Arc::new(FakeProcess {
-        probes: Mutex::new(VecDeque::from([probe("h264"), probe("hevc")])),
+        probes: Mutex::new(VecDeque::from([probe("h264"), encoded_probe()])),
         commands: Mutex::default(),
         filesystem: filesystem.clone(),
     });
@@ -427,7 +437,7 @@ async fn rezka_hls_fallback_uses_ffmpeg_ingest_without_http_range_download() {
     let filesystem = Arc::new(FakeFs::with_available(50 * GIB));
     let http = Arc::new(FakeHttp::default());
     let process = Arc::new(FakeProcess {
-        probes: Mutex::new(VecDeque::from([probe("h264"), probe("hevc")])),
+        probes: Mutex::new(VecDeque::from([probe("h264"), encoded_probe()])),
         commands: Mutex::default(),
         filesystem: filesystem.clone(),
     });
@@ -510,7 +520,7 @@ async fn unknown_source_size_uses_duration_instead_of_a_fixed_twenty_gib_peak() 
     });
     let mut source_probe = probe("h264");
     source_probe.duration_seconds = 45.0 * 60.0;
-    let mut encoded_probe = probe("hevc");
+    let mut encoded_probe = encoded_probe();
     encoded_probe.duration_seconds = 45.0 * 60.0;
     let process = Arc::new(FakeProcess {
         probes: Mutex::new(VecDeque::from([source_probe, encoded_probe])),
@@ -540,7 +550,11 @@ async fn failed_subtitle_is_partial_and_retry_fetches_only_that_track() {
         .unwrap()
         .insert("uk".to_owned());
     let process = Arc::new(FakeProcess {
-        probes: Mutex::new(VecDeque::from([probe("h264"), probe("hevc")])),
+        probes: Mutex::new(VecDeque::from([
+            probe("h264"),
+            encoded_probe(),
+            encoded_probe(),
+        ])),
         commands: Mutex::default(),
         filesystem: filesystem.clone(),
     });
@@ -581,7 +595,7 @@ async fn existing_publication_skips_download_and_transcode_but_reconciles_plex()
     }
     let http = Arc::new(FakeHttp::default());
     let process = Arc::new(FakeProcess {
-        probes: Mutex::default(),
+        probes: Mutex::new(VecDeque::from([encoded_probe()])),
         commands: Mutex::default(),
         filesystem: filesystem.clone(),
     });
@@ -600,12 +614,49 @@ async fn existing_publication_skips_download_and_transcode_but_reconciles_plex()
 }
 
 #[tokio::test]
+async fn legacy_hd_publication_is_replaced_with_full_hd_output() {
+    let work = work();
+    let filesystem = Arc::new(FakeFs::with_available(30 * GIB));
+    filesystem
+        .files
+        .lock()
+        .unwrap()
+        .insert(work.final_video.clone(), b"legacy-720p".to_vec());
+    let http = Arc::new(FakeHttp::default());
+    let process = Arc::new(FakeProcess {
+        probes: Mutex::new(VecDeque::from([
+            probe("hevc"),
+            probe("h264"),
+            encoded_probe(),
+        ])),
+        commands: Mutex::default(),
+        filesystem: filesystem.clone(),
+    });
+    let service = Arc::new(FakeService {
+        checks: Mutex::new(VecDeque::from([matched(&work.plex)])),
+        scans: Mutex::default(),
+    });
+    let pipeline = EpisodePipeline::new(filesystem.clone(), http.clone(), process.clone(), service);
+
+    assert_eq!(
+        pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
+        EpisodeOutcome::Completed
+    );
+    assert_eq!(http.video_offsets.lock().unwrap().as_slice(), &[0]);
+    assert_eq!(process.commands.lock().unwrap().len(), 1);
+    assert_eq!(
+        filesystem.files.lock().unwrap().get(&work.final_video),
+        Some(&b"encoded".to_vec())
+    );
+}
+
+#[tokio::test]
 async fn rezka_transcode_emits_a_transcode_stage_start() {
     let work = work();
     let filesystem = Arc::new(FakeFs::with_available(30 * GIB));
     let http = Arc::new(FakeHttp::default());
     let process = Arc::new(FakeProcess {
-        probes: Mutex::new(VecDeque::from([probe("h264"), probe("hevc")])),
+        probes: Mutex::new(VecDeque::from([probe("h264"), encoded_probe()])),
         commands: Mutex::default(),
         filesystem: filesystem.clone(),
     });
@@ -653,7 +704,7 @@ async fn skipped_transcode_emits_no_transcode_stage_start() {
     }
     let http = Arc::new(FakeHttp::default());
     let process = Arc::new(FakeProcess {
-        probes: Mutex::default(),
+        probes: Mutex::new(VecDeque::from([encoded_probe()])),
         commands: Mutex::default(),
         filesystem: filesystem.clone(),
     });
@@ -688,7 +739,7 @@ async fn complete_partial_skips_download_but_still_transcodes_and_publishes() {
         ..FakeHttp::default()
     });
     let process = Arc::new(FakeProcess {
-        probes: Mutex::new(VecDeque::from([probe("h264"), probe("hevc")])),
+        probes: Mutex::new(VecDeque::from([probe("h264"), encoded_probe()])),
         commands: Mutex::default(),
         filesystem: filesystem.clone(),
     });
@@ -783,9 +834,9 @@ async fn job_runner_processes_episode_work_items_sequentially() {
     let process = Arc::new(FakeProcess {
         probes: Mutex::new(VecDeque::from([
             probe("h264"),
-            probe("hevc"),
+            encoded_probe(),
             probe("h264"),
-            probe("hevc"),
+            encoded_probe(),
         ])),
         commands: Mutex::default(),
         filesystem: filesystem.clone(),
