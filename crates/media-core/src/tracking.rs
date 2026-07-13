@@ -340,6 +340,12 @@ impl TrackingRuntime {
         let next_check = now + time::Duration::hours(6);
         for tracking in due {
             result.checked += 1;
+            let baseline = tracking
+                .known_episodes()
+                .iter()
+                .max()
+                .copied()
+                .ok_or(PortError::Conflict)?;
             let available = match self.discovery.available_episodes(&tracking).await {
                 Ok(available) => available,
                 Err(_) => {
@@ -349,7 +355,7 @@ impl TrackingRuntime {
                 }
             };
             for episode in available {
-                if !tracking.known_episodes().contains(&episode)
+                if episode > baseline
                     && self
                         .store
                         .record_future_episode(tracking.id(), episode, next_check)

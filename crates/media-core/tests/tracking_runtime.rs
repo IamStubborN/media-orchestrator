@@ -51,6 +51,9 @@ impl EpisodeDiscoveryPort for Discovery {
         _: &TrackingSubscription,
     ) -> Result<Vec<EpisodeSnapshot>, PortError> {
         Ok(vec![
+            EpisodeSnapshot::new(1, 1).unwrap(),
+            EpisodeSnapshot::new(1, 2).unwrap(),
+            EpisodeSnapshot::new(1, 3).unwrap(),
             EpisodeSnapshot::new(1, 4).unwrap(),
             EpisodeSnapshot::new(1, 5).unwrap(),
         ])
@@ -86,7 +89,7 @@ fn block_on<F: Future>(future: F) -> F::Output {
 }
 
 #[test]
-fn scheduler_records_only_future_episodes_and_never_creates_jobs() {
+fn scheduler_treats_every_episode_at_or_before_the_baseline_as_known() {
     block_on(async {
         let store = Arc::new(ScheduleStore {
             due: tracking(),
