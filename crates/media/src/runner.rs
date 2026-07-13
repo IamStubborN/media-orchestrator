@@ -203,10 +203,15 @@ impl media_runner::Cancellation for RunnerControl {
 /// needs to stay constant across retries of the same episode.
 const TRANSCODE_STAGE_ORDINAL: u32 = 2;
 
+/// Stable stage ordinal for the actual source transfer. Keep transcode at its
+/// historical ordinal 2 so in-flight jobs can resume, and place download at 3
+/// to satisfy the storage `UNIQUE (task_id, ordinal)` constraint.
+const DOWNLOAD_STAGE_ORDINAL: u32 = 3;
+
 /// Stage ordinal for the internal "execution" wrapper reported on task 0 around
 /// the whole job. It is deliberately placed in a reserved high band, well above
 /// any pipeline sub-stage ordinal (`resolve_manifest` 0, `media_pipeline` 1,
-/// `transcode` 2, torrent stages 0/1), so it can never collide with a real
+/// `transcode` 2, `download` 3, torrent stages 0/1), so it can never collide with a real
 /// sub-stage under the `job_stages` `UNIQUE (task_id, ordinal)` constraint — a
 /// collision at ordinal 2 previously rolled back and silently dropped the
 /// transcode milestone for every movie and first episode. The service keys the
@@ -220,7 +225,9 @@ const EXECUTION_STAGE_ORDINAL: u32 = 1_000_000;
 // UNIQUE(task_id, ordinal) constraint and be silently dropped (its reporter is
 // best-effort) for every movie and first episode.
 const _: () = assert!(EXECUTION_STAGE_ORDINAL != TRANSCODE_STAGE_ORDINAL);
-const _: () = assert!(EXECUTION_STAGE_ORDINAL > 2);
+const _: () = assert!(EXECUTION_STAGE_ORDINAL != DOWNLOAD_STAGE_ORDINAL);
+const _: () = assert!(TRANSCODE_STAGE_ORDINAL != DOWNLOAD_STAGE_ORDINAL);
+const _: () = assert!(EXECUTION_STAGE_ORDINAL > 3);
 
 /// Retention window for runner-owned staging directories. A directory stamped
 /// terminal is removed this long after retirement; an unstamped directory (a
@@ -243,15 +250,31 @@ impl media_runner::StageReporter for ControlStageReporter<'_> {
         // errors), so pipeline progress can never fail the job.
         let _ = self
             .control
-            .stage_started(self.task_ordinal, stage_name, TRANSCODE_STAGE_ORDINAL)
+            .stage_started(
+                self.task_ordinal,
+                stage_name,
+                pipeline_stage_ordinal(stage_name),
+            )
             .await;
     }
 
     async fn stage_completed(&self, stage_name: &str) {
         let _ = self
             .control
-            .stage_completed(self.task_ordinal, stage_name, TRANSCODE_STAGE_ORDINAL)
+            .stage_completed(
+                self.task_ordinal,
+                stage_name,
+                pipeline_stage_ordinal(stage_name),
+            )
             .await;
+    }
+}
+
+fn pipeline_stage_ordinal(stage_name: &str) -> u32 {
+    if stage_name == "download" {
+        DOWNLOAD_STAGE_ORDINAL
+    } else {
+        TRANSCODE_STAGE_ORDINAL
     }
 }
 

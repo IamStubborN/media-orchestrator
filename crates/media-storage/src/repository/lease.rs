@@ -470,10 +470,7 @@ fn notifications_for_event(
         // repeats into a single notification per (job, phase). The runner carries
         // no percent data, so these are milestones only, never progress fractions.
         JobEventKind::StageStarted(stage)
-            if matches!(
-                stage.name(),
-                "download" | "torrent_monitor" | "media_pipeline"
-            ) =>
+            if matches!(stage.name(), "download" | "torrent_monitor") =>
         {
             vec![(
                 "downloading-started",

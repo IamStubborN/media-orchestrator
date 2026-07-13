@@ -385,15 +385,19 @@ async fn storage_preflight_uses_the_probed_source_size() {
     });
     let pipeline = EpisodePipeline::new(filesystem, http.clone(), process, service)
         .with_storage_reserve_bytes(20 * GIB);
+    let reporter = RecordingReporter::default();
 
-    let EpisodeOutcome::BlockedStorage(blocked) =
-        pipeline.run(&work, &NeverCancelled, &()).await.unwrap()
+    let EpisodeOutcome::BlockedStorage(blocked) = pipeline
+        .run(&work, &NeverCancelled, &reporter)
+        .await
+        .unwrap()
     else {
         panic!("expected storage-blocked outcome");
     };
     assert_eq!(blocked.available_bytes(), 23 * GIB);
     assert_eq!(blocked.required_bytes(), 24 * GIB);
     assert!(http.video_offsets.lock().unwrap().is_empty());
+    assert!(reporter.events.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -520,10 +524,12 @@ async fn rezka_transcode_emits_a_transcode_stage_start() {
             .unwrap(),
         EpisodeOutcome::Completed
     );
-    // Exactly one "transcode" milestone fires when the ffmpeg step runs.
+    // The transfer and transcode milestones wrap the actual work, not preflight.
     assert_eq!(
         reporter.events.lock().unwrap().as_slice(),
         &[
+            "started:download".to_owned(),
+            "completed:download".to_owned(),
             "started:transcode".to_owned(),
             "completed:transcode".to_owned()
         ]

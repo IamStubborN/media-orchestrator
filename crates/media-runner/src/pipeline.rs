@@ -201,6 +201,7 @@ impl EpisodePipeline {
                         } else {
                             0
                         };
+                        reporter.stage_started("download").await;
                         if let Err(error) = self
                             .http
                             .download_video(
@@ -214,6 +215,7 @@ impl EpisodePipeline {
                         {
                             return cancellation_outcome(error);
                         }
+                        reporter.stage_completed("download").await;
                     }
                 }
                 VideoSourceKind::Hls => {

@@ -252,6 +252,15 @@ async fn rezka_runner_events_create_each_success_notification_once() {
         )
         .unwrap(),
         JobEvent::stage_started(JobEventId::new(), 0, "media_pipeline".to_owned(), 1).unwrap(),
+        JobEvent::stage_started(JobEventId::new(), 0, "download".to_owned(), 3).unwrap(),
+        JobEvent::stage_completed(
+            JobEventId::new(),
+            0,
+            "download".to_owned(),
+            3,
+            Default::default(),
+        )
+        .unwrap(),
         JobEvent::stage_completed(
             JobEventId::new(),
             0,
@@ -693,12 +702,11 @@ async fn storage_block_notifies_both_family_recipients_once() {
             ))
             .collect::<Vec<_>>(),
         vec![
-            // Terminal and lifecycle events keep the Family scope (both users),
-            // while the downloading-started progress milestone routes to the
-            // initiator (Secondary) only.
+            // Terminal and lifecycle events keep the Family scope (both users).
+            // Starting the media_pipeline umbrella only performs preflight and
+            // must not claim that a real download has begun.
             ("blocked-storage".to_owned(), "primary".to_owned()),
             ("blocked-storage".to_owned(), "secondary".to_owned()),
-            ("downloading-started".to_owned(), "secondary".to_owned()),
             ("started".to_owned(), "primary".to_owned()),
             ("started".to_owned(), "secondary".to_owned()),
         ]
@@ -1818,6 +1826,7 @@ async fn family_job_routes_progress_to_initiator_but_terminal_events_to_both() {
     for event in [
         JobEvent::started(JobEventId::new()),
         JobEvent::stage_started(JobEventId::new(), 0, "media_pipeline".to_owned(), 1).unwrap(),
+        JobEvent::stage_started(JobEventId::new(), 0, "download".to_owned(), 3).unwrap(),
         JobEvent::stage_started(JobEventId::new(), 0, "transcode".to_owned(), 2).unwrap(),
         JobEvent::transition(JobEventId::new(), JobState::Publishing, None).unwrap(),
         JobEvent::transition(JobEventId::new(), JobState::PlexPending, None).unwrap(),
