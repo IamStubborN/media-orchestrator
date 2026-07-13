@@ -135,10 +135,12 @@ async fn create_rejects_owner_spoofing_as_unknown_json() {
 }
 
 #[tokio::test]
-async fn queue_status_exposes_only_counts_and_activity() {
+async fn queue_status_exposes_counts_activity_and_runner_availability() {
     let response = app(FakeJobStore::with_status(QueueStatus {
         queued: 2,
         active: true,
+        runner_state: media_core::RunnerLifecycleState::Blocked,
+        blocked_reason: Some("vpn_rotation_failed".to_owned()),
     }))
     .oneshot(
         Request::get("/v1/queue/status")
@@ -152,7 +154,15 @@ async fn queue_status_exposes_only_counts_and_activity() {
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(value, serde_json::json!({"queued": 2, "active": true}));
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "queued": 2,
+            "active": true,
+            "runner_state": "blocked",
+            "blocked_reason": "vpn_rotation_failed"
+        })
+    );
     assert!(
         bytes
             .windows("owner".len())

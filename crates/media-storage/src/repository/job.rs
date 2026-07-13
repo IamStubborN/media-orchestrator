@@ -1,4 +1,7 @@
-use media_core::{Job, JobId, JobStore, NewJob, OperationKey, PortError, QueueStatus, UserId};
+use media_core::{
+    Job, JobId, JobStore, NewJob, OperationKey, PortError, QueueStatus, RunnerLifecycleState,
+    UserId,
+};
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, QueryFilter,
     QueryOrder, Statement, TransactionTrait,
@@ -371,9 +374,10 @@ impl JobStore for SeaOrmJobStore {
             .database
             .query_one_raw(Statement::from_string(
                 DatabaseBackend::Postgres,
-                "SELECT COUNT(*) FILTER (WHERE state = 'queued')::bigint AS queued, \
-                 EXISTS (SELECT 1 FROM job_leases WHERE expires_at > now()) AS active \
-                 FROM jobs",
+                "SELECT (SELECT COUNT(*) FROM jobs WHERE state = 'queued')::bigint AS queued, \
+                 EXISTS (SELECT 1 FROM job_leases WHERE expires_at > now()) AS active, \
+                 lifecycle.state AS runner_state, lifecycle.reason AS blocked_reason \
+                 FROM runner_lifecycle lifecycle WHERE lifecycle.singleton = true",
             ))
             .await
             .map_err(map_database_error)?
@@ -386,7 +390,25 @@ impl JobStore for SeaOrmJobStore {
         let active = row
             .try_get::<bool>("", "active")
             .map_err(|_| PortError::Infrastructure)?;
-        Ok(QueueStatus { queued, active })
+        let runner_state = match row
+            .try_get::<String>("", "runner_state")
+            .map_err(|_| PortError::Infrastructure)?
+            .as_str()
+        {
+            "ready" => RunnerLifecycleState::Ready,
+            "rotating" => RunnerLifecycleState::Rotating,
+            "blocked" => RunnerLifecycleState::Blocked,
+            _ => return Err(PortError::Infrastructure),
+        };
+        let blocked_reason = row
+            .try_get::<Option<String>>("", "blocked_reason")
+            .map_err(|_| PortError::Infrastructure)?;
+        Ok(QueueStatus {
+            queued,
+            active,
+            runner_state,
+            blocked_reason,
+        })
     }
 }
 

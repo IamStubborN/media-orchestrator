@@ -1,4 +1,4 @@
-use crate::{ClientId, JobId, LeaseId, NeedsActionReason, UserId};
+use crate::{ClientId, JobId, LeaseId, NeedsActionReason, RunnerLifecycleState, UserId};
 
 pub const MAX_RESULT_REF_BYTES: usize = 64 * 1024;
 
@@ -91,10 +91,12 @@ impl NewJob {
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct QueueStatus {
     pub queued: u64,
     pub active: bool,
+    pub runner_state: RunnerLifecycleState,
+    pub blocked_reason: Option<String>,
 }
 
 /// A job together with its currently running processing stage, if any. This is a

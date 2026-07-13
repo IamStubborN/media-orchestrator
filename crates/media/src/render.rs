@@ -154,6 +154,12 @@ pub fn queue_status(value: &Value) -> String {
         get_u64(value, "queued").map(|queued| queued.to_string()),
     );
     push_pair(&mut pairs, "Active", get_bool(value, "active").map(yes_no));
+    push_pair(&mut pairs, "Runner", get_str(value, "runner_state"));
+    push_pair(
+        &mut pairs,
+        "Blocked reason",
+        get_str(value, "blocked_reason"),
+    );
     key_value_block("Queue", &pairs)
 }
 
@@ -508,8 +514,16 @@ mod tests {
 
     #[test]
     fn queue_status_renders_aligned_block() {
-        let rendered = queue_status(&json!({ "queued": 3, "active": false }));
-        assert_eq!(rendered, "Queue\n  Queued: 3\n  Active: no");
+        let rendered = queue_status(&json!({
+            "queued": 3,
+            "active": false,
+            "runner_state": "blocked",
+            "blocked_reason": "vpn_rotation_failed"
+        }));
+        assert_eq!(
+            rendered,
+            "Queue\n  Queued:         3\n  Active:         no\n  Runner:         blocked\n  Blocked reason: vpn_rotation_failed"
+        );
     }
 
     #[test]

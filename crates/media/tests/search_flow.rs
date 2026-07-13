@@ -253,6 +253,8 @@ impl JobStore for MemoryJobStore {
         Ok(QueueStatus {
             queued: 0,
             active: false,
+            runner_state: media_core::RunnerLifecycleState::Ready,
+            blocked_reason: None,
         })
     }
 }

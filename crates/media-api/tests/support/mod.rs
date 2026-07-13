@@ -94,6 +94,8 @@ impl JobStore for NoopJobStore {
         Ok(QueueStatus {
             queued: 0,
             active: false,
+            runner_state: media_core::RunnerLifecycleState::Ready,
+            blocked_reason: None,
         })
     }
 }
@@ -125,6 +127,8 @@ impl Default for FakeJobStore {
             status: Arc::new(Mutex::new(QueueStatus {
                 queued: 0,
                 active: false,
+                runner_state: media_core::RunnerLifecycleState::Ready,
+                blocked_reason: None,
             })),
         }
     }
@@ -315,7 +319,7 @@ impl JobStore for FakeJobStore {
     }
 
     async fn queue_status(&self) -> Result<QueueStatus, PortError> {
-        Ok(*self.status.lock().unwrap())
+        Ok(self.status.lock().unwrap().clone())
     }
 }
 

@@ -2,8 +2,8 @@ use media_contract::{
     CheckpointValueDto, CreateJobRequest, CreateTrackingRequest, EpisodeSnapshotDto, JobDetailDto,
     JobDto, JobStateDto, LeaseDto, NeedsActionReasonDto, NotifyScopeDto, ProviderDto, PublicId,
     QueueStatusDto, ReleaseCandidateDto, ReleaseLifecycleDto, ReleasePrecisionDto,
-    ReleaseQueryResponse, RunnerEventDto, RunnerEventRequest, ScheduledEpisodeDto, TrackingDto,
-    TrackingScopeDto, TrackingStateDto,
+    ReleaseQueryResponse, RunnerEventDto, RunnerEventRequest, RunnerLifecycleStateDto,
+    ScheduledEpisodeDto, TrackingDto, TrackingScopeDto, TrackingStateDto,
 };
 use media_core::{
     CheckpointValue, EpisodeSnapshot, Job, JobDetail, JobEvent, JobEventId,
@@ -300,10 +300,16 @@ pub(crate) fn lease(lease: &JobLease) -> Result<LeaseDto, time::error::Format> {
 }
 
 #[must_use]
-pub(crate) const fn queue_status(status: QueueStatus) -> QueueStatusDto {
+pub(crate) fn queue_status(status: QueueStatus) -> QueueStatusDto {
     QueueStatusDto {
         queued: status.queued,
         active: status.active,
+        runner_state: match status.runner_state {
+            media_core::RunnerLifecycleState::Ready => RunnerLifecycleStateDto::Ready,
+            media_core::RunnerLifecycleState::Rotating => RunnerLifecycleStateDto::Rotating,
+            media_core::RunnerLifecycleState::Blocked => RunnerLifecycleStateDto::Blocked,
+        },
+        blocked_reason: status.blocked_reason,
     }
 }
 

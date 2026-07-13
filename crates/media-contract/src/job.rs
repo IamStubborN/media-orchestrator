@@ -1,4 +1,4 @@
-use crate::{NotifyScopeDto, ProviderDto, PublicId};
+use crate::{NotifyScopeDto, ProviderDto, PublicId, RunnerLifecycleStateDto};
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -57,11 +57,14 @@ pub struct JobDetailDto {
     pub current_stage: Option<String>,
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct QueueStatusDto {
     pub queued: u64,
     pub active: bool,
+    pub runner_state: RunnerLifecycleStateDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -83,7 +86,7 @@ mod tests {
         CreateJobRequest, JobDetailDto, JobDto, JobStateDto, JobSummaryDto, NeedsActionReasonDto,
         QueueStatusDto,
     };
-    use crate::{NotifyScopeDto, ProviderDto, PublicId};
+    use crate::{NotifyScopeDto, ProviderDto, PublicId, RunnerLifecycleStateDto};
 
     #[test]
     fn job_enums_use_stable_snake_case_names() {
@@ -255,10 +258,20 @@ mod tests {
         let status = QueueStatusDto {
             queued: 3,
             active: true,
+            runner_state: RunnerLifecycleStateDto::Blocked,
+            blocked_reason: Some("vpn_rotation_failed".to_owned()),
         };
-        let value = serde_json::to_value(status).unwrap();
+        let value = serde_json::to_value(&status).unwrap();
 
-        assert_eq!(value, serde_json::json!({ "queued": 3, "active": true }));
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "queued": 3,
+                "active": true,
+                "runner_state": "blocked",
+                "blocked_reason": "vpn_rotation_failed"
+            })
+        );
         assert_eq!(
             serde_json::from_value::<QueueStatusDto>(value).unwrap(),
             status,

@@ -292,7 +292,8 @@ mod tests {
     use crate::{
         PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientId, ClientRole, Job, JobId, JobLease,
         JobState, JobStore, JobValidationError, LeaseId, LeaseStore, NewJob, NotifyScope,
-        OperationKey, PortError, Provider, QueueStatus, RUNNER_CLIENT_ID, UserId,
+        OperationKey, PortError, Provider, QueueStatus, RUNNER_CLIENT_ID, RunnerLifecycleState,
+        UserId,
     };
 
     fn block_on<F: Future>(future: F) -> F::Output {
@@ -347,6 +348,8 @@ mod tests {
                 status: QueueStatus {
                     queued: 0,
                     active: false,
+                    runner_state: RunnerLifecycleState::Ready,
+                    blocked_reason: None,
                 },
                 failure: None,
             }
@@ -411,7 +414,7 @@ mod tests {
         }
 
         async fn queue_status(&self) -> Result<QueueStatus, PortError> {
-            self.failure.map_or(Ok(self.status), Err)
+            self.failure.map_or_else(|| Ok(self.status.clone()), Err)
         }
     }
 
@@ -581,6 +584,8 @@ mod tests {
             status: QueueStatus {
                 queued: 7,
                 active: true,
+                runner_state: RunnerLifecycleState::Ready,
+                blocked_reason: None,
             },
             ..FakeJobStore::empty()
         };
@@ -591,6 +596,8 @@ mod tests {
             QueueStatus {
                 queued: 7,
                 active: true,
+                runner_state: RunnerLifecycleState::Ready,
+                blocked_reason: None,
             },
         );
         assert_eq!(
