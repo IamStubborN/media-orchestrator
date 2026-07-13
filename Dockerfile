@@ -49,10 +49,10 @@ LABEL org.opencontainers.image.created=$OCI_CREATED \
 COPY --from=certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 RUN groupadd --gid 65532 media && \
     useradd --uid 65532 --gid 65532 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin media
-COPY --from=builder --chown=65532:65532 /out/media /usr/local/bin/media
 WORKDIR /var/empty
 
 FROM runtime-common AS service
+COPY --from=builder --chown=65532:65532 /out/media /usr/local/bin/media
 USER 65532:65532
 EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=6 \
@@ -70,6 +70,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 FROM runner-packages AS runner
+COPY --from=builder --chown=65532:65532 /out/media /usr/local/bin/media
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/media"]
 CMD ["runner"]
