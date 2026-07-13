@@ -163,11 +163,12 @@ Plex discovery, and the movie gate remain pending.
 
 **Priority:** High
 
-**Current state:** A read-only TVmaze release query is implemented, deployed,
-and live-verified with exact title/year matching, lifecycle, released/expected
-counts, next episode date/time, bounded schedule output, source, precision, and
-fetch timestamp. Durable tracking, owner/family routing, polling, and availability
-notifications remain pending.
+**Current state:** TVmaze release queries and durable Rezka tracking are
+implemented, deployed, and live-verified. A personal subscription discovered
+exactly one future episode and notified only Primary once. A family subscription
+created by Primary was visible and removable by Secondary, while Primary's personal
+subscription remained private. The remaining product gate is the Hermes
+conversation that offers tracking after explaining an ongoing series.
 
 ### Implementation and Verification
 
