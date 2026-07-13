@@ -17,8 +17,10 @@ use media_core::{
     PRIMARY_USER_ID, CanonicalEpisode, CanonicalEpisodeCoordinates, CanonicalMedia, CanonicalSeason,
     EpisodeDiscoveryPort, EpisodeId, EpisodeMappingConfirmation, EpisodeProviderMapping,
     ExternalNamespace, IdentityStore, Job, JobApplication, JobId, JobStore, MediaExternalReference,
-    NewJob, NotifyScope, OperationKey, PortError, Provider, QueueStatus, TrackingId, TrackingScope,
-    TrackingSubscription, UserId, SECONDARY_USER_ID,
+    NewJob, NotifyScope, OperationKey, PortError, Provider, QueueStatus, ReleaseCandidate,
+    ReleaseLifecycle, ReleaseMetadataPort, ReleaseMetadataResult, ReleasePrecision, ReleaseQuery,
+    ReleaseQueryError, ScheduledEpisode, TrackingId, TrackingScope, TrackingSubscription, UserId,
+    SECONDARY_USER_ID,
 };
 
 #[derive(Default)]
@@ -81,6 +83,78 @@ async fn tracking_discovery_uses_the_selected_rezka_translation_snapshot() {
             media_core::EpisodeSnapshot::new(1, 1).unwrap(),
             media_core::EpisodeSnapshot::new(1, 2).unwrap(),
         ]
+    );
+}
+
+struct FakeReleaseProvider;
+
+#[async_trait::async_trait]
+impl ReleaseMetadataPort for FakeReleaseProvider {
+    async fn query(
+        &self,
+        query: &ReleaseQuery,
+    ) -> Result<ReleaseMetadataResult, ReleaseQueryError> {
+        assert_eq!(query.title, "Sugar");
+        Ok(ReleaseMetadataResult::Matched {
+            source: "tvmaze".to_owned(),
+            fetched_at: "2026-07-13T14:00:00Z".to_owned(),
+            show: ReleaseCandidate {
+                source_id: 7,
+                title: "Sugar".to_owned(),
+                original_title: None,
+                year: Some(2024),
+                lifecycle: ReleaseLifecycle::Ongoing,
+            },
+            precision: ReleasePrecision::DateTime,
+            lifecycle: ReleaseLifecycle::Ongoing,
+            released_episodes: 1,
+            expected_episodes: Some(2),
+            next_episode: None,
+            schedule: vec![
+                ScheduledEpisode {
+                    source_id: 71,
+                    season: 1,
+                    episode: 1,
+                    title: "Past".to_owned(),
+                    air_at: Some("2020-01-01T00:00:00Z".to_owned()),
+                    precision: ReleasePrecision::DateTime,
+                },
+                ScheduledEpisode {
+                    source_id: 72,
+                    season: 1,
+                    episode: 2,
+                    title: "Future".to_owned(),
+                    air_at: Some("2099-01-01T00:00:00Z".to_owned()),
+                    precision: ReleasePrecision::DateTime,
+                },
+            ],
+        })
+    }
+}
+
+#[tokio::test]
+async fn calendar_tracking_is_independent_of_download_providers() {
+    let provider = Arc::new(FakeProvider {
+        pages: Mutex::new(HashMap::new()),
+    });
+    let discovery = media::search::ProviderEpisodeDiscovery::with_release(
+        provider,
+        Arc::new(FakeReleaseProvider),
+    );
+    let tracking = TrackingSubscription::rehydrate(
+        TrackingId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        "Sugar".to_owned(),
+        "release-calendar".to_owned(),
+        vec![media_core::EpisodeSnapshot::new(1, 1).unwrap()],
+        TrackingScope::Personal,
+    )
+    .unwrap();
+
+    assert_eq!(
+        discovery.available_episodes(&tracking).await.unwrap(),
+        vec![media_core::EpisodeSnapshot::new(1, 1).unwrap()]
     );
 }
 

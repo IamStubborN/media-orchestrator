@@ -11,7 +11,8 @@ use media_contract::{
 use media_core::{
     EpisodeDiscoveryPort, EpisodeMappingConfirmation, EpisodeSnapshot, IdentityStore, Job,
     JobApplication, JobId, JobState, NeedsActionReason, NewJobCommand, NotifyScope, OperationKey,
-    PortError, Provider, TrackingSubscription, UserId,
+    PortError, Provider, ReleaseMetadataPort, ReleaseMetadataResult, ReleasePrecision,
+    ReleaseQuery, ScheduledEpisode, TrackingSubscription, UserId,
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -160,12 +161,27 @@ pub trait SearchProvider: Send + Sync {
 
 pub struct ProviderEpisodeDiscovery {
     provider: Arc<dyn SearchProvider>,
+    release: Option<Arc<dyn ReleaseMetadataPort>>,
 }
 
 impl ProviderEpisodeDiscovery {
     #[must_use]
     pub fn new(provider: Arc<dyn SearchProvider>) -> Self {
-        Self { provider }
+        Self {
+            provider,
+            release: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_release(
+        provider: Arc<dyn SearchProvider>,
+        release: Arc<dyn ReleaseMetadataPort>,
+    ) -> Self {
+        Self {
+            provider,
+            release: Some(release),
+        }
     }
 }
 
@@ -175,6 +191,10 @@ impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
         &self,
         tracking: &TrackingSubscription,
     ) -> Result<Vec<EpisodeSnapshot>, PortError> {
+        if tracking.translation() == "release-calendar" {
+            return self.release_episodes(tracking).await;
+        }
+
         let page = self
             .provider
             .search(
@@ -238,6 +258,46 @@ impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
         episodes.sort_unstable();
         episodes.dedup();
         Ok(episodes)
+    }
+}
+
+impl ProviderEpisodeDiscovery {
+    async fn release_episodes(
+        &self,
+        tracking: &TrackingSubscription,
+    ) -> Result<Vec<EpisodeSnapshot>, PortError> {
+        let release = self.release.as_ref().ok_or(PortError::Infrastructure)?;
+        let query =
+            ReleaseQuery::new(tracking.title(), None, None).map_err(|_| PortError::Conflict)?;
+        let result = release
+            .query(&query)
+            .await
+            .map_err(|_| PortError::Infrastructure)?;
+        let ReleaseMetadataResult::Matched { schedule, .. } = result else {
+            return Err(PortError::Conflict);
+        };
+        let now = OffsetDateTime::now_utc();
+        let mut episodes = schedule
+            .into_iter()
+            .filter(|episode| release_episode_has_aired(episode, now))
+            .filter_map(|episode| EpisodeSnapshot::new(episode.season, episode.episode).ok())
+            .collect::<Vec<_>>();
+        episodes.sort_unstable();
+        episodes.dedup();
+        Ok(episodes)
+    }
+}
+
+fn release_episode_has_aired(episode: &ScheduledEpisode, now: OffsetDateTime) -> bool {
+    let Some(value) = episode.air_at.as_deref() else {
+        return false;
+    };
+    match episode.precision {
+        ReleasePrecision::DateTime => {
+            OffsetDateTime::parse(value, &Rfc3339).is_ok_and(|air_at| air_at <= now)
+        }
+        ReleasePrecision::Date => value <= now.date().to_string().as_str(),
+        ReleasePrecision::Unknown => false,
     }
 }
 

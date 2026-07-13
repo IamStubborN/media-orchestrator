@@ -105,11 +105,11 @@ struct ReleaseArgs {
 #[derive(Debug, Subcommand)]
 enum TrackingCommand {
     Add {
-        #[arg(long, value_enum)]
+        #[arg(long, value_enum, default_value = "rezka", hide = true)]
         provider: Provider,
         #[arg(long)]
         title: String,
-        #[arg(long)]
+        #[arg(long, default_value = "release-calendar", hide = true)]
         translation: String,
         #[arg(long = "known-episode", required = true, value_parser = parse_known_episode)]
         known_episodes: Vec<media_contract::EpisodeSnapshotDto>,

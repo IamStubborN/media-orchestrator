@@ -787,16 +787,7 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
     let operations = Arc::new(StorageOperationCompletionAdapter::new(
         SeaOrmOperationReceiptRepository::new(database.clone()),
     ));
-    let mut state = ApiState::new(
-        jobs.clone(),
-        leases,
-        clients,
-        idempotency,
-        operations,
-        readiness,
-    )
-    .with_tracking(tracking)
-    .with_release_metadata(Arc::new(media_core::ReleaseMetadataService::new(Arc::new(
+    let release_provider = Arc::new(
         media_integrations::tvmaze::TvmazeClient::new(
             media_integrations::tvmaze::TvmazeConfig::new(
                 config.tvmaze().base_url().clone(),
@@ -807,7 +798,19 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
             .map_err(|_| ServiceError::Bootstrap)?,
         )
         .map_err(|_| ServiceError::Bootstrap)?,
-    ))))
+    );
+    let mut state = ApiState::new(
+        jobs.clone(),
+        leases,
+        clients,
+        idempotency,
+        operations,
+        readiness,
+    )
+    .with_tracking(tracking)
+    .with_release_metadata(Arc::new(media_core::ReleaseMetadataService::new(
+        release_provider.clone(),
+    )))
     .with_lifecycle(Arc::new(RunnerLifecycleApplication::new(Arc::new(
         SeaOrmRunnerLifecycleStore::new(database.clone()),
     ))))
@@ -840,8 +843,9 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
         if rezka_tracking_enabled {
             tracking_runtime = Some(prepare_tracking_scheduler(
                 database.clone(),
-                Arc::new(crate::search::ProviderEpisodeDiscovery::new(
+                Arc::new(crate::search::ProviderEpisodeDiscovery::with_release(
                     provider.clone(),
+                    release_provider.clone(),
                 )),
             ));
         }
