@@ -411,7 +411,7 @@ fn notifications_for_event(
             let error_code = sanitized_error_code(error_code);
             vec![(
                 "failed",
-                context.message(job, &format!("Задача завершилась ошибкой: {error_code}.")),
+                context.message(job, &failure_description(error_code)),
             )]
         }
         JobEventKind::JobTransition { state, .. } => match state {
@@ -493,6 +493,30 @@ fn sanitized_error_code(error_code: &str) -> &str {
     } else {
         &error_code[..safe_length]
     }
+}
+
+fn failure_description(error_code: &str) -> String {
+    let explanation = match error_code {
+        "stream_expired" => {
+            "Ссылка на видеопоток Rezka истекла. Автоматические попытки закончились; повторите задачу, чтобы получить новую ссылку."
+        }
+        "source_transfer_transient" => {
+            "CDN временно не смог передать видео. Автоматические попытки закончились; повторите задачу позже."
+        }
+        "source_transfer_rejected" => {
+            "CDN отклонил выбранный видеопоток. Проверьте доступ к переводу или выберите другой результат."
+        }
+        "runner_service_unavailable" => {
+            "Runner потерял связь с media-service. Повторите задачу после восстановления сервиса."
+        }
+        "runner_configuration_invalid" => {
+            "Runner настроен некорректно. Требуется проверить конфигурацию сервиса."
+        }
+        _ => {
+            "Не удалось скачать или обработать медиа. Повторите задачу; если ошибка повторится, проверьте Job ID в журнале."
+        }
+    };
+    format!("{explanation}\nКод ошибки: {error_code}")
 }
 
 fn replayed_lease(result: OperationResult) -> Result<Option<JobLease>, sea_orm::DbErr> {

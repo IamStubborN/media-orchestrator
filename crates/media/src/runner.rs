@@ -21,6 +21,25 @@ pub enum RunnerError {
     Service,
     #[error("runner execution failed")]
     Execution,
+    #[error("source stream expired")]
+    SourceExpired,
+    #[error("source transfer failed transiently")]
+    SourceTransferTransient,
+    #[error("source transfer was rejected")]
+    SourceTransferRejected,
+}
+
+impl RunnerError {
+    const fn stage_failure(self) -> (bool, &'static str) {
+        match self {
+            Self::Configuration => (false, "runner_configuration_invalid"),
+            Self::Service => (true, "runner_service_unavailable"),
+            Self::Execution => (true, "execution_failed"),
+            Self::SourceExpired => (true, "stream_expired"),
+            Self::SourceTransferTransient => (true, "source_transfer_transient"),
+            Self::SourceTransferRejected => (false, "source_transfer_rejected"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -550,7 +569,7 @@ impl MediaJobExecutor {
                 .await
                 .map_err(|error| {
                     tracing::warn!(error = ?error, "Rezka media pipeline failed");
-                    RunnerError::Execution
+                    map_pipeline_error(error)
                 })?;
             control
                 .stage_completed(task_ordinal, "media_pipeline", 1)
@@ -1091,6 +1110,19 @@ fn map_pipeline_outcome(outcome: media_runner::EpisodeOutcome) -> ExecutionOutco
     }
 }
 
+fn map_pipeline_error(error: media_runner::RunnerPortError) -> RunnerError {
+    match error {
+        media_runner::RunnerPortError::SourceExpired => RunnerError::SourceExpired,
+        media_runner::RunnerPortError::SourceTransferTransient => {
+            RunnerError::SourceTransferTransient
+        }
+        media_runner::RunnerPortError::SourceTransferRejected => {
+            RunnerError::SourceTransferRejected
+        }
+        _ => RunnerError::Execution,
+    }
+}
+
 fn combine_episode_outcome(
     aggregate: ExecutionOutcome,
     current: ExecutionOutcome,
@@ -1233,18 +1265,21 @@ pub async fn run_single_iteration(
                 .await?;
             outcome
         }
-        Err(_) => {
-            let retryable = !matches!(
+        Err(error) => {
+            let (mut retryable, error_code) = error.stage_failure();
+            if matches!(
                 lease.execution.as_ref(),
                 Some(media_contract::ExecutionSelectionDto::RezkaSessionRefresh { .. })
-            );
+            ) {
+                retryable = false;
+            }
             let job = control
                 .stage_failed(
                     0,
                     "execution",
                     EXECUTION_STAGE_ORDINAL,
                     retryable,
-                    "execution_failed",
+                    error_code,
                 )
                 .await?;
             if job.state == JobStateDto::Failed && executor.retire(&lease).await.is_err() {

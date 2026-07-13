@@ -55,6 +55,8 @@ struct RecordingExecutor {
 
 struct FailingExecutor;
 
+struct TypedFailingExecutor(media::runner::RunnerError);
+
 #[async_trait::async_trait]
 impl JobExecutor for FailingExecutor {
     async fn execute(
@@ -64,6 +66,47 @@ impl JobExecutor for FailingExecutor {
     ) -> Result<ExecutionOutcome, media::runner::RunnerError> {
         Err(media::runner::RunnerError::Execution)
     }
+}
+
+#[async_trait::async_trait]
+impl JobExecutor for TypedFailingExecutor {
+    async fn execute(
+        &self,
+        _: &LeaseDto,
+        _: &RunnerControl,
+    ) -> Result<ExecutionOutcome, media::runner::RunnerError> {
+        Err(self.0)
+    }
+}
+
+#[tokio::test]
+async fn expired_source_reports_a_stable_retryable_error_code() {
+    let api = Arc::new(FakeApi {
+        lease: Mutex::new(Some(lease())),
+        events: Mutex::default(),
+        heartbeats: AtomicUsize::new(0),
+    });
+
+    assert!(
+        run_single_iteration(
+            api.clone(),
+            Arc::new(TypedFailingExecutor(
+                media::runner::RunnerError::SourceExpired,
+            )),
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap()
+    );
+
+    assert!(api.events.lock().unwrap().iter().any(|event| matches!(
+        event,
+        RunnerEventDto::StageFailed {
+            retryable: true,
+            error_code,
+            ..
+        } if error_code == "stream_expired"
+    )));
 }
 
 #[async_trait::async_trait]
@@ -367,12 +410,7 @@ async fn run_loop_exits_cleanly_after_one_processed_job_when_configured() {
     let executor = Arc::new(SignalingExecutor {
         done: Mutex::new(Some(sender)),
     });
-    let handle = tokio::spawn(run_loop(
-        api,
-        executor,
-        Duration::from_millis(1),
-        true,
-    ));
+    let handle = tokio::spawn(run_loop(api, executor, Duration::from_millis(1), true));
 
     tokio::time::timeout(Duration::from_secs(30), receiver)
         .await

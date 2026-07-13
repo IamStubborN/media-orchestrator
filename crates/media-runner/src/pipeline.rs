@@ -217,6 +217,7 @@ impl EpisodePipeline {
                     }
                 }
                 VideoSourceKind::Hls => {
+                    self.http.validate_video_source(source_url).await?;
                     let command = build_hls_ingest_command(source_url, &work.source_partial)
                         .map_err(|_| RunnerPortError::InvalidWork)?;
                     reporter.stage_started("download").await;

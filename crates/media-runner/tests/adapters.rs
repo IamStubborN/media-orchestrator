@@ -2,8 +2,8 @@ use std::{path::PathBuf, sync::Arc};
 
 use media_runner::{
     Cancellation, FileSystemPort, HttpPort, HttpRunnerServiceAdapter, PlexCheck, PlexExpectation,
-    ProcessPort, ReqwestHttpAdapter, RunnerServicePort, SensitiveUrl, StorageRoots,
-    TokioFileSystem, TokioProcessAdapter,
+    ProcessPort, ReqwestHttpAdapter, RunnerPortError, RunnerServicePort, SensitiveUrl,
+    StorageRoots, TokioFileSystem, TokioProcessAdapter,
 };
 use secrecy::SecretString;
 use tempfile::tempdir;
@@ -156,6 +156,31 @@ async fn reqwest_adapter_probes_video_size_with_a_single_byte_range() {
     let url = SensitiveUrl::parse(&format!("{}/video", server.uri()), "video").unwrap();
 
     assert_eq!(adapter.probe_video_size(&url).await.unwrap(), 734_003_200);
+}
+
+#[tokio::test]
+async fn video_source_statuses_preserve_expiry_and_retry_semantics() {
+    for (status, expected) in [
+        (403, RunnerPortError::SourceExpired),
+        (410, RunnerPortError::SourceExpired),
+        (429, RunnerPortError::SourceTransferTransient),
+        (503, RunnerPortError::SourceTransferTransient),
+        (404, RunnerPortError::SourceTransferRejected),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/video"))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        let adapter = ReqwestHttpAdapter::new(std::time::Duration::from_secs(5)).unwrap();
+        let url = SensitiveUrl::parse(&format!("{}/video", server.uri()), "video").unwrap();
+
+        assert_eq!(
+            adapter.validate_video_source(&url).await.unwrap_err(),
+            expected
+        );
+    }
 }
 
 #[tokio::test]

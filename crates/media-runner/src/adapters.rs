@@ -232,6 +232,21 @@ impl std::fmt::Debug for ReqwestHttpAdapter {
 
 #[async_trait]
 impl HttpPort for ReqwestHttpAdapter {
+    async fn validate_video_source(&self, url: &SensitiveUrl) -> Result<(), RunnerPortError> {
+        let response = self
+            .client
+            .get(url.as_url().clone())
+            .header(reqwest::header::RANGE, "bytes=0-0")
+            .send()
+            .await
+            .map_err(|_| RunnerPortError::SourceTransferTransient)?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(classify_source_status(response.status()))
+        }
+    }
+
     async fn probe_video_size(&self, url: &SensitiveUrl) -> Result<u64, RunnerPortError> {
         let response = self
             .client
@@ -239,9 +254,9 @@ impl HttpPort for ReqwestHttpAdapter {
             .header(reqwest::header::RANGE, "bytes=0-0")
             .send()
             .await
-            .map_err(|_| RunnerPortError::Http)?;
+            .map_err(|_| RunnerPortError::SourceTransferTransient)?;
         if !response.status().is_success() {
-            return Err(RunnerPortError::Http);
+            return Err(classify_source_status(response.status()));
         }
         let content_range_total = response
             .headers()
@@ -270,8 +285,14 @@ impl HttpPort for ReqwestHttpAdapter {
         if resume_from > 0 {
             request = request.header(reqwest::header::RANGE, format!("bytes={resume_from}-"));
         }
-        let response = request.send().await.map_err(|_| RunnerPortError::Http)?;
+        let response = request
+            .send()
+            .await
+            .map_err(|_| RunnerPortError::SourceTransferTransient)?;
         let status = response.status().as_u16();
+        if !matches!(status, 200 | 206 | 416) {
+            return Err(classify_source_status(response.status()));
+        }
         let raw_content_range = response
             .headers()
             .get(reqwest::header::CONTENT_RANGE)
@@ -299,7 +320,7 @@ impl HttpPort for ReqwestHttpAdapter {
             if cancellation.is_cancelled() {
                 return Err(RunnerPortError::Cancelled);
             }
-            let chunk = chunk.map_err(|_| RunnerPortError::Http)?;
+            let chunk = chunk.map_err(|_| RunnerPortError::SourceTransferTransient)?;
             if chunk.is_empty() {
                 continue;
             }
@@ -309,7 +330,7 @@ impl HttpPort for ReqwestHttpAdapter {
                 .ok_or(RunnerPortError::Http)?;
         }
         if offset == initial_offset {
-            return Err(RunnerPortError::Http);
+            return Err(RunnerPortError::SourceTransferTransient);
         }
         Ok(())
     }
@@ -351,6 +372,14 @@ impl HttpPort for ReqwestHttpAdapter {
             return Err(RunnerPortError::Http);
         }
         Ok(contents)
+    }
+}
+
+fn classify_source_status(status: reqwest::StatusCode) -> RunnerPortError {
+    match status.as_u16() {
+        401 | 403 | 410 => RunnerPortError::SourceExpired,
+        408 | 425 | 429 | 500..=599 => RunnerPortError::SourceTransferTransient,
+        _ => RunnerPortError::SourceTransferRejected,
     }
 }
 

@@ -10,6 +10,12 @@ pub enum RunnerPortError {
     Filesystem,
     #[error("HTTP transfer failed")]
     Http,
+    #[error("source stream expired")]
+    SourceExpired,
+    #[error("source transfer failed transiently")]
+    SourceTransferTransient,
+    #[error("source transfer was rejected")]
+    SourceTransferRejected,
     #[error("media process failed")]
     Process,
     #[error("runner service request failed")]
@@ -67,6 +73,10 @@ pub trait FileSystemPort: Send + Sync {
 
 #[async_trait]
 pub trait HttpPort: Send + Sync {
+    async fn validate_video_source(&self, _url: &SensitiveUrl) -> Result<(), RunnerPortError> {
+        Ok(())
+    }
+
     async fn probe_video_size(&self, url: &SensitiveUrl) -> Result<u64, RunnerPortError>;
 
     async fn download_video(
