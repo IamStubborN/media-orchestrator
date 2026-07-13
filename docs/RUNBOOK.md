@@ -62,6 +62,42 @@ Interpret `runner_state` as follows:
 Do not infer availability from `active=false` alone. An idle ready runner and a
 blocked runner both have no active lease, but require different operator action.
 
+## Rezka Session Authentication
+
+Rezka login is owned by `rezka-client` inside the runner and does not use
+Chromium, Playwright, Obscura, or copied browser cookies. A session refresh must
+follow this observable contract:
+
+1. The configured probe contains exactly one marker class: valid or invalid.
+2. Anubis, when present, is solved at most once before the next probe.
+3. DLE login posts only to the selected HTTPS origin at `/ajax/login/`.
+4. A current successful response may be HTTP 200 with body `Redirect`, HTTP 200
+   with success JSON, or an HTTP redirect. Every accepted shape must also set a
+   new `PHPSESSID`; a stale pre-existing cookie is insufficient.
+5. The final probe must contain a valid marker and no invalid marker before the
+   encrypted snapshot is saved.
+
+The deployed default probe is the Rezka root, with `logout` as the valid marker
+and `login` as the invalid marker. If the provider changes either marker or the
+DLE response shape, expect a sanitized `provider_response_invalid` or
+`authentication_required` result. Inspect the runner error code and refresh the
+fixtures and parser together; do not add a manual browser-cookie fallback.
+
+Refresh through the owner-scoped Hermes wrapper:
+
+```sh
+ssh host.example.invalid \
+  'docker exec hermes-primary hermes-media rezka session refresh \
+   --credential-request REQUEST_ID --json'
+```
+
+Credential-backed refresh requires the existing one-time Vaultwarden approval
+flow. `REQUEST_ID` is the approved one-time broker request, not a credential;
+the command returns a normal job whose terminal status is inspected through
+`hermes-media jobs show JOB_ID --json`. Never place the username, password,
+cookie, or resolved credential in a shell command, job payload, or evidence
+file.
+
 ## Local Build
 
 Build immutable images directly on the Docker host without GitHub Actions:

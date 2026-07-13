@@ -66,6 +66,27 @@ The crate never reads Docker secrets or writes session files. The composition
 root supplies credentials, and a runner-side adapter encrypts and persists the
 exported cookie state.
 
+#### Rezka Authentication Contract
+
+Authentication is a bounded protocol flow, not browser automation:
+
+1. Fetch the configured same-origin probe and classify it from explicit valid
+   and invalid markers. A response containing both marker classes or neither is
+   inconclusive and credentials are not sent.
+2. Solve at most one detected Anubis challenge and probe again.
+3. If the session is explicitly invalid, post the DLE form to `/ajax/login/`
+   over HTTPS. Exact IP-loopback HTTP is allowed only for tests.
+4. Accept either an HTTP redirect carrying a newly stored `PHPSESSID`, or HTTP
+   200 with a case-insensitive `Redirect` body or `{ "success": true }`. A
+   success-shaped response without the new session cookie is rejected.
+5. Probe once more and require an unambiguous valid marker before exporting the
+   encrypted session snapshot.
+
+The DLE response is only evidence that a login attempt was accepted. The final
+probe is authoritative for authenticated state. Cookies are attached only to
+the exact selected Rezka origin and are never exposed through the CLI, jobs,
+notifications, logs, or a browser-cookie import path.
+
 ### `media-storage`
 
 Owns PostgreSQL persistence:

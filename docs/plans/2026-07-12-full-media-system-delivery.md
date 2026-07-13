@@ -46,7 +46,6 @@ must not close it.
 2. Live-verify expired-stream recovery and Plex publication of a mapped
    Specials/OVA episode. Storage recovery, ambiguous numbering, and persistent
    canonical mapping are already live-verified.
-3. Audit specs, architecture, runbook, plans, and evidence; then publish one final acceptance report that distinguishes implemented, deployed, and live-verified behavior.
 
 ### Immediate Execution Queue
 
@@ -55,8 +54,6 @@ must not close it.
 2. Complete Secondary command coverage and the external unknown-user gate, or
    record the latter as an explicit external-account blocker rather than claiming
    it passed.
-3. Reconcile every acceptance item with dated evidence and close the goal only
-   after no required work remains.
 
 ## Status Model
 
@@ -406,6 +403,12 @@ binary checksum and the notification outbox was clean.
 ## Workstream 11: Documentation Truthfulness
 
 **Priority:** Medium
+
+**Current state:** Audited. `docs/ACCEPTANCE.md` is the authoritative
+implemented/deployed/live-verified matrix and links every satisfied workstream
+to dated evidence. Architecture and runbook documentation now record the live
+DLE `Redirect`/success response, mandatory new-session-cookie, and final marker
+probe contract. Deferred browser fallback remains explicitly excluded.
 
 1. Audit existing specs, plans, reviews, and architecture documentation.
 2. Replace broad `implemented` claims with the three-state status model.
