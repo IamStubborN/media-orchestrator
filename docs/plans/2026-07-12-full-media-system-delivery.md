@@ -193,6 +193,13 @@ conversation that offers tracking after explaining an ongoing series.
 
 **Priority:** High
 
+**Current state:** Rezka movie search, explicit translation selection, real
+movie playback resolution, subtitle parsing, full download, VAAPI transcode,
+year-qualified naming, movie-root publication, and exact Plex movie/subtitle
+discovery are live-verified. Prowlarr movie search/selection is live-verified;
+submission encountered transient qBittorrent transport failures and its
+completion/Plex gate remains pending.
+
 ### Implementation and Verification
 
 1. Verify Rezka movie discovery, translations, stream selection, and subtitles.
