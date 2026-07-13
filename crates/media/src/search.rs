@@ -297,7 +297,7 @@ impl ConcreteSearchProvider {
         }
         let mut results = Vec::new();
         let mut cursor = offset;
-        while cursor < entries.len() && results.len() < MAX_SEARCH_RESULTS_PER_PAGE {
+        'entries: while cursor < entries.len() && results.len() < MAX_SEARCH_RESULTS_PER_PAGE {
             let entry = &entries[cursor];
             cursor += 1;
             let details = match prepared.client.title(entry.locator()).await {
@@ -357,14 +357,29 @@ impl ConcreteSearchProvider {
                     })
                     .collect::<Vec<_>>();
                 for (translation_id, selection) in selections {
-                    let availability = prepared
-                        .client
-                        .series_availability(&selection.map_err(|_| SearchError::Provider)?)
-                        .await
-                        .map_err(|error| {
+                    let selection = selection.map_err(|error| {
+                        tracing::warn!(stage = "translation", error_code = ?error.code(), error = %error, "Rezka search failed");
+                        SearchError::Provider
+                    })?;
+                    let availability = match prepared.client.series_availability(&selection).await {
+                        Ok(availability) => availability,
+                        Err(error)
+                            if error.code()
+                                == rezka_client::RezkaErrorCode::ProviderResponseInvalid =>
+                        {
+                            tracing::warn!(
+                                stage = "availability",
+                                error_code = ?error.code(),
+                                error = %error,
+                                "skipping unusable Rezka search result"
+                            );
+                            continue 'entries;
+                        }
+                        Err(error) => {
                             tracing::warn!(stage = "availability", error_code = ?error.code(), error = %error, "Rezka search failed");
-                            SearchError::Provider
-                        })?;
+                            return Err(SearchError::Provider);
+                        }
+                    };
                     by_translation.insert(
                         translation_id,
                         availability
