@@ -23,14 +23,12 @@ must not close it.
 
 ### Remaining Acceptance Work
 
-1. Deploy and live-verify the owner-scoped retry API and CLI for `partial` and `failed` jobs.
-2. Force a subtitle failure and prove retry downloads only the missing track.
-3. Verify Rezka subtitle-present episode handling and five-item pagination through Hermes.
-4. Verify initiator and family Telegram delivery for both profiles, plus unknown-user rejection.
-5. Exercise the ongoing-series Hermes conversation and release-date answers.
-6. Live-verify storage blocking, ambiguous numbering, Specials/OVA mapping, and expired-stream recovery.
-7. Verify a complete deploy and rollback cycle.
-8. Audit all documentation and publish the final acceptance report with dated evidence.
+1. Force a subtitle failure and prove retry downloads only the missing track.
+2. Verify Rezka subtitle-present episode handling and five-item pagination through Hermes.
+3. Verify initiator and family Telegram delivery for both profiles, plus unknown-user rejection.
+4. Exercise the ongoing-series Hermes conversation and release-date answers.
+5. Live-verify storage blocking, ambiguous numbering, Specials/OVA mapping, and expired-stream recovery.
+6. Audit all documentation and publish the final acceptance report with dated evidence.
 
 ## Status Model
 
@@ -120,9 +118,9 @@ Subtitle-present and pagination live gates remain pending.
 
 **Current state:** Subtitle response-shape compatibility, unknown-language
 degradation, partial stage semantics, and checkpoint-preserving execution are
-implemented. An owner-scoped `POST /v1/jobs/{id}/retry` endpoint and matching
-`media jobs retry` command are in progress. The forced-failure live gate remains
-pending.
+implemented. The owner-scoped, idempotent `POST /v1/jobs/{id}/retry` endpoint and
+matching `media jobs retry` command are deployed and live-verified through the
+Hermes wrapper. The forced subtitle-failure live gate remains pending.
 
 ### Implementation and Verification
 
@@ -296,9 +294,10 @@ from Secondary and an unknown-sender rejection check remain pending.
 
 **Current state:** Local immutable Docker builds, cached runner packages, a
 credential-free operational runbook, and `mise` status/verify/deploy/rollback
-tasks are implemented. Status and verify pass live. Deploy was live-verified to
-fail closed before build while a movie job was active. A complete no-active-job
-deploy and rollback cycle remains pending.
+tasks are implemented. A complete deploy, migration, backend health check,
+Hermes CLI refresh, Hermes health check, rollback to the previous image pair,
+and redeploy to the current pair are live-verified. Deploy was also verified to
+fail closed before build while a movie job was active.
 
 ### Implementation
 
