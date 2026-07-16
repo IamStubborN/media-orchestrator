@@ -303,6 +303,32 @@ async fn rezka_runner_events_create_each_success_notification_once() {
         assert_eq!(row.try_get::<String>("", "recipient").unwrap(), "primary");
         assert_sanitized_message(row, &["private-provider-reference"]);
     }
+
+    let deliveries = SeaOrmNotificationOutbox::new(test_db.connection().clone())
+        .lease_pending(
+            NotificationId::new(),
+            time::OffsetDateTime::now_utc() + time::Duration::seconds(1),
+            time::Duration::seconds(30),
+            10,
+        )
+        .await
+        .unwrap();
+    let completed = deliveries
+        .iter()
+        .find(|delivery| delivery.event_type() == NotificationEventType::Completed)
+        .unwrap();
+    assert_eq!(
+        completed.status_key(),
+        None,
+        "terminal completion must create a new Telegram message"
+    );
+    assert!(
+        deliveries
+            .iter()
+            .filter(|delivery| delivery.event_type() != NotificationEventType::Completed)
+            .all(|delivery| delivery.status_key().is_some()),
+        "progress events must keep editing the existing status card"
+    );
 }
 
 #[tokio::test]

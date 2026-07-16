@@ -363,6 +363,13 @@ fn delivery_from_row(row: &sea_orm::QueryResult) -> Result<NotificationDelivery,
     let payload: serde_json::Value = row
         .try_get("", "payload")
         .map_err(|_| PortError::Infrastructure)?;
+    let event_type = parse_event(
+        &row.try_get::<String>("", "event_type")
+            .map_err(|_| PortError::Infrastructure)?,
+    )?;
+    let aggregate_type = row
+        .try_get::<String>("", "aggregate_type")
+        .map_err(|_| PortError::Infrastructure)?;
     NotificationDelivery::rehydrate(
         NotificationId::from_uuid(
             row.try_get("", "id")
@@ -377,15 +384,18 @@ fn delivery_from_row(row: &sea_orm::QueryResult) -> Result<NotificationDelivery,
             "secondary" => NotificationRecipient::Secondary,
             _ => return Err(PortError::Infrastructure),
         },
-        parse_event(
-            &row.try_get::<String>("", "event_type")
-                .map_err(|_| PortError::Infrastructure)?,
-        )?,
-        match row
-            .try_get::<String>("", "aggregate_type")
-            .map_err(|_| PortError::Infrastructure)?
-            .as_str()
-        {
+        event_type,
+        match aggregate_type.as_str() {
+            "job"
+                if matches!(
+                    event_type,
+                    NotificationEventType::Completed
+                        | NotificationEventType::Partial
+                        | NotificationEventType::Failed
+                ) =>
+            {
+                None
+            }
             "job" => Some(format!(
                 "media-job:{}",
                 row.try_get::<uuid::Uuid>("", "aggregate_id")
