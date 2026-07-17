@@ -7,6 +7,7 @@ mod release;
 mod runner;
 mod search;
 mod tracking;
+mod trending;
 
 use axum::Router;
 
@@ -24,4 +25,5 @@ pub(crate) fn protected_routes() -> Router<ApiState> {
         .merge(tracking::routes())
         .merge(release::routes())
         .merge(search::routes())
+        .merge(trending::routes())
 }

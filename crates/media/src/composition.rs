@@ -35,6 +35,34 @@ use crate::{
     search::{ConcreteSearchProvider, DurableSearchService, StorageSearchPersistence},
 };
 
+struct TmdbTrendingAdapter(media_integrations::tmdb::TmdbClient);
+
+#[async_trait::async_trait]
+impl media_api::TrendingService for TmdbTrendingAdapter {
+    async fn trending(
+        &self,
+        category: media_contract::TrendingCategoryDto,
+        page: u32,
+    ) -> Result<media_contract::TrendingPageDto, media_api::TrendingServiceError> {
+        self.0
+            .trending(category, page)
+            .await
+            .map_err(|error| match error.code() {
+                media_integrations::tmdb::TmdbErrorCode::InvalidRequest => {
+                    media_api::TrendingServiceError::InvalidRequest
+                }
+                media_integrations::tmdb::TmdbErrorCode::Configuration => {
+                    media_api::TrendingServiceError::Unavailable
+                }
+                media_integrations::tmdb::TmdbErrorCode::Transport
+                | media_integrations::tmdb::TmdbErrorCode::Unauthorized
+                | media_integrations::tmdb::TmdbErrorCode::ProviderResponse => {
+                    media_api::TrendingServiceError::Provider
+                }
+            })
+    }
+}
+
 const IDEMPOTENCY_TTL: time::Duration = time::Duration::hours(24);
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -799,6 +827,22 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
         )
         .map_err(|_| ServiceError::Bootstrap)?,
     );
+    let trending = config
+        .tmdb()
+        .map(|config| {
+            let config = media_integrations::tmdb::TmdbConfig::new(
+                config.base_url().clone(),
+                config.api_key().clone(),
+                config.language(),
+                Duration::from_secs(15),
+            )
+            .map_err(|_| ServiceError::Bootstrap)?;
+            media_integrations::tmdb::TmdbClient::new(config)
+                .map(TmdbTrendingAdapter)
+                .map(Arc::new)
+                .map_err(|_| ServiceError::Bootstrap)
+        })
+        .transpose()?;
     let mut state = ApiState::new(
         jobs.clone(),
         leases,
@@ -815,6 +859,9 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
         SeaOrmRunnerLifecycleStore::new(database.clone()),
     ))))
     .with_metrics_source(Arc::new(SeaOrmMetricsSource::new(database.clone())));
+    if let Some(trending) = trending {
+        state = state.with_trending(trending);
+    }
     let mut tracking_runtime = None;
     if config.rezka().is_some() || config.prowlarr().is_some() {
         let rezka = config

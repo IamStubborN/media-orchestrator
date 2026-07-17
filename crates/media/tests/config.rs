@@ -202,6 +202,22 @@ fn server_config_uses_public_tvmaze_defaults_without_a_key() {
 }
 
 #[test]
+fn server_tmdb_config_is_optional_and_redacts_the_api_key() {
+    let source = FakeSource::valid_server();
+    assert!(ServerConfig::load_from(&source).unwrap().tmdb().is_none());
+
+    let mut source = FakeSource::valid_server();
+    source.set_env("MEDIA_TMDB_API_KEY", "tmdb-secret");
+    let config = ServerConfig::load_from(&source).unwrap();
+    let tmdb = config.tmdb().unwrap();
+    assert_eq!(tmdb.base_url().as_str(), "https://api.themoviedb.org/3/");
+    assert_eq!(tmdb.language(), "ru");
+    let rendered = format!("{tmdb:?}");
+    assert!(rendered.contains("[REDACTED]"));
+    assert!(!rendered.contains("tmdb-secret"));
+}
+
+#[test]
 fn database_config_accepts_direct_environment_and_prefers_file_override() {
     let mut direct = FakeSource::default();
     direct.set_env("MEDIA_DATABASE_URL", "postgres://direct");

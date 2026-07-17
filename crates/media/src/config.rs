@@ -52,6 +52,10 @@ const PROWLARR_API_KEY: &str = "MEDIA_PROWLARR_API_KEY";
 const PROWLARR_API_KEY_FILE: &str = "MEDIA_PROWLARR_API_KEY_FILE";
 const TVMAZE_URL: &str = "MEDIA_TVMAZE_URL";
 const TVMAZE_USER_AGENT: &str = "MEDIA_TVMAZE_USER_AGENT";
+const TMDB_URL: &str = "MEDIA_TMDB_URL";
+const TMDB_API_KEY: &str = "MEDIA_TMDB_API_KEY";
+const TMDB_API_KEY_FILE: &str = "MEDIA_TMDB_API_KEY_FILE";
+const TMDB_LANGUAGE: &str = "MEDIA_TMDB_LANGUAGE";
 const QBITTORRENT_URL: &str = "MEDIA_QBITTORRENT_URL";
 const QBITTORRENT_TV_CATEGORY: &str = "MEDIA_QBITTORRENT_TV_CATEGORY";
 const QBITTORRENT_MOVIES_CATEGORY: &str = "MEDIA_QBITTORRENT_MOVIES_CATEGORY";
@@ -76,6 +80,8 @@ const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:8080";
 const DEFAULT_REZKA_USER_AGENT: &str = "media-orchestrator/0.1 rezka-session";
 const DEFAULT_TVMAZE_URL: &str = "https://api.tvmaze.com/";
 const DEFAULT_TVMAZE_USER_AGENT: &str = "media-orchestrator/0.1 release-metadata";
+const DEFAULT_TMDB_URL: &str = "https://api.themoviedb.org/3/";
+const DEFAULT_TMDB_LANGUAGE: &str = "ru";
 const DEFAULT_LEASE_TTL_SECONDS: i64 = 60;
 const DEFAULT_PRIMARY_WEBHOOK_URL: &str = "http://hermes-primary:8644/webhooks/media-notify";
 const DEFAULT_SECONDARY_WEBHOOK_URL: &str = "http://hermes-secondary:8644/webhooks/media-notify";
@@ -188,6 +194,7 @@ pub struct ServerConfig {
     rezka: Option<RezkaCompositionConfig>,
     prowlarr: Option<ProwlarrCompositionConfig>,
     tvmaze: TvmazeCompositionConfig,
+    tmdb: Option<TmdbCompositionConfig>,
     plex: Option<PlexCompositionConfig>,
 }
 
@@ -231,6 +238,10 @@ impl ServerConfig {
             .map(|_| load_plex_config(source))
             .transpose()?;
         let tvmaze = load_tvmaze_config(source)?;
+        let tmdb = (source.var_os(TMDB_API_KEY).is_some()
+            || source.var_os(TMDB_API_KEY_FILE).is_some())
+        .then(|| load_tmdb_config(source))
+        .transpose()?;
         Ok(Self {
             database_url: database.database_url,
             listen_addr,
@@ -253,6 +264,7 @@ impl ServerConfig {
             rezka,
             prowlarr,
             tvmaze,
+            tmdb,
             plex,
         })
     }
@@ -312,6 +324,11 @@ impl ServerConfig {
         &self.tvmaze
     }
 
+    #[must_use]
+    pub const fn tmdb(&self) -> Option<&TmdbCompositionConfig> {
+        self.tmdb.as_ref()
+    }
+
     pub const fn plex(&self) -> Option<&PlexCompositionConfig> {
         self.plex.as_ref()
     }
@@ -335,6 +352,7 @@ impl std::fmt::Debug for ServerConfig {
             .field("rezka", &self.rezka.as_ref().map(|_| "[REDACTED]"))
             .field("prowlarr", &self.prowlarr.as_ref().map(|_| "[REDACTED]"))
             .field("tvmaze", &self.tvmaze)
+            .field("tmdb", &self.tmdb.as_ref().map(|_| "[REDACTED]"))
             .field("plex", &self.plex.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
@@ -589,6 +607,37 @@ pub struct TvmazeCompositionConfig {
     user_agent: String,
 }
 
+pub struct TmdbCompositionConfig {
+    base_url: url::Url,
+    api_key: SecretString,
+    language: String,
+}
+
+impl TmdbCompositionConfig {
+    pub const fn base_url(&self) -> &url::Url {
+        &self.base_url
+    }
+
+    pub const fn api_key(&self) -> &SecretString {
+        &self.api_key
+    }
+
+    pub fn language(&self) -> &str {
+        &self.language
+    }
+}
+
+impl std::fmt::Debug for TmdbCompositionConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TmdbCompositionConfig")
+            .field("base_url", &self.base_url)
+            .field("api_key", &"[REDACTED]")
+            .field("language", &self.language)
+            .finish()
+    }
+}
+
 impl TvmazeCompositionConfig {
     pub const fn base_url(&self) -> &url::Url {
         &self.base_url
@@ -735,6 +784,34 @@ fn load_tvmaze_config(source: &impl ConfigSource) -> Result<TvmazeCompositionCon
     Ok(TvmazeCompositionConfig {
         base_url,
         user_agent,
+    })
+}
+
+fn load_tmdb_config(source: &impl ConfigSource) -> Result<TmdbCompositionConfig, ConfigError> {
+    let value =
+        optional_environment(source, TMDB_URL)?.unwrap_or_else(|| DEFAULT_TMDB_URL.to_owned());
+    let base_url = value
+        .parse::<url::Url>()
+        .map_err(|_| ConfigError::InvalidEnvironment { name: TMDB_URL })?;
+    if base_url.host_str().is_none()
+        || !base_url.username().is_empty()
+        || base_url.password().is_some()
+        || base_url.query().is_some()
+        || base_url.fragment().is_some()
+    {
+        return Err(ConfigError::InvalidEnvironment { name: TMDB_URL });
+    }
+    let language = optional_environment(source, TMDB_LANGUAGE)?
+        .unwrap_or_else(|| DEFAULT_TMDB_LANGUAGE.to_owned());
+    if language.trim().is_empty() {
+        return Err(ConfigError::InvalidEnvironment {
+            name: TMDB_LANGUAGE,
+        });
+    }
+    Ok(TmdbCompositionConfig {
+        base_url,
+        api_key: read_secret(source, TMDB_API_KEY, TMDB_API_KEY_FILE, SecretKind::Token)?,
+        language,
     })
 }
 

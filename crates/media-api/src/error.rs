@@ -119,6 +119,24 @@ impl ApiError {
         )
     }
 
+    pub(crate) fn integration_unavailable(request_id: &RequestId) -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ApiErrorCode::Internal,
+            "trending integration is unavailable",
+            request_id,
+        )
+    }
+
+    pub(crate) fn upstream_failure(request_id: &RequestId) -> Self {
+        Self::new(
+            StatusCode::BAD_GATEWAY,
+            ApiErrorCode::Internal,
+            "trending provider request failed",
+            request_id,
+        )
+    }
+
     pub(crate) fn missing_idempotency_key(request_id: &RequestId) -> Self {
         Self::new(
             StatusCode::BAD_REQUEST,

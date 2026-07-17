@@ -9,6 +9,7 @@ mod plex;
 mod request_id;
 mod route;
 mod search;
+mod trending;
 
 use std::{sync::Arc, time::Duration};
 
@@ -28,6 +29,7 @@ pub use idempotency::{
 pub use plex::{PlexReconcileService, PlexServiceError};
 pub use request_id::RequestId;
 pub use search::{SearchError, SearchService};
+pub use trending::{TrendingService, TrendingServiceError};
 
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 // Conservative application-level budgets, independent of proxy/server defaults.
@@ -54,6 +56,7 @@ pub struct ApiState {
     pub(crate) plex: Arc<dyn PlexReconcileService>,
     pub(crate) metrics: Arc<MetricsRecorder>,
     pub(crate) metrics_source: Option<Arc<dyn MetricsSource>>,
+    pub(crate) trending: Arc<dyn TrendingService>,
 }
 
 impl ApiState {
@@ -80,6 +83,7 @@ impl ApiState {
             plex: Arc::new(plex::UnavailablePlexService),
             metrics: Arc::new(MetricsRecorder::default()),
             metrics_source: None,
+            trending: Arc::new(trending::UnavailableTrendingService),
         }
     }
 
@@ -126,6 +130,17 @@ impl ApiState {
     pub fn with_search(mut self, search: Arc<dyn SearchService>) -> Self {
         self.search = search;
         self
+    }
+
+    #[must_use]
+    pub fn with_trending(mut self, trending: Arc<dyn TrendingService>) -> Self {
+        self.trending = trending;
+        self
+    }
+
+    #[must_use]
+    pub fn trending(&self) -> &dyn TrendingService {
+        self.trending.as_ref()
     }
 
     #[must_use]
