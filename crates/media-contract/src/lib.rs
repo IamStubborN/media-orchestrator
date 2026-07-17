@@ -14,6 +14,7 @@ mod plex;
 mod release;
 mod search;
 mod tracking;
+mod trending;
 
 pub use actor::{NotifyScopeDto, ProviderDto};
 pub use error::{ApiError, ApiErrorCode};
@@ -42,3 +43,4 @@ pub use tracking::{
     CreateTrackingRequest, EpisodeSnapshotDto, TrackingDto, TrackingListDto, TrackingScopeDto,
     TrackingStateDto,
 };
+pub use trending::{TrendingCategoryDto, TrendingItemDto, TrendingMediaTypeDto, TrendingPageDto};

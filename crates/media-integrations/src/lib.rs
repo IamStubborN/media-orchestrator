@@ -4,4 +4,5 @@ pub mod hermes;
 pub mod plex;
 pub mod prowlarr;
 pub mod qbittorrent;
+pub mod tmdb;
 pub mod tvmaze;

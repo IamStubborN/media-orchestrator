@@ -12,7 +12,7 @@ hex.workspace = true
 hmac.workspace = true
 media-contract = { path = "../media-contract", version = "=0.1.0" }
 media-core = { path = "../media-core", version = "=0.1.0" }
-reqwest = { workspace = true, features = ["form", "multipart"] }
+reqwest = { workspace = true, features = ["form", "multipart", "query"] }
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
