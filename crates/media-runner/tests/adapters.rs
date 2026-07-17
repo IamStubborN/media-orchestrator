@@ -184,10 +184,12 @@ async fn reqwest_adapter_reports_resumed_direct_download_progress() {
             &url,
             &partial,
             4,
-            Some(8),
             filesystem.as_ref(),
             &Active,
-            &reporter,
+            media_runner::TransferProgressContext {
+                total_bytes: Some(8),
+                reporter: &reporter,
+            },
         )
         .await
         .unwrap();

@@ -211,10 +211,12 @@ impl EpisodePipeline {
                                 source_url,
                                 &work.source_partial,
                                 resume_from,
-                                probed_source_bytes,
                                 self.filesystem.as_ref(),
                                 cancellation,
-                                reporter,
+                                crate::TransferProgressContext {
+                                    total_bytes: probed_source_bytes,
+                                    reporter,
+                                },
                             )
                             .await
                         {

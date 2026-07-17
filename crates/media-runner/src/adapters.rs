@@ -282,10 +282,12 @@ impl HttpPort for ReqwestHttpAdapter {
             url,
             partial_path,
             resume_from,
-            None,
             filesystem,
             cancellation,
-            &(),
+            crate::TransferProgressContext {
+                total_bytes: None,
+                reporter: &(),
+            },
         )
         .await
     }
@@ -295,11 +297,14 @@ impl HttpPort for ReqwestHttpAdapter {
         url: &SensitiveUrl,
         partial_path: &Path,
         resume_from: u64,
-        total_bytes: Option<u64>,
         filesystem: &dyn FileSystemPort,
         cancellation: &dyn Cancellation,
-        reporter: &dyn crate::StageReporter,
+        progress: crate::TransferProgressContext<'_>,
     ) -> Result<(), RunnerPortError> {
+        let crate::TransferProgressContext {
+            total_bytes,
+            reporter,
+        } = progress;
         if cancellation.is_cancelled() {
             return Err(RunnerPortError::Cancelled);
         }

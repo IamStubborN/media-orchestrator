@@ -48,6 +48,11 @@ pub struct TransferObservation {
     pub final_observation: bool,
 }
 
+pub struct TransferProgressContext<'a> {
+    pub total_bytes: Option<u64>,
+    pub reporter: &'a dyn StageReporter,
+}
+
 /// Reports the start of a named pipeline sub-stage. These are best-effort
 /// progress milestones with no percentage data; the composition root implements
 /// this to forward them to the runner service as stage-start events.
@@ -112,12 +117,11 @@ pub trait HttpPort: Send + Sync {
         url: &SensitiveUrl,
         partial_path: &Path,
         resume_from: u64,
-        total_bytes: Option<u64>,
         filesystem: &dyn FileSystemPort,
         cancellation: &dyn Cancellation,
-        reporter: &dyn StageReporter,
+        progress: TransferProgressContext<'_>,
     ) -> Result<(), RunnerPortError> {
-        let _ = (total_bytes, reporter);
+        let _ = progress;
         self.download_video(url, partial_path, resume_from, filesystem, cancellation)
             .await
     }
