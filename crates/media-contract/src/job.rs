@@ -55,6 +55,39 @@ pub struct JobDetailDto {
     pub job: JobDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<TransferProgressDto>,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferKindDto {
+    Direct,
+    Hls,
+    Torrent,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct TransferProgressDto {
+    pub kind: TransferKindDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress_percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub downloaded_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_speed_bps: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eta_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seeds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peers: Option<u64>,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -84,7 +117,7 @@ pub struct JobListDto {
 mod tests {
     use super::{
         CreateJobRequest, JobDetailDto, JobDto, JobStateDto, JobSummaryDto, NeedsActionReasonDto,
-        QueueStatusDto,
+        QueueStatusDto, TransferKindDto, TransferProgressDto,
     };
     use crate::{NotifyScopeDto, ProviderDto, PublicId, RunnerLifecycleStateDto};
 
@@ -208,6 +241,7 @@ mod tests {
                 notify_scope: NotifyScopeDto::Initiator,
             },
             current_stage: Some("transcode".to_owned()),
+            progress: None,
         };
 
         let value = serde_json::to_value(&dto).unwrap();
@@ -237,6 +271,7 @@ mod tests {
                 notify_scope: NotifyScopeDto::Family,
             },
             current_stage: None,
+            progress: None,
         };
 
         let value = serde_json::to_value(&dto).unwrap();
@@ -248,6 +283,51 @@ mod tests {
                 "result_ref": "prowlarr:result:7",
                 "state": "queued",
                 "notify_scope": "family"
+            }),
+        );
+        assert_eq!(serde_json::from_value::<JobDetailDto>(value).unwrap(), dto);
+    }
+
+    #[test]
+    fn job_detail_exposes_structured_download_progress() {
+        let dto = JobDetailDto {
+            job: JobDto {
+                id: PublicId::parse("018f3f86-7b4c-7b4f-9b6a-6d62f45bb111").unwrap(),
+                provider: ProviderDto::Prowlarr,
+                result_ref: "prowlarr:result:7".to_owned(),
+                state: JobStateDto::Running,
+                needs_action_reason: None,
+                notify_scope: NotifyScopeDto::Initiator,
+            },
+            current_stage: Some("torrent_monitor".to_owned()),
+            progress: Some(TransferProgressDto {
+                kind: TransferKindDto::Torrent,
+                state: Some("downloading".to_owned()),
+                progress_percent: Some(73),
+                downloaded_bytes: Some(4_402_341_478),
+                total_bytes: Some(6_012_954_214),
+                download_speed_bps: Some(19_293_798),
+                eta_seconds: Some(85),
+                seeds: Some(12),
+                peers: Some(4),
+                updated_at: "2026-07-17T18:23:05Z".to_owned(),
+            }),
+        };
+
+        let value = serde_json::to_value(&dto).unwrap();
+        assert_eq!(
+            value["progress"],
+            serde_json::json!({
+                "kind": "torrent",
+                "state": "downloading",
+                "progress_percent": 73,
+                "downloaded_bytes": 4_402_341_478_u64,
+                "total_bytes": 6_012_954_214_u64,
+                "download_speed_bps": 19_293_798,
+                "eta_seconds": 85,
+                "seeds": 12,
+                "peers": 4,
+                "updated_at": "2026-07-17T18:23:05Z"
             }),
         );
         assert_eq!(serde_json::from_value::<JobDetailDto>(value).unwrap(), dto);

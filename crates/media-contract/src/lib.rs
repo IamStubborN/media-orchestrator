@@ -22,7 +22,7 @@ pub use execution::{CheckpointValueDto, RunnerEventDto, RunnerEventRequest, Runn
 pub use id::PublicId;
 pub use job::{
     CreateJobRequest, JobDetailDto, JobDto, JobListDto, JobStateDto, JobSummaryDto,
-    NeedsActionReasonDto, QueueStatusDto,
+    NeedsActionReasonDto, QueueStatusDto, TransferKindDto, TransferProgressDto,
 };
 pub use lease::LeaseDto;
 pub use lifecycle::{RunnerLifecycleDto, RunnerLifecycleStateDto, UpdateRunnerLifecycleRequest};

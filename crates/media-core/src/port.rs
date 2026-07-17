@@ -38,6 +38,7 @@ pub trait JobStore: Send + Sync {
         Ok(self.find_for_owner(id, owner).await?.map(|job| JobDetail {
             job,
             current_stage: None,
+            progress: None,
         }))
     }
 

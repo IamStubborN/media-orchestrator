@@ -1,6 +1,6 @@
 use media_core::{
     Job, JobId, JobStore, NewJob, OperationKey, PortError, QueueStatus, RunnerLifecycleState,
-    UserId,
+    TransferKind, TransferProgress, UserId,
 };
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, QueryFilter,
@@ -112,22 +112,39 @@ impl JobStore for SeaOrmJobStore {
         // so it is excluded by name; otherwise it would mask the real phase for
         // every single-task (torrent and movie) job. No running phase (queued,
         // publishing, terminal) yields no stage.
-        let current_stage = self
+        let running_stage = self
             .database
             .query_one_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
-                "SELECT s.name FROM job_stages s \
+                "SELECT s.name, s.checkpoint, s.updated_at FROM job_stages s \
                  JOIN job_tasks t ON s.task_id = t.id \
                  WHERE t.job_id = $1 AND s.state = 'running' AND s.name <> 'execution' \
                  ORDER BY t.ordinal DESC, s.ordinal DESC LIMIT 1",
                 [id.into_uuid().into()],
             ))
             .await
-            .map_err(map_database_error)?
-            .map(|row| row.try_get::<String>("", "name"))
-            .transpose()
             .map_err(map_database_error)?;
-        Ok(Some(media_core::JobDetail { job, current_stage }))
+        let (current_stage, progress) = match running_stage {
+            Some(row) => {
+                let name = row
+                    .try_get::<String>("", "name")
+                    .map_err(map_database_error)?;
+                let checkpoint = row
+                    .try_get::<serde_json::Value>("", "checkpoint")
+                    .map_err(map_database_error)?;
+                let updated_at = row
+                    .try_get::<time::OffsetDateTime>("", "updated_at")
+                    .map_err(map_database_error)?;
+                let progress = parse_transfer_progress(&name, &checkpoint, updated_at);
+                (Some(name), progress)
+            }
+            None => (None, None),
+        };
+        Ok(Some(media_core::JobDetail {
+            job,
+            current_stage,
+            progress,
+        }))
     }
 
     async fn list_for_owner(&self, owner: UserId) -> Result<Vec<Job>, PortError> {
@@ -410,6 +427,75 @@ impl JobStore for SeaOrmJobStore {
             blocked_reason,
         })
     }
+}
+
+fn parse_transfer_progress(
+    stage: &str,
+    checkpoint: &serde_json::Value,
+    updated_at: time::OffsetDateTime,
+) -> Option<TransferProgress> {
+    if !matches!(stage, "download" | "torrent_monitor") {
+        return None;
+    }
+    let checkpoint = checkpoint.as_object()?;
+    let kind = match checkpoint.get("kind")?.as_str()? {
+        "direct" => TransferKind::Direct,
+        "hls" => TransferKind::Hls,
+        "torrent" => TransferKind::Torrent,
+        _ => return None,
+    };
+    let state = optional_state(checkpoint.get("state"))?;
+    let progress_percent = optional_unsigned(checkpoint.get("progress_percent"))?
+        .map(u8::try_from)
+        .transpose()
+        .ok()?
+        .filter(|value| *value <= 100);
+    if checkpoint.contains_key("progress_percent") && progress_percent.is_none() {
+        return None;
+    }
+    let downloaded_bytes = optional_unsigned(checkpoint.get("downloaded_bytes"))?;
+    let total_bytes = optional_unsigned(checkpoint.get("total_bytes"))?;
+    if downloaded_bytes
+        .zip(total_bytes)
+        .is_some_and(|(downloaded, total)| downloaded > total)
+    {
+        return None;
+    }
+    Some(TransferProgress {
+        kind,
+        state,
+        progress_percent,
+        downloaded_bytes,
+        total_bytes,
+        download_speed_bps: optional_unsigned(checkpoint.get("download_speed_bps"))?,
+        eta_seconds: optional_unsigned(checkpoint.get("eta_seconds"))?,
+        seeds: optional_unsigned(checkpoint.get("seeds"))?,
+        peers: optional_unsigned(checkpoint.get("peers"))?,
+        updated_at,
+    })
+}
+
+fn optional_unsigned(value: Option<&serde_json::Value>) -> Option<Option<u64>> {
+    match value {
+        Some(value) => value.as_u64().map(Some),
+        None => Some(None),
+    }
+}
+
+fn optional_state(value: Option<&serde_json::Value>) -> Option<Option<String>> {
+    let Some(value) = value else {
+        return Some(None);
+    };
+    let value = value.as_str()?;
+    if value.is_empty()
+        || value.len() > 32
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return None;
+    }
+    Some(Some(value.to_owned()))
 }
 
 pub(crate) async fn insert_outbox(

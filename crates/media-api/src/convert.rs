@@ -3,7 +3,8 @@ use media_contract::{
     JobDto, JobStateDto, LeaseDto, NeedsActionReasonDto, NotifyScopeDto, ProviderDto, PublicId,
     QueueStatusDto, ReleaseCandidateDto, ReleaseLifecycleDto, ReleasePrecisionDto,
     ReleaseQueryResponse, RunnerEventDto, RunnerEventRequest, RunnerLifecycleStateDto,
-    ScheduledEpisodeDto, TrackingDto, TrackingScopeDto, TrackingStateDto,
+    ScheduledEpisodeDto, TrackingDto, TrackingScopeDto, TrackingStateDto, TransferKindDto,
+    TransferProgressDto,
 };
 use media_core::{
     CheckpointValue, EpisodeSnapshot, Job, JobDetail, JobEvent, JobEventId,
@@ -287,6 +288,28 @@ pub(crate) fn job_detail(detail: &JobDetail) -> JobDetailDto {
     JobDetailDto {
         job: job(&detail.job),
         current_stage: detail.current_stage.clone(),
+        progress: detail
+            .progress
+            .as_ref()
+            .map(|progress| TransferProgressDto {
+                kind: match progress.kind {
+                    media_core::TransferKind::Direct => TransferKindDto::Direct,
+                    media_core::TransferKind::Hls => TransferKindDto::Hls,
+                    media_core::TransferKind::Torrent => TransferKindDto::Torrent,
+                },
+                state: progress.state.clone(),
+                progress_percent: progress.progress_percent,
+                downloaded_bytes: progress.downloaded_bytes,
+                total_bytes: progress.total_bytes,
+                download_speed_bps: progress.download_speed_bps,
+                eta_seconds: progress.eta_seconds,
+                seeds: progress.seeds,
+                peers: progress.peers,
+                updated_at: progress
+                    .updated_at
+                    .format(&Rfc3339)
+                    .expect("progress timestamps format as RFC3339"),
+            }),
     }
 }
 

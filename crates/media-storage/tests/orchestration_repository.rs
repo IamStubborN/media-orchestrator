@@ -1654,7 +1654,7 @@ async fn active_cancel_is_cooperative_and_runner_acknowledgement_releases_the_le
 
 #[tokio::test]
 async fn job_detail_reports_the_running_stage_and_clears_it_when_idle() {
-    let (_test_db, jobs, leases) = setup().await;
+    let (test_db, jobs, leases) = setup().await;
     let created = jobs
         .create(operation_key(), new_job("rezka://detail-stage"))
         .await
@@ -1677,6 +1677,47 @@ async fn job_detail_reports_the_running_stage_and_clears_it_when_idle() {
             .await
             .unwrap();
     }
+    leases
+        .report_event(
+            operation_key(),
+            lease.lease_id(),
+            RUNNER_CLIENT_ID,
+            JobEvent::stage_checkpoint(
+                JobEventId::new(),
+                0,
+                "download".to_owned(),
+                0,
+                [
+                    (
+                        "kind".to_owned(),
+                        CheckpointValue::String("direct".to_owned()),
+                    ),
+                    (
+                        "state".to_owned(),
+                        CheckpointValue::String("downloading".to_owned()),
+                    ),
+                    ("progress_percent".to_owned(), CheckpointValue::Unsigned(73)),
+                    (
+                        "downloaded_bytes".to_owned(),
+                        CheckpointValue::Unsigned(4_402_341_478),
+                    ),
+                    (
+                        "total_bytes".to_owned(),
+                        CheckpointValue::Unsigned(6_012_954_214),
+                    ),
+                    (
+                        "download_speed_bps".to_owned(),
+                        CheckpointValue::Unsigned(19_293_798),
+                    ),
+                    ("eta_seconds".to_owned(), CheckpointValue::Unsigned(85)),
+                ]
+                .into_iter()
+                .collect(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
 
     let detail = jobs
         .find_detail_for_owner(created.id(), PRIMARY_USER_ID)
@@ -1685,6 +1726,29 @@ async fn job_detail_reports_the_running_stage_and_clears_it_when_idle() {
         .unwrap();
     assert_eq!(detail.current_stage.as_deref(), Some("download"));
     assert_eq!(detail.job.state(), JobState::Running);
+    let progress = detail.progress.expect("running download progress");
+    assert_eq!(progress.progress_percent, Some(73));
+    assert_eq!(progress.downloaded_bytes, Some(4_402_341_478));
+    assert_eq!(progress.total_bytes, Some(6_012_954_214));
+    assert_eq!(progress.download_speed_bps, Some(19_293_798));
+    assert_eq!(progress.eta_seconds, Some(85));
+
+    test_db
+        .connection()
+        .execute_unprepared(
+            "UPDATE job_stages SET checkpoint = \
+             '{\"kind\":\"direct\",\"progress_percent\":101}'::jsonb \
+             WHERE name = 'download'",
+        )
+        .await
+        .unwrap();
+    let malformed = jobs
+        .find_detail_for_owner(created.id(), PRIMARY_USER_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(malformed.current_stage.as_deref(), Some("download"));
+    assert_eq!(malformed.progress, None, "invalid progress is ignored");
 
     // Owner isolation still applies to the detail read.
     assert!(

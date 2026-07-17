@@ -99,6 +99,27 @@ pub struct QueueStatus {
     pub blocked_reason: Option<String>,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum TransferKind {
+    Direct,
+    Hls,
+    Torrent,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct TransferProgress {
+    pub kind: TransferKind,
+    pub state: Option<String>,
+    pub progress_percent: Option<u8>,
+    pub downloaded_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
+    pub download_speed_bps: Option<u64>,
+    pub eta_seconds: Option<u64>,
+    pub seeds: Option<u64>,
+    pub peers: Option<u64>,
+    pub updated_at: time::OffsetDateTime,
+}
+
 /// A job together with its currently running processing stage, if any. This is a
 /// read model for the client-facing detail endpoint; `current_stage` is the name
 /// of the running stage (for example the download or transcode phase) and is
@@ -107,6 +128,7 @@ pub struct QueueStatus {
 pub struct JobDetail {
     pub job: Job,
     pub current_stage: Option<String>,
+    pub progress: Option<TransferProgress>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

@@ -38,7 +38,8 @@ pub use identity::{
 };
 pub use job::{
     Job, JobDetail, JobLease, JobState, JobTransitionError, JobValidationError,
-    MAX_RESULT_REF_BYTES, NewJob, NotifyScope, Provider, QueueStatus,
+    MAX_RESULT_REF_BYTES, NewJob, NotifyScope, Provider, QueueStatus, TransferKind,
+    TransferProgress,
 };
 pub use lifecycle::{RunnerLifecycle, RunnerLifecycleState, RunnerLifecycleUpdate};
 pub use metrics::{MetricsSnapshot, MetricsSource};
