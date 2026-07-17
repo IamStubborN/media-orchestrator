@@ -97,6 +97,35 @@ pub fn job(value: &Value, action: Option<&str>) -> String {
     push_pair(&mut pairs, "Result", get_str(value, "result_ref"));
     push_pair(&mut pairs, "Notify", get_str(value, "notify_scope"));
     push_pair(&mut pairs, "Stage", job_stage(value));
+    if let Some(progress) = value
+        .get("progress")
+        .filter(|progress| progress.is_object())
+    {
+        push_pair(
+            &mut pairs,
+            "Progress",
+            get_u64(progress, "progress_percent").map(format_progress),
+        );
+        push_pair(&mut pairs, "Downloaded", downloaded_summary(progress));
+        push_pair(
+            &mut pairs,
+            "Speed",
+            get_u64(progress, "download_speed_bps")
+                .map(|bytes| format!("{}/s", format_size(bytes))),
+        );
+        push_pair(
+            &mut pairs,
+            "ETA",
+            get_u64(progress, "eta_seconds").map(format_duration),
+        );
+        push_pair(&mut pairs, "Seeds/peers", swarm_summary(progress));
+        push_pair(&mut pairs, "Source state", get_str(progress, "state"));
+        push_pair(
+            &mut pairs,
+            "Progress updated",
+            get_str(progress, "updated_at"),
+        );
+    }
     push_pair(&mut pairs, "Attempts", get_scalar(value, "attempts"));
     push_pair(&mut pairs, "Created", get_str(value, "created_at"));
     push_pair(&mut pairs, "Updated", get_str(value, "updated_at"));
@@ -469,6 +498,48 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+fn format_progress(percent: u64) -> String {
+    let percent = percent.min(100);
+    let filled = ((percent + 5) / 10) as usize;
+    format!(
+        "[{}{}] {percent}%",
+        "#".repeat(filled),
+        "-".repeat(10 - filled)
+    )
+}
+
+fn downloaded_summary(progress: &Value) -> Option<String> {
+    let downloaded = get_u64(progress, "downloaded_bytes")?;
+    Some(match get_u64(progress, "total_bytes") {
+        Some(total) => format!("{} / {}", format_size(downloaded), format_size(total)),
+        None => format_size(downloaded),
+    })
+}
+
+fn swarm_summary(progress: &Value) -> Option<String> {
+    let seeds = get_u64(progress, "seeds");
+    let peers = get_u64(progress, "peers");
+    match (seeds, peers) {
+        (Some(seeds), Some(peers)) => Some(format!("{seeds}/{peers}")),
+        (Some(seeds), None) => Some(format!("{seeds}/?")),
+        (None, Some(peers)) => Some(format!("?/{peers}")),
+        (None, None) => None,
+    }
+}
+
+fn format_duration(seconds: u64) -> String {
+    let hours = seconds / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let seconds = seconds % 60;
+    if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
 fn translations_summary(result: &Value) -> Option<String> {
     let translations = result.get("translations")?.as_array()?;
     if translations.is_empty() {
@@ -633,6 +704,37 @@ mod tests {
         assert!(rendered.contains("Attempts: 2"));
         assert!(rendered.contains("Created:  2026-07-12T10:00:00Z"));
         assert!(rendered.contains("Updated:  2026-07-12T10:05:00Z"));
+    }
+
+    #[test]
+    fn job_renders_detailed_transfer_progress() {
+        let rendered = job(
+            &json!({
+                "id": "job-1",
+                "state": "running",
+                "progress": {
+                    "kind": "torrent",
+                    "state": "downloading",
+                    "progress_percent": 73,
+                    "downloaded_bytes": 4402341478_u64,
+                    "total_bytes": 6012954214_u64,
+                    "download_speed_bps": 19293798_u64,
+                    "eta_seconds": 85,
+                    "seeds": 12,
+                    "peers": 4,
+                    "updated_at": "2026-07-18T10:05:00Z"
+                }
+            }),
+            None,
+        );
+
+        assert!(rendered.contains("Progress:         [#######---] 73%"));
+        assert!(rendered.contains("Downloaded:       4.1 GiB / 5.6 GiB"));
+        assert!(rendered.contains("Speed:            18.4 MiB/s"));
+        assert!(rendered.contains("ETA:              1m 25s"));
+        assert!(rendered.contains("Seeds/peers:      12/4"));
+        assert!(rendered.contains("Source state:     downloading"));
+        assert!(rendered.contains("Progress updated: 2026-07-18T10:05:00Z"));
     }
 
     #[test]
