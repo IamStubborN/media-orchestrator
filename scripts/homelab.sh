@@ -80,6 +80,8 @@ prepare_hermes_cli() {
     service_image=$1
     docker_host=$2
     media_version=0.1.0
+    hermes_revision=$(git -C "$hermes_root" rev-parse --short HEAD)
+    hermes_image=hermes-home:local-$hermes_revision
     artifact=$hermes_root/artifacts/media-$media_version-linux-amd64
     container=$(DOCKER_HOST=$docker_host docker create "$service_image")
     trap 'DOCKER_HOST=$docker_host docker rm -f "$container" >/dev/null 2>&1 || true' EXIT HUP INT TERM
@@ -95,7 +97,7 @@ prepare_hermes_cli() {
     scp "$hermes_root/scripts/patch_hermes_telegram.py" "$host:$hermes_remote_root/scripts/patch_hermes_telegram.py.next" >/dev/null
     scp "$hermes_root/shared/skills/media/SKILL.md" "$host:$hermes_remote_root/shared/skills/media/SKILL.md.next" >/dev/null
     scp "$artifact" "$host:$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next" >/dev/null
-    remote "set -eu; install -m 0644 '$hermes_remote_root/Dockerfile.next' '$hermes_remote_root/Dockerfile'; rm '$hermes_remote_root/Dockerfile.next'; install -m 0755 '$hermes_remote_root/scripts/hermes-home-entrypoint.next' '$hermes_remote_root/scripts/hermes-home-entrypoint'; rm '$hermes_remote_root/scripts/hermes-home-entrypoint.next'; install -m 0755 '$hermes_remote_root/scripts/hermes-media.next' '$hermes_remote_root/scripts/hermes-media'; rm '$hermes_remote_root/scripts/hermes-media.next'; install -m 0755 '$hermes_remote_root/scripts/patch_hermes_telegram.py.next' '$hermes_remote_root/scripts/patch_hermes_telegram.py'; rm '$hermes_remote_root/scripts/patch_hermes_telegram.py.next'; install -m 0644 '$hermes_remote_root/shared/skills/media/SKILL.md.next' '$hermes_remote_root/shared/skills/media/SKILL.md'; rm '$hermes_remote_root/shared/skills/media/SKILL.md.next'; install -m 0755 '$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next' '$hermes_remote_root/artifacts/media-$media_version-linux-amd64'; rm '$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next'; sed -i 's#^MEDIA_CLI_SHA256=.*#MEDIA_CLI_SHA256=$checksum#' '$hermes_remote_root/.env'; cd '$hermes_remote_root'; docker compose --env-file .env build hermes-primary"
+    remote "set -eu; install -m 0644 '$hermes_remote_root/Dockerfile.next' '$hermes_remote_root/Dockerfile'; rm '$hermes_remote_root/Dockerfile.next'; install -m 0755 '$hermes_remote_root/scripts/hermes-home-entrypoint.next' '$hermes_remote_root/scripts/hermes-home-entrypoint'; rm '$hermes_remote_root/scripts/hermes-home-entrypoint.next'; install -m 0755 '$hermes_remote_root/scripts/hermes-media.next' '$hermes_remote_root/scripts/hermes-media'; rm '$hermes_remote_root/scripts/hermes-media.next'; install -m 0755 '$hermes_remote_root/scripts/patch_hermes_telegram.py.next' '$hermes_remote_root/scripts/patch_hermes_telegram.py'; rm '$hermes_remote_root/scripts/patch_hermes_telegram.py.next'; install -m 0644 '$hermes_remote_root/shared/skills/media/SKILL.md.next' '$hermes_remote_root/shared/skills/media/SKILL.md'; rm '$hermes_remote_root/shared/skills/media/SKILL.md.next'; install -m 0755 '$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next' '$hermes_remote_root/artifacts/media-$media_version-linux-amd64'; rm '$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next'; sed -i 's#^MEDIA_CLI_SHA256=.*#MEDIA_CLI_SHA256=$checksum#; s#^HERMES_HOME_IMAGE=.*#HERMES_HOME_IMAGE=$hermes_image#' '$hermes_remote_root/.env'; cd '$hermes_remote_root'; docker compose --env-file .env build hermes-primary"
 }
 
 replace_hermes_agents() {
