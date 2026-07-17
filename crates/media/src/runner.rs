@@ -168,6 +168,38 @@ impl RunnerControl {
         Ok(())
     }
 
+    /// Persists a best-effort progress observation for a running stage. A
+    /// checkpoint transport failure is intentionally swallowed so telemetry
+    /// can never interrupt the transfer it describes.
+    pub async fn stage_checkpoint(
+        &self,
+        task_ordinal: u32,
+        name: &str,
+        stage_ordinal: u32,
+        checkpoint: std::collections::BTreeMap<String, CheckpointValueDto>,
+    ) -> Result<(), RunnerError> {
+        if let Err(error) = self
+            .api
+            .report(
+                &self.lease,
+                RunnerEventDto::StageCheckpoint {
+                    task_ordinal,
+                    stage_name: name.to_owned(),
+                    stage_ordinal,
+                    checkpoint,
+                },
+            )
+            .await
+        {
+            tracing::warn!(
+                ?error,
+                stage_name = name,
+                "failed to report stage checkpoint"
+            );
+        }
+        Ok(())
+    }
+
     pub async fn stage_failed(
         &self,
         task_ordinal: u32,
@@ -235,6 +267,33 @@ const _: () = assert!(EXECUTION_STAGE_ORDINAL > 3);
 /// for the same window. The window is far longer than any job can run, so an
 /// in-progress download or transcode is never mistaken for an orphan.
 const STAGING_RETENTION_WINDOW: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const PROGRESS_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5);
+
+#[derive(Default)]
+struct ProgressCheckpointGate {
+    last_reported_at: Option<tokio::time::Instant>,
+    last_state: Option<String>,
+}
+
+impl ProgressCheckpointGate {
+    fn should_report(
+        &mut self,
+        now: tokio::time::Instant,
+        state: &str,
+        final_observation: bool,
+    ) -> bool {
+        let state_changed = self.last_state.as_deref() != Some(state);
+        let interval_elapsed = self
+            .last_reported_at
+            .is_none_or(|last| now.duration_since(last) >= PROGRESS_CHECKPOINT_INTERVAL);
+        if !(final_observation || state_changed || interval_elapsed) {
+            return false;
+        }
+        self.last_reported_at = Some(now);
+        self.last_state = Some(state.to_owned());
+        true
+    }
+}
 
 /// Adapts [`RunnerControl`] to the pipeline's [`media_runner::StageReporter`]
 /// port, binding each reported sub-stage to the current episode's task ordinal.
@@ -815,6 +874,7 @@ impl MediaJobExecutor {
         // qBittorrent 5.2 can acknowledge an add request before the torrent is
         // visible through /torrents/info. Keep that visibility grace bounded.
         let visibility_deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut progress_gate = ProgressCheckpointGate::default();
         loop {
             if control.is_cancelled() {
                 return Ok(ExecutionOutcome::Cancelled);
@@ -834,6 +894,17 @@ impl MediaJobExecutor {
                     return Err(RunnerError::Execution);
                 }
             };
+            let state = torrent_state_name(&snapshot.state);
+            let final_observation = matches!(
+                snapshot.state,
+                media_integrations::qbittorrent::TorrentState::Complete
+                    | media_integrations::qbittorrent::TorrentState::Error
+            );
+            if progress_gate.should_report(tokio::time::Instant::now(), state, final_observation) {
+                control
+                    .stage_checkpoint(0, "torrent_monitor", 1, torrent_checkpoint(&snapshot))
+                    .await?;
+            }
             match snapshot.state {
                 media_integrations::qbittorrent::TorrentState::Complete => break,
                 media_integrations::qbittorrent::TorrentState::Error => {
@@ -938,6 +1009,66 @@ impl MediaJobExecutor {
         }
         let _ = request.title;
         Ok(aggregate)
+    }
+}
+
+fn torrent_checkpoint(
+    snapshot: &media_integrations::qbittorrent::TorrentSnapshot,
+) -> std::collections::BTreeMap<String, CheckpointValueDto> {
+    let mut checkpoint = std::collections::BTreeMap::from([
+        (
+            "kind".to_owned(),
+            CheckpointValueDto::String("torrent".to_owned()),
+        ),
+        (
+            "state".to_owned(),
+            CheckpointValueDto::String(torrent_state_name(&snapshot.state).to_owned()),
+        ),
+        (
+            "progress_percent".to_owned(),
+            CheckpointValueDto::Unsigned(u64::from(progress_percent(snapshot.progress))),
+        ),
+    ]);
+    insert_checkpoint_value(
+        &mut checkpoint,
+        "downloaded_bytes",
+        snapshot.downloaded_bytes,
+    );
+    insert_checkpoint_value(&mut checkpoint, "total_bytes", snapshot.total_bytes);
+    insert_checkpoint_value(
+        &mut checkpoint,
+        "download_speed_bps",
+        snapshot.download_speed_bps,
+    );
+    insert_checkpoint_value(&mut checkpoint, "eta_seconds", snapshot.eta_seconds);
+    insert_checkpoint_value(&mut checkpoint, "seeds", snapshot.seeds);
+    insert_checkpoint_value(&mut checkpoint, "peers", snapshot.peers);
+    checkpoint
+}
+
+fn insert_checkpoint_value(
+    checkpoint: &mut std::collections::BTreeMap<String, CheckpointValueDto>,
+    name: &str,
+    value: Option<u64>,
+) {
+    if let Some(value) = value {
+        checkpoint.insert(name.to_owned(), CheckpointValueDto::Unsigned(value));
+    }
+}
+
+fn progress_percent(progress: f64) -> u8 {
+    (progress.clamp(0.0, 1.0) * 100.0).round() as u8
+}
+
+fn torrent_state_name(state: &media_integrations::qbittorrent::TorrentState) -> &str {
+    match state {
+        media_integrations::qbittorrent::TorrentState::Downloading => "downloading",
+        media_integrations::qbittorrent::TorrentState::Checking => "checking",
+        media_integrations::qbittorrent::TorrentState::Queued => "queued",
+        media_integrations::qbittorrent::TorrentState::Stalled => "stalled",
+        media_integrations::qbittorrent::TorrentState::Complete => "complete",
+        media_integrations::qbittorrent::TorrentState::Error => "error",
+        media_integrations::qbittorrent::TorrentState::Unknown(_) => "unknown",
     }
 }
 
@@ -1646,9 +1777,9 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        ExecutionOutcome, canonical_movie_name, combine_episode_outcome, highest_standard_variant,
-        matching_episode_videos, parse_episode_coordinates, rezka_audio_language,
-        rezka_final_video_path,
+        ExecutionOutcome, ProgressCheckpointGate, canonical_movie_name, combine_episode_outcome,
+        highest_standard_variant, matching_episode_videos, parse_episode_coordinates,
+        rezka_audio_language, rezka_final_video_path,
     };
 
     #[test]
@@ -1765,5 +1896,33 @@ mod tests {
                 ("Show.S02E02.mkv".to_owned(), (2, 2)),
             ]
         );
+    }
+
+    #[test]
+    fn progress_gate_reports_first_interval_state_change_and_final_observations() {
+        let started = tokio::time::Instant::now();
+        let mut gate = ProgressCheckpointGate::default();
+
+        assert!(gate.should_report(started, "downloading", false));
+        assert!(!gate.should_report(
+            started + std::time::Duration::from_secs(4),
+            "downloading",
+            false
+        ));
+        assert!(gate.should_report(
+            started + std::time::Duration::from_secs(4),
+            "stalled",
+            false
+        ));
+        assert!(gate.should_report(
+            started + std::time::Duration::from_secs(9),
+            "stalled",
+            false
+        ));
+        assert!(gate.should_report(
+            started + std::time::Duration::from_secs(10),
+            "complete",
+            true
+        ));
     }
 }

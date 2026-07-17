@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -11,8 +11,8 @@ use media::runner::{
     ExecutionOutcome, JobExecutor, RunnerApi, RunnerControl, run_loop, run_single_iteration,
 };
 use media_contract::{
-    ExecutionSelectionDto, JobDto, JobStateDto, LeaseDto, NotifyScopeDto, ProviderDto,
-    RunnerEventDto,
+    CheckpointValueDto, ExecutionSelectionDto, JobDto, JobStateDto, LeaseDto, NotifyScopeDto,
+    ProviderDto, RunnerEventDto,
 };
 
 struct FakeApi {
@@ -216,6 +216,17 @@ impl JobExecutor for RecordingExecutor {
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_active.fetch_max(active, Ordering::SeqCst);
         control.stage_started(0, "resolve", 0).await?;
+        control
+            .stage_checkpoint(
+                0,
+                "resolve",
+                0,
+                BTreeMap::from([(
+                    "downloaded_bytes".to_owned(),
+                    CheckpointValueDto::Unsigned(1024),
+                )]),
+            )
+            .await?;
         tokio::time::sleep(Duration::from_millis(5)).await;
         self.active.fetch_sub(1, Ordering::SeqCst);
         Ok(ExecutionOutcome::Completed)
@@ -279,6 +290,11 @@ async fn loop_leases_heartbeats_reports_stages_and_runs_one_active_job() {
     let events = api.events.lock().unwrap();
     assert!(matches!(events.first(), Some(RunnerEventDto::Started)));
     assert!(events.iter().any(|event| matches!(event, RunnerEventDto::StageStarted { stage_name, .. } if stage_name == "resolve")));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RunnerEventDto::StageCheckpoint { stage_name, checkpoint, .. }
+            if stage_name == "resolve" && checkpoint.get("downloaded_bytes") == Some(&CheckpointValueDto::Unsigned(1024))
+    )));
     let transitions = events
         .iter()
         .filter_map(|event| match event {
@@ -541,9 +557,9 @@ impl RunnerApi for ProgressFailingApi {
     ) -> Result<media_contract::JobDto, media::runner::RunnerError> {
         self.events.lock().unwrap().push(event.clone());
         match event {
-            RunnerEventDto::StageStarted { .. } | RunnerEventDto::StageCompleted { .. } => {
-                Err(media::runner::RunnerError::Service)
-            }
+            RunnerEventDto::StageStarted { .. }
+            | RunnerEventDto::StageCheckpoint { .. }
+            | RunnerEventDto::StageCompleted { .. } => Err(media::runner::RunnerError::Service),
             RunnerEventDto::JobTransition { state, .. } => {
                 let mut job = lease.job.clone();
                 job.state = state;

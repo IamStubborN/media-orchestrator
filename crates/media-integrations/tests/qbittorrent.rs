@@ -245,6 +245,13 @@ async fn an_existing_exact_torrent_is_reused_without_duplicate_submission() {
                 "state": "downloading",
                 "progress": 0.25,
                 "amount_left": 300,
+                "downloaded": 100,
+                "completed": 100,
+                "size": 400,
+                "dlspeed": 50,
+                "eta": 6,
+                "num_seeds": 12,
+                "num_leechs": 4,
                 "content_path": "/downloads/media-tv/release",
                 "save_path": "/downloads/media-tv",
                 "completion_on": -1
@@ -263,6 +270,13 @@ async fn an_existing_exact_torrent_is_reused_without_duplicate_submission() {
 
     let handle = client.submit_selected(selection).await.unwrap();
     assert_eq!(handle.category, "media-tv");
+    let snapshot = client.monitor(&handle).await.unwrap();
+    assert_eq!(snapshot.downloaded_bytes, Some(100));
+    assert_eq!(snapshot.total_bytes, Some(400));
+    assert_eq!(snapshot.download_speed_bps, Some(50));
+    assert_eq!(snapshot.eta_seconds, Some(6));
+    assert_eq!(snapshot.seeds, Some(12));
+    assert_eq!(snapshot.peers, Some(4));
     assert!(
         server
             .received_requests()
@@ -425,6 +439,12 @@ async fn monitoring_and_path_discovery_are_read_only() {
                 "state": "uploading",
                 "progress": 1.0,
                 "amount_left": 0,
+                "downloaded": -1,
+                "size": -1,
+                "dlspeed": -1,
+                "eta": 8640000,
+                "num_seeds": -1,
+                "num_leechs": -1,
                 "content_path": "/downloads/media-tv/Example Show",
                 "save_path": "/downloads/media-tv/",
                 "completion_on": 1770000000
@@ -454,6 +474,12 @@ async fn monitoring_and_path_discovery_are_read_only() {
     let snapshot = client.monitor(&handle).await.unwrap();
     assert_eq!(snapshot.state, TorrentState::Complete);
     assert_eq!(snapshot.progress, 1.0);
+    assert_eq!(snapshot.downloaded_bytes, None);
+    assert_eq!(snapshot.total_bytes, None);
+    assert_eq!(snapshot.download_speed_bps, None);
+    assert_eq!(snapshot.eta_seconds, None);
+    assert_eq!(snapshot.seeds, None);
+    assert_eq!(snapshot.peers, None);
     assert_eq!(
         snapshot.content_path,
         Path::new("/downloads/media-tv/Example Show")

@@ -237,6 +237,12 @@ pub struct TorrentSnapshot {
     pub state: TorrentState,
     pub progress: f64,
     pub amount_left: u64,
+    pub downloaded_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
+    pub download_speed_bps: Option<u64>,
+    pub eta_seconds: Option<u64>,
+    pub seeds: Option<u64>,
+    pub peers: Option<u64>,
     pub content_path: PathBuf,
     pub save_path: PathBuf,
     pub completion_on: Option<i64>,
@@ -511,6 +517,13 @@ impl QbittorrentClient {
             state,
             progress: torrent.progress,
             amount_left: torrent.amount_left,
+            downloaded_bytes: non_negative(torrent.completed)
+                .or_else(|| non_negative(torrent.downloaded)),
+            total_bytes: non_negative(torrent.size),
+            download_speed_bps: non_negative(torrent.dlspeed),
+            eta_seconds: non_negative(torrent.eta).filter(|seconds| *seconds < 8_640_000),
+            seeds: non_negative(torrent.num_seeds),
+            peers: non_negative(torrent.num_leechs),
             content_path: PathBuf::from(torrent.content_path),
             save_path: PathBuf::from(torrent.save_path),
             completion_on: (torrent.completion_on > 0).then_some(torrent.completion_on),
@@ -635,10 +648,32 @@ struct RawTorrent {
     state: String,
     progress: f64,
     amount_left: u64,
+    #[serde(default = "unknown_provider_integer")]
+    downloaded: i64,
+    #[serde(default = "unknown_provider_integer")]
+    completed: i64,
+    #[serde(default = "unknown_provider_integer")]
+    size: i64,
+    #[serde(default = "unknown_provider_integer")]
+    dlspeed: i64,
+    #[serde(default = "unknown_provider_integer")]
+    eta: i64,
+    #[serde(default = "unknown_provider_integer")]
+    num_seeds: i64,
+    #[serde(default = "unknown_provider_integer")]
+    num_leechs: i64,
     content_path: String,
     save_path: String,
     #[serde(default)]
     completion_on: i64,
+}
+
+const fn unknown_provider_integer() -> i64 {
+    -1
+}
+
+fn non_negative(value: i64) -> Option<u64> {
+    u64::try_from(value).ok()
 }
 
 #[derive(Deserialize)]
