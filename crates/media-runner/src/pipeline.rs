@@ -164,18 +164,12 @@ impl EpisodePipeline {
                 .source_url
                 .as_ref()
                 .ok_or(RunnerPortError::InvalidWork)?;
-            let source_bytes = match work.source_kind {
-                VideoSourceKind::Mp4 => self
-                    .http
-                    .probe_video_size(source_url)
-                    .await
-                    .unwrap_or_else(|_| {
-                        estimate_unknown_source_bytes(work.expected_duration_seconds)
-                    }),
-                VideoSourceKind::Hls => {
-                    estimate_unknown_source_bytes(work.expected_duration_seconds)
-                }
+            let probed_source_bytes = match work.source_kind {
+                VideoSourceKind::Mp4 => self.http.probe_video_size(source_url).await.ok(),
+                VideoSourceKind::Hls => None,
             };
+            let source_bytes = probed_source_bytes
+                .unwrap_or_else(|| estimate_unknown_source_bytes(work.expected_duration_seconds));
             self.filesystem
                 .create_dir_all(&work.staging_directory)
                 .await?;
@@ -213,12 +207,14 @@ impl EpisodePipeline {
                         reporter.stage_started("download").await;
                         if let Err(error) = self
                             .http
-                            .download_video(
+                            .download_video_with_progress(
                                 source_url,
                                 &work.source_partial,
                                 resume_from,
+                                probed_source_bytes,
                                 self.filesystem.as_ref(),
                                 cancellation,
+                                reporter,
                             )
                             .await
                         {
@@ -232,7 +228,11 @@ impl EpisodePipeline {
                     let command = build_hls_ingest_command(source_url, &work.source_partial)
                         .map_err(|_| RunnerPortError::InvalidWork)?;
                     reporter.stage_started("download").await;
-                    if let Err(error) = self.process.run(&command, cancellation).await {
+                    if let Err(error) = self
+                        .process
+                        .run_with_progress(&command, &work.source_partial, reporter, cancellation)
+                        .await
+                    {
                         return cancellation_outcome(error);
                     }
                     reporter.stage_completed("download").await;

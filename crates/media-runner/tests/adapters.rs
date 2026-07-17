@@ -1,9 +1,14 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
+use async_trait::async_trait;
 use media_runner::{
     Cancellation, FileSystemPort, HttpPort, HttpRunnerServiceAdapter, PlexCheck, PlexExpectation,
     ProcessPort, ReqwestHttpAdapter, RunnerPortError, RunnerServicePort, SensitiveUrl,
-    StorageRoots, TokioFileSystem, TokioProcessAdapter,
+    StageReporter, StorageRoots, TokioFileSystem, TokioProcessAdapter, TransferObservation,
+    TransferSource, build_hls_ingest_command,
 };
 use secrecy::SecretString;
 use tempfile::tempdir;
@@ -17,6 +22,21 @@ struct Active;
 impl Cancellation for Active {
     fn is_cancelled(&self) -> bool {
         false
+    }
+}
+
+#[derive(Default)]
+struct ProgressRecorder {
+    observations: Mutex<Vec<TransferObservation>>,
+}
+
+#[async_trait]
+impl StageReporter for ProgressRecorder {
+    async fn stage_started(&self, _stage_name: &str) {}
+    async fn stage_completed(&self, _stage_name: &str) {}
+
+    async fn stage_progress(&self, _stage_name: &str, observation: TransferObservation) {
+        self.observations.lock().unwrap().push(observation);
     }
 }
 
@@ -136,6 +156,49 @@ async fn reqwest_adapter_resumes_only_from_matching_content_range() {
         filesystem.read(&partial).await.unwrap().unwrap(),
         b"abcdefgh"
     );
+}
+
+#[tokio::test]
+async fn reqwest_adapter_reports_resumed_direct_download_progress() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/video"))
+        .and(header("range", "bytes=4-"))
+        .respond_with(
+            ResponseTemplate::new(206)
+                .insert_header("content-range", "bytes 4-7/8")
+                .set_body_bytes(b"efgh"),
+        )
+        .mount(&server)
+        .await;
+    let temporary = tempdir().unwrap();
+    let partial = temporary.path().join("video.partial");
+    let filesystem: Arc<dyn FileSystemPort> = Arc::new(TokioFileSystem);
+    filesystem.write_atomic(&partial, b"abcd").await.unwrap();
+    let adapter = ReqwestHttpAdapter::new(std::time::Duration::from_secs(5)).unwrap();
+    let url = SensitiveUrl::parse(&format!("{}/video", server.uri()), "video").unwrap();
+    let reporter = ProgressRecorder::default();
+
+    adapter
+        .download_video_with_progress(
+            &url,
+            &partial,
+            4,
+            Some(8),
+            filesystem.as_ref(),
+            &Active,
+            &reporter,
+        )
+        .await
+        .unwrap();
+
+    let observations = reporter.observations.lock().unwrap();
+    let final_observation = observations.last().expect("final progress observation");
+    assert_eq!(final_observation.downloaded_bytes, Some(8));
+    assert_eq!(final_observation.total_bytes, Some(8));
+    assert_eq!(final_observation.progress_percent, Some(100));
+    assert_eq!(final_observation.eta_seconds, Some(0));
+    assert!(final_observation.final_observation);
 }
 
 #[tokio::test]
@@ -320,6 +383,46 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"h264","width":1280,
     assert_eq!(probe.duration_seconds, 61.25);
     assert_eq!(probe.audio_language.as_deref(), Some("rus"));
     assert_eq!(probe.audio_title.as_deref(), Some("DEEP"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn process_adapter_reports_hls_bytes_without_inventing_percent_or_eta() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temporary = tempdir().unwrap();
+    let ffmpeg = temporary.path().join("ffmpeg-fixture");
+    std::fs::write(
+        &ffmpeg,
+        r#"#!/bin/sh
+for argument do output=$argument; done
+printf 'abc' > "$output"
+sleep 0.2
+printf 'def' >> "$output"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let output = temporary.path().join("episode.partial.mkv");
+    let input = SensitiveUrl::parse("https://cdn.example/playlist.m3u8", "video").unwrap();
+    let command = build_hls_ingest_command(&input, &output).unwrap();
+    let adapter =
+        TokioProcessAdapter::new("/usr/bin/false", &ffmpeg, std::time::Duration::from_secs(2));
+    let reporter = ProgressRecorder::default();
+
+    adapter
+        .run_with_progress(&command, &output, &reporter, &Active)
+        .await
+        .unwrap();
+
+    let observations = reporter.observations.lock().unwrap();
+    let final_observation = observations.last().expect("final HLS observation");
+    assert_eq!(final_observation.source, TransferSource::Hls);
+    assert_eq!(final_observation.downloaded_bytes, Some(6));
+    assert_eq!(final_observation.total_bytes, None);
+    assert_eq!(final_observation.progress_percent, None);
+    assert_eq!(final_observation.eta_seconds, None);
+    assert!(final_observation.final_observation);
 }
 
 #[tokio::test]

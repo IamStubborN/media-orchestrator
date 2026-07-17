@@ -278,6 +278,28 @@ impl HttpPort for ReqwestHttpAdapter {
         filesystem: &dyn FileSystemPort,
         cancellation: &dyn Cancellation,
     ) -> Result<(), RunnerPortError> {
+        self.download_video_with_progress(
+            url,
+            partial_path,
+            resume_from,
+            None,
+            filesystem,
+            cancellation,
+            &(),
+        )
+        .await
+    }
+
+    async fn download_video_with_progress(
+        &self,
+        url: &SensitiveUrl,
+        partial_path: &Path,
+        resume_from: u64,
+        total_bytes: Option<u64>,
+        filesystem: &dyn FileSystemPort,
+        cancellation: &dyn Cancellation,
+        reporter: &dyn crate::StageReporter,
+    ) -> Result<(), RunnerPortError> {
         if cancellation.is_cancelled() {
             return Err(RunnerPortError::Cancelled);
         }
@@ -307,14 +329,24 @@ impl HttpPort for ReqwestHttpAdapter {
         } else {
             raw_content_range.and_then(parse_content_range)
         };
+        let total_bytes = total_bytes.or_else(|| content_range.and_then(|(_, total)| total));
         let action =
             decide_resume(resume_from, status, content_range).map_err(|_| RunnerPortError::Http)?;
         let mut offset = match action {
             ResumeAction::Append => resume_from,
             ResumeAction::Restart => 0,
-            ResumeAction::Complete => return Ok(()),
+            ResumeAction::Complete => {
+                reporter
+                    .stage_progress(
+                        "download",
+                        direct_observation(resume_from, total_bytes, 0, Duration::ZERO, true),
+                    )
+                    .await;
+                return Ok(());
+            }
         };
         let initial_offset = offset;
+        let started = tokio::time::Instant::now();
         let mut body = response.bytes_stream();
         while let Some(chunk) = body.next().await {
             if cancellation.is_cancelled() {
@@ -328,10 +360,28 @@ impl HttpPort for ReqwestHttpAdapter {
             offset = offset
                 .checked_add(chunk.len() as u64)
                 .ok_or(RunnerPortError::Http)?;
+            reporter
+                .stage_progress(
+                    "download",
+                    direct_observation(
+                        offset,
+                        total_bytes,
+                        initial_offset,
+                        started.elapsed(),
+                        false,
+                    ),
+                )
+                .await;
         }
         if offset == initial_offset {
             return Err(RunnerPortError::SourceTransferTransient);
         }
+        reporter
+            .stage_progress(
+                "download",
+                direct_observation(offset, total_bytes, initial_offset, started.elapsed(), true),
+            )
+            .await;
         Ok(())
     }
 
@@ -372,6 +422,43 @@ impl HttpPort for ReqwestHttpAdapter {
             return Err(RunnerPortError::Http);
         }
         Ok(contents)
+    }
+}
+
+fn direct_observation(
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    initial_offset: u64,
+    elapsed: Duration,
+    final_observation: bool,
+) -> crate::TransferObservation {
+    let transferred = downloaded_bytes.saturating_sub(initial_offset);
+    let elapsed_seconds = elapsed.as_secs_f64();
+    let download_speed_bps = (elapsed_seconds > 0.0 && transferred > 0)
+        .then(|| (transferred as f64 / elapsed_seconds).round() as u64)
+        .filter(|speed| *speed > 0);
+    let progress_percent = total_bytes
+        .filter(|total| *total > 0)
+        .map(|total| ((downloaded_bytes.min(total) as f64 / total as f64) * 100.0).round() as u8);
+    let eta_seconds = match (total_bytes, download_speed_bps) {
+        (Some(total), Some(speed)) if speed > 0 => {
+            Some(total.saturating_sub(downloaded_bytes).div_ceil(speed))
+        }
+        _ => None,
+    };
+    crate::TransferObservation {
+        source: crate::TransferSource::Direct,
+        state: if final_observation {
+            "complete".to_owned()
+        } else {
+            "downloading".to_owned()
+        },
+        progress_percent,
+        downloaded_bytes: Some(downloaded_bytes),
+        total_bytes,
+        download_speed_bps,
+        eta_seconds,
+        final_observation,
     }
 }
 
@@ -505,6 +592,99 @@ impl ProcessPort for TokioProcessAdapter {
                 None => tokio::time::sleep(Duration::from_millis(100)).await,
             }
         }
+    }
+
+    async fn run_with_progress(
+        &self,
+        command: &ProcessCommand,
+        output_path: &Path,
+        reporter: &dyn crate::StageReporter,
+        cancellation: &dyn Cancellation,
+    ) -> Result<(), RunnerPortError> {
+        if command.program() != "ffmpeg" {
+            return Err(RunnerPortError::Process);
+        }
+        if cancellation.is_cancelled() {
+            return Err(RunnerPortError::Cancelled);
+        }
+        let mut child = tokio::process::Command::new(&self.ffmpeg_program)
+            .args(command.args())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|_| RunnerPortError::Process)?;
+        let started = tokio::time::Instant::now();
+        let mut previous_sample = started;
+        let mut previous_bytes = 0_u64;
+        loop {
+            if cancellation.is_cancelled() {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(RunnerPortError::Cancelled);
+            }
+            if started.elapsed() >= self.timeout {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(RunnerPortError::Process);
+            }
+            match child.try_wait().map_err(|_| RunnerPortError::Process)? {
+                Some(status) if status.success() => {
+                    let downloaded_bytes = tokio::fs::metadata(output_path)
+                        .await
+                        .ok()
+                        .map(|metadata| metadata.len());
+                    reporter
+                        .stage_progress("download", hls_observation(downloaded_bytes, None, true))
+                        .await;
+                    return Ok(());
+                }
+                Some(_) => return Err(RunnerPortError::Process),
+                None => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    let now = tokio::time::Instant::now();
+                    let downloaded_bytes = tokio::fs::metadata(output_path)
+                        .await
+                        .ok()
+                        .map(|metadata| metadata.len());
+                    let speed = downloaded_bytes.and_then(|bytes| {
+                        let elapsed = now.duration_since(previous_sample).as_secs_f64();
+                        (bytes > previous_bytes && elapsed > 0.0)
+                            .then(|| ((bytes - previous_bytes) as f64 / elapsed).round() as u64)
+                            .filter(|speed| *speed > 0)
+                    });
+                    if let Some(bytes) = downloaded_bytes {
+                        previous_bytes = bytes;
+                        previous_sample = now;
+                    }
+                    reporter
+                        .stage_progress("download", hls_observation(downloaded_bytes, speed, false))
+                        .await;
+                }
+            }
+        }
+    }
+}
+
+fn hls_observation(
+    downloaded_bytes: Option<u64>,
+    download_speed_bps: Option<u64>,
+    final_observation: bool,
+) -> crate::TransferObservation {
+    crate::TransferObservation {
+        source: crate::TransferSource::Hls,
+        state: if final_observation {
+            "complete".to_owned()
+        } else {
+            "downloading".to_owned()
+        },
+        progress_percent: None,
+        downloaded_bytes,
+        total_bytes: None,
+        download_speed_bps,
+        eta_seconds: None,
+        final_observation,
     }
 }
 

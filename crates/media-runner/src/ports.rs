@@ -30,6 +30,24 @@ pub trait Cancellation: Send + Sync {
     fn is_cancelled(&self) -> bool;
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum TransferSource {
+    Direct,
+    Hls,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct TransferObservation {
+    pub source: TransferSource,
+    pub state: String,
+    pub progress_percent: Option<u8>,
+    pub downloaded_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
+    pub download_speed_bps: Option<u64>,
+    pub eta_seconds: Option<u64>,
+    pub final_observation: bool,
+}
+
 /// Reports the start of a named pipeline sub-stage. These are best-effort
 /// progress milestones with no percentage data; the composition root implements
 /// this to forward them to the runner service as stage-start events.
@@ -37,6 +55,7 @@ pub trait Cancellation: Send + Sync {
 pub trait StageReporter: Send + Sync {
     async fn stage_started(&self, stage_name: &str);
     async fn stage_completed(&self, stage_name: &str);
+    async fn stage_progress(&self, _stage_name: &str, _observation: TransferObservation) {}
 }
 
 /// No-op reporter for callers (such as tests) that do not surface progress.
@@ -88,6 +107,21 @@ pub trait HttpPort: Send + Sync {
         cancellation: &dyn Cancellation,
     ) -> Result<(), RunnerPortError>;
 
+    async fn download_video_with_progress(
+        &self,
+        url: &SensitiveUrl,
+        partial_path: &Path,
+        resume_from: u64,
+        total_bytes: Option<u64>,
+        filesystem: &dyn FileSystemPort,
+        cancellation: &dyn Cancellation,
+        reporter: &dyn StageReporter,
+    ) -> Result<(), RunnerPortError> {
+        let _ = (total_bytes, reporter);
+        self.download_video(url, partial_path, resume_from, filesystem, cancellation)
+            .await
+    }
+
     async fn fetch_subtitle(
         &self,
         url: &SensitiveUrl,
@@ -108,6 +142,16 @@ pub trait ProcessPort: Send + Sync {
         command: &ProcessCommand,
         cancellation: &dyn Cancellation,
     ) -> Result<(), RunnerPortError>;
+
+    async fn run_with_progress(
+        &self,
+        command: &ProcessCommand,
+        _output_path: &Path,
+        _reporter: &dyn StageReporter,
+        cancellation: &dyn Cancellation,
+    ) -> Result<(), RunnerPortError> {
+        self.run(command, cancellation).await
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

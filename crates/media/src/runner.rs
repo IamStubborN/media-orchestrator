@@ -300,6 +300,7 @@ impl ProgressCheckpointGate {
 struct ControlStageReporter<'a> {
     control: &'a RunnerControl,
     task_ordinal: u32,
+    progress_gate: tokio::sync::Mutex<ProgressCheckpointGate>,
 }
 
 #[async_trait::async_trait]
@@ -326,6 +327,29 @@ impl media_runner::StageReporter for ControlStageReporter<'_> {
                 pipeline_stage_ordinal(stage_name),
             )
             .await;
+    }
+
+    async fn stage_progress(
+        &self,
+        stage_name: &str,
+        observation: media_runner::TransferObservation,
+    ) {
+        let should_report = self.progress_gate.lock().await.should_report(
+            tokio::time::Instant::now(),
+            &observation.state,
+            observation.final_observation,
+        );
+        if should_report {
+            let _ = self
+                .control
+                .stage_checkpoint(
+                    self.task_ordinal,
+                    stage_name,
+                    pipeline_stage_ordinal(stage_name),
+                    transfer_checkpoint(&observation),
+                )
+                .await;
+        }
     }
 }
 
@@ -703,6 +727,7 @@ impl MediaJobExecutor {
             let reporter = ControlStageReporter {
                 control,
                 task_ordinal,
+                progress_gate: tokio::sync::Mutex::new(ProgressCheckpointGate::default()),
             };
             let outcome = self
                 .pipeline
@@ -1043,6 +1068,43 @@ fn torrent_checkpoint(
     insert_checkpoint_value(&mut checkpoint, "eta_seconds", snapshot.eta_seconds);
     insert_checkpoint_value(&mut checkpoint, "seeds", snapshot.seeds);
     insert_checkpoint_value(&mut checkpoint, "peers", snapshot.peers);
+    checkpoint
+}
+
+fn transfer_checkpoint(
+    observation: &media_runner::TransferObservation,
+) -> std::collections::BTreeMap<String, CheckpointValueDto> {
+    let kind = match observation.source {
+        media_runner::TransferSource::Direct => "direct",
+        media_runner::TransferSource::Hls => "hls",
+    };
+    let mut checkpoint = std::collections::BTreeMap::from([
+        (
+            "kind".to_owned(),
+            CheckpointValueDto::String(kind.to_owned()),
+        ),
+        (
+            "state".to_owned(),
+            CheckpointValueDto::String(observation.state.clone()),
+        ),
+    ]);
+    insert_checkpoint_value(
+        &mut checkpoint,
+        "progress_percent",
+        observation.progress_percent.map(u64::from),
+    );
+    insert_checkpoint_value(
+        &mut checkpoint,
+        "downloaded_bytes",
+        observation.downloaded_bytes,
+    );
+    insert_checkpoint_value(&mut checkpoint, "total_bytes", observation.total_bytes);
+    insert_checkpoint_value(
+        &mut checkpoint,
+        "download_speed_bps",
+        observation.download_speed_bps,
+    );
+    insert_checkpoint_value(&mut checkpoint, "eta_seconds", observation.eta_seconds);
     checkpoint
 }
 

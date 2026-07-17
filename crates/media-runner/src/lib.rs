@@ -26,7 +26,7 @@ pub use pipeline::{
 pub use plex::{PlexExpectation, PlexMismatch, PlexObservation, validate_plex_observation};
 pub use ports::{
     Cancellation, FileSystemPort, HttpPort, PlexCheck, ProcessPort, RunnerPortError,
-    RunnerServicePort, StageReporter,
+    RunnerServicePort, StageReporter, TransferObservation, TransferSource,
 };
 
 pub use retention::{
