@@ -13,7 +13,7 @@ use std::{
 };
 
 use axum::body::Body;
-use axum::{Router, http::StatusCode, response::Response, routing::any};
+use axum::{Router, extract::OriginalUri, http::StatusCode, response::Response, routing::any};
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 
 static SECRET_FILE_ID: AtomicU64 = AtomicU64::new(0);
@@ -220,4 +220,34 @@ async fn release_query_renders_next_episode_and_source() {
     assert!(rendered.contains("S03E01"));
     assert!(rendered.contains("tvmaze"));
     assert!(rendered.contains("schedule metadata, not Rezka availability"));
+}
+
+#[tokio::test]
+async fn trending_forwards_filters_and_renders_a_bounded_list() {
+    let router = Router::new().route(
+        "/v1/trending",
+        any(|uri: OriginalUri| async move {
+            if uri.0.query() != Some("category=tv&page=2") {
+                return json_response(StatusCode::BAD_REQUEST, r#"{"error":"query"}"#);
+            }
+            json_response(
+                StatusCode::OK,
+                r#"{"source":"tmdb","window":"week","category":"tv","page":2,"total_pages":9,"total_results":180,"results":[{"tmdb_id":7,"media_type":"tv","title":"Медведь","original_title":"The Bear","year":2026,"rating":8.4}]}"#,
+            )
+        }),
+    );
+    let server = TestServer::start(router).await;
+    let token_file = SecretFile::new("cli-secret");
+
+    let output = command_output(command(
+        &server,
+        &token_file,
+        ["trending", "--category", "tv", "--page", "2"],
+    ))
+    .await;
+    server.stop().await;
+
+    let rendered = stdout(&output);
+    assert!(rendered.contains("TMDB trending this week (tv), page 2/9"));
+    assert!(rendered.contains("Медведь / The Bear (2026) [tv] - 8.4"));
 }

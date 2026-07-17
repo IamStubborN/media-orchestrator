@@ -21,6 +21,7 @@ fn help_keeps_existing_commands_and_exposes_runtime_commands() {
         "queue",
         "tracking",
         "release",
+        "trending",
         "search",
         "download",
         "runner",
@@ -53,4 +54,14 @@ fn user_commands_reject_identity_flags_at_parse_time() {
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument"));
     }
+}
+
+#[test]
+fn trending_rejects_zero_page_at_parse_time() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("media")
+        .args(["trending", "--page", "0"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("page must be a positive integer"));
 }

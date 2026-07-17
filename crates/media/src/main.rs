@@ -20,6 +20,7 @@ enum Command {
     Queue(QueueArgs),
     Tracking(TrackingArgs),
     Release(ReleaseArgs),
+    Trending(TrendingArgs),
     Search(SearchArgs),
     #[command(visible_alias = "select")]
     Download(DownloadArgs),
@@ -98,6 +99,16 @@ struct ReleaseArgs {
     original_title: Option<String>,
     #[arg(long)]
     year: Option<i32>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct TrendingArgs {
+    #[arg(long, value_enum, default_value_t = TrendingCategory::All)]
+    category: TrendingCategory,
+    #[arg(long, default_value_t = 1, value_parser = parse_positive_page)]
+    page: u32,
     #[arg(long)]
     json: bool,
 }
@@ -201,6 +212,23 @@ enum QueueCommand {
 enum Provider {
     Rezka,
     Prowlarr,
+}
+
+#[derive(Debug, Copy, Clone, ValueEnum)]
+enum TrendingCategory {
+    All,
+    Movie,
+    Tv,
+}
+
+impl From<TrendingCategory> for media_contract::TrendingCategoryDto {
+    fn from(value: TrendingCategory) -> Self {
+        match value {
+            TrendingCategory::All => Self::All,
+            TrendingCategory::Movie => Self::Movie,
+            TrendingCategory::Tv => Self::Tv,
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, ValueEnum)]
@@ -309,6 +337,7 @@ async fn run(cli: Cli) -> Result<(), RunError> {
         Command::Queue(args) => run_queue(args).await,
         Command::Tracking(args) => run_tracking(args).await,
         Command::Release(args) => run_release(args).await,
+        Command::Trending(args) => run_trending(args).await,
         Command::Search(args) => run_search(args).await,
         Command::Download(args) => run_download(args).await,
         Command::Rezka(args) => run_rezka(args).await,
@@ -470,6 +499,20 @@ async fn run_release(args: ReleaseArgs) -> Result<(), RunError> {
         .await?;
     emit(&output, args.json, render::release);
     Ok(())
+}
+
+async fn run_trending(args: TrendingArgs) -> Result<(), RunError> {
+    let client = HttpClient::new(ClientConfig::load()?)?;
+    let output = client.trending(args.category.into(), args.page).await?;
+    emit(&output, args.json, render::trending);
+    Ok(())
+}
+
+fn parse_positive_page(value: &str) -> Result<u32, String> {
+    match value.parse::<u32>() {
+        Ok(page) if page > 0 => Ok(page),
+        _ => Err("page must be a positive integer".to_owned()),
+    }
 }
 
 async fn run_search(args: SearchArgs) -> Result<(), RunError> {

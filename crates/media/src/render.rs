@@ -163,6 +163,46 @@ pub fn queue_status(value: &Value) -> String {
     key_value_block("Queue", &pairs)
 }
 
+/// Render a bounded TMDB weekly trending list.
+#[must_use]
+pub fn trending(value: &Value) -> String {
+    let page = get_u64(value, "page").unwrap_or(1);
+    let total_pages = get_u64(value, "total_pages");
+    let category = get_str(value, "category").unwrap_or_else(|| "all".to_owned());
+    let page_label = total_pages.map_or_else(
+        || page.to_string(),
+        |total_pages| format!("{page}/{total_pages}"),
+    );
+    let header = format!("TMDB trending this week ({category}), page {page_label}");
+    let results = array(value, "results");
+    if results.is_empty() {
+        return format!("{header}\nNo trending titles found.");
+    }
+    let lines = results
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let title = get_str(item, "title").unwrap_or_else(|| "<unknown>".to_owned());
+            let original = get_str(item, "original_title")
+                .map(|value| format!(" / {value}"))
+                .unwrap_or_default();
+            let year = get_u64(item, "year")
+                .map(|value| format!(" ({value})"))
+                .unwrap_or_default();
+            let kind = get_str(item, "media_type")
+                .map(|value| format!(" [{value}]"))
+                .unwrap_or_default();
+            let rating = item
+                .get("rating")
+                .and_then(Value::as_f64)
+                .map(|value| format!(" - {value:.1}"))
+                .unwrap_or_default();
+            format!("{}. {title}{original}{year}{kind}{rating}", index + 1)
+        })
+        .collect::<Vec<_>>();
+    format!("{header}\n\n{}", lines.join("\n"))
+}
+
 pub fn episode_mapping_action(value: &Value) -> String {
     let title = get_str(value, "title").unwrap_or_else(|| "Unknown title".to_owned());
     let label = get_str(value, "label").unwrap_or_else(|| "Unknown episode".to_owned());

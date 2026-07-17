@@ -120,6 +120,21 @@ impl HttpClient {
         .await
     }
 
+    pub async fn trending(
+        &self,
+        category: media_contract::TrendingCategoryDto,
+        page: u32,
+    ) -> Result<String, ClientError> {
+        let category = match category {
+            media_contract::TrendingCategoryDto::All => "all",
+            media_contract::TrendingCategoryDto::Movie => "movie",
+            media_contract::TrendingCategoryDto::Tv => "tv",
+        };
+        let path = format!("v1/trending?category={category}&page={page}");
+        self.execute(self.request(reqwest::Method::GET, &path)?)
+            .await
+    }
+
     pub async fn add_tracking(
         &self,
         provider: ProviderDto,
