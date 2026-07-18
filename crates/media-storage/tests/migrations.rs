@@ -161,6 +161,59 @@ async fn migrations_apply_seed_fixed_users_and_reverse_cleanly() {
     .collect::<BTreeSet<_>>();
     assert_eq!(jsonb_columns, expected_jsonb);
 
+    let notification_generation = query(
+        db,
+        "SELECT column_default, is_nullable
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'notification_outbox'
+           AND column_name = 'generation'",
+    )
+    .await;
+    assert_eq!(notification_generation.len(), 1);
+    assert_eq!(
+        notification_generation[0]
+            .try_get::<String>("", "column_default")
+            .unwrap(),
+        "1"
+    );
+    assert_eq!(
+        notification_generation[0]
+            .try_get::<String>("", "is_nullable")
+            .unwrap(),
+        "NO"
+    );
+
+    let generation_constraint = query(
+        db,
+        "SELECT pg_get_constraintdef(oid) AS definition
+         FROM pg_constraint
+         WHERE conname = 'notification_generation_positive'",
+    )
+    .await;
+    assert_eq!(generation_constraint.len(), 1);
+    assert!(
+        generation_constraint[0]
+            .try_get::<String>("", "definition")
+            .unwrap()
+            .contains("generation > 0")
+    );
+
+    let event_type_constraint = query(
+        db,
+        "SELECT pg_get_constraintdef(oid) AS definition
+         FROM pg_constraint
+         WHERE conname = 'notification_event_type_check'",
+    )
+    .await;
+    assert_eq!(event_type_constraint.len(), 1);
+    assert!(
+        event_type_constraint[0]
+            .try_get::<String>("", "definition")
+            .unwrap()
+            .contains("download-progress")
+    );
+
     let indexes = query(
         db,
         "SELECT indexname, indexdef
@@ -253,6 +306,11 @@ async fn a_failed_migration_explicitly_rolls_back_partial_schema() {
             ]
         }),
         "search scope migration must follow blocked-storage notification support",
+    );
+    assert_eq!(
+        names.last().map(String::as_str),
+        Some("m20260718_000021_notification_generation"),
+        "notification generation migration must remain the latest schema change",
     );
     for migration in migrations {
         assert_eq!(

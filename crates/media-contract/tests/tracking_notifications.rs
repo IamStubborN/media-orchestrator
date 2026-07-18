@@ -43,6 +43,10 @@ fn notification_event_types_are_stable_and_complete() {
             NotificationEventTypeDto::DownloadingStarted,
             "downloading-started",
         ),
+        (
+            NotificationEventTypeDto::DownloadProgress,
+            "download-progress",
+        ),
         (NotificationEventTypeDto::Downloaded, "downloaded"),
         (
             NotificationEventTypeDto::TranscodingStarted,
@@ -53,11 +57,13 @@ fn notification_event_types_are_stable_and_complete() {
             "encoding-complete",
         ),
         (NotificationEventTypeDto::PlexAdded, "plex-added"),
+        (NotificationEventTypeDto::Completed, "completed"),
         (
             NotificationEventTypeDto::SessionRefreshed,
             "session-refreshed",
         ),
         (NotificationEventTypeDto::Partial, "partial"),
+        (NotificationEventTypeDto::BlockedStorage, "blocked-storage"),
         (NotificationEventTypeDto::Failed, "failed"),
         (
             NotificationEventTypeDto::FutureEpisodeFound,

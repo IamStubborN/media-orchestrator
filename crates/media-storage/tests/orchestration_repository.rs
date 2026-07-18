@@ -47,10 +47,19 @@ fn new_job_with_notifications(
     owner: media_core::UserId,
     notify_scope: NotifyScope,
 ) -> NewJob {
+    new_job_for_provider(reference, owner, notify_scope, Provider::Rezka)
+}
+
+fn new_job_for_provider(
+    reference: &str,
+    owner: media_core::UserId,
+    notify_scope: NotifyScope,
+    provider: Provider,
+) -> NewJob {
     NewJob::new(
         JobId::new(),
         owner,
-        Provider::Rezka,
+        provider,
         reference.to_owned(),
         notify_scope,
     )
@@ -288,17 +297,7 @@ async fn rezka_runner_events_create_each_success_notification_once() {
         .iter()
         .map(|row| row.try_get::<String>("", "event_type").unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(
-        event_types,
-        vec![
-            "completed",
-            "downloaded",
-            "downloading-started",
-            "encoding-complete",
-            "plex-added",
-            "started",
-        ]
-    );
+    assert_eq!(event_types, vec!["completed", "plex-added"]);
     for row in &notifications {
         assert_eq!(row.try_get::<String>("", "recipient").unwrap(), "primary");
         assert_sanitized_message(row, &["private-provider-reference"]);
@@ -363,16 +362,7 @@ async fn partial_completion_creates_plex_and_partial_notifications_once() {
         .iter()
         .map(|row| row.try_get::<String>("", "event_type").unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(
-        event_types,
-        vec![
-            "downloaded",
-            "encoding-complete",
-            "partial",
-            "plex-added",
-            "started",
-        ]
-    );
+    assert_eq!(event_types, vec!["partial", "plex-added"]);
     for row in &notifications {
         assert_sanitized_message(row, &["partial-private-reference"]);
     }
@@ -423,7 +413,7 @@ async fn session_refresh_emits_only_session_lifecycle_notifications() {
             .iter()
             .map(|row| row.try_get::<String>("", "event_type").unwrap())
             .collect::<Vec<_>>(),
-        vec!["session-refreshed", "started"],
+        vec!["session-refreshed"],
     );
     for row in &notifications {
         assert_sanitized_message(row, &["plex", "download", "encoding"]);
@@ -438,7 +428,7 @@ async fn session_refresh_emits_only_session_lifecycle_notifications() {
         )
         .await
         .unwrap();
-    assert_eq!(deliveries.len(), 2);
+    assert_eq!(deliveries.len(), 1);
     assert!(deliveries.iter().all(|delivery| {
         delivery
             .status_key()
@@ -452,7 +442,7 @@ async fn session_refresh_emits_only_session_lifecycle_notifications() {
 }
 
 #[tokio::test]
-async fn different_source_events_dedupe_the_same_job_notification_type() {
+async fn different_source_events_keep_only_the_latest_non_terminal_status() {
     let (test_db, jobs, leases) = setup().await;
     jobs.create(operation_key(), new_job("semantic-notification-dedupe"))
         .await
@@ -499,17 +489,12 @@ async fn different_source_events_dedupe_the_same_job_notification_type() {
                 row.try_get::<i64>("", "count").unwrap(),
             ))
             .collect::<Vec<_>>(),
-        vec![
-            ("downloaded".to_owned(), 1),
-            ("downloading-started".to_owned(), 1),
-            ("encoding-complete".to_owned(), 1),
-            ("started".to_owned(), 1),
-        ]
+        vec![("encoding-complete".to_owned(), 1)]
     );
 }
 
 #[tokio::test]
-async fn progress_notifications_fire_once_per_phase_across_retries_and_to_initiator_only() {
+async fn progress_milestones_replace_the_same_initiator_card_across_retries() {
     let (test_db, jobs, leases) = setup().await;
     jobs.create(operation_key(), new_job("rezka://progress-dedupe"))
         .await
@@ -576,54 +561,95 @@ async fn progress_notifications_fire_once_per_phase_across_retries_and_to_initia
             .unwrap();
     }
 
-    let counts = query(
-        test_db.connection(),
-        "SELECT event_type, recipient, count(*)::bigint AS count FROM notification_outbox \
-         WHERE event_type IN ('downloading-started', 'transcoding-started') \
-         GROUP BY event_type, recipient ORDER BY event_type, recipient",
-    )
-    .await;
-    assert_eq!(
-        counts
-            .iter()
-            .map(|row| (
-                row.try_get::<String>("", "event_type").unwrap(),
-                row.try_get::<String>("", "recipient").unwrap(),
-                row.try_get::<i64>("", "count").unwrap(),
-            ))
-            .collect::<Vec<_>>(),
-        vec![
-            ("downloading-started".to_owned(), "primary".to_owned(), 1),
-            ("transcoding-started".to_owned(), "primary".to_owned(), 1),
-        ],
-        "each phase notifies its initiator exactly once, even across retries",
-    );
-
     let progress = query(
         test_db.connection(),
-        "SELECT event_type, payload FROM notification_outbox \
-         WHERE event_type IN ('downloading-started', 'transcoding-started') \
-         ORDER BY event_type",
+        "SELECT event_type, recipient, payload, generation FROM notification_outbox",
     )
     .await;
-    for row in &progress {
-        assert_sanitized_message(row, &["progress-dedupe"]);
-    }
+    assert_eq!(progress.len(), 1);
+    assert_eq!(
+        progress[0].try_get::<String>("", "event_type").unwrap(),
+        "transcoding-started"
+    );
+    assert_eq!(
+        progress[0].try_get::<String>("", "recipient").unwrap(),
+        "primary"
+    );
+    assert_eq!(progress[0].try_get::<i64>("", "generation").unwrap(), 6);
+    assert_sanitized_message(&progress[0], &["progress-dedupe"]);
     assert!(
         progress[0]
             .try_get::<serde_json::Value>("", "payload")
             .unwrap()["message"]
             .as_str()
             .unwrap()
-            .contains("Скачивание исходного видео началось")
+            .contains("Перекодирование Rezka-видео через VAAPI началось")
     );
+}
+
+#[tokio::test]
+async fn non_terminal_job_notifications_coalesce_into_one_generation_ordered_card() {
+    let (test_db, jobs, leases) = setup().await;
+    jobs.create(operation_key(), new_job("coalesced-status-card"))
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::stage_started(JobEventId::new(), 0, "download".to_owned(), 0).unwrap(),
+        JobEvent::stage_completed(
+            JobEventId::new(),
+            0,
+            "download".to_owned(),
+            0,
+            Default::default(),
+        )
+        .unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    let rows = query(
+        test_db.connection(),
+        "SELECT event_type, payload, generation, delivered_at, dead_at
+         FROM notification_outbox",
+    )
+    .await;
+    assert_eq!(rows.len(), 1, "one job must keep one mutable status card");
+    assert_eq!(
+        rows[0].try_get::<String>("", "event_type").unwrap(),
+        "downloaded"
+    );
+    assert_eq!(rows[0].try_get::<i64>("", "generation").unwrap(), 3);
     assert!(
-        progress[1]
-            .try_get::<serde_json::Value>("", "payload")
-            .unwrap()["message"]
+        rows[0].try_get::<serde_json::Value>("", "payload").unwrap()["message"]
             .as_str()
             .unwrap()
-            .contains("Перекодирование Rezka-видео через VAAPI началось")
+            .contains("Скачивание исходного видео завершено")
+    );
+    assert!(
+        rows[0]
+            .try_get::<Option<time::OffsetDateTime>>("", "delivered_at")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        rows[0]
+            .try_get::<Option<time::OffsetDateTime>>("", "dead_at")
+            .unwrap()
+            .is_none()
     );
 }
 
@@ -733,8 +759,6 @@ async fn storage_block_notifies_both_family_recipients_once() {
             // must not claim that a real download has begun.
             ("blocked-storage".to_owned(), "primary".to_owned()),
             ("blocked-storage".to_owned(), "secondary".to_owned()),
-            ("started".to_owned(), "primary".to_owned()),
-            ("started".to_owned(), "secondary".to_owned()),
         ]
     );
     for row in &notifications {
@@ -1719,6 +1743,43 @@ async fn job_detail_reports_the_running_stage_and_clears_it_when_idle() {
         .await
         .unwrap();
 
+    let progress_notifications = query(
+        test_db.connection(),
+        "SELECT event_type, recipient, payload, generation FROM notification_outbox",
+    )
+    .await;
+    assert_eq!(progress_notifications.len(), 1);
+    assert_eq!(
+        progress_notifications[0]
+            .try_get::<String>("", "event_type")
+            .unwrap(),
+        "download-progress"
+    );
+    assert_eq!(
+        progress_notifications[0]
+            .try_get::<String>("", "recipient")
+            .unwrap(),
+        "primary"
+    );
+    assert_eq!(
+        progress_notifications[0]
+            .try_get::<i64>("", "generation")
+            .unwrap(),
+        3
+    );
+    let progress_message = progress_notifications[0]
+        .try_get::<serde_json::Value>("", "payload")
+        .unwrap()["message"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(progress_message.contains("Загрузка выполняется"));
+    assert!(progress_message.contains("73%"));
+    assert!(progress_message.contains("4.1 ГБ / 5.6 ГБ"));
+    assert!(progress_message.contains("18.4 МБ/с"));
+    assert!(progress_message.contains("1 мин 25 сек"));
+    assert!(!progress_message.contains("://"));
+
     let detail = jobs
         .find_detail_for_owner(created.id(), PRIMARY_USER_ID)
         .await
@@ -1784,6 +1845,175 @@ async fn job_detail_reports_the_running_stage_and_clears_it_when_idle() {
         idle.current_stage, None,
         "a completed stage leaves no running stage to report",
     );
+}
+
+#[tokio::test]
+async fn hls_progress_without_total_updates_only_the_initiators_card_without_a_fake_percent() {
+    let (test_db, jobs, leases) = setup().await;
+    jobs.create(
+        operation_key(),
+        new_job_with_notifications(
+            "hls-progress-without-total",
+            PRIMARY_USER_ID,
+            NotifyScope::Family,
+        ),
+    )
+    .await
+    .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::stage_started(JobEventId::new(), 0, "download".to_owned(), 0).unwrap(),
+        JobEvent::stage_checkpoint(
+            JobEventId::new(),
+            0,
+            "download".to_owned(),
+            0,
+            [
+                ("kind".to_owned(), CheckpointValue::String("hls".to_owned())),
+                (
+                    "downloaded_bytes".to_owned(),
+                    CheckpointValue::Unsigned(734_003_200),
+                ),
+                (
+                    "download_speed_bps".to_owned(),
+                    CheckpointValue::Unsigned(8_388_608),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        )
+        .unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    let rows = query(
+        test_db.connection(),
+        "SELECT event_type, recipient, payload FROM notification_outbox ORDER BY recipient",
+    )
+    .await;
+    assert_eq!(
+        rows.len(),
+        2,
+        "family lifecycle card plus initiator progress card"
+    );
+    let progress = rows
+        .iter()
+        .find(|row| row.try_get::<String>("", "event_type").unwrap() == "download-progress")
+        .unwrap();
+    assert_eq!(
+        progress.try_get::<String>("", "recipient").unwrap(),
+        "primary"
+    );
+    let message = progress
+        .try_get::<serde_json::Value>("", "payload")
+        .unwrap()["message"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(message.contains("Скачано: 700.0 МБ"));
+    assert!(message.contains("8.0 МБ/с"));
+    assert!(!message.contains('%'));
+    assert!(!message.contains("Осталось:"));
+}
+
+#[tokio::test]
+async fn torrent_progress_card_includes_swarm_and_transfer_details() {
+    let (test_db, jobs, leases) = setup().await;
+    jobs.create(
+        operation_key(),
+        new_job_for_provider(
+            "torrent-progress",
+            PRIMARY_USER_ID,
+            NotifyScope::Initiator,
+            Provider::Prowlarr,
+        ),
+    )
+    .await
+    .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::stage_started(JobEventId::new(), 0, "torrent_monitor".to_owned(), 0).unwrap(),
+        JobEvent::stage_checkpoint(
+            JobEventId::new(),
+            0,
+            "torrent_monitor".to_owned(),
+            0,
+            [
+                (
+                    "kind".to_owned(),
+                    CheckpointValue::String("torrent".to_owned()),
+                ),
+                ("progress_percent".to_owned(), CheckpointValue::Unsigned(42)),
+                (
+                    "downloaded_bytes".to_owned(),
+                    CheckpointValue::Unsigned(4 * 1024 * 1024 * 1024),
+                ),
+                (
+                    "total_bytes".to_owned(),
+                    CheckpointValue::Unsigned(10 * 1024 * 1024 * 1024),
+                ),
+                (
+                    "download_speed_bps".to_owned(),
+                    CheckpointValue::Unsigned(16 * 1024 * 1024),
+                ),
+                ("eta_seconds".to_owned(), CheckpointValue::Unsigned(375)),
+                ("seeds".to_owned(), CheckpointValue::Unsigned(12)),
+                ("peers".to_owned(), CheckpointValue::Unsigned(4)),
+            ]
+            .into_iter()
+            .collect(),
+        )
+        .unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    let rows = query(
+        test_db.connection(),
+        "SELECT event_type, payload FROM notification_outbox",
+    )
+    .await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].try_get::<String>("", "event_type").unwrap(),
+        "download-progress"
+    );
+    let message = rows[0].try_get::<serde_json::Value>("", "payload").unwrap()["message"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(message.contains("42%"));
+    assert!(message.contains("4.0 ГБ / 10.0 ГБ"));
+    assert!(message.contains("16.0 МБ/с"));
+    assert!(message.contains("6 мин 15 сек"));
+    assert!(message.contains("Сиды/пиры: 12/4"));
+    assert!(message.contains("Prowlarr"));
+    assert!(!message.contains("://"));
 }
 
 #[tokio::test]
@@ -1922,9 +2152,6 @@ async fn family_job_routes_progress_to_initiator_but_terminal_events_to_both() {
         JobEvent::stage_started(JobEventId::new(), 0, "media_pipeline".to_owned(), 1).unwrap(),
         JobEvent::stage_started(JobEventId::new(), 0, "download".to_owned(), 3).unwrap(),
         JobEvent::stage_started(JobEventId::new(), 0, "transcode".to_owned(), 2).unwrap(),
-        JobEvent::transition(JobEventId::new(), JobState::Publishing, None).unwrap(),
-        JobEvent::transition(JobEventId::new(), JobState::PlexPending, None).unwrap(),
-        JobEvent::transition(JobEventId::new(), JobState::Completed, None).unwrap(),
     ] {
         leases
             .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
@@ -1949,11 +2176,19 @@ async fn family_job_routes_progress_to_initiator_but_terminal_events_to_both() {
                 row.try_get::<String>("", "recipient").unwrap(),
             ))
             .collect::<Vec<_>>(),
-        vec![
-            ("downloading-started".to_owned(), "secondary".to_owned()),
-            ("transcoding-started".to_owned(), "secondary".to_owned()),
-        ],
+        vec![("transcoding-started".to_owned(), "secondary".to_owned())],
     );
+
+    for event in [
+        JobEvent::transition(JobEventId::new(), JobState::Publishing, None).unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::PlexPending, None).unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::Completed, None).unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
 
     // A terminal Plex event keeps the Family scope: both recipients.
     let plex = query(

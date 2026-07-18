@@ -141,7 +141,12 @@ impl NotificationOutboxPort for Outbox {
         Ok(vec![self.delivery.clone()])
     }
 
-    async fn mark_delivered(&self, id: NotificationId, _: NotificationId) -> Result<(), PortError> {
+    async fn mark_delivered(
+        &self,
+        id: NotificationId,
+        _: NotificationId,
+        _: u64,
+    ) -> Result<(), PortError> {
         self.delivered.lock().unwrap().push(id);
         Ok(())
     }
@@ -151,6 +156,7 @@ impl NotificationOutboxPort for Outbox {
         id: NotificationId,
         _: NotificationId,
         _: time::OffsetDateTime,
+        _: u64,
         _: &str,
     ) -> Result<(), PortError> {
         self.failed.lock().unwrap().push(id);
@@ -162,6 +168,7 @@ impl NotificationOutboxPort for Outbox {
         id: NotificationId,
         _: NotificationId,
         _: time::OffsetDateTime,
+        _: u64,
         _: &str,
     ) -> Result<(), PortError> {
         self.dead.lock().unwrap().push(id);
@@ -187,6 +194,7 @@ fn started_delivery() -> NotificationDelivery {
         NotificationEventType::Started,
         None,
         "Media job started.".to_owned(),
+        1,
         0,
     )
     .unwrap()

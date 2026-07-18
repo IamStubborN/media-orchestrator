@@ -212,13 +212,30 @@ async fn insert_notification_outbox(
         };
         let source_dedupe_key = notification_dedupe_key(job, event_type);
         for recipient in recipients {
+            let conflict_action = if is_terminal_notification(event_type) {
+                "DO NOTHING"
+            } else {
+                "DO UPDATE SET \
+                 event_type = EXCLUDED.event_type, \
+                 payload = EXCLUDED.payload, \
+                 generation = notification_outbox.generation + 1, \
+                 delivered_at = NULL, \
+                 dead_at = NULL, \
+                 next_attempt_at = now(), \
+                 attempt_count = 0, \
+                 last_error_code = NULL \
+                 WHERE notification_outbox.event_type IS DISTINCT FROM EXCLUDED.event_type \
+                    OR notification_outbox.payload IS DISTINCT FROM EXCLUDED.payload"
+            };
             transaction
                 .execute_raw(Statement::from_sql_and_values(
                     DatabaseBackend::Postgres,
-                    "INSERT INTO notification_outbox \
+                    format!(
+                        "INSERT INTO notification_outbox \
                      (id, aggregate_type, aggregate_id, event_type, recipient, source_dedupe_key, payload) \
                      VALUES ($1, 'job', $2, $3, $4, $5, $6) \
-                     ON CONFLICT (source_dedupe_key, recipient) DO NOTHING",
+                     ON CONFLICT (source_dedupe_key, recipient) {conflict_action}"
+                    ),
                     [
                         Uuid::new_v4().into(),
                         job.id().into_uuid().into(),
@@ -438,6 +455,104 @@ fn format_bytes(bytes: u64) -> String {
     format!("{:.1} ГБ", bytes as f64 / GIB)
 }
 
+fn format_transfer_bytes(bytes: u64) -> String {
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+    if bytes >= GIB {
+        format!("{:.1} ГБ", bytes as f64 / GIB as f64)
+    } else {
+        format!("{:.1} МБ", bytes as f64 / MIB as f64)
+    }
+}
+
+fn format_transfer_speed(bytes_per_second: u64) -> String {
+    format!("{}/с", format_transfer_bytes(bytes_per_second))
+}
+
+fn format_duration(seconds: u64) -> String {
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let seconds = seconds % 60;
+    match (hours, minutes) {
+        (0, 0) => format!("{seconds} сек"),
+        (0, _) => format!("{minutes} мин {seconds} сек"),
+        _ => format!("{hours} ч {minutes} мин"),
+    }
+}
+
+fn checkpoint_unsigned(checkpoint: &Checkpoint, key: &str) -> Option<u64> {
+    match checkpoint.get(key) {
+        Some(CheckpointValue::Unsigned(value)) => Some(*value),
+        _ => None,
+    }
+}
+
+fn progress_bar(percent: u64) -> String {
+    let filled = usize::try_from(percent.min(100).div_ceil(10)).unwrap_or(10);
+    format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled))
+}
+
+fn progress_message(
+    job: &Job,
+    context: &JobNotificationContext,
+    stage: &str,
+    checkpoint: &Checkpoint,
+) -> Option<String> {
+    let percent = checkpoint_unsigned(checkpoint, "progress_percent").filter(|value| *value <= 100);
+    let downloaded = checkpoint_unsigned(checkpoint, "downloaded_bytes");
+    let total = checkpoint_unsigned(checkpoint, "total_bytes").filter(|value| *value > 0);
+    let speed = checkpoint_unsigned(checkpoint, "download_speed_bps").filter(|value| *value > 0);
+    let eta = checkpoint_unsigned(checkpoint, "eta_seconds");
+    let seeds = checkpoint_unsigned(checkpoint, "seeds");
+    let peers = checkpoint_unsigned(checkpoint, "peers");
+    if percent.is_none()
+        && downloaded.is_none()
+        && speed.is_none()
+        && eta.is_none()
+        && seeds.is_none()
+        && peers.is_none()
+    {
+        return None;
+    }
+
+    let mut metrics = Vec::with_capacity(5);
+    if let Some(percent) = percent {
+        metrics.push(format!("`{}` **{percent}%**", progress_bar(percent)));
+    }
+    match (downloaded, total) {
+        (Some(downloaded), Some(total)) => metrics.push(format!(
+            "📦 {} / {}",
+            format_transfer_bytes(downloaded),
+            format_transfer_bytes(total)
+        )),
+        (Some(downloaded), None) => {
+            metrics.push(format!("📦 Скачано: {}", format_transfer_bytes(downloaded)));
+        }
+        _ => {}
+    }
+    if let Some(speed) = speed {
+        metrics.push(format!("🚀 {}", format_transfer_speed(speed)));
+    }
+    if let Some(eta) = eta {
+        metrics.push(format!("⏱ Осталось: {}", format_duration(eta)));
+    }
+    match (seeds, peers) {
+        (Some(seeds), Some(peers)) => metrics.push(format!("🌱 Сиды/пиры: {seeds}/{peers}")),
+        (Some(seeds), None) => metrics.push(format!("🌱 Сиды: {seeds}")),
+        (None, Some(peers)) => metrics.push(format!("👥 Пиры: {peers}")),
+        (None, None) => {}
+    }
+
+    Some(format!(
+        "⬇️ **Загрузка выполняется**\n\n{}\n\n{}\n\n🔄 **Этап:** {}\n➡️ **Дальше:** {}\n🆔 `Job {}`",
+        context.details(job),
+        metrics.join("\n"),
+        stage_label(stage),
+        after_download(job),
+        job.id(),
+    ))
+}
+
 fn storage_blocked_description(context: &JobNotificationContext) -> String {
     match (
         context.storage_available_bytes,
@@ -520,6 +635,13 @@ fn notifications_for_event(
                     "после проверки результата видео и субтитры будут опубликованы в Plex",
                 ),
             )]
+        }
+        JobEventKind::StageCheckpoint { stage, checkpoint }
+            if matches!(stage.name(), "download" | "torrent_monitor") =>
+        {
+            progress_message(job, context, stage.name(), checkpoint)
+                .map(|message| vec![("download-progress", message)])
+                .unwrap_or_default()
         }
         JobEventKind::StageCompleted { stage, .. }
             if matches!(stage.name(), "download" | "torrent_monitor") =>
@@ -683,8 +805,23 @@ fn notifications_for_event(
 
 fn notification_dedupe_key(job: &Job, event_type: &str) -> Vec<u8> {
     let mut key = job.id().into_uuid().as_bytes().to_vec();
-    key.extend_from_slice(event_type.as_bytes());
+    if is_terminal_notification(event_type) {
+        key.extend_from_slice(event_type.as_bytes());
+    } else {
+        key.extend_from_slice(b"status-card");
+    }
     key
+}
+
+fn is_terminal_notification(event_type: &str) -> bool {
+    matches!(
+        NotificationEventType::from_wire(event_type),
+        Some(
+            NotificationEventType::Completed
+                | NotificationEventType::Partial
+                | NotificationEventType::Failed
+        )
+    )
 }
 
 fn sanitized_error_code(error_code: &str) -> &str {

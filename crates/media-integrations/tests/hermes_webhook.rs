@@ -17,6 +17,7 @@ fn delivery() -> NotificationDelivery {
         NotificationEventType::Started,
         Some("media-job:00000000-0000-0000-0000-000000000999".to_owned()),
         "Media job 00000000-0000-0000-0000-000000000123 started.".to_owned(),
+        1,
         0,
     )
     .unwrap()

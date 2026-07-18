@@ -13,6 +13,7 @@ pub enum NotificationEventType {
     Started,
     ChoiceNeeded,
     DownloadingStarted,
+    DownloadProgress,
     Downloaded,
     TranscodingStarted,
     EncodingComplete,
@@ -35,6 +36,7 @@ impl NotificationEventType {
             "started" => Self::Started,
             "choice-needed" => Self::ChoiceNeeded,
             "downloading-started" => Self::DownloadingStarted,
+            "download-progress" => Self::DownloadProgress,
             "downloaded" => Self::Downloaded,
             "transcoding-started" => Self::TranscodingStarted,
             "encoding-complete" => Self::EncodingComplete,
@@ -56,7 +58,10 @@ impl NotificationEventType {
     /// action-required events keep the job's configured scope routing.
     #[must_use]
     pub const fn is_progress_milestone(self) -> bool {
-        matches!(self, Self::DownloadingStarted | Self::TranscodingStarted)
+        matches!(
+            self,
+            Self::DownloadingStarted | Self::DownloadProgress | Self::TranscodingStarted
+        )
     }
 }
 
@@ -67,6 +72,7 @@ pub struct NotificationDelivery {
     event_type: NotificationEventType,
     status_key: Option<String>,
     message: String,
+    generation: u64,
     attempt_count: u32,
 }
 
@@ -78,6 +84,8 @@ pub enum NotificationValidationError {
     UrlNotAllowed,
     #[error("notification status key is invalid")]
     InvalidStatusKey,
+    #[error("notification generation is invalid")]
+    InvalidGeneration,
 }
 
 impl NotificationDelivery {
@@ -87,6 +95,7 @@ impl NotificationDelivery {
         event_type: NotificationEventType,
         status_key: Option<String>,
         message: String,
+        generation: u64,
         attempt_count: u32,
     ) -> Result<Self, NotificationValidationError> {
         if message.trim().is_empty() {
@@ -104,12 +113,16 @@ impl NotificationDelivery {
         }) {
             return Err(NotificationValidationError::InvalidStatusKey);
         }
+        if generation == 0 || generation > i64::MAX as u64 {
+            return Err(NotificationValidationError::InvalidGeneration);
+        }
         Ok(Self {
             id,
             recipient,
             event_type,
             status_key,
             message,
+            generation,
             attempt_count,
         })
     }
@@ -133,6 +146,10 @@ impl NotificationDelivery {
     #[must_use]
     pub fn message(&self) -> &str {
         &self.message
+    }
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
     }
     #[must_use]
     pub const fn attempt_count(&self) -> u32 {
@@ -191,12 +208,14 @@ pub trait NotificationOutboxPort: Send + Sync {
         &self,
         id: NotificationId,
         worker: NotificationId,
+        generation: u64,
     ) -> Result<(), PortError>;
     async fn mark_failed(
         &self,
         id: NotificationId,
         worker: NotificationId,
         now: time::OffsetDateTime,
+        generation: u64,
         error_code: &str,
     ) -> Result<(), PortError>;
     /// Records a terminal failure so the delivery is never leased again.
@@ -205,6 +224,7 @@ pub trait NotificationOutboxPort: Send + Sync {
         id: NotificationId,
         worker: NotificationId,
         now: time::OffsetDateTime,
+        generation: u64,
         error_code: &str,
     ) -> Result<(), PortError>;
 }
@@ -249,18 +269,32 @@ impl NotificationDispatcher {
         for delivery in deliveries {
             match self.sink.deliver(&delivery).await {
                 Ok(()) => {
-                    self.outbox.mark_delivered(delivery.id(), worker).await?;
+                    self.outbox
+                        .mark_delivered(delivery.id(), worker, delivery.generation())
+                        .await?;
                     result.delivered += 1;
                 }
                 Err(failure) if failure.is_retryable() => {
                     self.outbox
-                        .mark_failed(delivery.id(), worker, now, failure.code())
+                        .mark_failed(
+                            delivery.id(),
+                            worker,
+                            now,
+                            delivery.generation(),
+                            failure.code(),
+                        )
                         .await?;
                     result.failed += 1;
                 }
                 Err(failure) => {
                     self.outbox
-                        .mark_dead(delivery.id(), worker, now, failure.code())
+                        .mark_dead(
+                            delivery.id(),
+                            worker,
+                            now,
+                            delivery.generation(),
+                            failure.code(),
+                        )
                         .await?;
                     result.dead += 1;
                 }

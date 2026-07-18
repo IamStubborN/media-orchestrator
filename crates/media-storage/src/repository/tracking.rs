@@ -203,7 +203,7 @@ impl SeaOrmNotificationOutbox {
         }
         self.database.query_all_raw(Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
-            "WITH pending AS (SELECT id FROM notification_outbox WHERE delivered_at IS NULL AND dead_at IS NULL AND next_attempt_at <= $1 AND (lease_expires_at IS NULL OR lease_expires_at <= $1) ORDER BY next_attempt_at, created_at FOR UPDATE SKIP LOCKED LIMIT $2) UPDATE notification_outbox n SET lease_owner = $3, lease_expires_at = $1 + make_interval(secs => $4) FROM pending WHERE n.id = pending.id RETURNING n.id, n.aggregate_type, n.aggregate_id, n.recipient, n.event_type, n.payload, n.attempt_count",
+            "WITH pending AS (SELECT id FROM notification_outbox WHERE delivered_at IS NULL AND dead_at IS NULL AND next_attempt_at <= $1 AND (lease_expires_at IS NULL OR lease_expires_at <= $1) ORDER BY next_attempt_at, created_at FOR UPDATE SKIP LOCKED LIMIT $2) UPDATE notification_outbox n SET lease_owner = $3, lease_expires_at = $1 + make_interval(secs => $4) FROM pending WHERE n.id = pending.id RETURNING n.id, n.aggregate_type, n.aggregate_id, n.recipient, n.event_type, n.payload, n.generation, n.attempt_count",
             [now.into(), i64::from(limit).into(), worker.into_uuid().into(), ttl_seconds.into()],
         )).await.map_err(map_database_error)?.iter().map(delivery_from_row).collect()
     }
@@ -212,12 +212,27 @@ impl SeaOrmNotificationOutbox {
         &self,
         id: NotificationId,
         worker: NotificationId,
+        generation: u64,
     ) -> Result<(), PortError> {
-        let changed = self.database.execute_raw(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            "UPDATE notification_outbox SET delivered_at = now(), lease_owner = NULL, lease_expires_at = NULL, last_error_code = NULL WHERE id = $1 AND lease_owner = $2 AND delivered_at IS NULL",
-            [id.into_uuid().into(), worker.into_uuid().into()],
-        )).await.map_err(map_database_error)?;
+        let generation = i64::try_from(generation).map_err(|_| PortError::Conflict)?;
+        let changed = self
+            .database
+            .execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "UPDATE notification_outbox SET \
+             delivered_at = CASE WHEN generation = $3 THEN now() ELSE NULL END, \
+             next_attempt_at = CASE WHEN generation = $3 THEN next_attempt_at ELSE now() END, \
+             lease_owner = NULL, lease_expires_at = NULL, \
+             last_error_code = CASE WHEN generation = $3 THEN NULL ELSE last_error_code END \
+             WHERE id = $1 AND lease_owner = $2 AND delivered_at IS NULL",
+                [
+                    id.into_uuid().into(),
+                    worker.into_uuid().into(),
+                    generation.into(),
+                ],
+            ))
+            .await
+            .map_err(map_database_error)?;
         if changed.rows_affected() == 1 {
             Ok(())
         } else {
@@ -230,15 +245,24 @@ impl SeaOrmNotificationOutbox {
         id: NotificationId,
         worker: NotificationId,
         now: time::OffsetDateTime,
+        generation: u64,
         error_code: &str,
     ) -> Result<(), PortError> {
         if error_code.trim().is_empty() || error_code.contains("://") {
             return Err(PortError::Conflict);
         }
+        let generation = i64::try_from(generation).map_err(|_| PortError::Conflict)?;
         let changed = self.database.execute_raw(Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
-            "UPDATE notification_outbox SET attempt_count = attempt_count + 1, next_attempt_at = $3 + make_interval(secs => LEAST(3600, 30 * power(2, LEAST(attempt_count, 7))::bigint)), lease_owner = NULL, lease_expires_at = NULL, last_error_code = $4 WHERE id = $1 AND lease_owner = $2 AND delivered_at IS NULL AND dead_at IS NULL",
-            [id.into_uuid().into(), worker.into_uuid().into(), now.into(), error_code.into()],
+            "UPDATE notification_outbox SET \
+             attempt_count = CASE WHEN generation = $4 THEN attempt_count + 1 ELSE attempt_count END, \
+             next_attempt_at = CASE WHEN generation = $4 \
+               THEN $3 + make_interval(secs => LEAST(3600, 30 * power(2, LEAST(attempt_count, 7))::bigint)) \
+               ELSE now() END, \
+             lease_owner = NULL, lease_expires_at = NULL, \
+             last_error_code = CASE WHEN generation = $4 THEN $5 ELSE last_error_code END \
+             WHERE id = $1 AND lease_owner = $2 AND delivered_at IS NULL AND dead_at IS NULL",
+            [id.into_uuid().into(), worker.into_uuid().into(), now.into(), generation.into(), error_code.into()],
         )).await.map_err(map_database_error)?;
         if changed.rows_affected() == 1 {
             Ok(())
@@ -252,15 +276,23 @@ impl SeaOrmNotificationOutbox {
         id: NotificationId,
         worker: NotificationId,
         now: time::OffsetDateTime,
+        generation: u64,
         error_code: &str,
     ) -> Result<(), PortError> {
         if error_code.trim().is_empty() || error_code.contains("://") {
             return Err(PortError::Conflict);
         }
+        let generation = i64::try_from(generation).map_err(|_| PortError::Conflict)?;
         let changed = self.database.execute_raw(Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
-            "UPDATE notification_outbox SET attempt_count = attempt_count + 1, dead_at = $3, lease_owner = NULL, lease_expires_at = NULL, last_error_code = $4 WHERE id = $1 AND lease_owner = $2 AND delivered_at IS NULL AND dead_at IS NULL",
-            [id.into_uuid().into(), worker.into_uuid().into(), now.into(), error_code.into()],
+            "UPDATE notification_outbox SET \
+             attempt_count = CASE WHEN generation = $4 THEN attempt_count + 1 ELSE attempt_count END, \
+             dead_at = CASE WHEN generation = $4 THEN $3 ELSE NULL END, \
+             next_attempt_at = CASE WHEN generation = $4 THEN next_attempt_at ELSE now() END, \
+             lease_owner = NULL, lease_expires_at = NULL, \
+             last_error_code = CASE WHEN generation = $4 THEN $5 ELSE last_error_code END \
+             WHERE id = $1 AND lease_owner = $2 AND delivered_at IS NULL AND dead_at IS NULL",
+            [id.into_uuid().into(), worker.into_uuid().into(), now.into(), generation.into(), error_code.into()],
         )).await.map_err(map_database_error)?;
         if changed.rows_affected() == 1 {
             Ok(())
@@ -286,8 +318,9 @@ impl NotificationOutboxPort for SeaOrmNotificationOutbox {
         &self,
         id: NotificationId,
         worker: NotificationId,
+        generation: u64,
     ) -> Result<(), PortError> {
-        SeaOrmNotificationOutbox::mark_delivered(self, id, worker).await
+        SeaOrmNotificationOutbox::mark_delivered(self, id, worker, generation).await
     }
 
     async fn mark_failed(
@@ -295,9 +328,10 @@ impl NotificationOutboxPort for SeaOrmNotificationOutbox {
         id: NotificationId,
         worker: NotificationId,
         now: time::OffsetDateTime,
+        generation: u64,
         error_code: &str,
     ) -> Result<(), PortError> {
-        SeaOrmNotificationOutbox::mark_failed(self, id, worker, now, error_code).await
+        SeaOrmNotificationOutbox::mark_failed(self, id, worker, now, generation, error_code).await
     }
 
     async fn mark_dead(
@@ -305,9 +339,10 @@ impl NotificationOutboxPort for SeaOrmNotificationOutbox {
         id: NotificationId,
         worker: NotificationId,
         now: time::OffsetDateTime,
+        generation: u64,
         error_code: &str,
     ) -> Result<(), PortError> {
-        SeaOrmNotificationOutbox::mark_dead(self, id, worker, now, error_code).await
+        SeaOrmNotificationOutbox::mark_dead(self, id, worker, now, generation, error_code).await
     }
 }
 
@@ -409,6 +444,11 @@ fn delivery_from_row(row: &sea_orm::QueryResult) -> Result<NotificationDelivery,
             .and_then(serde_json::Value::as_str)
             .ok_or(PortError::Infrastructure)?
             .to_owned(),
+        u64::try_from(
+            row.try_get::<i64>("", "generation")
+                .map_err(|_| PortError::Infrastructure)?,
+        )
+        .map_err(|_| PortError::Infrastructure)?,
         u32::try_from(
             row.try_get::<i32>("", "attempt_count")
                 .map_err(|_| PortError::Infrastructure)?,

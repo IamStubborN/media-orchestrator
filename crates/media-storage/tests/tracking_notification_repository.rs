@@ -195,8 +195,9 @@ async fn outbox_leases_once_retries_with_backoff_and_keeps_stable_delivery_id() 
     );
 
     let delivery_id = leased[0].id();
+    let generation = leased[0].generation();
     outbox
-        .mark_failed(delivery_id, worker, now, "http_502")
+        .mark_failed(delivery_id, worker, now, generation, "http_502")
         .await
         .unwrap();
     assert!(
@@ -217,7 +218,10 @@ async fn outbox_leases_once_retries_with_backoff_and_keeps_stable_delivery_id() 
         .unwrap();
     assert_eq!(retried[0].id(), delivery_id);
     assert_eq!(retried[0].attempt_count(), 1);
-    outbox.mark_delivered(delivery_id, worker).await.unwrap();
+    outbox
+        .mark_delivered(delivery_id, worker, retried[0].generation())
+        .await
+        .unwrap();
     assert!(
         outbox
             .lease_pending(
@@ -229,6 +233,145 @@ async fn outbox_leases_once_retries_with_backoff_and_keeps_stable_delivery_id() 
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn stale_delivery_ack_releases_the_lease_without_consuming_a_new_generation() {
+    let test_db = TestDatabase::start_migrated().await;
+    let tracking = SeaOrmTrackingStore::new(test_db.connection().clone());
+    let outbox = SeaOrmNotificationOutbox::new(test_db.connection().clone());
+    let value = tracking
+        .add(
+            operation_key(),
+            new_tracking(TrackingId::new(), TrackingScope::Personal),
+        )
+        .await
+        .unwrap();
+    tracking
+        .record_future_episode(
+            value.id(),
+            EpisodeSnapshot::new(1, 5).unwrap(),
+            time::OffsetDateTime::now_utc() + time::Duration::hours(6),
+        )
+        .await
+        .unwrap();
+    let now = time::OffsetDateTime::now_utc();
+
+    let delivered_worker = NotificationId::new();
+    let first = outbox
+        .lease_pending(delivered_worker, now, time::Duration::seconds(30), 1)
+        .await
+        .unwrap()
+        .remove(0);
+    test_db
+        .connection()
+        .execute_unprepared(
+            "UPDATE notification_outbox SET generation = generation + 1, payload = '{\"message\":\"generation 2\"}'::jsonb",
+        )
+        .await
+        .unwrap();
+    outbox
+        .mark_delivered(first.id(), delivered_worker, first.generation())
+        .await
+        .unwrap();
+
+    let failed_worker = NotificationId::new();
+    let second = outbox
+        .lease_pending(
+            failed_worker,
+            now + time::Duration::minutes(1),
+            time::Duration::seconds(30),
+            1,
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(second.generation(), 2);
+    test_db
+        .connection()
+        .execute_unprepared(
+            "UPDATE notification_outbox SET generation = generation + 1, payload = '{\"message\":\"generation 3\"}'::jsonb",
+        )
+        .await
+        .unwrap();
+    outbox
+        .mark_failed(
+            second.id(),
+            failed_worker,
+            now + time::Duration::minutes(1),
+            second.generation(),
+            "stale_failure",
+        )
+        .await
+        .unwrap();
+
+    let dead_worker = NotificationId::new();
+    let third = outbox
+        .lease_pending(
+            dead_worker,
+            now + time::Duration::minutes(2),
+            time::Duration::seconds(30),
+            1,
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(third.generation(), 3);
+    test_db
+        .connection()
+        .execute_unprepared(
+            "UPDATE notification_outbox SET generation = generation + 1, payload = '{\"message\":\"generation 4\"}'::jsonb",
+        )
+        .await
+        .unwrap();
+    outbox
+        .mark_dead(
+            third.id(),
+            dead_worker,
+            now + time::Duration::minutes(2),
+            third.generation(),
+            "stale_dead_letter",
+        )
+        .await
+        .unwrap();
+
+    let latest = outbox
+        .lease_pending(
+            NotificationId::new(),
+            now + time::Duration::minutes(3),
+            time::Duration::seconds(30),
+            1,
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(latest.id(), first.id());
+    assert_eq!(latest.generation(), 4);
+    assert_eq!(latest.attempt_count(), 0);
+    assert_eq!(latest.message(), "generation 4");
+    let rows = query(
+        test_db.connection(),
+        "SELECT delivered_at, dead_at, last_error_code FROM notification_outbox",
+    )
+    .await;
+    assert!(
+        rows[0]
+            .try_get::<Option<time::OffsetDateTime>>("", "delivered_at")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        rows[0]
+            .try_get::<Option<time::OffsetDateTime>>("", "dead_at")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        rows[0]
+            .try_get::<Option<String>>("", "last_error_code")
+            .unwrap()
+            .is_none()
     );
 }
 
@@ -259,6 +402,7 @@ async fn mark_failed_does_not_overflow_backoff_at_high_attempt_counts() {
         .await
         .unwrap();
     let delivery_id = leased[0].id();
+    let generation = leased[0].generation();
 
     test_db
         .connection()
@@ -269,7 +413,7 @@ async fn mark_failed_does_not_overflow_backoff_at_high_attempt_counts() {
     // With attempt_count this high, `30 * power(2, attempt_count)` overflowed int4
     // before the exponent was clamped, so mark_failed used to error here.
     outbox
-        .mark_failed(delivery_id, worker, now, "webhook_http")
+        .mark_failed(delivery_id, worker, now, generation, "webhook_http")
         .await
         .unwrap();
 
@@ -308,9 +452,10 @@ async fn mark_dead_buries_a_delivery_so_it_is_never_leased_again() {
         .await
         .unwrap();
     let delivery_id = leased[0].id();
+    let generation = leased[0].generation();
 
     outbox
-        .mark_dead(delivery_id, worker, now, "webhook_rejected")
+        .mark_dead(delivery_id, worker, now, generation, "webhook_rejected")
         .await
         .unwrap();
 

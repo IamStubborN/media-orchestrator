@@ -18,6 +18,7 @@ mod m20260713_000017_complete_terminal_stages;
 mod m20260713_000018_completed_notification;
 mod m20260713_000019_tracking_specials;
 mod m20260713_000020_identity_episode_numbers;
+mod m20260718_000021_notification_generation;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseTransaction;
@@ -48,6 +49,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260713_000018_completed_notification::Migration),
             Box::new(m20260713_000019_tracking_specials::Migration),
             Box::new(m20260713_000020_identity_episode_numbers::Migration),
+            Box::new(m20260718_000021_notification_generation::Migration),
         ]
     }
 }
