@@ -16,6 +16,51 @@ pub enum TrackingState {
     Active,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct TrackingDownload {
+    provider_media_ref: String,
+    translation_id: u64,
+    season: u32,
+}
+
+impl TrackingDownload {
+    pub fn new(
+        provider_media_ref: String,
+        translation_id: u64,
+        season: u32,
+    ) -> Result<Self, TrackingValidationError> {
+        if provider_media_ref.trim().is_empty() {
+            return Err(TrackingValidationError::EmptyProviderMediaReference);
+        }
+        if provider_media_ref.contains("://") {
+            return Err(TrackingValidationError::UrlNotAllowed);
+        }
+        if translation_id == 0 || season == 0 {
+            return Err(TrackingValidationError::InvalidDownloadSelection);
+        }
+        Ok(Self {
+            provider_media_ref,
+            translation_id,
+            season,
+        })
+    }
+
+    #[must_use]
+    pub fn provider_media_ref(&self) -> &str {
+        &self.provider_media_ref
+    }
+
+    #[must_use]
+    pub const fn translation_id(&self) -> u64 {
+        self.translation_id
+    }
+
+    #[must_use]
+    pub const fn season(&self) -> u32 {
+        self.season
+    }
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct EpisodeSnapshot {
     season: u32,
@@ -55,6 +100,7 @@ pub struct NewTrackingCommand {
     pub known_episodes: Vec<EpisodeSnapshot>,
     pub scope: TrackingScope,
     pub series_ongoing: bool,
+    pub download: Option<TrackingDownload>,
 }
 
 impl NewTrackingCommand {
@@ -77,6 +123,7 @@ pub struct NewTrackingSubscription {
     translation: String,
     known_episodes: Vec<EpisodeSnapshot>,
     scope: TrackingScope,
+    download: Option<TrackingDownload>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -88,6 +135,7 @@ pub struct TrackingSubscription {
     translation: String,
     known_episodes: Vec<EpisodeSnapshot>,
     scope: TrackingScope,
+    download: Option<TrackingDownload>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
@@ -102,6 +150,12 @@ pub enum TrackingValidationError {
     EmptyEpisodeSnapshot,
     #[error("known episode snapshot contains duplicates")]
     DuplicateEpisode,
+    #[error("provider media reference cannot be empty")]
+    EmptyProviderMediaReference,
+    #[error("tracking download selection is invalid")]
+    InvalidDownloadSelection,
+    #[error("automatic download is only supported for Rezka tracking")]
+    UnsupportedDownloadProvider,
     #[error("only ongoing series can be tracked")]
     SeriesNotOngoing,
 }
@@ -120,6 +174,11 @@ impl NewTrackingSubscription {
         if !command.series_ongoing {
             return Err(TrackingValidationError::SeriesNotOngoing);
         }
+        validate_download(
+            command.provider,
+            &command.translation,
+            command.download.as_ref(),
+        )?;
         Ok(Self {
             id,
             owner_id,
@@ -128,6 +187,7 @@ impl NewTrackingSubscription {
             translation: command.translation,
             known_episodes: command.known_episodes,
             scope: command.scope,
+            download: command.download,
         })
     }
 
@@ -141,6 +201,7 @@ impl NewTrackingSubscription {
             translation: self.translation,
             known_episodes: self.known_episodes,
             scope: self.scope,
+            download: self.download,
         }
     }
 
@@ -172,9 +233,14 @@ impl NewTrackingSubscription {
     pub const fn scope(&self) -> TrackingScope {
         self.scope
     }
+    #[must_use]
+    pub const fn download(&self) -> Option<&TrackingDownload> {
+        self.download.as_ref()
+    }
 }
 
 impl TrackingSubscription {
+    #[allow(clippy::too_many_arguments)]
     pub fn rehydrate(
         id: TrackingId,
         owner_id: UserId,
@@ -183,8 +249,10 @@ impl TrackingSubscription {
         translation: String,
         known_episodes: Vec<EpisodeSnapshot>,
         scope: TrackingScope,
+        download: Option<TrackingDownload>,
     ) -> Result<Self, TrackingValidationError> {
         validate(&title, &translation, &known_episodes)?;
+        validate_download(provider, &translation, download.as_ref())?;
         Ok(Self {
             id,
             owner_id,
@@ -193,6 +261,7 @@ impl TrackingSubscription {
             translation,
             known_episodes,
             scope,
+            download,
         })
     }
 
@@ -224,6 +293,10 @@ impl TrackingSubscription {
     pub const fn scope(&self) -> TrackingScope {
         self.scope
     }
+    #[must_use]
+    pub const fn download(&self) -> Option<&TrackingDownload> {
+        self.download.as_ref()
+    }
 
     #[must_use]
     pub fn is_visible_to(&self, user: UserId) -> bool {
@@ -231,6 +304,27 @@ impl TrackingSubscription {
             || (matches!(self.scope, TrackingScope::Family)
                 && (user == PRIMARY_USER_ID || user == SECONDARY_USER_ID))
     }
+}
+
+fn validate_download(
+    provider: Provider,
+    translation: &str,
+    download: Option<&TrackingDownload>,
+) -> Result<(), TrackingValidationError> {
+    let Some(download) = download else {
+        return Ok(());
+    };
+    if provider != Provider::Rezka {
+        return Err(TrackingValidationError::UnsupportedDownloadProvider);
+    }
+    if translation == "release-calendar"
+        || download.provider_media_ref().trim().is_empty()
+        || download.translation_id() == 0
+        || download.season() == 0
+    {
+        return Err(TrackingValidationError::InvalidDownloadSelection);
+    }
+    Ok(())
 }
 
 fn validate(
@@ -302,16 +396,27 @@ pub trait EpisodeDiscoveryPort: Send + Sync {
     ) -> Result<Vec<EpisodeSnapshot>, PortError>;
 }
 
+#[async_trait::async_trait]
+pub trait TrackedEpisodeDownloadPort: Send + Sync {
+    async fn enqueue_episode(
+        &self,
+        tracking: &TrackingSubscription,
+        episode: EpisodeSnapshot,
+    ) -> Result<(), PortError>;
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct TrackingRunResult {
     pub checked: u32,
     pub discovered: u32,
     pub failed: u32,
+    pub queued: u32,
 }
 
 pub struct TrackingRuntime {
     store: Arc<dyn TrackingScheduleStore>,
     discovery: Arc<dyn EpisodeDiscoveryPort>,
+    downloads: Option<Arc<dyn TrackedEpisodeDownloadPort>>,
 }
 
 impl TrackingRuntime {
@@ -320,7 +425,17 @@ impl TrackingRuntime {
         store: Arc<dyn TrackingScheduleStore>,
         discovery: Arc<dyn EpisodeDiscoveryPort>,
     ) -> Self {
-        Self { store, discovery }
+        Self {
+            store,
+            discovery,
+            downloads: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_downloads(mut self, downloads: Arc<dyn TrackedEpisodeDownloadPort>) -> Self {
+        self.downloads = Some(downloads);
+        self
     }
 
     pub async fn run_once(
@@ -336,13 +451,20 @@ impl TrackingRuntime {
             checked: 0,
             discovered: 0,
             failed: 0,
+            queued: 0,
         };
-        let next_check = now + time::Duration::hours(6);
         for tracking in due {
+            let next_check = if tracking.download().is_some() {
+                now + time::Duration::minutes(15)
+            } else {
+                now + time::Duration::hours(6)
+            };
             result.checked += 1;
+            let selected_season = tracking.download().map(TrackingDownload::season);
             let baseline = tracking
                 .known_episodes()
                 .iter()
+                .filter(|episode| selected_season.is_none_or(|season| episode.season() == season))
                 .max()
                 .copied()
                 .ok_or(PortError::Conflict)?;
@@ -355,11 +477,28 @@ impl TrackingRuntime {
                 }
             };
             for episode in available {
-                if episode > baseline
-                    && self
-                        .store
-                        .record_future_episode(tracking.id(), episode, next_check)
-                        .await?
+                if episode <= baseline
+                    || tracking
+                        .download()
+                        .is_some_and(|download| episode.season() != download.season())
+                {
+                    continue;
+                }
+                if tracking.download().is_some() {
+                    let Some(downloads) = self.downloads.as_deref() else {
+                        result.failed += 1;
+                        continue;
+                    };
+                    if downloads.enqueue_episode(&tracking, episode).await.is_err() {
+                        result.failed += 1;
+                        continue;
+                    }
+                    result.queued += 1;
+                }
+                if self
+                    .store
+                    .record_future_episode(tracking.id(), episode, next_check)
+                    .await?
                 {
                     result.discovered += 1;
                 }

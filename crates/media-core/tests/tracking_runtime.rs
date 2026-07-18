@@ -8,8 +8,9 @@ use media_core::{
     PRIMARY_USER_ID, EpisodeDiscoveryPort, EpisodeSnapshot, NewTrackingCommand,
     NewTrackingSubscription, NotificationDelivery, NotificationDeliveryFailure,
     NotificationDispatcher, NotificationEventType, NotificationId, NotificationOutboxPort,
-    NotificationRecipient, NotificationSink, OperationKey, PortError, Provider, TrackingId,
-    TrackingRuntime, TrackingScheduleStore, TrackingScope, TrackingSubscription,
+    NotificationRecipient, NotificationSink, OperationKey, PortError, Provider,
+    TrackedEpisodeDownloadPort, TrackingDownload, TrackingId, TrackingRuntime,
+    TrackingScheduleStore, TrackingScope, TrackingSubscription,
 };
 
 struct ScheduleStore {
@@ -71,6 +72,28 @@ fn tracking() -> TrackingSubscription {
             known_episodes: vec![EpisodeSnapshot::new(1, 4).unwrap()],
             scope: TrackingScope::Personal,
             series_ongoing: true,
+            download: None,
+        },
+    )
+    .unwrap()
+    .into_persisted()
+}
+
+fn download_tracking() -> TrackingSubscription {
+    NewTrackingSubscription::new(
+        TrackingId::new(),
+        PRIMARY_USER_ID,
+        NewTrackingCommand {
+            provider: Provider::Rezka,
+            title: "Blades of the Guardians S2".to_owned(),
+            translation: "Studio Dub".to_owned(),
+            known_episodes: vec![
+                EpisodeSnapshot::new(2, 7).unwrap(),
+                EpisodeSnapshot::new(3, 1).unwrap(),
+            ],
+            scope: TrackingScope::Personal,
+            series_ongoing: true,
+            download: Some(TrackingDownload::new("42".to_owned(), 19, 2).unwrap()),
         },
     )
     .unwrap()
@@ -107,6 +130,68 @@ fn scheduler_treats_every_episode_at_or_before_the_baseline_as_known() {
         assert_eq!(
             *store.discovered.lock().unwrap(),
             vec![EpisodeSnapshot::new(1, 5).unwrap()]
+        );
+    });
+}
+
+struct DownloadDiscovery;
+
+#[async_trait::async_trait]
+impl EpisodeDiscoveryPort for DownloadDiscovery {
+    async fn available_episodes(
+        &self,
+        _: &TrackingSubscription,
+    ) -> Result<Vec<EpisodeSnapshot>, PortError> {
+        Ok(vec![
+            EpisodeSnapshot::new(2, 7).unwrap(),
+            EpisodeSnapshot::new(2, 8).unwrap(),
+            EpisodeSnapshot::new(3, 1).unwrap(),
+        ])
+    }
+}
+
+#[derive(Default)]
+struct Enqueuer {
+    episodes: Mutex<Vec<EpisodeSnapshot>>,
+}
+
+#[async_trait::async_trait]
+impl TrackedEpisodeDownloadPort for Enqueuer {
+    async fn enqueue_episode(
+        &self,
+        _: &TrackingSubscription,
+        episode: EpisodeSnapshot,
+    ) -> Result<(), PortError> {
+        self.episodes.lock().unwrap().push(episode);
+        Ok(())
+    }
+}
+
+#[test]
+fn scheduler_enqueues_only_new_episodes_from_the_selected_download_season() {
+    block_on(async {
+        let store = Arc::new(ScheduleStore {
+            due: download_tracking(),
+            discovered: Mutex::new(Vec::new()),
+        });
+        let downloads = Arc::new(Enqueuer::default());
+        let runtime = TrackingRuntime::new(store.clone(), Arc::new(DownloadDiscovery))
+            .with_downloads(downloads.clone());
+
+        let result = runtime
+            .run_once(time::OffsetDateTime::now_utc(), 10)
+            .await
+            .unwrap();
+
+        assert_eq!(result.queued, 1);
+        assert_eq!(result.discovered, 1);
+        assert_eq!(
+            *downloads.episodes.lock().unwrap(),
+            vec![EpisodeSnapshot::new(2, 8).unwrap()]
+        );
+        assert_eq!(
+            *store.discovered.lock().unwrap(),
+            vec![EpisodeSnapshot::new(2, 8).unwrap()]
         );
     });
 }

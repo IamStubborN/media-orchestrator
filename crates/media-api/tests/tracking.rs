@@ -81,6 +81,10 @@ fn create_body() -> &'static str {
     r#"{"provider":"rezka","title":"Ongoing Show","translation":"Studio Dub","known_episodes":[{"season":1,"episode":4}],"scope":"family","series_ongoing":true}"#
 }
 
+fn download_body() -> &'static str {
+    r#"{"provider":"rezka","title":"Blades of the Guardians S2","translation":"Studio Dub","known_episodes":[{"season":2,"episode":7}],"scope":"personal","series_ongoing":true,"download":{"provider_media_ref":"42513","translation_id":19,"season":2}}"#
+}
+
 #[tokio::test]
 async fn authenticated_owner_can_add_list_and_other_family_user_can_remove() {
     let app = app();
@@ -156,4 +160,27 @@ async fn create_rejects_owner_and_auto_download_fields() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
+}
+
+#[tokio::test]
+async fn authenticated_owner_can_create_an_exact_rezka_download_subscription() {
+    let response = app()
+        .oneshot(
+            Request::post("/v1/tracking")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header("idempotency-key", "tracking-download-add")
+                .header("content-type", "application/json")
+                .body(Body::from(download_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(value["download"]["provider_media_ref"], "42513");
+    assert_eq!(value["download"]["translation_id"], 19);
+    assert_eq!(value["download"]["season"], 2);
+    assert!(value.get("owner_id").is_none());
 }

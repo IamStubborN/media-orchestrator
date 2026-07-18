@@ -142,6 +142,7 @@ impl HttpClient {
         translation: String,
         known_episodes: Vec<EpisodeSnapshotDto>,
         scope: TrackingScopeDto,
+        download: Option<media_contract::TrackingDownloadDto>,
     ) -> Result<String, ClientError> {
         let request = CreateTrackingRequest {
             provider,
@@ -150,6 +151,7 @@ impl HttpClient {
             known_episodes,
             scope,
             series_ongoing: true,
+            download,
         };
         self.execute(
             self.request(reqwest::Method::POST, "v1/tracking")?

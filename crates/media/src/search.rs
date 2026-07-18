@@ -12,8 +12,9 @@ use media_core::{
     EpisodeDiscoveryPort, EpisodeMappingConfirmation, EpisodeSnapshot, IdentityStore, Job,
     JobApplication, JobId, JobState, NeedsActionReason, NewJobCommand, NotifyScope, OperationKey,
     PortError, Provider, ReleaseMetadataPort, ReleaseMetadataResult, ReleasePrecision,
-    ReleaseQuery, ScheduledEpisode, TrackingSubscription, UserId,
+    ReleaseQuery, ScheduledEpisode, TrackedEpisodeDownloadPort, TrackingSubscription, UserId,
 };
+use sha2::{Digest as _, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 const SEARCH_TTL: time::Duration = time::Duration::hours(24);
@@ -217,13 +218,19 @@ impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
             )
             .await
             .map_err(|_| PortError::Infrastructure)?;
-        let result = page.results.into_iter().find(|result| {
-            matches!(
-                &result.public,
-                SearchResultDto::Rezka { title, .. }
-                    if title.trim().eq_ignore_ascii_case(tracking.title().trim())
-            )
-        });
+        let result =
+            page.results
+                .into_iter()
+                .find(|result| match (&result.public, &result.private) {
+                    (
+                        SearchResultDto::Rezka { title, .. },
+                        PrivateResult::Rezka { title_id, .. },
+                    ) => tracking.download().map_or_else(
+                        || title.trim().eq_ignore_ascii_case(tracking.title().trim()),
+                        |download| download.provider_media_ref() == title_id.to_string(),
+                    ),
+                    _ => false,
+                });
         let Some(ProviderResult {
             public: SearchResultDto::Rezka { translations, .. },
             private:
@@ -235,16 +242,27 @@ impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
         else {
             return Err(PortError::Infrastructure);
         };
-        let translation_id = translations
-            .iter()
-            .find(|translation| {
-                translation
-                    .name
-                    .trim()
-                    .eq_ignore_ascii_case(tracking.translation().trim())
-            })
-            .map(|translation| translation.id)
-            .ok_or(PortError::Infrastructure)?;
+        let translation_id = tracking.download().map_or_else(
+            || {
+                translations
+                    .iter()
+                    .find(|translation| {
+                        translation
+                            .name
+                            .trim()
+                            .eq_ignore_ascii_case(tracking.translation().trim())
+                    })
+                    .map(|translation| translation.id)
+                    .ok_or(PortError::Infrastructure)
+            },
+            |download| {
+                translations
+                    .iter()
+                    .any(|translation| translation.id == download.translation_id())
+                    .then_some(download.translation_id())
+                    .ok_or(PortError::Infrastructure)
+            },
+        )?;
         let mut episodes = translation_episodes
             .get(&translation_id)
             .ok_or(PortError::Infrastructure)?
@@ -258,6 +276,134 @@ impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
         episodes.sort_unstable();
         episodes.dedup();
         Ok(episodes)
+    }
+}
+
+pub struct TrackedEpisodeDownloader {
+    provider: Arc<dyn SearchProvider>,
+    persistence: Arc<dyn SearchPersistence>,
+    jobs: Arc<JobApplication>,
+    identity: Option<Arc<dyn IdentityStore>>,
+}
+
+impl TrackedEpisodeDownloader {
+    #[must_use]
+    pub fn new(
+        provider: Arc<dyn SearchProvider>,
+        persistence: Arc<dyn SearchPersistence>,
+        jobs: Arc<JobApplication>,
+    ) -> Self {
+        Self {
+            provider,
+            persistence,
+            jobs,
+            identity: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_identity(mut self, identity: Arc<dyn IdentityStore>) -> Self {
+        self.identity = Some(identity);
+        self
+    }
+}
+
+#[async_trait::async_trait]
+impl TrackedEpisodeDownloadPort for TrackedEpisodeDownloader {
+    async fn enqueue_episode(
+        &self,
+        tracking: &TrackingSubscription,
+        episode: EpisodeSnapshot,
+    ) -> Result<(), PortError> {
+        let download = tracking.download().ok_or(PortError::Conflict)?;
+        if episode.season() != download.season() {
+            return Err(PortError::Conflict);
+        }
+        let page = self
+            .provider
+            .search(
+                &StartSearchRequest {
+                    scope: media_contract::SearchScopeDto {
+                        platform: "system".to_owned(),
+                        chat_id: "tracking-download".to_owned(),
+                        thread_id: None,
+                    },
+                    source: ProviderDto::Rezka,
+                    query: tracking.title().to_owned(),
+                    media_kind: Some(MediaKindDto::Series),
+                    season: None,
+                    preferred_qualities: Vec::new(),
+                    preferred_languages: Vec::new(),
+                    preferred_codecs: Vec::new(),
+                    preferred_release_groups: Vec::new(),
+                },
+                None,
+            )
+            .await
+            .map_err(|_| PortError::Infrastructure)?;
+        let result = page
+            .results
+            .iter()
+            .find(|result| {
+                matches!(
+                    &result.private,
+                    PrivateResult::Rezka { title_id, .. }
+                        if download.provider_media_ref() == title_id.to_string()
+                )
+            })
+            .ok_or(PortError::Infrastructure)?;
+        let request = SelectResultRequest {
+            session_id: "tracking".to_owned(),
+            result_id: result.public.result_id().to_owned(),
+            translation_id: Some(download.translation_id()),
+            season: Some(episode.season()),
+            episode: Some(episode.episode()),
+            scope: media_contract::SearchScopeDto {
+                platform: "system".to_owned(),
+                chat_id: "tracking-download".to_owned(),
+                thread_id: None,
+            },
+        };
+        let mut execution = execution(result, &request, Some(MediaKindDto::Series), None)
+            .map_err(|_| PortError::Infrastructure)?;
+        if let Some(identity) = self.identity.as_deref() {
+            apply_persisted_episode_mappings(identity, &mut execution)
+                .await
+                .map_err(|_| PortError::Infrastructure)?;
+        }
+        let result_ref = format!(
+            "selection:tracking:{}:{}:{}",
+            tracking.id(),
+            episode.season(),
+            episode.episode()
+        );
+        self.persistence
+            .insert_execution(result_ref.clone(), execution)
+            .await
+            .map_err(|_| PortError::Infrastructure)?;
+        let operation: [u8; 32] = Sha256::digest(
+            format!(
+                "tracking-download:v1:{}:{}:{}",
+                tracking.id(),
+                episode.season(),
+                episode.episode()
+            )
+            .as_bytes(),
+        )
+        .into();
+        self.jobs
+            .create_job_for_owner(
+                tracking.owner_id(),
+                OperationKey::from_bytes(operation),
+                NewJobCommand {
+                    provider: Provider::Rezka,
+                    result_ref,
+                    notify_scope: NotifyScope::Initiator,
+                },
+            )
+            .await
+            .map_err(|_| PortError::Infrastructure)?;
+        Ok(())
     }
 }
 

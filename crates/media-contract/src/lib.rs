@@ -40,7 +40,7 @@ pub use search::{
     TrackingPromptDto,
 };
 pub use tracking::{
-    CreateTrackingRequest, EpisodeSnapshotDto, TrackingDto, TrackingListDto, TrackingScopeDto,
-    TrackingStateDto,
+    CreateTrackingRequest, EpisodeSnapshotDto, TrackingDownloadDto, TrackingDto, TrackingListDto,
+    TrackingScopeDto, TrackingStateDto,
 };
 pub use trending::{TrendingCategoryDto, TrendingItemDto, TrendingMediaTypeDto, TrendingPageDto};

@@ -511,8 +511,10 @@ pub fn prepare_notification_dispatcher(
 pub fn prepare_tracking_scheduler(
     database: DatabaseConnection,
     discovery: Arc<dyn EpisodeDiscoveryPort>,
+    downloads: Arc<dyn media_core::TrackedEpisodeDownloadPort>,
 ) -> TrackingRuntime {
     TrackingRuntime::new(Arc::new(SeaOrmTrackingStore::new(database)), discovery)
+        .with_downloads(downloads)
 }
 
 pub struct PlexReconcileAdapter {
@@ -885,21 +887,29 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
         let persistence = Arc::new(StorageSearchPersistence::new(
             media_storage::SeaOrmSearchRepository::new(database.clone()),
         ));
+        let identity = Arc::new(media_storage::SeaOrmIdentityStore::new(database.clone()));
         let rezka_tracking_enabled = rezka.is_some();
         let provider = Arc::new(ConcreteSearchProvider::new(rezka, prowlarr));
         if rezka_tracking_enabled {
+            let downloads = Arc::new(
+                crate::search::TrackedEpisodeDownloader::new(
+                    provider.clone(),
+                    persistence.clone(),
+                    jobs.clone(),
+                )
+                .with_identity(identity.clone()),
+            );
             tracking_runtime = Some(prepare_tracking_scheduler(
                 database.clone(),
                 Arc::new(crate::search::ProviderEpisodeDiscovery::with_release(
                     provider.clone(),
                     release_provider.clone(),
                 )),
+                downloads,
             ));
         }
         state = state.with_search(Arc::new(
-            DurableSearchService::new(persistence, provider, jobs).with_identity(Arc::new(
-                media_storage::SeaOrmIdentityStore::new(database.clone()),
-            )),
+            DurableSearchService::new(persistence, provider, jobs).with_identity(identity),
         ));
     }
     if let Some(config) = config.plex() {

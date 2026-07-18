@@ -128,6 +128,12 @@ enum TrackingCommand {
         known_episodes: Vec<media_contract::EpisodeSnapshotDto>,
         #[arg(long, value_enum)]
         scope: TrackingScope,
+        #[arg(long, requires_all = ["translation_id", "season"])]
+        provider_media_ref: Option<String>,
+        #[arg(long, requires_all = ["provider_media_ref", "season"])]
+        translation_id: Option<u64>,
+        #[arg(long, requires_all = ["provider_media_ref", "translation_id"])]
+        season: Option<u32>,
         #[arg(long)]
         json: bool,
     },
@@ -463,8 +469,22 @@ async fn run_tracking(args: TrackingArgs) -> Result<(), RunError> {
             translation,
             known_episodes,
             scope,
+            provider_media_ref,
+            translation_id,
+            season,
             json,
         } => {
+            let download = match (provider_media_ref, translation_id, season) {
+                (Some(provider_media_ref), Some(translation_id), Some(season)) => {
+                    Some(media_contract::TrackingDownloadDto {
+                        provider_media_ref,
+                        translation_id,
+                        season,
+                    })
+                }
+                (None, None, None) => None,
+                _ => return Err(ClientError::Configuration.into()),
+            };
             let output = client
                 .add_tracking(
                     provider.into(),
@@ -472,6 +492,7 @@ async fn run_tracking(args: TrackingArgs) -> Result<(), RunError> {
                     translation,
                     known_episodes,
                     scope.into(),
+                    download,
                 )
                 .await?;
             emit(&output, json, |value| {

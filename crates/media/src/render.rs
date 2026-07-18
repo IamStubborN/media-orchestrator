@@ -266,6 +266,7 @@ pub fn tracking(value: &Value, action: Option<&str>) -> String {
     push_pair(&mut pairs, "Title", get_str(value, "title"));
     push_pair(&mut pairs, "Translation", get_str(value, "translation"));
     push_pair(&mut pairs, "Scope", get_str(value, "scope"));
+    push_pair(&mut pairs, "Mode", tracking_mode(value));
     push_pair(&mut pairs, "Known episodes", known_episodes_summary(value));
 
     key_value_block(&header, &pairs)
@@ -287,6 +288,7 @@ pub fn tracking_list(value: &Value) -> String {
         Column::always("TITLE"),
         Column::optional("TRANSLATION"),
         Column::optional("SCOPE"),
+        Column::optional("MODE"),
         Column::optional("LATEST"),
     ];
     let rows = items
@@ -301,12 +303,28 @@ pub fn tracking_list(value: &Value) -> String {
                 get_str(item, "title"),
                 get_str(item, "translation"),
                 get_str(item, "scope"),
+                tracking_mode(item),
                 known_episodes_summary(item),
             ]
         })
         .collect::<Vec<_>>();
 
     table(&columns, &rows)
+}
+
+fn tracking_mode(value: &Value) -> Option<String> {
+    value
+        .get("download")
+        .and_then(Value::as_object)
+        .map_or_else(
+            || Some("notify".to_owned()),
+            |download| {
+                download
+                    .get("season")
+                    .and_then(Value::as_u64)
+                    .map(|season| format!("download S{season:02}"))
+            },
+        )
 }
 
 #[must_use]

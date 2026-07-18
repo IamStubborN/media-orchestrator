@@ -20,6 +20,7 @@ fn new_tracking(id: TrackingId, scope: TrackingScope) -> NewTrackingSubscription
             known_episodes: vec![EpisodeSnapshot::new(1, 4).unwrap()],
             scope,
             series_ongoing: true,
+            download: None,
         },
     )
     .unwrap()

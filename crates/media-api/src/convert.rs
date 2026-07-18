@@ -123,6 +123,17 @@ pub(crate) fn new_tracking_command(
             TrackingScopeDto::Family => TrackingScope::Family,
         },
         series_ongoing: request.series_ongoing,
+        download: request
+            .download
+            .map(|download| {
+                media_core::TrackingDownload::new(
+                    download.provider_media_ref,
+                    download.translation_id,
+                    download.season,
+                )
+                .map_err(|_| ())
+            })
+            .transpose()?,
     })
 }
 
@@ -148,6 +159,13 @@ pub(crate) fn tracking(value: &TrackingSubscription) -> TrackingDto {
             TrackingScope::Family => TrackingScopeDto::Family,
         },
         state: TrackingStateDto::Active,
+        download: value
+            .download()
+            .map(|download| media_contract::TrackingDownloadDto {
+                provider_media_ref: download.provider_media_ref().to_owned(),
+                translation_id: download.translation_id(),
+                season: download.season(),
+            }),
     }
 }
 

@@ -5,7 +5,7 @@ use std::{
 
 use media::search::{
     DurableSearchService, ProviderPage, ProviderResult, SearchPersistence, SearchProvider,
-    StoredSearchSession,
+    StoredSearchSession, TrackedEpisodeDownloader,
 };
 use media_api::{SearchError, SearchService};
 use media_contract::{
@@ -19,8 +19,8 @@ use media_core::{
     ExternalNamespace, IdentityStore, Job, JobApplication, JobId, JobStore, MediaExternalReference,
     NewJob, NotifyScope, OperationKey, PortError, Provider, QueueStatus, ReleaseCandidate,
     ReleaseLifecycle, ReleaseMetadataPort, ReleaseMetadataResult, ReleasePrecision, ReleaseQuery,
-    ReleaseQueryError, ScheduledEpisode, TrackingId, TrackingScope, TrackingSubscription, UserId,
-    SECONDARY_USER_ID,
+    ReleaseQueryError, ScheduledEpisode, TrackedEpisodeDownloadPort, TrackingDownload, TrackingId,
+    TrackingScope, TrackingSubscription, UserId, SECONDARY_USER_ID,
 };
 
 #[derive(Default)]
@@ -74,6 +74,7 @@ async fn tracking_discovery_uses_the_selected_rezka_translation_snapshot() {
         "Original".to_owned(),
         vec![media_core::EpisodeSnapshot::new(1, 1).unwrap()],
         TrackingScope::Personal,
+        None,
     )
     .unwrap();
 
@@ -149,6 +150,7 @@ async fn calendar_tracking_is_independent_of_download_providers() {
         "release-calendar".to_owned(),
         vec![media_core::EpisodeSnapshot::new(1, 1).unwrap()],
         TrackingScope::Personal,
+        None,
     )
     .unwrap();
 
@@ -156,6 +158,90 @@ async fn calendar_tracking_is_independent_of_download_providers() {
         discovery.available_episodes(&tracking).await.unwrap(),
         vec![media_core::EpisodeSnapshot::new(1, 1).unwrap()]
     );
+}
+
+#[tokio::test]
+async fn tracked_episode_download_creates_one_exact_rezka_episode_execution_for_the_owner() {
+    let public = SearchResultDto::Rezka {
+        result_id: "rezka:42".to_owned(),
+        title: "Blades of the Guardians S2".to_owned(),
+        original_title: None,
+        year: Some(2026),
+        media_kind: MediaKindDto::Series,
+        thumbnail_url: None,
+        translations: vec![RezkaTranslationDto {
+            id: 19,
+            name: "Studio Dub".to_owned(),
+            premium: false,
+            director: false,
+            camrip: false,
+            has_ads: false,
+        }],
+        availability: Some(SeriesAvailabilityDto {
+            lifecycle_status: media_contract::SeriesLifecycleStatusDto::Ongoing,
+            incomplete: true,
+            seasons: vec![SeasonAvailabilityDto {
+                season: 2,
+                episodes: vec![7, 8],
+            }],
+            tracking_prompt: None,
+        }),
+    };
+    let provider = Arc::new(FakeProvider {
+        pages: Mutex::new(HashMap::from([(
+            ProviderDto::Rezka,
+            vec![ProviderPage {
+                results: vec![ProviderResult::rezka(public, "/show.html".to_owned(), 42)],
+                provider_continuation: None,
+            }],
+        )])),
+    });
+    let persistence = Arc::new(MemorySearchPersistence::default());
+    let jobs = Arc::new(MemoryJobStore::default());
+    let downloader = TrackedEpisodeDownloader::new(
+        provider,
+        persistence.clone(),
+        Arc::new(JobApplication::new(jobs.clone())),
+    );
+    let tracking = TrackingSubscription::rehydrate(
+        TrackingId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        "Blades of the Guardians S2".to_owned(),
+        "Studio Dub".to_owned(),
+        vec![media_core::EpisodeSnapshot::new(2, 7).unwrap()],
+        TrackingScope::Personal,
+        Some(TrackingDownload::new("42".to_owned(), 19, 2).unwrap()),
+    )
+    .unwrap();
+
+    downloader
+        .enqueue_episode(&tracking, media_core::EpisodeSnapshot::new(2, 8).unwrap())
+        .await
+        .unwrap();
+
+    let jobs = jobs.jobs.lock().unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].owner_id(), PRIMARY_USER_ID);
+    assert_eq!(jobs[0].provider(), Provider::Rezka);
+    assert_eq!(jobs[0].notify_scope(), NotifyScope::Initiator);
+    let execution = persistence
+        .executions
+        .lock()
+        .unwrap()
+        .get(jobs[0].result_ref())
+        .cloned()
+        .unwrap();
+    assert!(matches!(
+        execution,
+        media_contract::ExecutionSelectionDto::Rezka {
+            title_id: 42,
+            translation_id: 19,
+            season: Some(2),
+            episode: Some(8),
+            ..
+        }
+    ));
 }
 
 #[async_trait::async_trait]

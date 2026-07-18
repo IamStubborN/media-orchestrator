@@ -1,8 +1,8 @@
 use media_core::{
     PRIMARY_USER_ID, EpisodeSnapshot, NewTrackingSubscription, NotificationDelivery,
     NotificationEventType, NotificationId, NotificationOutboxPort, NotificationRecipient,
-    OperationKey, PortError, Provider, TrackingId, TrackingScheduleStore, TrackingScope,
-    TrackingStore, TrackingSubscription, UserId, SECONDARY_USER_ID,
+    OperationKey, PortError, Provider, TrackingDownload, TrackingId, TrackingScheduleStore,
+    TrackingScope, TrackingStore, TrackingSubscription, UserId, SECONDARY_USER_ID,
 };
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
 
@@ -29,7 +29,7 @@ impl SeaOrmTrackingStore {
         let result = async {
             let row = transaction.query_one_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
-                "SELECT owner_id, title, scope FROM tracking_subscriptions WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+                "SELECT owner_id, title, scope, download_provider_media_ref FROM tracking_subscriptions WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
                 [id.into_uuid().into()],
             )).await?.ok_or_else(|| sea_orm::DbErr::RecordNotFound("tracking subscription not found".to_owned()))?;
             let discovery_id = uuid::Uuid::new_v4();
@@ -56,6 +56,10 @@ impl SeaOrmTrackingStore {
             let owner = UserId::from_uuid(row.try_get("", "owner_id")?);
             let title: String = row.try_get("", "title")?;
             let scope: String = row.try_get("", "scope")?;
+            let auto_download: Option<String> = row.try_get("", "download_provider_media_ref")?;
+            if auto_download.is_some() {
+                return Ok(true);
+            }
             let message = format!(
                 "📺 **Новая серия доступна**\n\n🎬 {title}\n🔔 S{:02}E{:02}\n\n➡️ **Дальше:** выберите источник — Rezka или Prowlarr",
                 episode.season(), episode.episode()
@@ -90,10 +94,14 @@ impl TrackingStore for SeaOrmTrackingStore {
         let known = episode_json(value.known_episodes());
         let row = self.database.query_one_raw(Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
-            "INSERT INTO tracking_subscriptions (id, owner_id, provider, title, translation, known_episodes, scope, created_operation_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (created_operation_key) DO UPDATE SET created_operation_key = EXCLUDED.created_operation_key RETURNING id, owner_id, provider, title, translation, known_episodes, scope",
+            "INSERT INTO tracking_subscriptions (id, owner_id, provider, title, translation, known_episodes, scope, download_provider_media_ref, download_translation_id, download_season, created_operation_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (created_operation_key) DO UPDATE SET created_operation_key = EXCLUDED.created_operation_key RETURNING id, owner_id, provider, title, translation, known_episodes, scope, download_provider_media_ref, download_translation_id, download_season",
             [
                 value.id().into_uuid().into(), value.owner_id().into_uuid().into(), provider_value(value.provider()).into(),
-                value.title().into(), value.translation().into(), known.into(), scope_value(value.scope()).into(), operation.as_bytes().to_vec().into(),
+                value.title().into(), value.translation().into(), known.into(), scope_value(value.scope()).into(),
+                value.download().map(|download| download.provider_media_ref().to_owned()).into(),
+                value.download().and_then(|download| i64::try_from(download.translation_id()).ok()).into(),
+                value.download().and_then(|download| i32::try_from(download.season()).ok()).into(),
+                operation.as_bytes().to_vec().into(),
             ],
         )).await.map_err(map_database_error)?.ok_or(PortError::Infrastructure)?;
         tracking_from_row(&row)
@@ -102,7 +110,7 @@ impl TrackingStore for SeaOrmTrackingStore {
     async fn list_visible(&self, user: UserId) -> Result<Vec<TrackingSubscription>, PortError> {
         self.database.query_all_raw(Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
-            "SELECT id, owner_id, provider, title, translation, known_episodes, scope FROM tracking_subscriptions WHERE deleted_at IS NULL AND (owner_id = $1 OR (scope = 'family' AND $1 IN ($2, $3))) ORDER BY created_at, id",
+            "SELECT id, owner_id, provider, title, translation, known_episodes, scope, download_provider_media_ref, download_translation_id, download_season FROM tracking_subscriptions WHERE deleted_at IS NULL AND (owner_id = $1 OR (scope = 'family' AND $1 IN ($2, $3))) ORDER BY created_at, id",
             [user.into_uuid().into(), PRIMARY_USER_ID.into_uuid().into(), SECONDARY_USER_ID.into_uuid().into()],
         )).await.map_err(map_database_error)?.iter().map(tracking_from_row).collect()
     }
@@ -115,7 +123,7 @@ impl TrackingStore for SeaOrmTrackingStore {
     ) -> Result<Option<TrackingSubscription>, PortError> {
         let row = self.database.query_one_raw(Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
-            "UPDATE tracking_subscriptions SET deleted_at = COALESCE(deleted_at, now()), remove_operation_key = COALESCE(remove_operation_key, $3), updated_at = now() WHERE id = $1 AND (remove_operation_key = $3 OR (deleted_at IS NULL AND (owner_id = $2 OR (scope = 'family' AND $2 IN ($4, $5))))) RETURNING id, owner_id, provider, title, translation, known_episodes, scope",
+            "UPDATE tracking_subscriptions SET deleted_at = COALESCE(deleted_at, now()), remove_operation_key = COALESCE(remove_operation_key, $3), updated_at = now() WHERE id = $1 AND (remove_operation_key = $3 OR (deleted_at IS NULL AND (owner_id = $2 OR (scope = 'family' AND $2 IN ($4, $5))))) RETURNING id, owner_id, provider, title, translation, known_episodes, scope, download_provider_media_ref, download_translation_id, download_season",
             [id.into_uuid().into(), user.into_uuid().into(), operation.as_bytes().to_vec().into(), PRIMARY_USER_ID.into_uuid().into(), SECONDARY_USER_ID.into_uuid().into()],
         )).await.map_err(map_database_error)?;
         row.as_ref().map(tracking_from_row).transpose()
@@ -135,7 +143,7 @@ impl TrackingScheduleStore for SeaOrmTrackingStore {
         self.database
             .query_all_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
-                "SELECT id, owner_id, provider, title, translation, known_episodes, scope \
+                "SELECT id, owner_id, provider, title, translation, known_episodes, scope, download_provider_media_ref, download_translation_id, download_season \
                  FROM tracking_subscriptions WHERE deleted_at IS NULL AND next_check_at <= $1 \
                  ORDER BY next_check_at, created_at LIMIT $2",
                 [now.into(), i64::from(limit).into()],
@@ -368,6 +376,27 @@ fn tracking_from_row(row: &sea_orm::QueryResult) -> Result<TrackingSubscription,
             EpisodeSnapshot::new(season, episode).map_err(|_| PortError::Infrastructure)
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let provider_media_ref: Option<String> = row
+        .try_get("", "download_provider_media_ref")
+        .map_err(|_| PortError::Infrastructure)?;
+    let translation_id: Option<i64> = row
+        .try_get("", "download_translation_id")
+        .map_err(|_| PortError::Infrastructure)?;
+    let season: Option<i32> = row
+        .try_get("", "download_season")
+        .map_err(|_| PortError::Infrastructure)?;
+    let download = match (provider_media_ref, translation_id, season) {
+        (Some(provider_media_ref), Some(translation_id), Some(season)) => Some(
+            TrackingDownload::new(
+                provider_media_ref,
+                u64::try_from(translation_id).map_err(|_| PortError::Infrastructure)?,
+                u32::try_from(season).map_err(|_| PortError::Infrastructure)?,
+            )
+            .map_err(|_| PortError::Infrastructure)?,
+        ),
+        (None, None, None) => None,
+        _ => return Err(PortError::Infrastructure),
+    };
     TrackingSubscription::rehydrate(
         TrackingId::from_uuid(
             row.try_get("", "id")
@@ -390,6 +419,7 @@ fn tracking_from_row(row: &sea_orm::QueryResult) -> Result<TrackingSubscription,
             &row.try_get::<String>("", "scope")
                 .map_err(|_| PortError::Infrastructure)?,
         )?,
+        download,
     )
     .map_err(|_| PortError::Infrastructure)
 }

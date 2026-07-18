@@ -24,6 +24,14 @@ pub struct EpisodeSnapshotDto {
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct TrackingDownloadDto {
+    pub provider_media_ref: String,
+    pub translation_id: u64,
+    pub season: u32,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateTrackingRequest {
     pub provider: ProviderDto,
     pub title: String,
@@ -31,6 +39,8 @@ pub struct CreateTrackingRequest {
     pub known_episodes: Vec<EpisodeSnapshotDto>,
     pub scope: TrackingScopeDto,
     pub series_ongoing: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download: Option<TrackingDownloadDto>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -42,6 +52,8 @@ pub struct TrackingDto {
     pub known_episodes: Vec<EpisodeSnapshotDto>,
     pub scope: TrackingScopeDto,
     pub state: TrackingStateDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download: Option<TrackingDownloadDto>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
