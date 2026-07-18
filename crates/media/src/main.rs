@@ -60,6 +60,8 @@ enum RezkaCommand {
         has_ads: bool,
         #[arg(long)]
         json: bool,
+        #[arg(long, default_value_t = false)]
+        probe_streams: bool,
     },
 }
 
@@ -385,6 +387,7 @@ async fn run_rezka(args: RezkaArgs) -> Result<(), RunError> {
             camrip,
             has_ads,
             json,
+            probe_streams,
         } => {
             let kind = match (kind, season, episode) {
                 (MediaKind::Movie, None, None) => media::diagnostic::InspectionKind::Movie {
@@ -403,6 +406,7 @@ async fn run_rezka(args: RezkaArgs) -> Result<(), RunError> {
                 title_id,
                 translation_id,
                 kind,
+                probe_streams,
             )
             .await?;
             let inspection = inspection.as_json();
