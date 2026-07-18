@@ -7,7 +7,7 @@ use std::{
 use async_trait::async_trait;
 use futures_util::StreamExt as _;
 use secrecy::{ExposeSecret as _, SecretString};
-use tokio::io::AsyncWriteExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::{
     Cancellation, FileSystemPort, HttpPort, MediaProbe, PlexCheck, PlexExpectation,
@@ -16,6 +16,7 @@ use crate::{
 };
 
 const MAX_SUBTITLE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PROCESS_ERROR_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Copy, Clone, Default)]
 pub struct TokioFileSystem;
@@ -575,25 +576,37 @@ impl ProcessPort for TokioProcessAdapter {
             .args(command.args())
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .map_err(|_| RunnerPortError::Process)?;
+        let stderr = child.stderr.take().ok_or(RunnerPortError::Process)?;
+        let mut stderr_task = Some(tokio::spawn(capture_process_stderr(stderr)));
         let started = tokio::time::Instant::now();
         loop {
             if cancellation.is_cancelled() {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
+                let _ = collect_process_stderr(&mut stderr_task).await;
                 return Err(RunnerPortError::Cancelled);
             }
             if started.elapsed() >= self.timeout {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
+                let stderr = collect_process_stderr(&mut stderr_task).await;
+                log_process_failure(None, &stderr, "timeout");
                 return Err(RunnerPortError::Process);
             }
             match child.try_wait().map_err(|_| RunnerPortError::Process)? {
-                Some(status) if status.success() => return Ok(()),
-                Some(_) => return Err(RunnerPortError::Process),
+                Some(status) if status.success() => {
+                    let _ = collect_process_stderr(&mut stderr_task).await;
+                    return Ok(());
+                }
+                Some(status) => {
+                    let stderr = collect_process_stderr(&mut stderr_task).await;
+                    log_process_failure(status.code(), &stderr, "exit");
+                    return Err(RunnerPortError::Process);
+                }
                 None => tokio::time::sleep(Duration::from_millis(100)).await,
             }
         }
@@ -616,10 +629,12 @@ impl ProcessPort for TokioProcessAdapter {
             .args(command.args())
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .map_err(|_| RunnerPortError::Process)?;
+        let stderr = child.stderr.take().ok_or(RunnerPortError::Process)?;
+        let mut stderr_task = Some(tokio::spawn(capture_process_stderr(stderr)));
         let started = tokio::time::Instant::now();
         let mut previous_sample = started;
         let mut previous_bytes = 0_u64;
@@ -627,15 +642,19 @@ impl ProcessPort for TokioProcessAdapter {
             if cancellation.is_cancelled() {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
+                let _ = collect_process_stderr(&mut stderr_task).await;
                 return Err(RunnerPortError::Cancelled);
             }
             if started.elapsed() >= self.timeout {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
+                let stderr = collect_process_stderr(&mut stderr_task).await;
+                log_process_failure(None, &stderr, "timeout");
                 return Err(RunnerPortError::Process);
             }
             match child.try_wait().map_err(|_| RunnerPortError::Process)? {
                 Some(status) if status.success() => {
+                    let _ = collect_process_stderr(&mut stderr_task).await;
                     let downloaded_bytes = tokio::fs::metadata(output_path)
                         .await
                         .ok()
@@ -645,7 +664,11 @@ impl ProcessPort for TokioProcessAdapter {
                         .await;
                     return Ok(());
                 }
-                Some(_) => return Err(RunnerPortError::Process),
+                Some(status) => {
+                    let stderr = collect_process_stderr(&mut stderr_task).await;
+                    log_process_failure(status.code(), &stderr, "exit");
+                    return Err(RunnerPortError::Process);
+                }
                 None => {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     let now = tokio::time::Instant::now();
@@ -669,6 +692,81 @@ impl ProcessPort for TokioProcessAdapter {
                 }
             }
         }
+    }
+}
+
+async fn capture_process_stderr(mut stderr: tokio::process::ChildStderr) -> Vec<u8> {
+    let mut retained = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let read = match stderr.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        let remaining = MAX_PROCESS_ERROR_BYTES.saturating_sub(retained.len());
+        retained.extend_from_slice(&buffer[..read.min(remaining)]);
+    }
+    retained
+}
+
+async fn collect_process_stderr(task: &mut Option<tokio::task::JoinHandle<Vec<u8>>>) -> Vec<u8> {
+    match task.take() {
+        Some(task) => task.await.unwrap_or_default(),
+        None => Vec::new(),
+    }
+}
+
+fn log_process_failure(exit_code: Option<i32>, stderr: &[u8], reason: &str) {
+    let summary = redact_process_stderr(stderr);
+    tracing::warn!(
+        exit_code,
+        reason,
+        stderr = %summary,
+        "ffmpeg process failed"
+    );
+}
+
+fn redact_process_stderr(stderr: &[u8]) -> String {
+    let mut summary = String::new();
+    for token in String::from_utf8_lossy(stderr).split_whitespace() {
+        let token = if token.contains("://") {
+            "[REDACTED_URL]"
+        } else {
+            token
+        };
+        let separator = usize::from(!summary.is_empty());
+        if summary.len() + separator + token.len() > 512 {
+            break;
+        }
+        if separator == 1 {
+            summary.push(' ');
+        }
+        summary.push_str(token);
+    }
+    if summary.is_empty() {
+        "[no stderr]".to_owned()
+    } else {
+        summary
+    }
+}
+
+#[cfg(test)]
+mod process_error_tests {
+    use super::redact_process_stderr;
+
+    #[test]
+    fn process_stderr_redacts_complete_urls_and_keeps_the_reason() {
+        let stderr =
+            b"[https] HTTP error 403 Forbidden for https://cdn.example/video.m3u8?token=secret";
+
+        let summary = redact_process_stderr(stderr);
+
+        assert_eq!(
+            summary,
+            "[https] HTTP error 403 Forbidden for [REDACTED_URL]"
+        );
+        assert!(!summary.contains("secret"));
+        assert!(!summary.contains("cdn.example"));
     }
 }
 
