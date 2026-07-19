@@ -11,7 +11,7 @@ hermes_root=${HERMES_HOME_ROOT:-$root/../hermes-home}
 hermes_remote_root=${HERMES_HOME_REMOTE_ROOT:-/home/operator/hermes-home}
 
 usage() {
-    echo "usage: $0 status|verify|deploy|rollback" >&2
+    echo "usage: $0 status|verify|deploy|deploy-hermes|rollback" >&2
     exit 2
 }
 
@@ -141,6 +141,13 @@ deploy() {
     replace_hermes_agents
 }
 
+deploy_hermes() {
+    service_image=$(remote "docker inspect media-service --format '{{.Config.Image}}'")
+    docker_host=${MEDIA_DOCKER_HOST:-ssh://$host}
+    prepare_hermes_cli "$service_image" "$docker_host"
+    replace_hermes_agents
+}
+
 rollback() {
     assert_no_active_job
     previous=$(remote "cat '$rollback_file'")
@@ -157,6 +164,7 @@ case ${1:-} in
     status) status ;;
     verify) verify ;;
     deploy) deploy ;;
+    deploy-hermes) deploy_hermes ;;
     rollback) rollback ;;
     *) usage ;;
 esac
