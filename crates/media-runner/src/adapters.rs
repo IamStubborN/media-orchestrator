@@ -650,7 +650,7 @@ impl ProcessPort for TokioProcessAdapter {
                 let _ = child.wait().await;
                 let stderr = collect_process_stderr(&mut stderr_task).await;
                 log_process_failure(None, &stderr, "timeout");
-                return Err(RunnerPortError::Process);
+                return Err(RunnerPortError::SourceTransferTransient);
             }
             match child.try_wait().map_err(|_| RunnerPortError::Process)? {
                 Some(status) if status.success() => {
@@ -667,7 +667,7 @@ impl ProcessPort for TokioProcessAdapter {
                 Some(status) => {
                     let stderr = collect_process_stderr(&mut stderr_task).await;
                     log_process_failure(status.code(), &stderr, "exit");
-                    return Err(RunnerPortError::Process);
+                    return Err(RunnerPortError::SourceTransferTransient);
                 }
                 None => {
                     tokio::time::sleep(Duration::from_millis(100)).await;

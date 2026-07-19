@@ -427,6 +427,33 @@ printf 'def' >> "$output"
     assert!(final_observation.final_observation);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn process_adapter_classifies_hls_transport_failure_as_transient() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temporary = tempdir().unwrap();
+    let ffmpeg = temporary.path().join("ffmpeg-fixture");
+    std::fs::write(
+        &ffmpeg,
+        "#!/bin/sh\nprintf >&2 'Connection timed out\\n'\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let output = temporary.path().join("episode.partial.mkv");
+    let input = SensitiveUrl::parse("https://cdn.example/playlist.m3u8", "video").unwrap();
+    let command = build_hls_ingest_command(&input, &output).unwrap();
+    let adapter =
+        TokioProcessAdapter::new("/usr/bin/false", &ffmpeg, std::time::Duration::from_secs(2));
+
+    let error = adapter
+        .run_with_progress(&command, &output, &ProgressRecorder::default(), &Active)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error, RunnerPortError::SourceTransferTransient);
+}
+
 #[tokio::test]
 async fn service_adapter_requests_scan_and_decodes_exact_plex_observation() {
     let server = MockServer::start().await;
