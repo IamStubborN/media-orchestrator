@@ -369,7 +369,7 @@ async fn partial_completion_creates_plex_and_partial_notifications_once() {
 }
 
 #[tokio::test]
-async fn session_refresh_emits_only_session_lifecycle_notifications() {
+async fn successful_session_refresh_is_silent() {
     let (test_db, jobs, leases) = setup().await;
     jobs.create(
         operation_key(),
@@ -408,16 +408,7 @@ async fn session_refresh_emits_only_session_lifecycle_notifications() {
     }
 
     let notifications = notification_rows(&test_db).await;
-    assert_eq!(
-        notifications
-            .iter()
-            .map(|row| row.try_get::<String>("", "event_type").unwrap())
-            .collect::<Vec<_>>(),
-        vec!["session-refreshed"],
-    );
-    for row in &notifications {
-        assert_sanitized_message(row, &["plex", "download", "encoding"]);
-    }
+    assert!(notifications.is_empty());
 
     let deliveries = SeaOrmNotificationOutbox::new(test_db.connection().clone())
         .lease_pending(
@@ -428,17 +419,7 @@ async fn session_refresh_emits_only_session_lifecycle_notifications() {
         )
         .await
         .unwrap();
-    assert_eq!(deliveries.len(), 1);
-    assert!(deliveries.iter().all(|delivery| {
-        delivery
-            .status_key()
-            .is_some_and(|key| key.starts_with("media-job:"))
-    }));
-    assert!(
-        deliveries
-            .iter()
-            .any(|delivery| { delivery.event_type() == NotificationEventType::SessionRefreshed })
-    );
+    assert!(deliveries.is_empty());
 }
 
 #[tokio::test]
@@ -583,7 +564,7 @@ async fn progress_milestones_replace_the_same_initiator_card_across_retries() {
             .unwrap()["message"]
             .as_str()
             .unwrap()
-            .contains("Перекодирование Rezka-видео через VAAPI началось")
+            .contains("Подготовка видео в 1080p началась")
     );
 }
 
@@ -769,7 +750,7 @@ async fn storage_block_notifies_both_family_recipients_once() {
         assert!(message.contains("📺 сериал, серия S01E01 · Rezka"));
         assert!(message.contains("🎙 Оригинал (+субтитры)"));
         assert!(message.contains("✨ Лучшее доступное качество · все доступные субтитры"));
-        assert!(message.contains("📁 Plex / Сериалы · VAAPI"));
+        assert!(message.contains("📁 После обработки появится в Plex / Сериалы"));
         assert!(message.contains("🔄 **Этап:**"));
         assert!(message.contains("➡️ **Дальше:**"));
         if row.try_get::<String>("", "event_type").unwrap() == "blocked-storage" {
@@ -778,7 +759,8 @@ async fn storage_block_notifies_both_family_recipients_once() {
             assert!(message.contains("Нужно: 24.0 ГБ"));
             assert!(message.contains("Не хватает: 1.0 ГБ"));
         }
-        assert!(message.contains("🆔 `Job "));
+        assert!(!message.contains("🆔"));
+        assert!(!message.contains("Job ID"));
     }
 
     let deliveries = SeaOrmNotificationOutbox::new(test_db.connection().clone())
@@ -903,7 +885,8 @@ async fn terminal_stage_failure_creates_one_sanitized_failure_notification() {
         .as_str()
         .unwrap()
         .to_owned();
-    assert!(message.contains("provider_error"));
+    assert!(message.contains("попросите технические детали"));
+    assert!(!message.contains("provider_error"));
     assert_sanitized_message(
         &failed[0],
         &["secret.example", "token", "failure-private-reference"],
@@ -1779,6 +1762,8 @@ async fn job_detail_reports_the_running_stage_and_clears_it_when_idle() {
     assert!(progress_message.contains("18.4 МБ/с"));
     assert!(progress_message.contains("1 мин 25 сек"));
     assert!(!progress_message.contains("://"));
+    assert!(!progress_message.contains("🆔"));
+    assert!(!progress_message.contains("Job ID"));
 
     let detail = jobs
         .find_detail_for_owner(created.id(), PRIMARY_USER_ID)

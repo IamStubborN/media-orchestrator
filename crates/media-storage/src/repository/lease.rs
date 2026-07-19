@@ -259,7 +259,6 @@ struct JobNotificationContext {
     episode: Option<u64>,
     episode_count: Option<usize>,
     translation: Option<String>,
-    translation_id: Option<u64>,
     storage_available_bytes: Option<u64>,
     storage_required_bytes: Option<u64>,
 }
@@ -297,14 +296,12 @@ impl JobNotificationContext {
         }
         if let Some(translation) = &self.translation {
             lines.push(format!("🎙 {translation}"));
-        } else if let Some(translation_id) = self.translation_id {
-            lines.push(format!("🎙 Перевод ID {translation_id}"));
         }
         match job.provider() {
             media_core::Provider::Rezka => {
                 lines.push("✨ Лучшее доступное качество · все доступные субтитры".to_owned());
                 lines.push(format!(
-                    "📁 Plex / {} · VAAPI",
+                    "📁 После обработки появится в Plex / {}",
                     if self.media_kind.as_deref() == Some("фильм") {
                         "Фильмы"
                     } else {
@@ -313,7 +310,7 @@ impl JobNotificationContext {
                 ));
             }
             media_core::Provider::Prowlarr => lines.push(format!(
-                "📁 Plex / {} · qBittorrent",
+                "📁 После загрузки появится в Plex / {}",
                 if self.media_kind.as_deref() == Some("фильм") {
                     "Фильмы"
                 } else {
@@ -331,10 +328,9 @@ impl JobNotificationContext {
         let headline = headline.trim_end_matches('.');
         let note = note.map_or_else(String::new, |note| format!("\n\n{note}"));
         format!(
-            "{} **{headline}**{note}\n\n{}\n\n🔄 **Этап:** {stage}\n➡️ **Дальше:** {next}\n🆔 `Job {}`",
+            "{} **{headline}**{note}\n\n{}\n\n🔄 **Этап:** {stage}\n➡️ **Дальше:** {next}",
             status_icon(status),
             self.details(job),
-            job.id(),
         )
     }
 }
@@ -364,12 +360,12 @@ fn provider_label(job: &Job) -> &'static str {
 fn stage_label(stage: &str) -> &'static str {
     match stage {
         "download" => "скачивание исходного видео",
-        "torrent_monitor" => "ожидание загрузки в qBittorrent",
-        "media_pipeline" => "проверка места и обработка медиа",
-        "encode" | "encoding" | "transcode" => "перекодирование Rezka-видео через VAAPI",
+        "torrent_monitor" => "загрузка выбранного релиза",
+        "media_pipeline" => "проверка места и подготовка видео",
+        "encode" | "encoding" | "transcode" => "подготовка видео в 1080p",
         "publish" | "publishing" => "публикация в Plex",
         "subtitles" => "скачивание субтитров",
-        "resolve_manifest" => "получение ссылки на видеопоток",
+        "resolve_manifest" => "подготовка ссылки на видео",
         "resolve_identity" => "сопоставление сезона и серии",
         _ => "обработка медиа",
     }
@@ -378,10 +374,10 @@ fn stage_label(stage: &str) -> &'static str {
 fn after_download(job: &Job) -> &'static str {
     match job.provider() {
         media_core::Provider::Rezka => {
-            "после загрузки видео будет обработано через VAAPI и опубликовано в Plex"
+            "после загрузки видео будет подготовлено в 1080p и добавлено в Plex"
         }
         media_core::Provider::Prowlarr => {
-            "после завершения qBittorrent файл будет опубликован в Plex без перекодирования"
+            "после загрузки файл появится в Plex без дополнительной обработки"
         }
     }
 }
@@ -438,9 +434,6 @@ async fn notification_context(
         episode: payload.get("episode").and_then(serde_json::Value::as_u64),
         episode_count: episodes,
         translation: safe("translation"),
-        translation_id: payload
-            .get("translation_id")
-            .and_then(serde_json::Value::as_u64),
         storage_available_bytes: storage
             .get("storage_available_bytes")
             .and_then(serde_json::Value::as_u64),
@@ -544,12 +537,11 @@ fn progress_message(
     }
 
     Some(format!(
-        "⬇️ **Загрузка выполняется**\n\n{}\n\n{}\n\n🔄 **Этап:** {}\n➡️ **Дальше:** {}\n🆔 `Job {}`",
+        "⬇️ **Загрузка выполняется**\n\n{}\n\n{}\n\n🔄 **Этап:** {}\n➡️ **Дальше:** {}",
         context.details(job),
         metrics.join("\n"),
         stage_label(stage),
         after_download(job),
-        job.id(),
     ))
 }
 
@@ -584,23 +576,17 @@ fn notifications_for_event(
     event: &JobEvent,
     context: &JobNotificationContext,
 ) -> Vec<(&'static str, String)> {
-    let id = job.id();
     let session_refresh = job.result_ref().starts_with("selection:session-refresh:");
     match event.kind() {
-        JobEventKind::Started if session_refresh => {
-            vec![(
-                "started",
-                format!("🔐 **Обновляю сессию Rezka**\n\n🆔 `Job {id}`"),
-            )]
-        }
+        JobEventKind::Started if session_refresh => Vec::new(),
         JobEventKind::Started => vec![(
             "started",
             context.message(
                 job,
-                "Задача принята download-runner.",
+                "Загрузка подготовлена.",
                 "выполняется",
                 "подготовка загрузки",
-                "runner проверит источник, место на диске и начнёт скачивание",
+                "система проверит источник, место на диске и начнёт скачивание",
             ),
         )],
         // Intermediate progress. A stage start marks the beginning of a phase, so
@@ -629,7 +615,7 @@ fn notifications_for_event(
                 "transcoding-started",
                 context.message(
                     job,
-                    "Перекодирование Rezka-видео через VAAPI началось.",
+                    "Подготовка видео в 1080p началась.",
                     "обрабатывается",
                     stage_label(stage.name()),
                     "после проверки результата видео и субтитры будут опубликованы в Plex",
@@ -671,15 +657,13 @@ fn notifications_for_event(
                 ),
             )]
         }
-        JobEventKind::StageFailed { error_code, .. }
+        JobEventKind::StageFailed { .. }
             if session_refresh && job.state() == JobState::Failed =>
         {
-            let error_code = sanitized_error_code(error_code);
             vec![(
                 "failed",
-                format!(
-                    "❌ **Не удалось обновить сессию Rezka**\n\nПричина: `{error_code}`\n🆔 `Job {id}`"
-                ),
+                "❌ **Не удалось восстановить доступ к Rezka**\n\nПопробуйте загрузку позже. Если ошибка повторится, попросите технические детали."
+                    .to_owned(),
             )]
         }
         JobEventKind::StageFailed {
@@ -693,7 +677,7 @@ fn notifications_for_event(
                     &failure_description(error_code),
                     "ошибка",
                     stage_label(stage.name()),
-                    "повторите задачу; при повторной ошибке используйте Job ID для проверки журналов",
+                    "повторите загрузку; если ошибка повторится, попросите технические детали",
                 ),
             )]
         }
@@ -732,7 +716,7 @@ fn notifications_for_event(
                     ),
                     "приостановлено",
                     "проверка свободного места",
-                    "освободите место и повторно запустите этот Job; готовые данные автоматически не удаляются",
+                    "освободите место и повторите загрузку; готовые данные автоматически не удаляются",
                 ),
             )],
             JobState::Publishing if session_refresh => Vec::new(),
@@ -777,10 +761,7 @@ fn notifications_for_event(
                     context.message(job, "Видео готово и добавлено в Plex, но часть субтитров скачать не удалось.", "завершено частично", "скачивание субтитров", "повторите задачу: готовое видео не будет скачиваться или перекодироваться заново"),
                 ),
             ],
-            JobState::Completed if session_refresh => vec![(
-                "session-refreshed",
-                format!("✅ **Сессия Rezka обновлена**\n\n🆔 `Job {id}`"),
-            )],
+            JobState::Completed if session_refresh => Vec::new(),
             JobState::Completed => {
                 vec![
                     (
@@ -795,7 +776,7 @@ fn notifications_for_event(
             }
             JobState::Failed => vec![(
                 "failed",
-                context.message(job, "Задача завершилась ошибкой.", "ошибка", "обработка медиа", "повторите задачу; при повторной ошибке используйте Job ID для проверки журналов"),
+                context.message(job, "Задача завершилась ошибкой.", "ошибка", "обработка медиа", "повторите загрузку; если ошибка повторится, попросите технические детали"),
             )],
             _ => Vec::new(),
         },
@@ -858,10 +839,10 @@ fn failure_description(error_code: &str) -> String {
             "Runner настроен некорректно. Требуется проверить конфигурацию сервиса."
         }
         _ => {
-            "Не удалось скачать или обработать медиа. Повторите задачу; если ошибка повторится, проверьте Job ID в журнале."
+            "Не удалось скачать или обработать медиа. Повторите загрузку; если ошибка повторится, попросите технические детали."
         }
     };
-    format!("{explanation}\nКод ошибки: {error_code}")
+    explanation.to_owned()
 }
 
 fn replayed_lease(result: OperationResult) -> Result<Option<JobLease>, sea_orm::DbErr> {
