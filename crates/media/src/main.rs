@@ -122,18 +122,31 @@ enum TrackingCommand {
         provider: Provider,
         #[arg(long)]
         title: String,
-        #[arg(long, default_value = "release-calendar", hide = true)]
-        translation: String,
+        #[arg(long)]
+        translation: Option<String>,
         #[arg(long = "known-episode", required = true, value_parser = parse_known_episode)]
         known_episodes: Vec<media_contract::EpisodeSnapshotDto>,
         #[arg(long, value_enum)]
         scope: TrackingScope,
-        #[arg(long, requires_all = ["translation_id", "season"])]
+        #[arg(long, requires_all = ["translation", "translation_id", "season"])]
         provider_media_ref: Option<String>,
         #[arg(long, requires_all = ["provider_media_ref", "season"])]
         translation_id: Option<u64>,
         #[arg(long, requires_all = ["provider_media_ref", "translation_id"])]
         season: Option<u32>,
+        #[arg(long)]
+        json: bool,
+    },
+    EnableDownload {
+        tracking_id: String,
+        #[arg(long)]
+        translation: String,
+        #[arg(long)]
+        provider_media_ref: String,
+        #[arg(long)]
+        translation_id: u64,
+        #[arg(long)]
+        season: u32,
         #[arg(long)]
         json: bool,
     },
@@ -485,6 +498,7 @@ async fn run_tracking(args: TrackingArgs) -> Result<(), RunError> {
                 (None, None, None) => None,
                 _ => return Err(ClientError::Configuration.into()),
             };
+            let translation = translation.unwrap_or_else(|| "release-calendar".to_owned());
             let output = client
                 .add_tracking(
                     provider.into(),
@@ -497,6 +511,31 @@ async fn run_tracking(args: TrackingArgs) -> Result<(), RunError> {
                 .await?;
             emit(&output, json, |value| {
                 render::tracking(value, Some("Added tracking"))
+            });
+        }
+        TrackingCommand::EnableDownload {
+            tracking_id,
+            translation,
+            provider_media_ref,
+            translation_id,
+            season,
+            json,
+        } => {
+            let output = client
+                .patch_tracking(
+                    &tracking_id,
+                    media_contract::PatchTrackingRequest {
+                        translation,
+                        download: media_contract::TrackingDownloadDto {
+                            provider_media_ref,
+                            translation_id,
+                            season,
+                        },
+                    },
+                )
+                .await?;
+            emit(&output, json, |value| {
+                render::tracking(value, Some("Enabled automatic download"))
             });
         }
         TrackingCommand::List { json } => {

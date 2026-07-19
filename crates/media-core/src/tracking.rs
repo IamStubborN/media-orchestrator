@@ -23,6 +23,41 @@ pub struct TrackingDownload {
     season: u32,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct TrackingDownloadPatch {
+    translation: String,
+    download: TrackingDownload,
+}
+
+impl TrackingDownloadPatch {
+    pub fn new(
+        translation: String,
+        download: TrackingDownload,
+    ) -> Result<Self, TrackingValidationError> {
+        validate_download(Provider::Rezka, &translation, Some(&download))?;
+        if translation.trim().is_empty() {
+            return Err(TrackingValidationError::EmptyTranslation);
+        }
+        if translation.contains("://") {
+            return Err(TrackingValidationError::UrlNotAllowed);
+        }
+        Ok(Self {
+            translation,
+            download,
+        })
+    }
+
+    #[must_use]
+    pub fn translation(&self) -> &str {
+        &self.translation
+    }
+
+    #[must_use]
+    pub const fn download(&self) -> &TrackingDownload {
+        &self.download
+    }
+}
+
 impl TrackingDownload {
     pub fn new(
         provider_media_ref: String,
@@ -35,7 +70,13 @@ impl TrackingDownload {
         if provider_media_ref.contains("://") {
             return Err(TrackingValidationError::UrlNotAllowed);
         }
-        if translation_id == 0 || season == 0 {
+        if provider_media_ref
+            .parse::<u64>()
+            .ok()
+            .is_none_or(|value| value == 0)
+            || translation_id == 0
+            || season == 0
+        {
             return Err(TrackingValidationError::InvalidDownloadSelection);
         }
         Ok(Self {
@@ -360,6 +401,12 @@ pub trait TrackingStore: Send + Sync {
         value: NewTrackingSubscription,
     ) -> Result<TrackingSubscription, PortError>;
     async fn list_visible(&self, user: UserId) -> Result<Vec<TrackingSubscription>, PortError>;
+    async fn patch_download_visible(
+        &self,
+        id: TrackingId,
+        user: UserId,
+        patch: TrackingDownloadPatch,
+    ) -> Result<Option<TrackingSubscription>, PortError>;
     async fn remove_visible(
         &self,
         operation: OperationKey,
@@ -558,6 +605,22 @@ impl TrackingApplication {
             .require_user()
             .map_err(|_| TrackingApplicationError::Forbidden)?;
         self.store.list_visible(user).await.map_err(map_port_error)
+    }
+
+    pub async fn patch_download(
+        &self,
+        actor: &Actor,
+        id: TrackingId,
+        patch: TrackingDownloadPatch,
+    ) -> Result<TrackingSubscription, TrackingApplicationError> {
+        let user = actor
+            .require_user()
+            .map_err(|_| TrackingApplicationError::Forbidden)?;
+        self.store
+            .patch_download_visible(id, user, patch)
+            .await
+            .map_err(map_port_error)?
+            .ok_or(TrackingApplicationError::NotFound)
     }
 
     pub async fn remove(

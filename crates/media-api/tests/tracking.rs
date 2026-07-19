@@ -9,8 +9,8 @@ use axum::{
 use media_api::router;
 use media_core::{
     PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole, NewTrackingSubscription, OperationKey,
-    PortError, TrackingId, TrackingStore, TrackingSubscription, UserId, SECONDARY_CLIENT_ID,
-    SECONDARY_USER_ID,
+    PortError, TrackingDownloadPatch, TrackingId, TrackingStore, TrackingSubscription, UserId,
+    SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
 };
 use tower::ServiceExt;
 
@@ -42,6 +42,35 @@ impl TrackingStore for FakeTrackingStore {
             .filter(|value| value.is_visible_to(user))
             .cloned()
             .collect())
+    }
+
+    async fn patch_download_visible(
+        &self,
+        id: TrackingId,
+        user: UserId,
+        patch: TrackingDownloadPatch,
+    ) -> Result<Option<TrackingSubscription>, PortError> {
+        let mut values = self.values.lock().unwrap();
+        let Some(index) = values
+            .iter()
+            .position(|value| value.id() == id && value.is_visible_to(user))
+        else {
+            return Ok(None);
+        };
+        let value = &values[index];
+        let updated = TrackingSubscription::rehydrate(
+            value.id(),
+            value.owner_id(),
+            value.provider(),
+            value.title().to_owned(),
+            patch.translation().to_owned(),
+            value.known_episodes().to_vec(),
+            value.scope(),
+            Some(patch.download().clone()),
+        )
+        .map_err(|_| PortError::Conflict)?;
+        values[index] = updated.clone();
+        Ok(Some(updated))
     }
 
     async fn remove_visible(
@@ -108,6 +137,34 @@ async fn authenticated_owner_can_add_list_and_other_family_user_can_remove() {
     assert!(value.get("owner_id").is_none());
     assert!(value.get("auto_download").is_none());
     let id = value["id"].as_str().unwrap();
+
+    let patched = app
+        .clone()
+        .oneshot(
+            Request::patch(format!("/v1/tracking/{id}"))
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {SECONDARY_TOKEN}"),
+                )
+                .header("idempotency-key", "tracking-enable-download")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"translation":"DEEP","download":{"provider_media_ref":"88337","translation_id":509,"season":4}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(patched.status(), StatusCode::OK);
+    let patched: serde_json::Value =
+        serde_json::from_slice(&to_bytes(patched.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(patched["id"], id);
+    assert_eq!(patched["translation"], "DEEP");
+    assert_eq!(patched["known_episodes"][0]["episode"], 4);
+    assert_eq!(patched["scope"], "family");
+    assert_eq!(patched["download"]["provider_media_ref"], "88337");
+    assert_eq!(patched["download"]["translation_id"], 509);
+    assert_eq!(patched["download"]["season"], 4);
 
     let listed = app
         .clone()
@@ -183,4 +240,22 @@ async fn authenticated_owner_can_create_an_exact_rezka_download_subscription() {
     assert_eq!(value["download"]["translation_id"], 19);
     assert_eq!(value["download"]["season"], 2);
     assert!(value.get("owner_id").is_none());
+}
+
+#[tokio::test]
+async fn automatic_download_rejects_a_prefixed_rezka_reference() {
+    let body = download_body().replace("42513", "rezka:42513");
+    let response = app()
+        .oneshot(
+            Request::post("/v1/tracking")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header("idempotency-key", "tracking-download-prefixed-ref")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }

@@ -1,8 +1,9 @@
 use media_core::{
     PRIMARY_USER_ID, EpisodeSnapshot, NewTrackingSubscription, NotificationDelivery,
     NotificationEventType, NotificationId, NotificationOutboxPort, NotificationRecipient,
-    OperationKey, PortError, Provider, TrackingDownload, TrackingId, TrackingScheduleStore,
-    TrackingScope, TrackingStore, TrackingSubscription, UserId, SECONDARY_USER_ID,
+    OperationKey, PortError, Provider, TrackingDownload, TrackingDownloadPatch, TrackingId,
+    TrackingScheduleStore, TrackingScope, TrackingStore, TrackingSubscription, UserId,
+    SECONDARY_USER_ID,
 };
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
 
@@ -113,6 +114,28 @@ impl TrackingStore for SeaOrmTrackingStore {
             "SELECT id, owner_id, provider, title, translation, known_episodes, scope, download_provider_media_ref, download_translation_id, download_season FROM tracking_subscriptions WHERE deleted_at IS NULL AND (owner_id = $1 OR (scope = 'family' AND $1 IN ($2, $3))) ORDER BY created_at, id",
             [user.into_uuid().into(), PRIMARY_USER_ID.into_uuid().into(), SECONDARY_USER_ID.into_uuid().into()],
         )).await.map_err(map_database_error)?.iter().map(tracking_from_row).collect()
+    }
+
+    async fn patch_download_visible(
+        &self,
+        id: TrackingId,
+        user: UserId,
+        patch: TrackingDownloadPatch,
+    ) -> Result<Option<TrackingSubscription>, PortError> {
+        let download = patch.download();
+        let translation_id =
+            i64::try_from(download.translation_id()).map_err(|_| PortError::Conflict)?;
+        let season = i32::try_from(download.season()).map_err(|_| PortError::Conflict)?;
+        let row = self.database.query_one_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "UPDATE tracking_subscriptions SET translation = $3, download_provider_media_ref = $4, download_translation_id = $5, download_season = $6, next_check_at = now(), updated_at = now() WHERE id = $1 AND deleted_at IS NULL AND provider = 'rezka' AND (owner_id = $2 OR (scope = 'family' AND $2 IN ($7, $8))) RETURNING id, owner_id, provider, title, translation, known_episodes, scope, download_provider_media_ref, download_translation_id, download_season",
+            [
+                id.into_uuid().into(), user.into_uuid().into(), patch.translation().into(),
+                download.provider_media_ref().into(), translation_id.into(), season.into(),
+                PRIMARY_USER_ID.into_uuid().into(), SECONDARY_USER_ID.into_uuid().into(),
+            ],
+        )).await.map_err(map_database_error)?;
+        row.as_ref().map(tracking_from_row).transpose()
     }
 
     async fn remove_visible(

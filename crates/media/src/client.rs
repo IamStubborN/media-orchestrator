@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use media_contract::{
     ContinueSearchRequest, CreateJobRequest, CreateTrackingRequest, EpisodeSnapshotDto,
-    NotifyScopeDto, ProviderDto, ReleaseQueryRequest, ResolveEpisodeMappingRequest,
-    SelectResultRequest, StartSearchRequest, TrackingScopeDto,
+    NotifyScopeDto, PatchTrackingRequest, ProviderDto, ReleaseQueryRequest,
+    ResolveEpisodeMappingRequest, SelectResultRequest, StartSearchRequest, TrackingScopeDto,
 };
 use secrecy::{ExposeSecret, SecretString};
 
@@ -174,6 +174,20 @@ impl HttpClient {
     pub async fn list_tracking(&self) -> Result<String, ClientError> {
         self.execute(self.request(reqwest::Method::GET, "v1/tracking")?)
             .await
+    }
+
+    pub async fn patch_tracking(
+        &self,
+        tracking_id: &str,
+        request: PatchTrackingRequest,
+    ) -> Result<String, ClientError> {
+        let path = format!("v1/tracking/{tracking_id}");
+        self.execute(
+            self.request(reqwest::Method::PATCH, &path)?
+                .header(IDEMPOTENCY_KEY_HEADER, generated_identifier())
+                .json(&request),
+        )
+        .await
     }
 
     pub async fn remove_tracking(&self, tracking_id: &str) -> Result<String, ClientError> {

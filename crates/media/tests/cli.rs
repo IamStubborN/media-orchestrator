@@ -65,3 +65,23 @@ fn trending_rejects_zero_page_at_parse_time() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("page must be a positive integer"));
 }
+
+#[test]
+fn tracking_help_exposes_download_conversion_inputs() {
+    let output = assert_cmd::cargo::cargo_bin_cmd!("media")
+        .args(["tracking", "enable-download", "--help"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    for argument in [
+        "<TRACKING_ID>",
+        "--translation",
+        "--provider-media-ref",
+        "--translation-id",
+        "--season",
+    ] {
+        assert!(stdout.contains(argument), "help did not include {argument}");
+    }
+}

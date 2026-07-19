@@ -1,16 +1,17 @@
 use media_contract::{
     CheckpointValueDto, CreateJobRequest, CreateTrackingRequest, EpisodeSnapshotDto, JobDetailDto,
-    JobDto, JobStateDto, LeaseDto, NeedsActionReasonDto, NotifyScopeDto, ProviderDto, PublicId,
-    QueueStatusDto, ReleaseCandidateDto, ReleaseLifecycleDto, ReleasePrecisionDto,
-    ReleaseQueryResponse, RunnerEventDto, RunnerEventRequest, RunnerLifecycleStateDto,
-    ScheduledEpisodeDto, TrackingDto, TrackingScopeDto, TrackingStateDto, TransferKindDto,
-    TransferProgressDto,
+    JobDto, JobStateDto, LeaseDto, NeedsActionReasonDto, NotifyScopeDto, PatchTrackingRequest,
+    ProviderDto, PublicId, QueueStatusDto, ReleaseCandidateDto, ReleaseLifecycleDto,
+    ReleasePrecisionDto, ReleaseQueryResponse, RunnerEventDto, RunnerEventRequest,
+    RunnerLifecycleStateDto, ScheduledEpisodeDto, TrackingDto, TrackingScopeDto, TrackingStateDto,
+    TransferKindDto, TransferProgressDto,
 };
 use media_core::{
     CheckpointValue, EpisodeSnapshot, Job, JobDetail, JobEvent, JobEventId,
     JobEventValidationError, JobLease, JobState, NeedsActionReason, NewJobCommand,
     NewTrackingCommand, NotifyScope, Provider, QueueStatus, ReleaseCandidate, ReleaseLifecycle,
-    ReleaseMetadataResult, ReleasePrecision, ScheduledEpisode, TrackingScope, TrackingSubscription,
+    ReleaseMetadataResult, ReleasePrecision, ScheduledEpisode, TrackingDownloadPatch,
+    TrackingScope, TrackingSubscription,
 };
 use time::format_description::well_known::Rfc3339;
 
@@ -135,6 +136,18 @@ pub(crate) fn new_tracking_command(
             })
             .transpose()?,
     })
+}
+
+pub(crate) fn tracking_download_patch(
+    request: PatchTrackingRequest,
+) -> Result<TrackingDownloadPatch, ()> {
+    let download = media_core::TrackingDownload::new(
+        request.download.provider_media_ref,
+        request.download.translation_id,
+        request.download.season,
+    )
+    .map_err(|_| ())?;
+    TrackingDownloadPatch::new(request.translation, download).map_err(|_| ())
 }
 
 pub(crate) fn tracking(value: &TrackingSubscription) -> TrackingDto {

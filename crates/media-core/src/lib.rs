@@ -61,7 +61,7 @@ pub use release::*;
 pub use tracking::{
     EpisodeDiscoveryPort, EpisodeSnapshot, EpisodeSnapshotError, NewTrackingCommand,
     NewTrackingSubscription, TrackedEpisodeDownloadPort, TrackingApplication,
-    TrackingApplicationError, TrackingDownload, TrackingRunResult, TrackingRuntime,
-    TrackingScheduleStore, TrackingScope, TrackingState, TrackingStore, TrackingSubscription,
-    TrackingValidationError,
+    TrackingApplicationError, TrackingDownload, TrackingDownloadPatch, TrackingRunResult,
+    TrackingRuntime, TrackingScheduleStore, TrackingScope, TrackingState, TrackingStore,
+    TrackingSubscription, TrackingValidationError,
 };

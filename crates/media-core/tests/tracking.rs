@@ -6,8 +6,9 @@ use std::{
 
 use media_core::{
     PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole, EpisodeSnapshot, NewTrackingCommand,
-    NewTrackingSubscription, OperationKey, PortError, Provider, TrackingApplication, TrackingId,
-    TrackingScope, TrackingState, TrackingStore, SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
+    NewTrackingSubscription, OperationKey, PortError, Provider, TrackingApplication,
+    TrackingDownloadPatch, TrackingId, TrackingScope, TrackingState, TrackingStore,
+    TrackingSubscription, SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
 };
 
 #[derive(Default)]
@@ -39,6 +40,35 @@ impl TrackingStore for FakeTrackingStore {
             .filter(|value| value.is_visible_to(user))
             .cloned()
             .collect())
+    }
+
+    async fn patch_download_visible(
+        &self,
+        id: TrackingId,
+        user: media_core::UserId,
+        patch: TrackingDownloadPatch,
+    ) -> Result<Option<TrackingSubscription>, PortError> {
+        let mut values = self.values.lock().unwrap();
+        let Some(index) = values
+            .iter()
+            .position(|value| value.id() == id && value.is_visible_to(user))
+        else {
+            return Ok(None);
+        };
+        let value = &values[index];
+        let updated = TrackingSubscription::rehydrate(
+            value.id(),
+            value.owner_id(),
+            value.provider(),
+            value.title().to_owned(),
+            patch.translation().to_owned(),
+            value.known_episodes().to_vec(),
+            value.scope(),
+            Some(patch.download().clone()),
+        )
+        .map_err(|_| PortError::Conflict)?;
+        values[index] = updated.clone();
+        Ok(Some(updated))
     }
 
     async fn remove_visible(

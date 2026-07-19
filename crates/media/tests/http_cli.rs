@@ -295,12 +295,31 @@ async fn tracking_add_list_and_remove_use_strict_json_contracts() {
         .route(
             "/v1/tracking/{tracking_id}",
             any(|request: Request| async move {
-                let valid = request.method() == Method::DELETE
-                    && request.headers().contains_key("authorization")
-                    && request.headers().contains_key("x-request-id")
-                    && request.headers().contains_key("idempotency-key");
+                let method = request.method().clone();
+                let headers = request.headers().clone();
+                let body = to_bytes(request.into_body(), 64 * 1024).await.unwrap();
+                let common = headers.contains_key("authorization")
+                    && headers.contains_key("x-request-id")
+                    && headers.contains_key("idempotency-key");
+                let valid_remove = method == Method::DELETE && common && body.is_empty();
+                let valid_patch = method == Method::PATCH
+                    && common
+                    && serde_json::from_slice::<serde_json::Value>(&body).ok()
+                        == Some(serde_json::json!({
+                            "translation": "DEEP",
+                            "download": {
+                                "provider_media_ref": "88337",
+                                "translation_id": 509,
+                                "season": 4
+                            }
+                        }));
+                let valid = valid_remove || valid_patch;
                 if valid {
-                    json_response(StatusCode::OK, r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","provider":"rezka","title":"Ongoing Show","translation":"Studio Dub","known_episodes":[{"season":1,"episode":4}],"scope":"family","state":"active"}"#)
+                    json_response(StatusCode::OK, if valid_patch {
+                        r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","provider":"rezka","title":"Ongoing Show","translation":"DEEP","known_episodes":[{"season":1,"episode":4}],"scope":"family","state":"active","download":{"provider_media_ref":"88337","translation_id":509,"season":4}}"#
+                    } else {
+                        r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","provider":"rezka","title":"Ongoing Show","translation":"Studio Dub","known_episodes":[{"season":1,"episode":4}],"scope":"family","state":"active"}"#
+                    })
                 } else {
                     json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#)
                 }
@@ -337,6 +356,26 @@ async fn tracking_add_list_and_remove_use_strict_json_contracts() {
     ))
     .await
     .unwrap();
+    let enable_download = command_output(command(
+        &server,
+        &token_file,
+        [
+            "tracking",
+            "enable-download",
+            "018f3f86-7b4c-7b4f-9b6a-6d62f45bb111",
+            "--translation",
+            "DEEP",
+            "--provider-media-ref",
+            "88337",
+            "--translation-id",
+            "509",
+            "--season",
+            "4",
+            "--json",
+        ],
+    ))
+    .await
+    .unwrap();
     let remove = command_output(command(
         &server,
         &token_file,
@@ -351,7 +390,7 @@ async fn tracking_add_list_and_remove_use_strict_json_contracts() {
     .unwrap();
     server.stop().await;
 
-    for output in [&add, &list, &remove] {
+    for output in [&add, &list, &enable_download, &remove] {
         assert!(
             output.status.success(),
             "stderr: {}",
@@ -366,6 +405,11 @@ async fn tracking_add_list_and_remove_use_strict_json_contracts() {
         String::from_utf8(add.stdout)
             .unwrap()
             .contains("\"scope\":\"family\"")
+    );
+    assert!(
+        String::from_utf8(enable_download.stdout)
+            .unwrap()
+            .contains("\"provider_media_ref\":\"88337\"")
     );
     assert!(
         String::from_utf8(remove.stdout)

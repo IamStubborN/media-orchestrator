@@ -5,7 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get},
 };
-use media_contract::{CreateTrackingRequest, TrackingListDto};
+use media_contract::{CreateTrackingRequest, PatchTrackingRequest, TrackingListDto};
 use media_core::{Actor, TrackingApplicationError, TrackingId};
 
 use crate::{ApiError, ApiState, RequestId, convert, idempotency};
@@ -13,7 +13,50 @@ use crate::{ApiError, ApiState, RequestId, convert, idempotency};
 pub(super) fn routes() -> Router<ApiState> {
     Router::new()
         .route("/v1/tracking", get(list).post(create))
-        .route("/v1/tracking/{tracking_id}", delete(remove))
+        .route("/v1/tracking/{tracking_id}", delete(remove).patch(patch))
+}
+
+async fn patch(
+    State(state): State<ApiState>,
+    Extension(actor): Extension<Actor>,
+    Extension(request_id): Extension<RequestId>,
+    Path(tracking_id): Path<String>,
+    request: Request,
+) -> Response {
+    idempotency::execute(
+        state,
+        actor,
+        request_id,
+        request,
+        move |state, actor, request_id, _operation, body| async move {
+            let Some(tracking) = state.tracking() else {
+                return ApiError::internal(&request_id).into_response();
+            };
+            let Ok(id) = tracking_id.parse::<TrackingId>() else {
+                return ApiError::invalid_request(&request_id, "tracking ID is invalid")
+                    .into_response();
+            };
+            let request = match serde_json::from_slice::<PatchTrackingRequest>(&body) {
+                Ok(request) => request,
+                Err(_) => {
+                    return ApiError::invalid_request(&request_id, "request JSON is invalid")
+                        .into_response();
+                }
+            };
+            let patch = match convert::tracking_download_patch(request) {
+                Ok(patch) => patch,
+                Err(()) => {
+                    return ApiError::invalid_request(&request_id, "tracking request is invalid")
+                        .into_response();
+                }
+            };
+            match tracking.patch_download(&actor, id, patch).await {
+                Ok(value) => Json(convert::tracking(&value)).into_response(),
+                Err(error) => application_error(error, &request_id),
+            }
+        },
+    )
+    .await
 }
 
 async fn list(

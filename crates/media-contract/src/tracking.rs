@@ -44,6 +44,13 @@ pub struct CreateTrackingRequest {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PatchTrackingRequest {
+    pub translation: String,
+    pub download: TrackingDownloadDto,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TrackingDto {
     pub id: PublicId,
     pub provider: ProviderDto,
