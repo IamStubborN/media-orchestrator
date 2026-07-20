@@ -180,6 +180,7 @@ pub struct NotificationDelivery {
     event_type: NotificationEventType,
     status_key: Option<String>,
     message: String,
+    content: NotificationContent,
     generation: u64,
     attempt_count: u32,
 }
@@ -561,6 +562,7 @@ impl NotificationDelivery {
             recipient,
             event_type,
             status_key,
+            content: NotificationContent::LegacyMessage(message.clone()),
             message,
             generation,
             attempt_count,
@@ -586,6 +588,46 @@ impl NotificationDelivery {
     #[must_use]
     pub fn message(&self) -> &str {
         &self.message
+    }
+    #[must_use]
+    pub const fn content(&self) -> &NotificationContent {
+        &self.content
+    }
+    #[must_use]
+    pub fn card_key(&self) -> Option<&str> {
+        match &self.content {
+            NotificationContent::LegacyMessage(_) => self.status_key(),
+            NotificationContent::Media(notification) => Some(notification.card_key()),
+        }
+    }
+    #[must_use]
+    pub fn lifecycle_cycle(&self) -> Option<u64> {
+        match &self.content {
+            NotificationContent::LegacyMessage(_) => None,
+            NotificationContent::Media(notification) => Some(notification.lifecycle_cycle()),
+        }
+    }
+    pub fn rehydrate_media(
+        id: NotificationId,
+        recipient: NotificationRecipient,
+        event_type: NotificationEventType,
+        notification: MediaNotification,
+        generation: u64,
+        attempt_count: u32,
+    ) -> Result<Self, NotificationValidationError> {
+        if generation == 0 || generation > i64::MAX as u64 {
+            return Err(NotificationValidationError::InvalidGeneration);
+        }
+        Ok(Self {
+            id,
+            recipient,
+            event_type,
+            status_key: Some(notification.card_key().to_owned()),
+            message: String::new(),
+            content: NotificationContent::Media(notification),
+            generation,
+            attempt_count,
+        })
     }
     #[must_use]
     pub const fn generation(&self) -> u64 {

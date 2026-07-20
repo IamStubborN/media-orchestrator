@@ -297,10 +297,13 @@ async fn rezka_runner_events_create_each_success_notification_once() {
         .iter()
         .map(|row| row.try_get::<String>("", "event_type").unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(event_types, vec!["completed", "plex-added"]);
+    assert_eq!(event_types, vec!["completed", "completed"]);
     for row in &notifications {
         assert_eq!(row.try_get::<String>("", "recipient").unwrap(), "primary");
-        assert_sanitized_message(row, &["private-provider-reference"]);
+        assert_eq!(
+            row.try_get::<serde_json::Value>("", "payload").unwrap()["event_type"],
+            "media.notification"
+        );
     }
 
     let deliveries = SeaOrmNotificationOutbox::new(test_db.connection().clone())
@@ -316,17 +319,15 @@ async fn rezka_runner_events_create_each_success_notification_once() {
         .iter()
         .find(|delivery| delivery.event_type() == NotificationEventType::Completed)
         .unwrap();
-    assert_eq!(
-        completed.status_key(),
-        None,
-        "terminal completion must create a new Telegram message"
+    assert!(
+        completed.card_key().is_some(),
+        "terminal completion edits the lifecycle card"
     );
     assert!(
         deliveries
             .iter()
-            .filter(|delivery| delivery.event_type() != NotificationEventType::Completed)
-            .all(|delivery| delivery.status_key().is_some()),
-        "progress events must keep editing the existing status card"
+            .all(|delivery| delivery.card_key().is_some()),
+        "all structured deliveries retain the lifecycle card key"
     );
 }
 
@@ -362,9 +363,12 @@ async fn partial_completion_creates_plex_and_partial_notifications_once() {
         .iter()
         .map(|row| row.try_get::<String>("", "event_type").unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(event_types, vec!["partial", "plex-added"]);
+    assert_eq!(event_types, vec!["partial", "partial"]);
     for row in &notifications {
-        assert_sanitized_message(row, &["partial-private-reference"]);
+        assert_eq!(
+            row.try_get::<serde_json::Value>("", "payload").unwrap()["state"],
+            "partial"
+        );
     }
 }
 
@@ -614,11 +618,9 @@ async fn non_terminal_job_notifications_coalesce_into_one_generation_ordered_car
         "downloaded"
     );
     assert_eq!(rows[0].try_get::<i64>("", "generation").unwrap(), 3);
-    assert!(
-        rows[0].try_get::<serde_json::Value>("", "payload").unwrap()["message"]
-            .as_str()
-            .unwrap()
-            .contains("Скачивание исходного видео завершено")
+    assert_eq!(
+        rows[0].try_get::<serde_json::Value>("", "payload").unwrap()["state"],
+        "processing"
     );
     assert!(
         rows[0]
@@ -632,6 +634,178 @@ async fn non_terminal_job_notifications_coalesce_into_one_generation_ordered_car
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn job_lifecycle_projects_one_terminal_card_and_one_final_push() {
+    let (test_db, jobs, leases) = setup().await;
+    let created = jobs
+        .create(
+            operation_key(),
+            new_job("selection:structured-lifecycle-card"),
+        )
+        .await
+        .unwrap();
+    test_db
+        .connection()
+        .execute_unprepared(
+            "INSERT INTO search_executions (result_ref, payload) VALUES \
+             ('selection:structured-lifecycle-card', \
+              '{\"title\":\"Structured Show\",\"media_kind\":\"series\",\"season\":1,\"translation\":\"Studio Dub\",\"episodes\":[{\"season\":1,\"episode\":1}]}')",
+        )
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::stage_started(JobEventId::new(), 0, "download".to_owned(), 0).unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::Publishing, None).unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::PlexPending, None).unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::Completed, None).unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    let rows = query(
+        test_db.connection(),
+        "SELECT event_type, payload, generation FROM notification_outbox ORDER BY event_type",
+    )
+    .await;
+    assert_eq!(rows.len(), 2, "one mutable card and one final push");
+
+    let card = rows
+        .iter()
+        .find(|row| {
+            row.try_get::<serde_json::Value>("", "payload").unwrap()["delivery_kind"] == "card"
+        })
+        .unwrap();
+    let card_payload = card.try_get::<serde_json::Value>("", "payload").unwrap();
+    assert_eq!(card_payload["event_type"], "media.notification");
+    assert_eq!(
+        card_payload["card_key"],
+        format!("media-job:{}", created.id())
+    );
+    assert_eq!(card_payload["state"], "completed");
+    assert_eq!(card_payload["terminal"], true);
+    assert!(card.try_get::<i64>("", "generation").unwrap() > 1);
+
+    let push = rows
+        .iter()
+        .find(|row| {
+            row.try_get::<serde_json::Value>("", "payload").unwrap()["delivery_kind"]
+                == "final-push"
+        })
+        .unwrap();
+    let push_payload = push.try_get::<serde_json::Value>("", "payload").unwrap();
+    assert_eq!(
+        push_payload["card_key"],
+        format!("media-job:{}", created.id())
+    );
+    assert_eq!(push_payload["state"], "completed");
+    assert_eq!(push_payload["terminal"], true);
+}
+
+#[tokio::test]
+async fn partial_season_card_aggregates_task_states_and_episode_coordinates() {
+    let (test_db, jobs, leases) = setup().await;
+    let created = jobs
+        .create(operation_key(), new_job("selection:partial-season-card"))
+        .await
+        .unwrap();
+    let episodes = (1..=12)
+        .map(|episode| serde_json::json!({"season": 1, "episode": episode}))
+        .collect::<Vec<_>>();
+    test_db
+        .connection()
+        .execute_unprepared(&format!(
+            "INSERT INTO search_executions (result_ref, payload) VALUES \
+             ('selection:partial-season-card', '{{\"title\":\"Season Show\",\"media_kind\":\"series\",\"season\":1,\"episodes\":{}}}')",
+            serde_json::Value::Array(episodes)
+        ))
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    leases
+        .report_event(
+            operation_key(),
+            lease.lease_id(),
+            RUNNER_CLIENT_ID,
+            JobEvent::started(JobEventId::new()),
+        )
+        .await
+        .unwrap();
+    for event in [
+        JobEvent::transition(JobEventId::new(), JobState::Publishing, None).unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::PlexPending, None).unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+    test_db
+        .connection()
+        .execute_unprepared(&format!(
+            "UPDATE job_tasks SET state = 'completed' WHERE job_id = '{}'; \
+             INSERT INTO job_tasks (id, job_id, ordinal, state) \
+             SELECT gen_random_uuid(), '{}', ordinal, \
+                    CASE WHEN ordinal = 11 THEN 'failed' ELSE 'completed' END \
+             FROM generate_series(1, 11) AS ordinal",
+            created.id(),
+            created.id(),
+        ))
+        .await
+        .unwrap();
+    leases
+        .report_event(
+            operation_key(),
+            lease.lease_id(),
+            RUNNER_CLIENT_ID,
+            JobEvent::transition(JobEventId::new(), JobState::Partial, None).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let card = query(
+        test_db.connection(),
+        "SELECT payload FROM notification_outbox WHERE payload->>'delivery_kind' = 'card'",
+    )
+    .await
+    .remove(0)
+    .try_get::<serde_json::Value>("", "payload")
+    .unwrap();
+    assert_eq!(card["state"], "partial");
+    assert_eq!(card["progress"]["completed_episodes"], 11);
+    assert_eq!(card["progress"]["total_episodes"], 12);
+    assert_eq!(
+        card["progress"]["missing_episodes"],
+        serde_json::json!([{"season": 1, "episode": 12}])
+    );
+    assert_eq!(
+        card["actions"],
+        serde_json::json!(["retry-missing", "details"])
+    );
+    assert!(card.get("issue").is_none());
 }
 
 #[tokio::test]
@@ -878,19 +1052,13 @@ async fn terminal_stage_failure_creates_one_sanitized_failure_notification() {
          WHERE event_type = 'failed'",
     )
     .await;
-    assert_eq!(failed.len(), 1);
-    let message = failed[0]
-        .try_get::<serde_json::Value>("", "payload")
-        .unwrap()["message"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert!(message.contains("попросите технические детали"));
-    assert!(!message.contains("provider_error"));
-    assert_sanitized_message(
-        &failed[0],
-        &["secret.example", "token", "failure-private-reference"],
-    );
+    assert_eq!(failed.len(), 2);
+    for row in failed {
+        let payload = row.try_get::<serde_json::Value>("", "payload").unwrap();
+        assert_eq!(payload["state"], "failed");
+        assert!(!payload.to_string().contains("secret.example"));
+        assert!(!payload.to_string().contains("token"));
+    }
 }
 
 #[tokio::test]
@@ -1130,7 +1298,15 @@ async fn retryable_rezka_stage_fails_terminally_on_twentieth_attempt() {
 async fn owner_retry_requeues_failed_work_idempotently() {
     let (test_db, jobs, leases) = setup().await;
     let created = jobs
-        .create(operation_key(), new_job("explicit-retry"))
+        .create(
+            operation_key(),
+            new_job_for_provider(
+                "explicit-retry",
+                PRIMARY_USER_ID,
+                NotifyScope::Initiator,
+                Provider::Prowlarr,
+            ),
+        )
         .await
         .unwrap();
     for _ in 0..3 {
@@ -1198,6 +1374,17 @@ async fn owner_retry_requeues_failed_work_idempotently() {
         .await
         .len(),
         1,
+    );
+    assert_eq!(
+        query(
+            test_db.connection(),
+            "SELECT notification_cycle FROM jobs WHERE id = \
+             (SELECT id FROM jobs WHERE result_ref = 'explicit-retry')",
+        )
+        .await[0]
+            .try_get::<i64>("", "notification_cycle")
+            .unwrap(),
+        2,
     );
 }
 

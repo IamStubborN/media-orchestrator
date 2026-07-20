@@ -1,9 +1,12 @@
 use media_core::{
-    PRIMARY_USER_ID, EpisodeSnapshot, NewTrackingSubscription, NotificationDelivery,
-    NotificationEventType, NotificationId, NotificationOutboxPort, NotificationRecipient,
-    OperationKey, PortError, Provider, TrackingDownload, TrackingDownloadPatch, TrackingId,
-    TrackingScheduleStore, TrackingScope, TrackingStore, TrackingSubscription, UserId,
-    SECONDARY_USER_ID,
+    PRIMARY_USER_ID, EpisodeSnapshot, JobId, MediaNotification, MediaNotificationAction,
+    MediaNotificationDeliveryKind, MediaNotificationEpisode, MediaNotificationIssue,
+    MediaNotificationKind, MediaNotificationMedia, MediaNotificationNextStep,
+    MediaNotificationProgress, MediaNotificationStage, MediaNotificationState,
+    NewTrackingSubscription, NotificationDelivery, NotificationEventType, NotificationId,
+    NotificationOutboxPort, NotificationRecipient, OperationKey, PortError, Provider,
+    TrackingDownload, TrackingDownloadPatch, TrackingId, TrackingScheduleStore, TrackingScope,
+    TrackingStore, TrackingSubscription, UserId, SECONDARY_USER_ID,
 };
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
 
@@ -455,35 +458,48 @@ fn delivery_from_row(row: &sea_orm::QueryResult) -> Result<NotificationDelivery,
         &row.try_get::<String>("", "event_type")
             .map_err(|_| PortError::Infrastructure)?,
     )?;
+    let id = NotificationId::from_uuid(
+        row.try_get("", "id")
+            .map_err(|_| PortError::Infrastructure)?,
+    );
+    let recipient = match row
+        .try_get::<String>("", "recipient")
+        .map_err(|_| PortError::Infrastructure)?
+        .as_str()
+    {
+        "primary" => NotificationRecipient::Primary,
+        "secondary" => NotificationRecipient::Secondary,
+        _ => return Err(PortError::Infrastructure),
+    };
+    let generation = u64::try_from(
+        row.try_get::<i64>("", "generation")
+            .map_err(|_| PortError::Infrastructure)?,
+    )
+    .map_err(|_| PortError::Infrastructure)?;
+    let attempts = u32::try_from(
+        row.try_get::<i32>("", "attempt_count")
+            .map_err(|_| PortError::Infrastructure)?,
+    )
+    .map_err(|_| PortError::Infrastructure)?;
+    if payload.get("schema_version") == Some(&serde_json::json!(2)) {
+        return NotificationDelivery::rehydrate_media(
+            id,
+            recipient,
+            event_type,
+            media_notification_from_payload(&payload)?,
+            generation,
+            attempts,
+        )
+        .map_err(|_| PortError::Infrastructure);
+    }
     let aggregate_type = row
         .try_get::<String>("", "aggregate_type")
         .map_err(|_| PortError::Infrastructure)?;
     NotificationDelivery::rehydrate(
-        NotificationId::from_uuid(
-            row.try_get("", "id")
-                .map_err(|_| PortError::Infrastructure)?,
-        ),
-        match row
-            .try_get::<String>("", "recipient")
-            .map_err(|_| PortError::Infrastructure)?
-            .as_str()
-        {
-            "primary" => NotificationRecipient::Primary,
-            "secondary" => NotificationRecipient::Secondary,
-            _ => return Err(PortError::Infrastructure),
-        },
+        id,
+        recipient,
         event_type,
         match aggregate_type.as_str() {
-            "job"
-                if matches!(
-                    event_type,
-                    NotificationEventType::Completed
-                        | NotificationEventType::Partial
-                        | NotificationEventType::Failed
-                ) =>
-            {
-                None
-            }
             "job" => Some(format!(
                 "media-job:{}",
                 row.try_get::<uuid::Uuid>("", "aggregate_id")
@@ -497,16 +513,194 @@ fn delivery_from_row(row: &sea_orm::QueryResult) -> Result<NotificationDelivery,
             .and_then(serde_json::Value::as_str)
             .ok_or(PortError::Infrastructure)?
             .to_owned(),
-        u64::try_from(
-            row.try_get::<i64>("", "generation")
-                .map_err(|_| PortError::Infrastructure)?,
-        )
-        .map_err(|_| PortError::Infrastructure)?,
-        u32::try_from(
-            row.try_get::<i32>("", "attempt_count")
-                .map_err(|_| PortError::Infrastructure)?,
-        )
-        .map_err(|_| PortError::Infrastructure)?,
+        generation,
+        attempts,
+    )
+    .map_err(|_| PortError::Infrastructure)
+}
+
+fn media_notification_from_payload(
+    payload: &serde_json::Value,
+) -> Result<MediaNotification, PortError> {
+    let value = |name: &str| {
+        payload
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .ok_or(PortError::Infrastructure)
+    };
+    let media = payload
+        .get("media")
+        .and_then(serde_json::Value::as_object)
+        .ok_or(PortError::Infrastructure)?;
+    let media_value = |name: &str| {
+        media
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .ok_or(PortError::Infrastructure)
+    };
+    let job_id = media_value("job_id")?
+        .parse::<uuid::Uuid>()
+        .map_err(|_| PortError::Infrastructure)?;
+    let kind = match media_value("kind")? {
+        "movie" => MediaNotificationKind::Movie,
+        "series" => MediaNotificationKind::Series,
+        _ => return Err(PortError::Infrastructure),
+    };
+    let media = MediaNotificationMedia::new(
+        JobId::from_uuid(job_id),
+        media_value("title")?.to_owned(),
+        kind,
+        media_value("provider")?.to_owned(),
+        media
+            .get("season")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok()),
+        media
+            .get("translation")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned),
+    )
+    .map_err(|_| PortError::Infrastructure)?;
+    let progress = payload
+        .get("progress")
+        .map(|progress| {
+            let object = progress.as_object().ok_or(PortError::Infrastructure)?;
+            let number = |name: &str| {
+                object
+                    .get(name)
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+            };
+            let missing = object
+                .get("missing_episodes")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|episode| {
+                    MediaNotificationEpisode::new(
+                        u32::try_from(
+                            episode
+                                .get("season")
+                                .and_then(serde_json::Value::as_u64)
+                                .ok_or(PortError::Infrastructure)?,
+                        )
+                        .map_err(|_| PortError::Infrastructure)?,
+                        u32::try_from(
+                            episode
+                                .get("episode")
+                                .and_then(serde_json::Value::as_u64)
+                                .ok_or(PortError::Infrastructure)?,
+                        )
+                        .map_err(|_| PortError::Infrastructure)?,
+                    )
+                    .map_err(|_| PortError::Infrastructure)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            MediaNotificationProgress::new(
+                number("completed_episodes"),
+                number("total_episodes"),
+                number("current_episode"),
+                missing,
+                object
+                    .get("downloaded_bytes")
+                    .and_then(serde_json::Value::as_u64),
+                object
+                    .get("download_speed_bps")
+                    .and_then(serde_json::Value::as_u64),
+                object
+                    .get("percentage")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| u8::try_from(value).ok()),
+            )
+            .map_err(|_| PortError::Infrastructure)
+        })
+        .transpose()?;
+    let issue = payload
+        .get("issue")
+        .map(|issue| {
+            MediaNotificationIssue::new(
+                issue
+                    .get("code")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or(PortError::Infrastructure)?
+                    .to_owned(),
+                issue
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or(PortError::Infrastructure)?
+                    .to_owned(),
+            )
+            .map_err(|_| PortError::Infrastructure)
+        })
+        .transpose()?;
+    let delivery_kind = match value("delivery_kind")? {
+        "card" => MediaNotificationDeliveryKind::Card,
+        "final-push" => MediaNotificationDeliveryKind::FinalPush,
+        _ => return Err(PortError::Infrastructure),
+    };
+    let state = match value("state")? {
+        "queued" => MediaNotificationState::Queued,
+        "downloading" => MediaNotificationState::Downloading,
+        "processing" => MediaNotificationState::Processing,
+        "publishing" => MediaNotificationState::Publishing,
+        "completed" => MediaNotificationState::Completed,
+        "partial" => MediaNotificationState::Partial,
+        "failed" => MediaNotificationState::Failed,
+        "cancelled" => MediaNotificationState::Cancelled,
+        "needs-action" => MediaNotificationState::NeedsAction,
+        _ => return Err(PortError::Infrastructure),
+    };
+    let stage = match payload.get("stage").and_then(serde_json::Value::as_str) {
+        None => None,
+        Some("download") => Some(MediaNotificationStage::Download),
+        Some("process") => Some(MediaNotificationStage::Process),
+        Some("publish") => Some(MediaNotificationStage::Publish),
+        _ => return Err(PortError::Infrastructure),
+    };
+    let next_step = match payload.get("next_step").and_then(serde_json::Value::as_str) {
+        None => None,
+        Some("download") => Some(MediaNotificationNextStep::Download),
+        Some("process") => Some(MediaNotificationNextStep::Process),
+        Some("publish") => Some(MediaNotificationNextStep::Publish),
+        Some("none") => Some(MediaNotificationNextStep::None),
+        _ => return Err(PortError::Infrastructure),
+    };
+    let actions = payload
+        .get("actions")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|action| match action.as_str() {
+            Some("cancel") => Ok(MediaNotificationAction::Cancel),
+            Some("details") => Ok(MediaNotificationAction::Details),
+            Some("retry") => Ok(MediaNotificationAction::Retry),
+            Some("retry-missing") => Ok(MediaNotificationAction::RetryMissing),
+            Some("resume-storage") => Ok(MediaNotificationAction::ResumeStorage),
+            _ => Err(PortError::Infrastructure),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    MediaNotification::new(
+        delivery_kind,
+        value("card_key")?.to_owned(),
+        payload
+            .get("revision")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or(PortError::Infrastructure)?,
+        payload
+            .get("lifecycle_cycle")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or(PortError::Infrastructure)?,
+        payload
+            .get("terminal")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or(PortError::Infrastructure)?,
+        state,
+        media,
+        progress,
+        stage,
+        next_step,
+        issue,
+        actions,
     )
     .map_err(|_| PortError::Infrastructure)
 }

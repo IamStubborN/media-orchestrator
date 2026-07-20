@@ -194,11 +194,9 @@ async fn insert_notification_outbox(
     job: &Job,
     event: &JobEvent,
 ) -> Result<(), sea_orm::DbErr> {
-    let context = notification_context(transaction, job).await?;
-    let notifications = notifications_for_event(job, event, &context);
-    if notifications.is_empty() {
+    let Some(projected) = project_notification(transaction, job, event).await? else {
         return Ok(());
-    }
+    };
     let initiator = match job.owner_id() {
         owner if owner == PRIMARY_USER_ID => "primary",
         owner if owner == SECONDARY_USER_ID => "secondary",
@@ -208,60 +206,413 @@ async fn insert_notification_outbox(
             ));
         }
     };
-    // Terminal, action-required, and lifecycle events follow the job's configured
-    // notify scope. Progress milestones are routed to the initiator only, even for
-    // a Family job, so a co-owner is not pinged for every download/transcode start.
     let scope_recipients: Vec<&str> = match job.notify_scope() {
         NotifyScope::Family => vec!["primary", "secondary"],
         NotifyScope::Initiator => vec![initiator],
     };
-    for (event_type, message) in notifications {
-        let recipients: &[&str] = if NotificationEventType::from_wire(event_type)
-            .is_some_and(NotificationEventType::is_progress_milestone)
-        {
-            std::slice::from_ref(&initiator)
-        } else {
-            &scope_recipients
-        };
-        let source_dedupe_key = notification_dedupe_key(job, event_type);
-        for recipient in recipients {
-            let conflict_action = if is_terminal_notification(event_type) {
-                "DO NOTHING"
-            } else {
-                "DO UPDATE SET \
-                 event_type = EXCLUDED.event_type, \
-                 payload = EXCLUDED.payload, \
-                 generation = notification_outbox.generation + 1, \
-                 delivered_at = NULL, \
-                 dead_at = NULL, \
-                 next_attempt_at = now(), \
-                 attempt_count = 0, \
-                 last_error_code = NULL \
-                 WHERE notification_outbox.event_type IS DISTINCT FROM EXCLUDED.event_type \
-                    OR notification_outbox.payload IS DISTINCT FROM EXCLUDED.payload"
-            };
-            transaction
-                .execute_raw(Statement::from_sql_and_values(
-                    DatabaseBackend::Postgres,
-                    format!(
-                        "INSERT INTO notification_outbox \
-                     (id, aggregate_type, aggregate_id, event_type, recipient, source_dedupe_key, payload) \
-                     VALUES ($1, 'job', $2, $3, $4, $5, $6) \
-                     ON CONFLICT (source_dedupe_key, recipient) {conflict_action}"
-                    ),
-                    [
-                        Uuid::new_v4().into(),
-                        job.id().into_uuid().into(),
-                        event_type.into(),
-                        (*recipient).into(),
-                        source_dedupe_key.clone().into(),
-                        serde_json::json!({"message": message}).into(),
-                    ],
-                ))
-                .await?;
-        }
+    let recipients: &[&str] = if projected.terminal {
+        &scope_recipients
+    } else {
+        std::slice::from_ref(&initiator)
+    };
+    for recipient in recipients {
+        insert_projected_notification(transaction, job, *recipient, &projected).await?;
     }
     Ok(())
+}
+
+struct ProjectedNotification {
+    event_type: &'static str,
+    state: &'static str,
+    terminal: bool,
+    lifecycle_cycle: u64,
+    media: serde_json::Value,
+    progress: Option<serde_json::Value>,
+    stage: Option<&'static str>,
+    next_step: Option<&'static str>,
+    issue: Option<serde_json::Value>,
+    actions: Vec<&'static str>,
+}
+
+async fn project_notification(
+    transaction: &sea_orm::DatabaseTransaction,
+    job: &Job,
+    event: &JobEvent,
+) -> Result<Option<ProjectedNotification>, sea_orm::DbErr> {
+    if job.result_ref().starts_with("selection:session-refresh:") {
+        return Ok(None);
+    }
+    let (event_type, state, terminal, stage, next_step, issue, actions) = match event.kind() {
+        JobEventKind::Started => (
+            "started",
+            "queued",
+            false,
+            None,
+            Some("download"),
+            None,
+            vec!["cancel", "details"],
+        ),
+        JobEventKind::StageStarted(stage) | JobEventKind::StageCheckpoint { stage, .. }
+            if matches!(stage.name(), "download" | "torrent_monitor") =>
+        {
+            (
+                "download-progress",
+                "downloading",
+                false,
+                Some("download"),
+                Some("process"),
+                None,
+                vec!["cancel", "details"],
+            )
+        }
+        JobEventKind::StageStarted(stage) | JobEventKind::StageCheckpoint { stage, .. }
+            if matches!(stage.name(), "encode" | "encoding" | "transcode") =>
+        {
+            (
+                "transcoding-started",
+                "processing",
+                false,
+                Some("process"),
+                Some("publish"),
+                None,
+                vec!["cancel", "details"],
+            )
+        }
+        JobEventKind::StageCompleted { stage, .. }
+            if matches!(stage.name(), "download" | "torrent_monitor") =>
+        {
+            (
+                "downloaded",
+                "processing",
+                false,
+                Some("process"),
+                Some("publish"),
+                None,
+                vec!["cancel", "details"],
+            )
+        }
+        JobEventKind::JobTransition {
+            state: JobState::Publishing,
+            ..
+        } => (
+            "downloaded",
+            "publishing",
+            false,
+            Some("publish"),
+            Some("publish"),
+            None,
+            vec!["cancel", "details"],
+        ),
+        JobEventKind::JobTransition {
+            state: JobState::Completed,
+            ..
+        } => (
+            "completed",
+            "completed",
+            true,
+            None,
+            Some("none"),
+            None,
+            vec!["details"],
+        ),
+        JobEventKind::JobTransition {
+            state: JobState::Partial,
+            ..
+        } => (
+            "partial",
+            "partial",
+            true,
+            None,
+            Some("none"),
+            None,
+            vec!["details"],
+        ),
+        JobEventKind::JobTransition {
+            state: JobState::BlockedStorage,
+            ..
+        } => (
+            "blocked-storage",
+            "needs-action",
+            true,
+            None,
+            Some("download"),
+            Some(serde_json::json!({"code":"storage_blocked","message":"storage is required"})),
+            vec!["resume-storage", "details"],
+        ),
+        JobEventKind::JobTransition {
+            state: JobState::NeedsAction,
+            ..
+        } => (
+            "choice-needed",
+            "needs-action",
+            true,
+            None,
+            Some("none"),
+            Some(
+                serde_json::json!({"code":"needs_action","message":"media selection needs attention"}),
+            ),
+            vec!["details"],
+        ),
+        JobEventKind::StageFailed { .. } if job.state() == JobState::Failed => (
+            "failed",
+            "failed",
+            true,
+            None,
+            Some("none"),
+            Some(serde_json::json!({"code":"media_failed","message":"media processing failed"})),
+            vec!["retry", "details"],
+        ),
+        JobEventKind::JobTransition {
+            state: JobState::Failed,
+            ..
+        } => (
+            "failed",
+            "failed",
+            true,
+            None,
+            Some("none"),
+            Some(serde_json::json!({"code":"media_failed","message":"media processing failed"})),
+            vec!["retry", "details"],
+        ),
+        _ => return Ok(None),
+    };
+    let payload = transaction
+        .query_one_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "SELECT payload FROM search_executions WHERE result_ref = $1",
+            [job.result_ref().into()],
+        ))
+        .await?
+        .map(|row| row.try_get::<serde_json::Value>("", "payload"))
+        .transpose()?
+        .unwrap_or_default();
+    let task_rows = transaction
+        .query_all_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "SELECT ordinal, state FROM job_tasks WHERE job_id = $1 ORDER BY ordinal",
+            [job.id().into_uuid().into()],
+        ))
+        .await?;
+    let selected = payload
+        .get("episodes")
+        .and_then(serde_json::Value::as_array)
+        .map(|episodes| {
+            episodes
+                .iter()
+                .filter_map(|episode| {
+                    Some((
+                        u32::try_from(episode.get("season")?.as_u64()?).ok()?,
+                        u32::try_from(episode.get("episode")?.as_u64()?).ok()?,
+                    ))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let title = payload
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .map(safe_notification_field)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "Media job".to_owned());
+    let kind = if payload
+        .get("media_kind")
+        .and_then(serde_json::Value::as_str)
+        == Some("movie")
+    {
+        "movie"
+    } else {
+        "series"
+    };
+    let season = payload
+        .get("season")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0);
+    let translation = payload
+        .get("translation")
+        .and_then(serde_json::Value::as_str)
+        .map(safe_notification_field)
+        .filter(|value| !value.is_empty());
+    let cycle = transaction
+        .query_one_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "SELECT notification_cycle FROM jobs WHERE id = $1",
+            [job.id().into_uuid().into()],
+        ))
+        .await?
+        .ok_or_else(|| sea_orm::DbErr::RecordNotFound("job disappeared".to_owned()))?
+        .try_get::<i64>("", "notification_cycle")?;
+    let current_ordinal = match event.kind() {
+        JobEventKind::StageStarted(stage) | JobEventKind::StageCheckpoint { stage, .. } => {
+            Some(stage.task_ordinal() as usize)
+        }
+        _ => None,
+    };
+    let mut completed = 0_u32;
+    let mut missing = Vec::new();
+    let mut task_state = std::collections::BTreeMap::new();
+    for row in task_rows {
+        task_state.insert(
+            row.try_get::<i32>("", "ordinal")? as usize,
+            row.try_get::<String>("", "state")?,
+        );
+    }
+    for (ordinal, coordinates) in selected.iter().enumerate() {
+        if task_state
+            .get(&ordinal)
+            .is_some_and(|value| value == "completed")
+        {
+            completed += 1;
+        }
+        if terminal
+            && state == "partial"
+            && task_state
+                .get(&ordinal)
+                .is_some_and(|value| value == "failed")
+        {
+            missing.push(serde_json::json!({"season": coordinates.0, "episode": coordinates.1}));
+        }
+    }
+    let mut progress = if selected.is_empty() || task_state.is_empty() {
+        None
+    } else {
+        Some(serde_json::json!({"completed_episodes": completed, "total_episodes": selected.len()}))
+    };
+    if let (Some(progress), Some(ordinal)) = (&mut progress, current_ordinal) {
+        if let Some((_, episode)) = selected.get(ordinal) {
+            progress["current_episode"] = serde_json::json!(episode);
+        }
+    }
+    if let Some(progress) = &mut progress {
+        if !missing.is_empty() {
+            progress["missing_episodes"] = serde_json::Value::Array(missing.clone());
+        }
+        if let JobEventKind::StageCheckpoint { checkpoint, .. } = event.kind() {
+            if let Some(value) = checkpoint_unsigned(checkpoint, "downloaded_bytes") {
+                progress["downloaded_bytes"] = serde_json::json!(value);
+            }
+            if let Some(value) = checkpoint_unsigned(checkpoint, "download_speed_bps") {
+                progress["download_speed_bps"] = serde_json::json!(value);
+            }
+            if let Some(value) =
+                checkpoint_unsigned(checkpoint, "progress_percent").filter(|value| *value <= 100)
+            {
+                progress["percentage"] = serde_json::json!(value);
+            }
+        }
+    }
+    let issue = if state == "partial" && missing.is_empty() {
+        Some(
+            serde_json::json!({"code":"subtitles_missing","message":"some subtitles are unavailable"}),
+        )
+    } else {
+        issue
+    };
+    let actions = if state == "partial" && !missing.is_empty() {
+        vec!["retry-missing", "details"]
+    } else {
+        actions
+    };
+    let mut media = serde_json::json!({
+        "job_id": job.id().to_string(), "title": title, "kind": kind,
+        "provider": provider_value(job.provider()), "season": season, "translation": translation,
+    });
+    media
+        .as_object_mut()
+        .expect("media payload is an object")
+        .retain(|_, value| !value.is_null());
+    Ok(Some(ProjectedNotification {
+        event_type,
+        state,
+        terminal,
+        lifecycle_cycle: u64::try_from(cycle)
+            .map_err(|_| sea_orm::DbErr::Type("invalid notification cycle".to_owned()))?,
+        media,
+        progress,
+        stage,
+        next_step,
+        issue,
+        actions,
+    }))
+}
+
+async fn insert_projected_notification(
+    transaction: &sea_orm::DatabaseTransaction,
+    job: &Job,
+    recipient: &str,
+    projected: &ProjectedNotification,
+) -> Result<(), sea_orm::DbErr> {
+    let card_key = format!("media-job:{}", job.id());
+    let card_dedupe = [job.id().into_uuid().as_bytes().as_slice(), b"card"].concat();
+    let previous = transaction.query_one_raw(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        "SELECT generation FROM notification_outbox WHERE source_dedupe_key = $1 AND recipient = $2 FOR UPDATE",
+        [card_dedupe.clone().into(), recipient.into()],
+    )).await?;
+    let revision = previous
+        .map(|row| row.try_get::<i64>("", "generation"))
+        .transpose()?
+        .unwrap_or(0)
+        + 1;
+    let payload = projected_payload(projected, "card", &card_key, revision as u64);
+    transaction.execute_raw(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        "INSERT INTO notification_outbox (id, aggregate_type, aggregate_id, event_type, recipient, source_dedupe_key, payload) \
+         VALUES ($1, 'job', $2, $3, $4, $5, $6) ON CONFLICT (source_dedupe_key, recipient) DO UPDATE SET \
+         event_type = EXCLUDED.event_type, payload = EXCLUDED.payload, generation = notification_outbox.generation + 1, \
+         delivered_at = NULL, dead_at = NULL, next_attempt_at = now(), attempt_count = 0, last_error_code = NULL",
+        [Uuid::new_v4().into(), job.id().into_uuid().into(), projected.event_type.into(), recipient.into(), card_dedupe.into(), payload.into()],
+    )).await?;
+    if projected.terminal {
+        let dedupe = format!(
+            "final-push:{}:{}:{}",
+            job.id(),
+            projected.lifecycle_cycle,
+            projected.state
+        )
+        .into_bytes();
+        let payload = projected_payload(projected, "final-push", &card_key, revision as u64);
+        transaction.execute_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "INSERT INTO notification_outbox (id, aggregate_type, aggregate_id, event_type, recipient, source_dedupe_key, payload) \
+             VALUES ($1, 'job', $2, $3, $4, $5, $6) ON CONFLICT (source_dedupe_key, recipient) DO NOTHING",
+            [Uuid::new_v4().into(), job.id().into_uuid().into(), projected.event_type.into(), recipient.into(), dedupe.into(), payload.into()],
+        )).await?;
+    }
+    Ok(())
+}
+
+fn projected_payload(
+    projected: &ProjectedNotification,
+    delivery_kind: &str,
+    card_key: &str,
+    revision: u64,
+) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "event_type": "media.notification", "schema_version": 2, "delivery_kind": delivery_kind,
+        "card_key": card_key, "revision": revision, "lifecycle_cycle": projected.lifecycle_cycle,
+        "terminal": projected.terminal, "state": projected.state, "media": projected.media, "actions": projected.actions,
+    });
+    if let Some(progress) = &projected.progress {
+        value["progress"] = progress.clone();
+    }
+    if let Some(stage) = projected.stage {
+        value["stage"] = serde_json::json!(stage);
+    }
+    if let Some(next_step) = projected.next_step {
+        value["next_step"] = serde_json::json!(next_step);
+    }
+    if let Some(issue) = &projected.issue {
+        value["issue"] = issue.clone();
+    }
+    value
+}
+
+fn provider_value(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Rezka => "rezka",
+        Provider::Prowlarr => "prowlarr",
+    }
 }
 
 #[derive(Debug, Default)]

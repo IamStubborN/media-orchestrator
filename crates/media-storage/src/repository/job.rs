@@ -340,7 +340,7 @@ impl JobStore for SeaOrmJobStore {
             transaction
                 .execute_raw(Statement::from_sql_and_values(
                     DatabaseBackend::Postgres,
-                    "UPDATE jobs SET state = 'queued', needs_action_reason = NULL, \
+                    "UPDATE jobs SET state = 'queued', notification_cycle = notification_cycle + 1, needs_action_reason = NULL, \
                      error_snapshot = NULL, attempt_count = 0, started_at = NULL, \
                      completed_at = NULL, updated_at = now() WHERE id = $1",
                     [id.into_uuid().into()],
