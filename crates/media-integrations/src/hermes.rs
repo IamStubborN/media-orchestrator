@@ -1,9 +1,17 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hmac::{Hmac, KeyInit, Mac};
-use media_contract::HermesDeliverOnlyWebhook;
+use media_contract::{
+    HermesDeliverOnlyWebhook, HermesMediaNotificationWebhook, MediaNotificationActionDto,
+    MediaNotificationDeliveryKindDto, MediaNotificationDto, MediaNotificationEpisodeDto,
+    MediaNotificationIssueDto, MediaNotificationKindDto, MediaNotificationNextStepDto,
+    MediaNotificationProgressDto, MediaNotificationStageDto, MediaNotificationStateDto, PublicId,
+};
 use media_core::{
-    NotificationDelivery, NotificationDeliveryFailure, NotificationRecipient, NotificationSink,
+    MediaNotification, MediaNotificationAction, MediaNotificationDeliveryKind,
+    MediaNotificationKind, MediaNotificationNextStep, MediaNotificationStage,
+    MediaNotificationState, NotificationContent, NotificationDelivery, NotificationDeliveryFailure,
+    NotificationRecipient, NotificationSink,
 };
 use secrecy::{ExposeSecret, SecretString};
 use sha2::Sha256;
@@ -76,11 +84,18 @@ impl HermesWebhookClient {
         delivery: &NotificationDelivery,
         timestamp: u64,
     ) -> Result<(), WebhookError> {
-        let body = serde_json::to_vec(&HermesDeliverOnlyWebhook {
-            event_type: "media.notification".to_owned(),
-            status_key: delivery.status_key().map(ToOwned::to_owned),
-            message: delivery.message().to_owned(),
-        })
+        let body = match delivery.content() {
+            NotificationContent::LegacyMessage(_) => {
+                serde_json::to_vec(&HermesDeliverOnlyWebhook {
+                    event_type: "media.notification".to_owned(),
+                    status_key: delivery.status_key().map(ToOwned::to_owned),
+                    message: delivery.message().to_owned(),
+                })
+            }
+            NotificationContent::Media(notification) => {
+                serde_json::to_vec(&media_webhook(notification, delivery.generation()))
+            }
+        }
         .map_err(|_| WebhookError::Serialization)?;
         let (endpoint, secret) = self.route(delivery.recipient());
         let timestamp = timestamp.to_string();
@@ -90,7 +105,10 @@ impl HermesWebhookClient {
             .post(endpoint.clone())
             .header(TIMESTAMP_HEADER, &timestamp)
             .header(SIGNATURE_HEADER, signature)
-            .header(REQUEST_ID_HEADER, delivery.id().to_string())
+            .header(
+                REQUEST_ID_HEADER,
+                format!("{}-{}", delivery.id(), delivery.generation()),
+            )
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body)
             .send()
@@ -114,6 +132,92 @@ impl HermesWebhookClient {
                 &self.config.secondary_secret,
             ),
         }
+    }
+}
+
+fn media_webhook(
+    notification: &MediaNotification,
+    generation: u64,
+) -> HermesMediaNotificationWebhook {
+    let media = notification.media();
+    HermesMediaNotificationWebhook {
+        event_type: "media.notification".to_owned(),
+        schema_version: 2,
+        delivery_kind: match notification.delivery_kind() {
+            MediaNotificationDeliveryKind::Card => MediaNotificationDeliveryKindDto::Card,
+            MediaNotificationDeliveryKind::FinalPush => MediaNotificationDeliveryKindDto::FinalPush,
+        },
+        card_key: notification.card_key().to_owned(),
+        revision: generation,
+        lifecycle_cycle: notification.lifecycle_cycle(),
+        terminal: notification.terminal(),
+        state: match notification.state() {
+            MediaNotificationState::Queued => MediaNotificationStateDto::Queued,
+            MediaNotificationState::Downloading => MediaNotificationStateDto::Downloading,
+            MediaNotificationState::Processing => MediaNotificationStateDto::Processing,
+            MediaNotificationState::Publishing => MediaNotificationStateDto::Publishing,
+            MediaNotificationState::Completed => MediaNotificationStateDto::Completed,
+            MediaNotificationState::Partial => MediaNotificationStateDto::Partial,
+            MediaNotificationState::Failed => MediaNotificationStateDto::Failed,
+            MediaNotificationState::Cancelled => MediaNotificationStateDto::Cancelled,
+            MediaNotificationState::NeedsAction => MediaNotificationStateDto::NeedsAction,
+        },
+        media: MediaNotificationDto {
+            job_id: PublicId::parse(&media.job_id().to_string())
+                .expect("domain job IDs are valid UUIDs"),
+            title: media.title().to_owned(),
+            kind: match media.kind() {
+                MediaNotificationKind::Movie => MediaNotificationKindDto::Movie,
+                MediaNotificationKind::Series => MediaNotificationKindDto::Series,
+            },
+            provider: media.provider().to_owned(),
+            season: media.season(),
+            translation: media.translation().map(ToOwned::to_owned),
+        },
+        progress: notification
+            .progress()
+            .map(|progress| MediaNotificationProgressDto {
+                completed_episodes: progress.completed_episodes(),
+                total_episodes: progress.total_episodes(),
+                current_episode: progress.current_episode(),
+                missing_episodes: progress
+                    .missing_episodes()
+                    .iter()
+                    .map(|episode| MediaNotificationEpisodeDto {
+                        season: episode.season(),
+                        episode: episode.episode(),
+                    })
+                    .collect(),
+                downloaded_bytes: progress.downloaded_bytes(),
+                download_speed_bps: progress.download_speed_bps(),
+                percentage: progress.percentage(),
+            }),
+        stage: notification.stage().map(|stage| match stage {
+            MediaNotificationStage::Download => MediaNotificationStageDto::Download,
+            MediaNotificationStage::Process => MediaNotificationStageDto::Process,
+            MediaNotificationStage::Publish => MediaNotificationStageDto::Publish,
+        }),
+        next_step: notification.next_step().map(|step| match step {
+            MediaNotificationNextStep::Download => MediaNotificationNextStepDto::Download,
+            MediaNotificationNextStep::Process => MediaNotificationNextStepDto::Process,
+            MediaNotificationNextStep::Publish => MediaNotificationNextStepDto::Publish,
+            MediaNotificationNextStep::None => MediaNotificationNextStepDto::None,
+        }),
+        issue: notification.issue().map(|issue| MediaNotificationIssueDto {
+            code: issue.code().to_owned(),
+            message: issue.message().to_owned(),
+        }),
+        actions: notification
+            .actions()
+            .iter()
+            .map(|action| match action {
+                MediaNotificationAction::Cancel => MediaNotificationActionDto::Cancel,
+                MediaNotificationAction::Details => MediaNotificationActionDto::Details,
+                MediaNotificationAction::Retry => MediaNotificationActionDto::Retry,
+                MediaNotificationAction::RetryMissing => MediaNotificationActionDto::RetryMissing,
+                MediaNotificationAction::ResumeStorage => MediaNotificationActionDto::ResumeStorage,
+            })
+            .collect(),
     }
 }
 
