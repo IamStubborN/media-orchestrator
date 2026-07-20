@@ -2,6 +2,105 @@ use std::sync::Arc;
 
 use crate::{NotificationId, PortError};
 
+const MAX_NOTIFICATION_DISPLAY_BYTES: usize = 256;
+const MAX_NOTIFICATION_CARD_KEY_BYTES: usize = 96;
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum NotificationContent {
+    /// Text payloads are retained only for outbox rows created before migration 24.
+    LegacyMessage(String),
+    Media(MediaNotification),
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum MediaNotificationDeliveryKind {
+    Card,
+    FinalPush,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum MediaNotificationState {
+    Queued,
+    Downloading,
+    Processing,
+    Publishing,
+    Completed,
+    Partial,
+    Failed,
+    Cancelled,
+    NeedsAction,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum MediaNotificationKind {
+    Movie,
+    Series,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum MediaNotificationStage {
+    Download,
+    Process,
+    Publish,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum MediaNotificationNextStep {
+    Download,
+    Process,
+    Publish,
+    None,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum MediaNotificationAction {
+    Cancel,
+    Details,
+    Retry,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MediaNotificationMedia {
+    job_id: crate::JobId,
+    title: String,
+    kind: MediaNotificationKind,
+    provider: String,
+    season: Option<u32>,
+    translation: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MediaNotificationProgress {
+    completed_episodes: Option<u32>,
+    total_episodes: Option<u32>,
+    current_episode: Option<u32>,
+    downloaded_bytes: Option<u64>,
+    download_speed_bps: Option<u64>,
+    percentage: Option<u8>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MediaNotificationIssue {
+    code: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MediaNotification {
+    delivery_kind: MediaNotificationDeliveryKind,
+    card_key: String,
+    revision: u64,
+    lifecycle_cycle: u64,
+    terminal: bool,
+    state: MediaNotificationState,
+    media: MediaNotificationMedia,
+    progress: Option<MediaNotificationProgress>,
+    stage: Option<MediaNotificationStage>,
+    next_step: Option<MediaNotificationNextStep>,
+    issue: Option<MediaNotificationIssue>,
+    actions: Vec<MediaNotificationAction>,
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum NotificationRecipient {
     Primary,
@@ -86,6 +185,249 @@ pub enum NotificationValidationError {
     InvalidStatusKey,
     #[error("notification generation is invalid")]
     InvalidGeneration,
+    #[error("notification display field is invalid")]
+    InvalidDisplayField,
+    #[error("notification card key is invalid")]
+    InvalidCardKey,
+    #[error("notification revision or lifecycle cycle is invalid")]
+    InvalidRevisionOrCycle,
+    #[error("notification episode progress is invalid")]
+    InvalidEpisodeProgress,
+    #[error("notification percentage is invalid")]
+    InvalidPercentage,
+}
+
+impl MediaNotificationMedia {
+    pub fn new(
+        job_id: crate::JobId,
+        title: String,
+        kind: MediaNotificationKind,
+        provider: String,
+        season: Option<u32>,
+        translation: Option<String>,
+    ) -> Result<Self, NotificationValidationError> {
+        validate_display_field(&title)?;
+        validate_display_field(&provider)?;
+        if season == Some(0) {
+            return Err(NotificationValidationError::InvalidEpisodeProgress);
+        }
+        if let Some(translation) = &translation {
+            validate_display_field(translation)?;
+        }
+        Ok(Self {
+            job_id,
+            title,
+            kind,
+            provider,
+            season,
+            translation,
+        })
+    }
+
+    #[must_use]
+    pub const fn job_id(&self) -> crate::JobId {
+        self.job_id
+    }
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+    #[must_use]
+    pub const fn kind(&self) -> MediaNotificationKind {
+        self.kind
+    }
+    #[must_use]
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+    #[must_use]
+    pub const fn season(&self) -> Option<u32> {
+        self.season
+    }
+    #[must_use]
+    pub fn translation(&self) -> Option<&str> {
+        self.translation.as_deref()
+    }
+}
+
+impl MediaNotificationProgress {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        completed_episodes: Option<u32>,
+        total_episodes: Option<u32>,
+        current_episode: Option<u32>,
+        downloaded_bytes: Option<u64>,
+        download_speed_bps: Option<u64>,
+        percentage: Option<u8>,
+    ) -> Result<Self, NotificationValidationError> {
+        if total_episodes == Some(0)
+            || completed_episodes
+                .is_some_and(|completed| total_episodes.is_none_or(|total| completed > total))
+            || current_episode.is_some_and(|current| {
+                total_episodes.is_none_or(|total| current == 0 || current > total)
+            })
+            || (completed_episodes.is_some() && total_episodes.is_none())
+        {
+            return Err(NotificationValidationError::InvalidEpisodeProgress);
+        }
+        if percentage.is_some_and(|value| value > 100) {
+            return Err(NotificationValidationError::InvalidPercentage);
+        }
+        Ok(Self {
+            completed_episodes,
+            total_episodes,
+            current_episode,
+            downloaded_bytes,
+            download_speed_bps,
+            percentage,
+        })
+    }
+
+    #[must_use]
+    pub const fn completed_episodes(&self) -> Option<u32> {
+        self.completed_episodes
+    }
+    #[must_use]
+    pub const fn total_episodes(&self) -> Option<u32> {
+        self.total_episodes
+    }
+    #[must_use]
+    pub const fn current_episode(&self) -> Option<u32> {
+        self.current_episode
+    }
+    #[must_use]
+    pub const fn downloaded_bytes(&self) -> Option<u64> {
+        self.downloaded_bytes
+    }
+    #[must_use]
+    pub const fn download_speed_bps(&self) -> Option<u64> {
+        self.download_speed_bps
+    }
+    #[must_use]
+    pub const fn percentage(&self) -> Option<u8> {
+        self.percentage
+    }
+}
+
+impl MediaNotificationIssue {
+    pub fn new(code: String, message: String) -> Result<Self, NotificationValidationError> {
+        validate_display_field(&code)?;
+        validate_display_field(&message)?;
+        Ok(Self { code, message })
+    }
+    #[must_use]
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl MediaNotification {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        delivery_kind: MediaNotificationDeliveryKind,
+        card_key: String,
+        revision: u64,
+        lifecycle_cycle: u64,
+        terminal: bool,
+        state: MediaNotificationState,
+        media: MediaNotificationMedia,
+        progress: Option<MediaNotificationProgress>,
+        stage: Option<MediaNotificationStage>,
+        next_step: Option<MediaNotificationNextStep>,
+        issue: Option<MediaNotificationIssue>,
+        actions: Vec<MediaNotificationAction>,
+    ) -> Result<Self, NotificationValidationError> {
+        if !valid_card_key(&card_key) {
+            return Err(NotificationValidationError::InvalidCardKey);
+        }
+        if revision == 0 || lifecycle_cycle == 0 {
+            return Err(NotificationValidationError::InvalidRevisionOrCycle);
+        }
+        Ok(Self {
+            delivery_kind,
+            card_key,
+            revision,
+            lifecycle_cycle,
+            terminal,
+            state,
+            media,
+            progress,
+            stage,
+            next_step,
+            issue,
+            actions,
+        })
+    }
+    #[must_use]
+    pub const fn delivery_kind(&self) -> MediaNotificationDeliveryKind {
+        self.delivery_kind
+    }
+    #[must_use]
+    pub fn card_key(&self) -> &str {
+        &self.card_key
+    }
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+    #[must_use]
+    pub const fn lifecycle_cycle(&self) -> u64 {
+        self.lifecycle_cycle
+    }
+    #[must_use]
+    pub const fn terminal(&self) -> bool {
+        self.terminal
+    }
+    #[must_use]
+    pub const fn state(&self) -> MediaNotificationState {
+        self.state
+    }
+    #[must_use]
+    pub fn media(&self) -> &MediaNotificationMedia {
+        &self.media
+    }
+    #[must_use]
+    pub fn progress(&self) -> Option<&MediaNotificationProgress> {
+        self.progress.as_ref()
+    }
+    #[must_use]
+    pub const fn stage(&self) -> Option<MediaNotificationStage> {
+        self.stage
+    }
+    #[must_use]
+    pub const fn next_step(&self) -> Option<MediaNotificationNextStep> {
+        self.next_step
+    }
+    #[must_use]
+    pub fn issue(&self) -> Option<&MediaNotificationIssue> {
+        self.issue.as_ref()
+    }
+    #[must_use]
+    pub fn actions(&self) -> &[MediaNotificationAction] {
+        &self.actions
+    }
+}
+
+fn validate_display_field(value: &str) -> Result<(), NotificationValidationError> {
+    if value.trim().is_empty()
+        || value.len() > MAX_NOTIFICATION_DISPLAY_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(NotificationValidationError::InvalidDisplayField);
+    }
+    Ok(())
+}
+
+fn valid_card_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_NOTIFICATION_CARD_KEY_BYTES
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, ':' | '-'))
 }
 
 impl NotificationDelivery {

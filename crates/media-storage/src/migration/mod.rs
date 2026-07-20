@@ -21,6 +21,7 @@ mod m20260713_000020_identity_episode_numbers;
 mod m20260718_000021_notification_generation;
 mod m20260718_000022_tracking_downloads;
 mod m20260720_000023_sticky_vpn_attempts;
+mod m20260720_000024_structured_notifications;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseTransaction;
@@ -54,6 +55,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260718_000021_notification_generation::Migration),
             Box::new(m20260718_000022_tracking_downloads::Migration),
             Box::new(m20260720_000023_sticky_vpn_attempts::Migration),
+            Box::new(m20260720_000024_structured_notifications::Migration),
         ]
     }
 }

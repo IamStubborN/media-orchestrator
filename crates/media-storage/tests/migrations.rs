@@ -309,8 +309,8 @@ async fn a_failed_migration_explicitly_rolls_back_partial_schema() {
     );
     assert_eq!(
         names.last().map(String::as_str),
-        Some("m20260720_000023_sticky_vpn_attempts"),
-        "sticky VPN attempt migration must remain the latest schema change",
+        Some("m20260720_000024_structured_notifications"),
+        "structured notifications migration must remain the latest schema change",
     );
     for migration in migrations {
         assert_eq!(
@@ -382,6 +382,107 @@ async fn search_scope_migration_discards_only_legacy_unscoped_sessions() {
         sessions[0].try_get::<uuid::Uuid>("", "id").unwrap(),
         uuid::Uuid::parse_str("10000000-0000-0000-0000-000000000092").unwrap()
     );
+}
+
+#[tokio::test]
+async fn structured_notifications_migration_preserves_legacy_rows_and_enforces_v2_payloads() {
+    let test_db = TestDatabase::start().await;
+    let db = test_db.connection();
+    Migrator::up(db, Some(23)).await.unwrap();
+
+    execute(
+        db,
+        "INSERT INTO jobs (id, owner_id, provider, result_ref, state, notify_scope)
+         VALUES ('00000000-0000-0000-0000-000000000999',
+                 '00000000-0000-0000-0000-000000000001', 'rezka', 'example', 'queued', 'initiator');
+         INSERT INTO notification_outbox
+           (id, aggregate_type, aggregate_id, event_type, recipient, source_dedupe_key, payload)
+         VALUES ('00000000-0000-0000-0000-000000000998', 'job',
+                 '00000000-0000-0000-0000-000000000999', 'started', 'primary',
+                 decode(repeat('01', 32), 'hex'), '{\"message\":\"legacy notification\"}'::jsonb)",
+    )
+    .await
+    .unwrap();
+
+    Migrator::up(db, None).await.unwrap();
+
+    let cycle = query(
+        db,
+        "SELECT notification_cycle FROM jobs WHERE id = '00000000-0000-0000-0000-000000000999'",
+    )
+    .await;
+    assert_eq!(
+        cycle[0].try_get::<i64>("", "notification_cycle").unwrap(),
+        1
+    );
+
+    let preserved = query(
+        db,
+        "SELECT payload FROM notification_outbox WHERE id = '00000000-0000-0000-0000-000000000998'",
+    )
+    .await;
+    assert_eq!(
+        preserved.len(),
+        1,
+        "legacy outbox rows must not be rewritten"
+    );
+
+    execute(
+        db,
+        "INSERT INTO notification_outbox
+           (id, aggregate_type, aggregate_id, event_type, recipient, source_dedupe_key, payload)
+         VALUES ('00000000-0000-0000-0000-000000000997', 'job',
+                 '00000000-0000-0000-0000-000000000999', 'download-progress', 'primary',
+                 decode(repeat('02', 32), 'hex'),
+                 '{
+                   \"event_type\": \"media.notification\",
+                   \"schema_version\": 2,
+                   \"delivery_kind\": \"card\",
+                   \"card_key\": \"media-job:00000000-0000-0000-0000-000000000999\",
+                   \"revision\": 7,
+                   \"lifecycle_cycle\": 1,
+                   \"terminal\": false,
+                   \"state\": \"downloading\",
+                   \"media\": {
+                     \"job_id\": \"00000000-0000-0000-0000-000000000999\",
+                     \"title\": \"Example Show\",
+                     \"kind\": \"series\",
+                     \"provider\": \"rezka\",
+                     \"season\": 1,
+                     \"translation\": \"AniLibria\"
+                   },
+                   \"progress\": {
+                     \"completed_episodes\": 7,
+                     \"total_episodes\": 12,
+                     \"current_episode\": 8,
+                     \"downloaded_bytes\": 195035136,
+                     \"download_speed_bps\": 5452595
+                   },
+                   \"stage\": \"download\",
+                   \"next_step\": \"process\",
+                   \"actions\": [\"cancel\", \"details\"]
+                 }'::jsonb)",
+    )
+    .await
+    .unwrap();
+
+    assert_rejected(
+        db,
+        "UPDATE jobs SET notification_cycle = 0
+         WHERE id = '00000000-0000-0000-0000-000000000999'",
+        "jobs_notification_cycle_positive",
+    )
+    .await;
+    assert_rejected(
+        db,
+        "INSERT INTO notification_outbox
+           (id, aggregate_type, aggregate_id, event_type, recipient, source_dedupe_key, payload)
+         VALUES ('00000000-0000-0000-0000-000000000996', 'job',
+                 '00000000-0000-0000-0000-000000000999', 'started', 'primary',
+                 decode(repeat('03', 32), 'hex'), '{}'::jsonb)",
+        "notification_payload_check",
+    )
+    .await;
 }
 
 #[tokio::test]
