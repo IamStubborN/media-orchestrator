@@ -511,6 +511,38 @@ async fn structured_notifications_migration_preserves_legacy_rows_and_enforces_v
         "notification_payload_check",
     )
     .await;
+    assert_rejected(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(payload, '{event_type}', 'null'::jsonb)
+         WHERE id = '00000000-0000-0000-0000-000000000997'",
+        "notification_payload_check",
+    )
+    .await;
+    assert_rejected(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(payload, '{state}', 'null'::jsonb)
+         WHERE id = '00000000-0000-0000-0000-000000000997'",
+        "notification_payload_check",
+    )
+    .await;
+    assert_rejected(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(payload, '{stage}', 'null'::jsonb)
+         WHERE id = '00000000-0000-0000-0000-000000000997'",
+        "notification_payload_check",
+    )
+    .await;
+    assert_rejected(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(payload, '{next_step}', 'null'::jsonb)
+         WHERE id = '00000000-0000-0000-0000-000000000997'",
+        "notification_payload_check",
+    )
+    .await;
 
     assert_rejected(
         db,

@@ -41,7 +41,7 @@ impl MigrationTrait for Migration {
                 LANGUAGE SQL
                 IMMUTABLE
                 AS $function$
-                    SELECT
+                    SELECT COALESCE(
                         jsonb_typeof(candidate) = 'object'
                         AND candidate ?& ARRAY['event_type', 'schema_version', 'delivery_kind', 'card_key',
                                                  'revision', 'lifecycle_cycle', 'terminal', 'state', 'media']
@@ -199,7 +199,7 @@ impl MigrationTrait for Migration {
                                 )
                                 ELSE false
                             END
-                        )
+                        ), false)
                 $function$;
 
                 ALTER TABLE notification_outbox
