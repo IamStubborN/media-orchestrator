@@ -309,8 +309,8 @@ async fn a_failed_migration_explicitly_rolls_back_partial_schema() {
     );
     assert_eq!(
         names.last().map(String::as_str),
-        Some("m20260718_000021_notification_generation"),
-        "notification generation migration must remain the latest schema change",
+        Some("m20260720_000023_sticky_vpn_attempts"),
+        "sticky VPN attempt migration must remain the latest schema change",
     );
     for migration in migrations {
         assert_eq!(

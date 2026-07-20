@@ -1,3 +1,5 @@
+pub const MAX_STICKY_VPN_ATTEMPTS: u32 = 3;
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum RunnerLifecycleState {
     Ready,

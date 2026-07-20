@@ -1,7 +1,8 @@
 use media_core::{
     PRIMARY_USER_ID, Checkpoint, CheckpointValue, ClientId, Job, JobEvent, JobEventKind, JobLease,
-    JobState, LeaseId, LeaseStore, NotificationEventType, NotifyScope, OperationKey, PortError,
-    Provider, StageFailureOutcome, StageRef, SECONDARY_USER_ID, max_stage_attempts,
+    JobState, LeaseId, LeaseStore, MAX_STICKY_VPN_ATTEMPTS, NotificationEventType, NotifyScope,
+    OperationKey, PortError, Provider, StageFailureOutcome, StageRef, SECONDARY_USER_ID,
+    max_stage_attempts,
 };
 use sea_orm::{
     ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, Statement, TransactionTrait,
@@ -19,6 +20,10 @@ use crate::{
 };
 
 const LEASE_ADVISORY_LOCK: i64 = 0x4d45_4449_414c_5345;
+enum LeaseDecision {
+    Available(Option<JobLease>),
+    RotationRequired,
+}
 
 #[derive(Clone)]
 pub struct SeaOrmLeaseStore {
@@ -50,18 +55,26 @@ impl LeaseStore for SeaOrmLeaseStore {
         let transaction = self.database.begin().await.map_err(map_database_error)?;
         let result = async {
             match operation::claim(&transaction, operation, OperationKind::LeaseNext).await? {
-                OperationClaim::Replay(result) => return replayed_lease(result),
+                OperationClaim::Replay(result) => {
+                    return replayed_lease(result).map(LeaseDecision::Available);
+                }
                 OperationClaim::Fresh => {}
             }
-            let lease = lease_next_in_transaction(&transaction, runner, ttl_seconds).await?;
-            let stored = lease
-                .clone()
-                .map_or(OperationResult::None, OperationResult::Lease);
+            let decision = lease_next_in_transaction(&transaction, runner, ttl_seconds).await?;
+            let stored = match &decision {
+                LeaseDecision::Available(lease) => lease
+                    .clone()
+                    .map_or(OperationResult::None, OperationResult::Lease),
+                LeaseDecision::RotationRequired => OperationResult::None,
+            };
             operation::complete(&transaction, operation, OperationKind::LeaseNext, &stored).await?;
-            Ok(lease)
+            Ok(decision)
         }
         .await;
-        finish(transaction, result).await
+        match finish(transaction, result).await? {
+            LeaseDecision::Available(lease) => Ok(lease),
+            LeaseDecision::RotationRequired => Err(PortError::Conflict),
+        }
     }
 
     async fn heartbeat(
@@ -1286,7 +1299,7 @@ async fn lease_next_in_transaction(
     transaction: &sea_orm::DatabaseTransaction,
     runner: ClientId,
     ttl_seconds: i64,
-) -> Result<Option<JobLease>, sea_orm::DbErr> {
+) -> Result<LeaseDecision, sea_orm::DbErr> {
     transaction
         .query_one_raw(Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
@@ -1299,12 +1312,16 @@ async fn lease_next_in_transaction(
     let lifecycle = transaction
         .query_one_raw(Statement::from_string(
             DatabaseBackend::Postgres,
-            "SELECT state FROM runner_lifecycle WHERE singleton = true FOR SHARE".to_owned(),
+            "SELECT state, sticky_job_id, sticky_attempt_count FROM runner_lifecycle \
+             WHERE singleton = true FOR UPDATE"
+                .to_owned(),
         ))
         .await?
         .ok_or_else(|| sea_orm::DbErr::Custom("runner lifecycle is missing".to_owned()))?;
-    if lifecycle.try_get::<String>("", "state")? != "ready" {
-        return Ok(None);
+    match lifecycle.try_get::<String>("", "state")?.as_str() {
+        "ready" => {}
+        "rotating" => return Ok(LeaseDecision::RotationRequired),
+        _ => return Ok(LeaseDecision::Available(None)),
     }
 
     if let Some(existing) = transaction
@@ -1316,7 +1333,7 @@ async fn lease_next_in_transaction(
         .await?
     {
         if existing.try_get::<bool>("", "active")? {
-            return Ok(None);
+            return Ok(LeaseDecision::Available(None));
         }
         let expired_job = existing.try_get::<Uuid>("", "job_id")?;
         transaction
@@ -1359,10 +1376,9 @@ async fn lease_next_in_transaction(
     let Some(candidate) = transaction
         .query_one_raw(Statement::from_string(
             DatabaseBackend::Postgres,
-            "UPDATE jobs SET state = 'leased', attempt_count = attempt_count + 1, \
-             updated_at = now() WHERE id = (SELECT id FROM jobs WHERE state = 'queued' \
-             ORDER BY created_at, id FOR UPDATE SKIP LOCKED LIMIT 1) AND state = 'queued' \
-             RETURNING id",
+            "SELECT id FROM jobs WHERE state = 'queued' ORDER BY created_at, id \
+             FOR UPDATE SKIP LOCKED LIMIT 1"
+                .to_owned(),
         ))
         .await?
     else {
@@ -1376,9 +1392,46 @@ async fn lease_next_in_transaction(
         if queued.try_get::<bool>("", "queued")? {
             return Err(sea_orm::DbErr::RecordNotUpdated);
         }
-        return Ok(None);
+        return Ok(LeaseDecision::Available(None));
     };
     let job_id = candidate.try_get::<Uuid>("", "id")?;
+    let sticky_job_id = lifecycle.try_get::<Option<Uuid>>("", "sticky_job_id")?;
+    let sticky_attempt_count = u32::try_from(lifecycle.try_get::<i32>("", "sticky_attempt_count")?)
+        .map_err(|_| sea_orm::DbErr::Type("invalid sticky VPN attempt count".to_owned()))?;
+    if sticky_job_id
+        .is_some_and(|sticky| sticky != job_id || sticky_attempt_count >= MAX_STICKY_VPN_ATTEMPTS)
+    {
+        transaction
+            .execute_raw(Statement::from_string(
+                DatabaseBackend::Postgres,
+                "UPDATE runner_lifecycle SET state = 'rotating', reason = NULL, \
+                 previous_ip = current_ip, updated_at = now() WHERE singleton = true"
+                    .to_owned(),
+            ))
+            .await?;
+        return Ok(LeaseDecision::RotationRequired);
+    }
+    let leased = transaction
+        .execute_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "UPDATE jobs SET state = 'leased', attempt_count = attempt_count + 1, \
+             updated_at = now() WHERE id = $1 AND state = 'queued'",
+            [job_id.into()],
+        ))
+        .await?;
+    if leased.rows_affected() != 1 {
+        return Err(sea_orm::DbErr::RecordNotUpdated);
+    }
+    transaction
+        .execute_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "UPDATE runner_lifecycle SET sticky_job_id = $1, \
+             sticky_attempt_count = CASE WHEN sticky_job_id = $1 \
+             THEN sticky_attempt_count + 1 ELSE 1 END, updated_at = now() \
+             WHERE singleton = true",
+            [job_id.into()],
+        ))
+        .await?;
     let lease_id = Uuid::new_v4();
     let inserted = transaction
         .query_one_raw(Statement::from_sql_and_values(
@@ -1405,7 +1458,7 @@ async fn lease_next_in_transaction(
             .await?
             .ok_or_else(|| sea_orm::DbErr::Custom("lease race check failed".to_owned()))?;
         if active.try_get::<bool>("", "active")? {
-            return Ok(None);
+            return Ok(LeaseDecision::Available(None));
         }
         return Err(sea_orm::DbErr::Custom(
             "lease slot conflicted without an active lease".to_owned(),
@@ -1414,12 +1467,12 @@ async fn lease_next_in_transaction(
     let expires_at = inserted.try_get("", "expires_at")?;
     let job = load_job(transaction, job_id).await?;
     debug_assert_eq!(job.state(), JobState::Leased);
-    Ok(Some(JobLease::new(
+    Ok(LeaseDecision::Available(Some(JobLease::new(
         LeaseId::from_uuid(lease_id),
         job,
         runner,
         expires_at,
-    )))
+    ))))
 }
 
 async fn heartbeat_in_transaction(

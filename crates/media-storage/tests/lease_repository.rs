@@ -72,6 +72,172 @@ async fn non_ready_lifecycle_denies_new_leases_without_mutating_the_job() {
     assert_eq!(stored.state(), JobState::Queued);
 }
 
+async fn return_job_to_queue(test_db: &TestDatabase, job_id: JobId) {
+    test_db
+        .connection()
+        .execute_raw(Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            "DELETE FROM job_leases WHERE job_id = $1",
+            [job_id.into_uuid().into()],
+        ))
+        .await
+        .unwrap();
+    test_db
+        .connection()
+        .execute_raw(Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            "UPDATE jobs SET state = 'queued', updated_at = now() WHERE id = $1",
+            [job_id.into_uuid().into()],
+        ))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn same_job_gets_three_leases_on_one_vpn_session_then_requires_rotation() {
+    let (test_db, jobs, leases) = setup().await;
+    let job = jobs
+        .create(operation_key(), new_job("selection:sticky-three"))
+        .await
+        .unwrap();
+
+    for expected_attempt in 1..=3_i32 {
+        let lease = leases
+            .lease_next(
+                operation_key(),
+                RUNNER_CLIENT_ID,
+                time::Duration::seconds(60),
+            )
+            .await
+            .unwrap()
+            .expect("the same job may retry on the sticky VPN session");
+        assert_eq!(lease.job().id(), job.id());
+        let row = query(
+            test_db.connection(),
+            "SELECT sticky_job_id, sticky_attempt_count FROM runner_lifecycle",
+        )
+        .await
+        .pop()
+        .unwrap();
+        assert_eq!(
+            row.try_get::<uuid::Uuid>("", "sticky_job_id").unwrap(),
+            job.id().into_uuid(),
+        );
+        assert_eq!(
+            row.try_get::<i32>("", "sticky_attempt_count").unwrap(),
+            expected_attempt,
+        );
+        return_job_to_queue(&test_db, job.id()).await;
+    }
+
+    assert_eq!(
+        leases
+            .lease_next(
+                operation_key(),
+                RUNNER_CLIENT_ID,
+                time::Duration::seconds(60),
+            )
+            .await,
+        Err(PortError::Conflict),
+    );
+    let lifecycle = query(
+        test_db.connection(),
+        "SELECT state, sticky_attempt_count FROM runner_lifecycle",
+    )
+    .await
+    .pop()
+    .unwrap();
+    assert_eq!(
+        lifecycle.try_get::<String>("", "state").unwrap(),
+        "rotating"
+    );
+    assert_eq!(
+        lifecycle
+            .try_get::<i32>("", "sticky_attempt_count")
+            .unwrap(),
+        3,
+    );
+    assert_eq!(jobs.queue_status().await.unwrap().queued, 1);
+    assert_eq!(
+        leases
+            .lease_next(
+                operation_key(),
+                RUNNER_CLIENT_ID,
+                time::Duration::seconds(60),
+            )
+            .await,
+        Err(PortError::Conflict),
+        "a lost rotation response must remain durable for the next request",
+    );
+}
+
+#[tokio::test]
+async fn switching_to_another_job_requires_rotation_immediately() {
+    let (test_db, jobs, leases) = setup().await;
+    let first = jobs
+        .create(operation_key(), new_job("selection:first-vpn-job"))
+        .await
+        .unwrap();
+    let second = jobs
+        .create(operation_key(), new_job("selection:second-vpn-job"))
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(lease.job().id(), first.id());
+    test_db
+        .connection()
+        .execute_raw(Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            "DELETE FROM job_leases WHERE job_id = $1",
+            [first.id().into_uuid().into()],
+        ))
+        .await
+        .unwrap();
+    test_db
+        .connection()
+        .execute_raw(Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            "UPDATE jobs SET state = 'failed', completed_at = now(), updated_at = now() \
+             WHERE id = $1",
+            [first.id().into_uuid().into()],
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        leases
+            .lease_next(
+                operation_key(),
+                RUNNER_CLIENT_ID,
+                time::Duration::seconds(60),
+            )
+            .await,
+        Err(PortError::Conflict),
+    );
+    let stored = jobs
+        .find_for_owner(second.id(), PRIMARY_USER_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.state(), JobState::Queued);
+    let lifecycle = query(test_db.connection(), "SELECT state FROM runner_lifecycle")
+        .await
+        .pop()
+        .unwrap();
+    assert_eq!(
+        lifecycle.try_get::<String>("", "state").unwrap(),
+        "rotating"
+    );
+}
+
 fn new_job(reference: &str) -> NewJob {
     NewJob::new(
         JobId::new(),
@@ -364,7 +530,7 @@ async fn expired_leases_requeue_recoverable_states_and_preserve_checkpoints() {
         .await
         .unwrap();
 
-    for state in ["leased", "running", "publishing"] {
+    for (index, state) in ["leased", "running", "publishing"].into_iter().enumerate() {
         test_db
             .connection()
             .execute_raw(Statement::from_sql_and_values(
@@ -390,9 +556,30 @@ async fn expired_leases_requeue_recoverable_states_and_preserve_checkpoints() {
                 RUNNER_CLIENT_ID,
                 time::Duration::seconds(60),
             )
-            .await
-            .unwrap()
-            .unwrap();
+            .await;
+        let recovered = if index == 2 {
+            assert_eq!(recovered, Err(PortError::Conflict));
+            test_db
+                .connection()
+                .execute_unprepared(
+                    "UPDATE runner_lifecycle SET state = 'ready', reason = NULL, \
+                     sticky_job_id = NULL, sticky_attempt_count = 0 \
+                     WHERE singleton = true",
+                )
+                .await
+                .unwrap();
+            leases
+                .lease_next(
+                    operation_key(),
+                    RUNNER_CLIENT_ID,
+                    time::Duration::seconds(60),
+                )
+                .await
+                .unwrap()
+                .unwrap()
+        } else {
+            recovered.unwrap().unwrap()
+        };
         assert_eq!(recovered.job().id(), created.id());
         assert_eq!(recovered.job().state(), JobState::Leased);
         lease = recovered;

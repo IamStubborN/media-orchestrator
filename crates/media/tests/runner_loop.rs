@@ -56,6 +56,27 @@ struct RecordingExecutor {
 
 struct FailingExecutor;
 
+struct RotationRequiredApi;
+
+#[async_trait::async_trait]
+impl RunnerApi for RotationRequiredApi {
+    async fn lease_next(&self) -> Result<Option<LeaseDto>, media::runner::RunnerError> {
+        Err(media::runner::RunnerError::RotationRequired)
+    }
+
+    async fn heartbeat(&self, _: &LeaseDto) -> Result<LeaseDto, media::runner::RunnerError> {
+        unreachable!("a rotation decision cannot own a lease")
+    }
+
+    async fn report(
+        &self,
+        _: &LeaseDto,
+        _: RunnerEventDto,
+    ) -> Result<JobDto, media::runner::RunnerError> {
+        unreachable!("a rotation decision cannot report job events")
+    }
+}
+
 struct TypedFailingExecutor(media::runner::RunnerError);
 
 struct ExpireOnceExecutor {
@@ -534,6 +555,22 @@ async fn run_loop_exits_cleanly_after_one_processed_job_when_configured() {
         .expect("runner should exit after the processed job")
         .expect("runner task should join")
         .expect("runner should exit successfully");
+}
+
+#[tokio::test]
+async fn run_loop_exits_cleanly_when_the_service_requires_vpn_rotation() {
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        run_loop(
+            Arc::new(RotationRequiredApi),
+            Arc::new(FailingExecutor),
+            Duration::from_millis(1),
+            true,
+        ),
+    )
+    .await
+    .expect("the runner must not retry a rotation decision")
+    .expect("VPN rotation is a clean process handoff");
 }
 
 /// Fails only stage progress events, keeping terminal transitions reliable.

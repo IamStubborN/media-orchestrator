@@ -367,6 +367,7 @@ pub struct FakeLeaseStore {
 #[derive(Default)]
 struct FakeLeaseState {
     lease: Option<JobLease>,
+    lease_failure: Option<PortError>,
     lease_operations: HashMap<OperationKey, Option<JobLease>>,
     heartbeat_operations: HashMap<OperationKey, Option<JobLease>>,
 }
@@ -375,6 +376,12 @@ impl FakeLeaseStore {
     pub fn with_lease(lease: JobLease) -> Self {
         let store = Self::default();
         store.state.lock().unwrap().lease = Some(lease);
+        store
+    }
+
+    pub fn with_lease_failure(error: PortError) -> Self {
+        let store = Self::default();
+        store.state.lock().unwrap().lease_failure = Some(error);
         store
     }
 
@@ -400,6 +407,9 @@ impl LeaseStore for FakeLeaseStore {
         _: time::Duration,
     ) -> Result<Option<JobLease>, PortError> {
         let mut state = self.state.lock().unwrap();
+        if let Some(error) = state.lease_failure {
+            return Err(error);
+        }
         if let Some(result) = state.lease_operations.get(&operation).cloned() {
             return Ok(result);
         }

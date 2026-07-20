@@ -156,6 +156,13 @@ ssh host.example.invalid \
 The watcher records the current public IP and completes the lifecycle transition
 through the narrow internal API.
 
+The service permits up to three attempts for the same job on one VPN session.
+It then returns `vpn_rotation_required` before issuing another lease. A different
+queued job requires rotation immediately. The watcher reads this durable decision,
+rotates Gluetun only when required, and otherwise restarts the one-attempt runner
+on the current session. The provider-specific stage limit remains 20 attempts for
+Rezka.
+
 ## Stuck Runner Recovery
 
 If a runner dies during a job, do not alter the job row. qBittorrent downloads

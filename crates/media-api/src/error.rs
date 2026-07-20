@@ -191,6 +191,15 @@ impl ApiError {
         )
     }
 
+    pub(crate) fn vpn_rotation_required(request_id: &RequestId) -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            ApiErrorCode::VpnRotationRequired,
+            "VPN rotation is required before another lease",
+            request_id,
+        )
+    }
+
     pub(crate) fn not_ready(request_id: &RequestId) -> Self {
         Self::new(
             StatusCode::SERVICE_UNAVAILABLE,

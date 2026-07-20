@@ -41,7 +41,9 @@ pub use job::{
     MAX_RESULT_REF_BYTES, NewJob, NotifyScope, Provider, QueueStatus, TransferKind,
     TransferProgress,
 };
-pub use lifecycle::{RunnerLifecycle, RunnerLifecycleState, RunnerLifecycleUpdate};
+pub use lifecycle::{
+    MAX_STICKY_VPN_ATTEMPTS, RunnerLifecycle, RunnerLifecycleState, RunnerLifecycleUpdate,
+};
 pub use metrics::{MetricsSnapshot, MetricsSource};
 pub use notification::{
     NotificationDelivery, NotificationDeliveryFailure, NotificationDispatchResult,

@@ -181,7 +181,7 @@ fn application_error(error: ApplicationError, request_id: &RequestId) -> Respons
             ApiError::forbidden(request_id, "operation is forbidden").into_response()
         }
         ApplicationError::NotFound => ApiError::lease_not_found(request_id).into_response(),
-        ApplicationError::Conflict => ApiError::conflict(request_id).into_response(),
+        ApplicationError::Conflict => ApiError::vpn_rotation_required(request_id).into_response(),
         ApplicationError::InvalidInput(_) => {
             ApiError::invalid_request(request_id, "lease request is invalid").into_response()
         }

@@ -13,7 +13,7 @@ use media_contract::{
 };
 use media_core::{
     PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientId, ClientRole, Job, JobId, JobLease, JobState,
-    LeaseId, NotifyScope, Provider, RUNNER_CLIENT_ID,
+    LeaseId, NotifyScope, PortError, Provider, RUNNER_CLIENT_ID,
 };
 use tower::ServiceExt;
 
@@ -150,6 +150,29 @@ async fn runner_can_lease_and_heartbeat_with_exact_request_ids() {
     let bytes = to_bytes(heartbeat.into_body(), usize::MAX).await.unwrap();
     let dto: LeaseDto = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(dto.lease_id.to_string(), expected.lease_id().to_string());
+}
+
+#[tokio::test]
+async fn sticky_vpn_conflict_returns_an_explicit_rotation_signal() {
+    let response = app(
+        FakeLeaseStore::with_lease_failure(PortError::Conflict),
+        ClientId::new(),
+    )
+    .oneshot(post(
+        "/v1/runner/leases",
+        RUNNER_TOKEN,
+        "rotate-vpn",
+        "rotate-vpn-request",
+        Body::from("{}"),
+    ))
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        error(response).await.code,
+        ApiErrorCode::VpnRotationRequired
+    );
 }
 
 #[tokio::test]

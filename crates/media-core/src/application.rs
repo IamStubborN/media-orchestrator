@@ -24,9 +24,9 @@ impl RunnerLifecycleApplication {
     }
 
     pub async fn get(&self, actor: &Actor) -> Result<RunnerLifecycle, ApplicationError> {
-        actor
-            .require_user()
-            .map_err(|_| ApplicationError::Forbidden)?;
+        if actor.require_user().is_err() && actor.require_lifecycle().is_err() {
+            return Err(ApplicationError::Forbidden);
+        }
         self.store.get().await.map_err(Into::into)
     }
 
@@ -288,12 +288,15 @@ mod tests {
         task::{Context, Poll, Waker},
     };
 
-    use super::{ApplicationError, JobApplication, LeaseApplication, LeaseTtlError, NewJobCommand};
+    use super::{
+        ApplicationError, JobApplication, LeaseApplication, LeaseTtlError, NewJobCommand,
+        RunnerLifecycleApplication,
+    };
     use crate::{
         PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientId, ClientRole, Job, JobId, JobLease,
-        JobState, JobStore, JobValidationError, LeaseId, LeaseStore, NewJob, NotifyScope,
-        OperationKey, PortError, Provider, QueueStatus, RUNNER_CLIENT_ID, RunnerLifecycleState,
-        UserId,
+        JobState, JobStore, JobValidationError, LIFECYCLE_CLIENT_ID, LeaseId, LeaseStore, NewJob,
+        NotifyScope, OperationKey, PortError, Provider, QueueStatus, RUNNER_CLIENT_ID,
+        RunnerLifecycle, RunnerLifecycleState, RunnerLifecycleStore, RunnerLifecycleUpdate, UserId,
     };
 
     fn block_on<F: Future>(future: F) -> F::Output {
@@ -314,6 +317,39 @@ mod tests {
 
     fn runner_actor() -> Actor {
         Actor::new(RUNNER_CLIENT_ID, None, ClientRole::Runner).unwrap()
+    }
+
+    fn lifecycle_actor() -> Actor {
+        Actor::new(LIFECYCLE_CLIENT_ID, None, ClientRole::Lifecycle).unwrap()
+    }
+
+    struct FakeLifecycleStore;
+
+    #[async_trait::async_trait]
+    impl RunnerLifecycleStore for FakeLifecycleStore {
+        async fn get(&self) -> Result<RunnerLifecycle, PortError> {
+            Ok(RunnerLifecycle {
+                state: RunnerLifecycleState::Ready,
+                reason: None,
+                previous_ip: Some("203.0.113.10".to_owned()),
+                current_ip: Some("203.0.113.10".to_owned()),
+                updated_at: time::OffsetDateTime::UNIX_EPOCH,
+            })
+        }
+
+        async fn update(&self, _: RunnerLifecycleUpdate) -> Result<RunnerLifecycle, PortError> {
+            self.get().await
+        }
+    }
+
+    #[test]
+    fn lifecycle_controller_can_read_the_state_it_must_enforce() {
+        let application = RunnerLifecycleApplication::new(Arc::new(FakeLifecycleStore));
+
+        let lifecycle = block_on(application.get(&lifecycle_actor())).unwrap();
+
+        assert_eq!(lifecycle.state, RunnerLifecycleState::Ready);
+        assert_eq!(lifecycle.current_ip.as_deref(), Some("203.0.113.10"));
     }
 
     const fn operation_key(marker: u8) -> OperationKey {

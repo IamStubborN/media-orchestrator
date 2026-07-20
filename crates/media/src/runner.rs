@@ -7,8 +7,8 @@ use std::{
 };
 
 use media_contract::{
-    CheckpointValueDto, JobStateDto, LeaseDto, NeedsActionReasonDto, RunnerEventDto,
-    RunnerEventRequest,
+    ApiError, ApiErrorCode, CheckpointValueDto, JobStateDto, LeaseDto, NeedsActionReasonDto,
+    RunnerEventDto, RunnerEventRequest,
 };
 use secrecy::{ExposeSecret as _, SecretString};
 
@@ -20,6 +20,8 @@ pub enum RunnerError {
     Configuration,
     #[error("runner service request failed")]
     Service,
+    #[error("VPN rotation is required before another lease")]
+    RotationRequired,
     #[error("runner execution failed")]
     Execution,
     #[error("source stream expired")]
@@ -35,6 +37,7 @@ impl RunnerError {
         match self {
             Self::Configuration => (false, "runner_configuration_invalid"),
             Self::Service => (true, "runner_service_unavailable"),
+            Self::RotationRequired => (false, "vpn_rotation_required"),
             Self::Execution => (true, "execution_failed"),
             Self::SourceExpired => (true, "stream_expired"),
             Self::SourceTransferTransient => (true, "source_transfer_transient"),
@@ -1709,6 +1712,9 @@ pub async fn run_loop(
                 // A misconfigured runner fails identically on every iteration, so
                 // stop rather than spin.
                 Err(RunnerError::Configuration) => return Err(RunnerError::Configuration),
+                // The service has durably gated the next lease until the watcher
+                // replaces the VPN session. Exit cleanly so the watcher can act.
+                Err(RunnerError::RotationRequired) => return Ok(()),
                 // Transient service or execution errors (leasing, reporting the
                 // Started event, joining the heartbeat task, terminal transition
                 // reporting) must not tear down the long-lived runner process. Log,
@@ -1794,14 +1800,34 @@ impl HttpRunnerApi {
 #[async_trait::async_trait]
 impl RunnerApi for HttpRunnerApi {
     async fn lease_next(&self) -> Result<Option<LeaseDto>, RunnerError> {
-        self.json(
-            self.request(reqwest::Method::POST, "v1/runner/leases")?
-                .json(&serde_json::json!({})),
-        )
-        .await?
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|_| RunnerError::Service)
+        let response = self
+            .request(reqwest::Method::POST, "v1/runner/leases")?
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .map_err(|_| RunnerError::Service)?;
+        if response.status() == reqwest::StatusCode::CONFLICT {
+            let rotation_required = response
+                .json::<ApiError>()
+                .await
+                .is_ok_and(|error| error.code == ApiErrorCode::VpnRotationRequired);
+            return Err(if rotation_required {
+                RunnerError::RotationRequired
+            } else {
+                RunnerError::Service
+            });
+        }
+        if response.status() == reqwest::StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(RunnerError::Service);
+        }
+        response
+            .json::<LeaseDto>()
+            .await
+            .map(Some)
+            .map_err(|_| RunnerError::Service)
     }
 
     async fn heartbeat(&self, lease: &LeaseDto) -> Result<LeaseDto, RunnerError> {
