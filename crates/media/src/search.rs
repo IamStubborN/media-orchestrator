@@ -364,8 +364,14 @@ impl TrackedEpisodeDownloadPort for TrackedEpisodeDownloader {
                 thread_id: None,
             },
         };
-        let mut execution = execution(result, &request, Some(MediaKindDto::Series), None)
-            .map_err(|_| PortError::Infrastructure)?;
+        let mut execution = execution(
+            result,
+            &request,
+            Some(MediaKindDto::Series),
+            None,
+            Some(tracking.title()),
+        )
+        .map_err(|_| PortError::Infrastructure)?;
         if let Some(identity) = self.identity.as_deref() {
             apply_persisted_episode_mappings(identity, &mut execution)
                 .await
@@ -1315,6 +1321,7 @@ impl SearchService for DurableSearchService {
             &request,
             session.request.media_kind,
             session.request.season,
+            Some(&session.request.query),
         )?;
         if let Some(identity) = self.identity.as_deref() {
             apply_persisted_episode_mappings(identity, &mut execution).await?;
@@ -1493,6 +1500,7 @@ fn execution(
     request: &SelectResultRequest,
     searched_kind: Option<MediaKindDto>,
     searched_season: Option<u16>,
+    series_title_hint: Option<&str>,
 ) -> Result<ExecutionSelectionDto, SearchError> {
     match (&result.public, &result.private) {
         (
@@ -1625,11 +1633,28 @@ fn execution(
                 episode_mappings: Vec::new(),
                 ambiguous_episodes,
                 release_year: *year,
+                library_title: (*media_kind == MediaKindDto::Series)
+                    .then(|| {
+                        series_title_hint
+                            .and_then(|hint| canonical_series_library_title(hint, title))
+                    })
+                    .flatten()
+                    .map(str::to_owned),
                 title: title.clone(),
             })
         }
         _ => Err(SearchError::Infrastructure),
     }
+}
+
+fn canonical_series_library_title<'a>(query: &'a str, provider_title: &str) -> Option<&'a str> {
+    let query = query.trim();
+    if query.is_empty() {
+        return None;
+    }
+
+    let suffix = provider_title.strip_prefix(query)?;
+    (suffix.is_empty() || suffix.starts_with(':') || suffix.starts_with(" [")).then_some(query)
 }
 
 fn ambiguous_episode_label(label: &str) -> bool {
@@ -1716,7 +1741,26 @@ fn job_dto(job: &Job) -> JobDto {
 
 #[cfg(test)]
 mod tests {
-    use super::{ambiguous_episode_label, skippable_title_error};
+    use super::{ambiguous_episode_label, canonical_series_library_title, skippable_title_error};
+
+    #[test]
+    fn season_release_titles_share_an_exact_base_query_as_the_plex_title() {
+        assert_eq!(
+            canonical_series_library_title("Магия и мускулы", "Магия и мускулы [ТВ-1]",),
+            Some("Магия и мускулы"),
+        );
+        assert_eq!(
+            canonical_series_library_title(
+                "Магия и мускулы",
+                "Магия и мускулы: Экзамен на звание Вестника Бога [ТВ-2]",
+            ),
+            Some("Магия и мускулы"),
+        );
+        assert_eq!(
+            canonical_series_library_title("Магия", "Магия и мускулы [ТВ-1]"),
+            None,
+        );
+    }
 
     #[test]
     fn only_explicit_special_markers_trigger_manual_episode_mapping() {

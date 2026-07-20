@@ -240,6 +240,8 @@ pub enum ExecutionSelectionDto {
         ambiguous_episodes: Vec<AmbiguousEpisodeDto>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         release_year: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library_title: Option<String>,
         title: String,
     },
     Prowlarr {

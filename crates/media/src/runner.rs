@@ -463,6 +463,7 @@ impl MediaJobExecutor {
                 episodes,
                 episode_mappings,
                 ambiguous_episodes,
+                library_title,
                 title,
                 translation: _,
                 release_year: _,
@@ -484,6 +485,7 @@ impl MediaJobExecutor {
                     *episode,
                     episodes,
                     episode_mappings,
+                    library_title.as_deref(),
                     title,
                 )
                 .await
@@ -566,6 +568,7 @@ impl MediaJobExecutor {
         episode: Option<u32>,
         episodes: &[media_contract::EpisodeSnapshotDto],
         episode_mappings: &[media_contract::EpisodeCoordinateMappingDto],
+        library_title: Option<&str>,
         title: &str,
     ) -> Result<ExecutionOutcome, RunnerError> {
         let mut prepared = self.rezka.lock().await;
@@ -702,7 +705,7 @@ impl MediaJobExecutor {
                 .stage_completed(task_ordinal, "resolve_manifest", 0)
                 .await?;
 
-            let canonical_title = season.zip(episode).and_then(|(season, episode)| {
+            let mapped_title = season.zip(episode).and_then(|(season, episode)| {
                 episode_mappings
                     .iter()
                     .find(|mapping| {
@@ -713,7 +716,7 @@ impl MediaJobExecutor {
             let work = self.rezka_work(RezkaWorkRequest {
                 lease,
                 manifest: &manifest,
-                title: canonical_title.unwrap_or(title),
+                title: mapped_title.or(library_title).unwrap_or(title),
                 release_year: details.release_year(),
                 season,
                 episode,

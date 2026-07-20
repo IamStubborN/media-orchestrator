@@ -239,8 +239,9 @@ async fn tracked_episode_download_creates_one_exact_rezka_episode_execution_for_
             translation_id: 19,
             season: Some(2),
             episode: Some(8),
+            library_title: Some(library_title),
             ..
-        }
+        } if library_title == "Blades of the Guardians S2"
     ));
 }
 
@@ -524,6 +525,7 @@ async fn ambiguous_episode_is_resolved_persisted_in_execution_and_requeued() {
                     label: "OVA".to_owned(),
                 }],
                 release_year: Some(2016),
+                library_title: None,
                 title: "Separate OVA title".to_owned(),
             },
         )

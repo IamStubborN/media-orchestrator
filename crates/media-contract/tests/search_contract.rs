@@ -195,3 +195,28 @@ fn legacy_prowlarr_execution_payloads_remain_deserializable() {
         }
     ));
 }
+
+#[test]
+fn legacy_rezka_execution_payloads_default_to_the_provider_title() {
+    let execution: ExecutionSelectionDto = serde_json::from_value(serde_json::json!({
+        "source": "rezka",
+        "locator": "/series/example.html",
+        "title_id": 42,
+        "media_kind": "series",
+        "translation_id": 19,
+        "director": false,
+        "camrip": false,
+        "has_ads": false,
+        "title": "Example [TV-1]"
+    }))
+    .unwrap();
+
+    assert!(matches!(
+        execution,
+        ExecutionSelectionDto::Rezka {
+            library_title: None,
+            title,
+            ..
+        } if title == "Example [TV-1]"
+    ));
+}
