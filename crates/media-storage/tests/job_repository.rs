@@ -140,6 +140,51 @@ async fn repeated_operation_key_returns_the_original_job_without_a_second_insert
 }
 
 #[tokio::test]
+async fn cancelling_a_queued_job_terminalizes_its_notification_card() {
+    let test_db = TestDatabase::start_migrated().await;
+    let store = SeaOrmJobStore::new(test_db.connection().clone());
+    let created = store
+        .create(
+            operation_key(),
+            new_job(PRIMARY_USER_ID, Provider::Rezka, "queued-cancel"),
+        )
+        .await
+        .unwrap();
+
+    let cancelled = store
+        .cancel(operation_key(), created.id(), PRIMARY_USER_ID)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(cancelled.state(), JobState::Cancelled);
+    let rows = query(
+        test_db.connection(),
+        "SELECT payload FROM notification_outbox ORDER BY created_at",
+    )
+    .await;
+    assert_eq!(rows.len(), 2, "one terminal card and one final push");
+    let payloads = rows
+        .iter()
+        .map(|row| {
+            row.try_get("", "payload")
+                .expect("notification payload must be JSON")
+        })
+        .collect::<Vec<serde_json::Value>>();
+    let card = payloads
+        .iter()
+        .find(|payload| payload["delivery_kind"] == "card")
+        .unwrap();
+    let push = payloads
+        .iter()
+        .find(|payload| payload["delivery_kind"] == "final-push")
+        .unwrap();
+    assert_eq!(card["state"], "cancelled");
+    assert_eq!(card["terminal"], true);
+    assert_eq!(push["revision"], card["revision"]);
+}
+
+#[tokio::test]
 async fn operation_completion_query_reports_only_completed_receipts() {
     let test_db = TestDatabase::start_migrated().await;
     let jobs = SeaOrmJobStore::new(test_db.connection().clone());

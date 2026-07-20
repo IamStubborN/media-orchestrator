@@ -1,6 +1,6 @@
 use media_core::{
-    Job, JobId, JobStore, NewJob, OperationKey, PortError, QueueStatus, RunnerLifecycleState,
-    TransferKind, TransferProgress, UserId,
+    Job, JobEvent, JobEventId, JobId, JobState, JobStore, NewJob, OperationKey, PortError,
+    QueueStatus, RunnerLifecycleState, TransferKind, TransferProgress, UserId,
 };
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, QueryFilter,
@@ -11,6 +11,7 @@ use crate::{
     entity::job,
     mapping::job_active_model,
     repository::{
+        lease::insert_notification_outbox,
         map_database_error, map_mapping_error,
         operation::{self, OperationClaim, OperationKind, OperationResult},
     },
@@ -209,6 +210,7 @@ impl JobStore for SeaOrmJobStore {
                 }
                 _ => return Err(sea_orm::DbErr::Type("invalid persisted job state".to_owned())),
             };
+            let transitioned_to_cancelled = target != current && target == "cancelled";
             if target != current {
                 transaction
                     .execute_raw(Statement::from_sql_and_values(
@@ -238,6 +240,11 @@ impl JobStore for SeaOrmJobStore {
                 .ok_or_else(|| sea_orm::DbErr::RecordNotFound("job disappeared".to_owned()))?;
             let job = Job::try_from(model)
                 .map_err(|_| sea_orm::DbErr::Type("invalid persisted job".to_owned()))?;
+            if transitioned_to_cancelled {
+                let event = JobEvent::transition(JobEventId::new(), JobState::Cancelled, None)
+                    .map_err(|_| sea_orm::DbErr::Type("invalid cancellation event".to_owned()))?;
+                insert_notification_outbox(&transaction, &job, &event).await?;
+            }
             operation::complete(
                 &transaction,
                 operation,

@@ -188,7 +188,7 @@ impl LeaseStore for SeaOrmLeaseStore {
     }
 }
 
-async fn insert_notification_outbox(
+pub(super) async fn insert_notification_outbox(
     transaction: &sea_orm::DatabaseTransaction,
     job: &Job,
     event: &JobEvent,
