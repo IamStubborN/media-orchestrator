@@ -216,6 +216,7 @@ impl JobStore for SeaOrmJobStore {
                     .execute_raw(Statement::from_sql_and_values(
                         DatabaseBackend::Postgres,
                         "UPDATE jobs SET state = $2, updated_at = now(), \
+                         needs_action_reason = CASE WHEN $2 = 'needs_action' THEN needs_action_reason ELSE NULL END, \
                          completed_at = CASE WHEN $2 = 'cancelled' THEN now() ELSE completed_at END \
                          WHERE id = $1",
                         [id.into_uuid().into(), target.into()],

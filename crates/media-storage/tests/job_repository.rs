@@ -185,6 +185,57 @@ async fn cancelling_a_queued_job_terminalizes_its_notification_card() {
 }
 
 #[tokio::test]
+async fn cancelling_a_needs_action_job_clears_reason_and_terminalizes_its_card() {
+    let test_db = TestDatabase::start_migrated().await;
+    let store = SeaOrmJobStore::new(test_db.connection().clone());
+    let created = store
+        .create(
+            operation_key(),
+            new_job(PRIMARY_USER_ID, Provider::Rezka, "needs-action-cancel"),
+        )
+        .await
+        .unwrap();
+    test_db
+        .connection()
+        .execute_unprepared(&format!(
+            "UPDATE jobs SET state = 'needs_action', needs_action_reason = 'identity_ambiguous' \
+             WHERE id = '{}'",
+            created.id().into_uuid()
+        ))
+        .await
+        .unwrap();
+
+    let cancelled = store
+        .cancel(operation_key(), created.id(), PRIMARY_USER_ID)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(cancelled.state(), JobState::Cancelled);
+    let rows = query(
+        test_db.connection(),
+        "SELECT state, needs_action_reason FROM jobs",
+    )
+    .await;
+    assert_eq!(rows[0].try_get::<String>("", "state").unwrap(), "cancelled");
+    assert_eq!(
+        rows[0]
+            .try_get::<Option<String>>("", "needs_action_reason")
+            .unwrap(),
+        None
+    );
+    let notifications = query(
+        test_db.connection(),
+        "SELECT payload FROM notification_outbox ORDER BY created_at",
+    )
+    .await;
+    assert_eq!(notifications.len(), 2);
+    assert!(notifications.iter().all(|row| {
+        row.try_get::<serde_json::Value>("", "payload").unwrap()["state"] == "cancelled"
+    }));
+}
+
+#[tokio::test]
 async fn operation_completion_query_reports_only_completed_receipts() {
     let test_db = TestDatabase::start_migrated().await;
     let jobs = SeaOrmJobStore::new(test_db.connection().clone());
