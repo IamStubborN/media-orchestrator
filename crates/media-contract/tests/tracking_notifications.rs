@@ -1,9 +1,9 @@
 use media_contract::{
     CreateTrackingRequest, EpisodeSnapshotDto, HermesDeliverOnlyWebhook,
     HermesMediaNotificationWebhook, MediaNotificationActionDto, MediaNotificationDeliveryKindDto,
-    MediaNotificationDto, MediaNotificationKindDto, MediaNotificationNextStepDto,
-    MediaNotificationProgressDto, MediaNotificationStageDto, MediaNotificationStateDto,
-    NotificationEventTypeDto, PublicId, TrackingScopeDto,
+    MediaNotificationDto, MediaNotificationEpisodeDto, MediaNotificationKindDto,
+    MediaNotificationNextStepDto, MediaNotificationProgressDto, MediaNotificationStageDto,
+    MediaNotificationStateDto, NotificationEventTypeDto, PublicId, TrackingScopeDto,
 };
 
 #[test]
@@ -124,13 +124,17 @@ fn hermes_media_notification_webhook_has_schema_version_two_shape() {
             downloaded_bytes: Some(195_035_136),
             download_speed_bps: Some(5_452_595),
             percentage: None,
+            missing_episodes: vec![MediaNotificationEpisodeDto {
+                season: 1,
+                episode: 9,
+            }],
         }),
         stage: Some(MediaNotificationStageDto::Download),
         next_step: Some(MediaNotificationNextStepDto::Process),
         issue: None,
         actions: vec![
-            MediaNotificationActionDto::Cancel,
-            MediaNotificationActionDto::Details,
+            MediaNotificationActionDto::RetryMissing,
+            MediaNotificationActionDto::ResumeStorage,
         ],
     };
 
@@ -158,11 +162,24 @@ fn hermes_media_notification_webhook_has_schema_version_two_shape() {
                 "total_episodes": 12,
                 "current_episode": 8,
                 "downloaded_bytes": 195035136,
-                "download_speed_bps": 5452595
+                "download_speed_bps": 5452595,
+                "missing_episodes": [{"season": 1, "episode": 9}]
             },
             "stage": "download",
             "next_step": "process",
-            "actions": ["cancel", "details"]
+            "actions": ["retry-missing", "resume-storage"]
         })
+    );
+}
+
+#[test]
+fn media_notification_actions_use_exact_kebab_case_wire_tags() {
+    assert_eq!(
+        serde_json::to_value(vec![
+            MediaNotificationActionDto::RetryMissing,
+            MediaNotificationActionDto::ResumeStorage,
+        ])
+        .unwrap(),
+        serde_json::json!(["retry-missing", "resume-storage"])
     );
 }

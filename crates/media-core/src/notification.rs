@@ -57,6 +57,8 @@ pub enum MediaNotificationAction {
     Cancel,
     Details,
     Retry,
+    RetryMissing,
+    ResumeStorage,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -74,9 +76,16 @@ pub struct MediaNotificationProgress {
     completed_episodes: Option<u32>,
     total_episodes: Option<u32>,
     current_episode: Option<u32>,
+    missing_episodes: Vec<MediaNotificationEpisode>,
     downloaded_bytes: Option<u64>,
     download_speed_bps: Option<u64>,
     percentage: Option<u8>,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct MediaNotificationEpisode {
+    season: u32,
+    episode: u32,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -256,6 +265,7 @@ impl MediaNotificationProgress {
         completed_episodes: Option<u32>,
         total_episodes: Option<u32>,
         current_episode: Option<u32>,
+        missing_episodes: Vec<MediaNotificationEpisode>,
         downloaded_bytes: Option<u64>,
         download_speed_bps: Option<u64>,
         percentage: Option<u8>,
@@ -277,6 +287,7 @@ impl MediaNotificationProgress {
             completed_episodes,
             total_episodes,
             current_episode,
+            missing_episodes,
             downloaded_bytes,
             download_speed_bps,
             percentage,
@@ -296,6 +307,10 @@ impl MediaNotificationProgress {
         self.current_episode
     }
     #[must_use]
+    pub fn missing_episodes(&self) -> &[MediaNotificationEpisode] {
+        &self.missing_episodes
+    }
+    #[must_use]
     pub const fn downloaded_bytes(&self) -> Option<u64> {
         self.downloaded_bytes
     }
@@ -306,6 +321,25 @@ impl MediaNotificationProgress {
     #[must_use]
     pub const fn percentage(&self) -> Option<u8> {
         self.percentage
+    }
+}
+
+impl MediaNotificationEpisode {
+    pub const fn new(season: u32, episode: u32) -> Result<Self, NotificationValidationError> {
+        if season == 0 || episode == 0 {
+            return Err(NotificationValidationError::InvalidEpisodeProgress);
+        }
+        Ok(Self { season, episode })
+    }
+
+    #[must_use]
+    pub const fn season(self) -> u32 {
+        self.season
+    }
+
+    #[must_use]
+    pub const fn episode(self) -> u32 {
+        self.episode
     }
 }
 
@@ -344,7 +378,11 @@ impl MediaNotification {
         if !valid_card_key(&card_key) {
             return Err(NotificationValidationError::InvalidCardKey);
         }
-        if revision == 0 || lifecycle_cycle == 0 {
+        if revision == 0
+            || lifecycle_cycle == 0
+            || revision > i64::MAX as u64
+            || lifecycle_cycle > i64::MAX as u64
+        {
             return Err(NotificationValidationError::InvalidRevisionOrCycle);
         }
         Ok(Self {
@@ -428,6 +466,66 @@ fn valid_card_key(value: &str) -> bool {
         && value
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, ':' | '-'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MediaNotification, MediaNotificationDeliveryKind, MediaNotificationEpisode,
+        MediaNotificationKind, MediaNotificationMedia, MediaNotificationState,
+        NotificationValidationError,
+    };
+    use crate::JobId;
+
+    fn media() -> MediaNotificationMedia {
+        MediaNotificationMedia::new(
+            JobId::new(),
+            "Example Show".to_owned(),
+            MediaNotificationKind::Series,
+            "rezka".to_owned(),
+            Some(1),
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn missing_episode_coordinates_must_be_positive() {
+        for coordinates in [(0, 1), (1, 0)] {
+            assert_eq!(
+                MediaNotificationEpisode::new(coordinates.0, coordinates.1),
+                Err(NotificationValidationError::InvalidEpisodeProgress),
+            );
+        }
+    }
+
+    #[test]
+    fn revision_and_lifecycle_cycle_must_fit_postgres_bigint() {
+        for (revision, lifecycle_cycle) in [
+            (0, 1),
+            (1, 0),
+            (i64::MAX as u64 + 1, 1),
+            (1, i64::MAX as u64 + 1),
+        ] {
+            assert_eq!(
+                MediaNotification::new(
+                    MediaNotificationDeliveryKind::Card,
+                    "media-job:example".to_owned(),
+                    revision,
+                    lifecycle_cycle,
+                    false,
+                    MediaNotificationState::Downloading,
+                    media(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    vec![],
+                ),
+                Err(NotificationValidationError::InvalidRevisionOrCycle),
+            );
+        }
+    }
 }
 
 impl NotificationDelivery {

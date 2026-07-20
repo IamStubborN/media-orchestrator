@@ -77,6 +77,8 @@ pub enum MediaNotificationActionDto {
     Cancel,
     Details,
     Retry,
+    RetryMissing,
+    ResumeStorage,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -101,12 +103,21 @@ pub struct MediaNotificationProgressDto {
     pub total_episodes: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_episode: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_episodes: Vec<MediaNotificationEpisodeDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub downloaded_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub download_speed_bps: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub percentage: Option<u8>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaNotificationEpisodeDto {
+    pub season: u32,
+    pub episode: u32,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

@@ -456,15 +456,61 @@ async fn structured_notifications_migration_preserves_legacy_rows_and_enforces_v
                      \"total_episodes\": 12,
                      \"current_episode\": 8,
                      \"downloaded_bytes\": 195035136,
-                     \"download_speed_bps\": 5452595
+                     \"download_speed_bps\": 5452595,
+                     \"missing_episodes\": [{\"season\": 1, \"episode\": 9}]
                    },
                    \"stage\": \"download\",
                    \"next_step\": \"process\",
-                   \"actions\": [\"cancel\", \"details\"]
+                   \"actions\": [\"retry-missing\", \"resume-storage\"]
                  }'::jsonb)",
     )
     .await
     .unwrap();
+
+    assert_rejected(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(payload, '{actions}', '[\"unknown\"]'::jsonb)
+         WHERE id = '00000000-0000-0000-0000-000000000997'",
+        "notification_payload_check",
+    )
+    .await;
+    assert_rejected(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(payload, '{progress}', '{\"percentage\": 101}'::jsonb)
+         WHERE id = '00000000-0000-0000-0000-000000000997'",
+        "notification_payload_check",
+    )
+    .await;
+    assert_rejected(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(payload, '{revision}', '9223372036854775808'::jsonb)
+         WHERE id = '00000000-0000-0000-0000-000000000997'",
+        "notification_payload_check",
+    )
+    .await;
+    assert_rejected(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(payload, '{lifecycle_cycle}', '9223372036854775808'::jsonb)
+         WHERE id = '00000000-0000-0000-0000-000000000997'",
+        "notification_payload_check",
+    )
+    .await;
+    assert_rejected(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(
+             payload,
+             '{progress}',
+             '{\"missing_episodes\": [{\"season\": 0, \"episode\": 9}]}'::jsonb
+         )
+         WHERE id = '00000000-0000-0000-0000-000000000997'",
+        "notification_payload_check",
+    )
+    .await;
 
     assert_rejected(
         db,
@@ -483,6 +529,46 @@ async fn structured_notifications_migration_preserves_legacy_rows_and_enforces_v
         "notification_payload_check",
     )
     .await;
+
+    Migrator::down(db, Some(1)).await.unwrap();
+
+    let retained_rows = query(
+        db,
+        "SELECT id::text AS id FROM notification_outbox ORDER BY id",
+    )
+    .await;
+    assert_eq!(
+        retained_rows
+            .iter()
+            .map(|row| row.try_get::<String>("", "id").unwrap())
+            .collect::<Vec<_>>(),
+        vec!["00000000-0000-0000-0000-000000000998"],
+        "down migration must delete only schema-v2 rows",
+    );
+    assert!(
+        query(
+            db,
+            "SELECT column_name FROM information_schema.columns
+             WHERE table_schema = 'public' AND table_name = 'jobs'
+               AND column_name = 'notification_cycle'",
+        )
+        .await
+        .is_empty(),
+        "down migration must remove notification_cycle",
+    );
+
+    Migrator::up(db, Some(1)).await.unwrap();
+    assert_eq!(
+        query(
+            db,
+            "SELECT notification_cycle FROM jobs WHERE id = '00000000-0000-0000-0000-000000000999'",
+        )
+        .await[0]
+            .try_get::<i64>("", "notification_cycle")
+            .unwrap(),
+        1,
+        "up migration must restore notification_cycle with its default",
+    );
 }
 
 #[tokio::test]
