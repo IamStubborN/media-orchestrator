@@ -9,6 +9,7 @@ environment_file=$remote_root/.env
 rollback_file=$remote_root/media/.media-orchestrator-images.previous
 hermes_root=${HERMES_HOME_ROOT:-$root/../hermes-home}
 hermes_remote_root=${HERMES_HOME_REMOTE_ROOT:-/home/operator/hermes-home}
+homelab_root=${HOMELAB_ROOT:-$root/../homelab}
 
 usage() {
     echo "usage: $0 status|verify|deploy|deploy-hermes|rollback" >&2
@@ -80,8 +81,6 @@ prepare_hermes_cli() {
     service_image=$1
     docker_host=$2
     media_version=0.1.0
-    hermes_revision=$(git -C "$hermes_root" rev-parse --short HEAD)
-    hermes_image=hermes-home:local-$hermes_revision
     artifact=$hermes_root/artifacts/media-$media_version-linux-amd64
     container=$(DOCKER_HOST=$docker_host docker create "$service_image")
     trap 'DOCKER_HOST=$docker_host docker rm -f "$container" >/dev/null 2>&1 || true' EXIT HUP INT TERM
@@ -89,25 +88,28 @@ prepare_hermes_cli() {
     DOCKER_HOST=$docker_host docker rm "$container" >/dev/null
     trap - EXIT HUP INT TERM
     chmod 0755 "$artifact"
-    checksum=$(shasum -a 256 "$artifact" | awk '{print $1}')
-
-    scp "$hermes_root/Dockerfile" "$host:$hermes_remote_root/Dockerfile.next" >/dev/null
-    scp "$hermes_root/scripts/hermes-home-entrypoint" "$host:$hermes_remote_root/scripts/hermes-home-entrypoint.next" >/dev/null
-    scp "$hermes_root/scripts/hermes-media" "$host:$hermes_remote_root/scripts/hermes-media.next" >/dev/null
-    scp "$hermes_root/scripts/hermes_media_notifications.py" "$host:$hermes_remote_root/scripts/hermes_media_notifications.py.next" >/dev/null
-    scp "$hermes_root/scripts/patch_hermes_telegram.py" "$host:$hermes_remote_root/scripts/patch_hermes_telegram.py.next" >/dev/null
-    scp "$hermes_root/shared/skills/media/SKILL.md" "$host:$hermes_remote_root/shared/skills/media/SKILL.md.next" >/dev/null
-    scp "$hermes_root/profiles/primary/SOUL.md" "$host:$hermes_remote_root/profiles/primary/SOUL.md.next" >/dev/null
-    scp "$hermes_root/profiles/secondary/SOUL.md" "$host:$hermes_remote_root/profiles/secondary/SOUL.md.next" >/dev/null
+    rsync -az --delete \
+        --exclude .git \
+        --exclude .worktrees/ \
+        --exclude .env \
+        --exclude artifacts/ \
+        --exclude secrets/ \
+        "$hermes_root/" "$host:$hermes_remote_root/"
     scp "$artifact" "$host:$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next" >/dev/null
-    remote "set -eu; install -m 0644 '$hermes_remote_root/Dockerfile.next' '$hermes_remote_root/Dockerfile'; rm '$hermes_remote_root/Dockerfile.next'; install -m 0755 '$hermes_remote_root/scripts/hermes-home-entrypoint.next' '$hermes_remote_root/scripts/hermes-home-entrypoint'; rm '$hermes_remote_root/scripts/hermes-home-entrypoint.next'; install -m 0755 '$hermes_remote_root/scripts/hermes-media.next' '$hermes_remote_root/scripts/hermes-media'; rm '$hermes_remote_root/scripts/hermes-media.next'; install -m 0644 '$hermes_remote_root/scripts/hermes_media_notifications.py.next' '$hermes_remote_root/scripts/hermes_media_notifications.py'; rm '$hermes_remote_root/scripts/hermes_media_notifications.py.next'; install -m 0755 '$hermes_remote_root/scripts/patch_hermes_telegram.py.next' '$hermes_remote_root/scripts/patch_hermes_telegram.py'; rm '$hermes_remote_root/scripts/patch_hermes_telegram.py.next'; install -m 0644 '$hermes_remote_root/shared/skills/media/SKILL.md.next' '$hermes_remote_root/shared/skills/media/SKILL.md'; rm '$hermes_remote_root/shared/skills/media/SKILL.md.next'; install -m 0644 '$hermes_remote_root/profiles/primary/SOUL.md.next' '$hermes_remote_root/profiles/primary/SOUL.md'; rm '$hermes_remote_root/profiles/primary/SOUL.md.next'; install -m 0644 '$hermes_remote_root/profiles/secondary/SOUL.md.next' '$hermes_remote_root/profiles/secondary/SOUL.md'; rm '$hermes_remote_root/profiles/secondary/SOUL.md.next'; install -m 0755 '$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next' '$hermes_remote_root/artifacts/media-$media_version-linux-amd64'; rm '$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next'; sed -i 's#^MEDIA_CLI_SHA256=.*#MEDIA_CLI_SHA256=$checksum#; s#^HERMES_HOME_IMAGE=.*#HERMES_HOME_IMAGE=$hermes_image#' '$hermes_remote_root/.env'; cd '$hermes_remote_root'; docker compose --env-file .env build hermes-primary"
+    remote "set -eu; install -m 0755 '$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next' '$hermes_remote_root/artifacts/media-$media_version-linux-amd64'; rm '$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next'; sed -i '/^HERMES_HOME_IMAGE=/d; /^MEDIA_CLI_SHA256=/d' '$hermes_remote_root/.env'; cd '$hermes_remote_root'; attempts=0; until docker compose --env-file .env pull; do attempts=\$((attempts + 1)); test \"\$attempts\" -lt 5 || exit 1; sleep 5; done"
+}
+
+sync_homelab_compose() {
+    source=$homelab_root/media/compose.media-orchestrator.yml
+    scp "$source" "$host:$compose_file.next" >/dev/null
+    remote "install -m 0644 '$compose_file.next' '$compose_file'; rm '$compose_file.next'"
 }
 
 replace_hermes_agents() {
-    remote "set -eu; cd '$hermes_remote_root'; docker compose --env-file .env up -d --no-deps --force-recreate hermes-primary hermes-secondary"
+    remote "set -eu; cd '$hermes_remote_root'; docker compose --env-file .env up -d --force-recreate agent-browser-updater vaultwarden-init-primary vaultwarden-broker-primary media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary"
     remote sh -s <<'REMOTE'
 set -eu
-for name in hermes-primary hermes-secondary; do
+for name in agent-browser-updater vaultwarden-broker-primary media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary; do
     attempts=0
     while :; do
         state=$(docker inspect "$name" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}')
@@ -137,16 +139,21 @@ deploy() {
             ./scripts/docker-build.sh
     )
     prepare_hermes_cli "$service_image" "$docker_host"
+    sync_homelab_compose
     remote "set -eu; umask 077; grep -E '^(MEDIA_SERVICE_IMAGE|DOWNLOAD_RUNNER_IMAGE)=' '$environment_file' >'$rollback_file'"
     replace_hermes_agents
     replace_images "$service_image" "$runner_image"
 }
 
 deploy_hermes() {
+    assert_no_active_job
     service_image=$(remote "docker inspect media-service --format '{{.Config.Image}}'")
     docker_host=${MEDIA_DOCKER_HOST:-ssh://$host}
     prepare_hermes_cli "$service_image" "$docker_host"
+    sync_homelab_compose
     replace_hermes_agents
+    remote "set -eu; cd '$remote_root/media'; docker compose --env-file '$environment_file' -f '$compose_file' up -d --no-deps --force-recreate media-service"
+    verify
 }
 
 rollback() {
