@@ -707,6 +707,7 @@ async fn job_lifecycle_projects_one_terminal_card_and_one_final_push() {
     );
     assert_eq!(push_payload["state"], "completed");
     assert_eq!(push_payload["terminal"], true);
+    assert_eq!(push_payload["revision"], card_payload["revision"]);
 }
 
 #[tokio::test]
@@ -1981,6 +1982,31 @@ async fn active_cancel_is_cooperative_and_runner_acknowledgement_releases_the_le
             .await
             .is_empty()
     );
+    let notifications = query(
+        test_db.connection(),
+        "SELECT payload FROM notification_outbox ORDER BY created_at",
+    )
+    .await;
+    assert_eq!(
+        notifications.len(),
+        2,
+        "cancel edits the card and sends one push"
+    );
+    let payloads = notifications
+        .iter()
+        .map(|row| row.try_get::<serde_json::Value>("", "payload").unwrap())
+        .collect::<Vec<_>>();
+    let card = payloads
+        .iter()
+        .find(|payload| payload["delivery_kind"] == "card")
+        .unwrap();
+    let push = payloads
+        .iter()
+        .find(|payload| payload["delivery_kind"] == "final-push")
+        .unwrap();
+    assert_eq!(card["state"], "cancelled");
+    assert_eq!(card["terminal"], true);
+    assert_eq!(push["revision"], card["revision"]);
 }
 
 #[tokio::test]

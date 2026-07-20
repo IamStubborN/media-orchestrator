@@ -386,6 +386,18 @@ async fn project_notification(
             Some(serde_json::json!({"code":"media_failed","message":"media processing failed"})),
             vec!["retry", "details"],
         ),
+        JobEventKind::JobTransition {
+            state: JobState::Cancelled,
+            ..
+        } => (
+            "cancelled",
+            "cancelled",
+            true,
+            None,
+            Some("none"),
+            None,
+            vec!["details"],
+        ),
         _ => return Ok(None),
     };
     let payload = transaction

@@ -20,6 +20,15 @@ impl MigrationTrait for Migration {
                         notification_cycle BETWEEN 1 AND 9223372036854775807
                     );
 
+                ALTER TABLE notification_outbox
+                    DROP CONSTRAINT notification_event_type_check,
+                    ADD CONSTRAINT notification_event_type_check CHECK (event_type IN (
+                        'started', 'choice-needed', 'downloading-started', 'download-progress',
+                        'downloaded', 'transcoding-started', 'encoding-complete', 'plex-added',
+                        'completed', 'session-refreshed', 'partial', 'blocked-storage', 'failed',
+                        'future-episode-found', 'cancelled'
+                    ));
+
                 CREATE FUNCTION notification_unsigned_integer_in_range(
                     value jsonb,
                     minimum numeric,
@@ -226,6 +235,15 @@ impl MigrationTrait for Migration {
             .execute_unprepared(
                 r#"
                 DELETE FROM notification_outbox WHERE payload->>'schema_version' = '2';
+
+                ALTER TABLE notification_outbox
+                    DROP CONSTRAINT notification_event_type_check,
+                    ADD CONSTRAINT notification_event_type_check CHECK (event_type IN (
+                        'started', 'choice-needed', 'downloading-started', 'download-progress',
+                        'downloaded', 'transcoding-started', 'encoding-complete', 'plex-added',
+                        'completed', 'session-refreshed', 'partial', 'blocked-storage', 'failed',
+                        'future-episode-found'
+                    ));
 
                 ALTER TABLE notification_outbox
                     DROP CONSTRAINT notification_payload_check,

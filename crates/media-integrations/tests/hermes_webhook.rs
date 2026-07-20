@@ -143,7 +143,7 @@ async fn posts_exact_schema_v2_payload_with_generation_aware_identity() {
             "schema_version": 2,
             "delivery_kind": "card",
             "card_key": "media-job:00000000-0000-0000-0000-000000000999",
-            "revision": 7,
+            "revision": 3,
             "lifecycle_cycle": 2,
             "terminal": false,
             "state": "downloading",

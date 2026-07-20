@@ -93,7 +93,7 @@ impl HermesWebhookClient {
                 })
             }
             NotificationContent::Media(notification) => {
-                serde_json::to_vec(&media_webhook(notification, delivery.generation()))
+                serde_json::to_vec(&media_webhook(notification))
             }
         }
         .map_err(|_| WebhookError::Serialization)?;
@@ -135,10 +135,7 @@ impl HermesWebhookClient {
     }
 }
 
-fn media_webhook(
-    notification: &MediaNotification,
-    generation: u64,
-) -> HermesMediaNotificationWebhook {
+fn media_webhook(notification: &MediaNotification) -> HermesMediaNotificationWebhook {
     let media = notification.media();
     HermesMediaNotificationWebhook {
         event_type: "media.notification".to_owned(),
@@ -148,7 +145,7 @@ fn media_webhook(
             MediaNotificationDeliveryKind::FinalPush => MediaNotificationDeliveryKindDto::FinalPush,
         },
         card_key: notification.card_key().to_owned(),
-        revision: generation,
+        revision: notification.revision(),
         lifecycle_cycle: notification.lifecycle_cycle(),
         terminal: notification.terminal(),
         state: match notification.state() {
