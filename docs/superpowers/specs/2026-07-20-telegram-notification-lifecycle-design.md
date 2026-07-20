@@ -50,9 +50,9 @@ The media skill documents how conversational status requests should be answered,
 
 ## Ordering And Delivery
 
-Every card update has a monotonically increasing revision. Hermes ignores updates whose revision is not newer than the stored revision. Once a terminal update is applied, non-terminal updates can never change that card again.
+Every card update has a monotonically increasing revision and a lifecycle cycle. Hermes ignores updates whose revision is not newer than the stored revision. Once a terminal update is applied, non-terminal updates from the same lifecycle cycle can never change that card again. An authorized explicit retry increments the lifecycle cycle and may reopen the same card.
 
-Outbox delivery remains at-least-once. Card key and revision make card replay idempotent. A final card update and its short completion reply use separate delivery identities. Hermes records an acknowledged push receipt and suppresses later replays. Because Telegram does not accept an idempotency key for a new message, an ambiguous network timeout may produce one duplicate short push; it must never produce another full result card.
+Outbox delivery remains at-least-once. Card key and revision make card replay idempotent. Each webhook delivery identity includes both the notification ID and its outbox generation so a newer coalesced card update is not mistaken for a replay of an older generation. A final card update and its short completion reply use separate delivery identities. Hermes records an acknowledged push receipt and suppresses later replays. Because Telegram does not accept an idempotency key for a new message, an ambiguous network timeout may produce one duplicate short push; it must never produce another full result card.
 
 The current behavior that gives terminal events no status key must be removed: completed, partial, and failed events update the same status card. The separate completion reply is an explicit push event rather than a second full result card.
 
