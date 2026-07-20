@@ -13,6 +13,14 @@ use media_core::{
     TrackingScheduleStore, TrackingScope, TrackingSubscription,
 };
 
+#[test]
+fn cancelled_notification_event_round_trips_from_wire() {
+    assert_eq!(
+        NotificationEventType::from_wire("cancelled"),
+        Some(NotificationEventType::Cancelled)
+    );
+}
+
 struct ScheduleStore {
     due: TrackingSubscription,
     discovered: Mutex<Vec<EpisodeSnapshot>>,

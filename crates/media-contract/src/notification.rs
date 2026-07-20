@@ -14,6 +14,7 @@ pub enum NotificationEventTypeDto {
     Partial,
     BlockedStorage,
     Failed,
+    Cancelled,
     FutureEpisodeFound,
 }
 

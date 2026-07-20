@@ -131,6 +131,7 @@ pub enum NotificationEventType {
     Partial,
     BlockedStorage,
     Failed,
+    Cancelled,
     FutureEpisodeFound,
 }
 
@@ -154,6 +155,7 @@ impl NotificationEventType {
             "partial" => Self::Partial,
             "blocked-storage" => Self::BlockedStorage,
             "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
             "future-episode-found" => Self::FutureEpisodeFound,
             _ => return None,
         })

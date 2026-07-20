@@ -2,8 +2,8 @@ mod support;
 
 use media_core::{
     PRIMARY_USER_ID, EpisodeSnapshot, NewTrackingCommand, NewTrackingSubscription,
-    NotificationEventType, NotificationId, NotificationRecipient, OperationKey, Provider,
-    TrackingId, TrackingScope, TrackingStore, SECONDARY_USER_ID,
+    NotificationContent, NotificationEventType, NotificationId, NotificationRecipient,
+    OperationKey, Provider, TrackingId, TrackingScope, TrackingStore, SECONDARY_USER_ID,
 };
 use media_storage::{SeaOrmNotificationOutbox, SeaOrmTrackingStore};
 use sea_orm::ConnectionTrait;
@@ -24,6 +24,68 @@ fn new_tracking(id: TrackingId, scope: TrackingScope) -> NewTrackingSubscription
         },
     )
     .unwrap()
+}
+
+#[tokio::test]
+async fn cancelled_structured_notification_can_be_leased() {
+    let test_db = TestDatabase::start_migrated().await;
+    test_db
+        .connection()
+        .execute_unprepared(
+            r#"
+            INSERT INTO notification_outbox (
+                id, aggregate_type, aggregate_id, event_type, recipient,
+                source_dedupe_key, payload
+            ) VALUES (
+                '00000000-0000-4000-8000-000000000101',
+                'job',
+                '00000000-0000-4000-8000-000000000102',
+                'cancelled',
+                'primary',
+                decode('01', 'hex'),
+                '{
+                    "event_type":"media.notification",
+                    "schema_version":2,
+                    "delivery_kind":"card",
+                    "card_key":"media-job:00000000-0000-4000-8000-000000000102",
+                    "revision":1,
+                    "lifecycle_cycle":1,
+                    "terminal":true,
+                    "state":"cancelled",
+                    "media":{
+                        "job_id":"00000000-0000-4000-8000-000000000102",
+                        "title":"Cancelled Show",
+                        "kind":"series",
+                        "provider":"rezka",
+                        "season":1
+                    },
+                    "progress":{"completed_episodes":0,"total_episodes":1},
+                    "next_step":"none",
+                    "actions":["details"]
+                }'::jsonb
+            )
+            "#,
+        )
+        .await
+        .unwrap();
+    let outbox = SeaOrmNotificationOutbox::new(test_db.connection().clone());
+
+    let deliveries = outbox
+        .lease_pending(
+            NotificationId::new(),
+            time::OffsetDateTime::now_utc(),
+            time::Duration::seconds(30),
+            10,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].event_type(), NotificationEventType::Cancelled);
+    let NotificationContent::Media(notification) = deliveries[0].content() else {
+        panic!("expected a structured media notification");
+    };
+    assert!(notification.terminal());
 }
 
 #[tokio::test]

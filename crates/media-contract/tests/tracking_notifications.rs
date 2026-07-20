@@ -68,6 +68,7 @@ fn notification_event_types_are_stable_and_complete() {
         (NotificationEventTypeDto::Partial, "partial"),
         (NotificationEventTypeDto::BlockedStorage, "blocked-storage"),
         (NotificationEventTypeDto::Failed, "failed"),
+        (NotificationEventTypeDto::Cancelled, "cancelled"),
         (
             NotificationEventTypeDto::FutureEpisodeFound,
             "future-episode-found",
