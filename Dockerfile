@@ -66,7 +66,6 @@ LABEL org.opencontainers.image.created=$OCI_CREATED \
 
 FROM runtime-common AS service
 COPY --from=builder --chown=65532:65532 /out/media /usr/local/bin/media
-COPY --from=yt-dlp --chown=65532:65532 /usr/local/bin/yt-dlp /usr/local/bin/yt-dlp
 USER 65532:65532
 EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=6 \
@@ -104,6 +103,7 @@ LABEL org.opencontainers.image.created=$OCI_CREATED \
       org.opencontainers.image.title="media-orchestrator" \
       org.opencontainers.image.version=$OCI_VERSION
 COPY --from=builder --chown=65532:65532 /out/media /usr/local/bin/media
+COPY --from=yt-dlp --chown=65532:65532 /usr/local/bin/yt-dlp /usr/local/bin/yt-dlp
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/media"]
 CMD ["runner"]
