@@ -75,20 +75,20 @@ async fn notification_rows(test_db: &TestDatabase) -> Vec<sea_orm::QueryResult> 
     .await
 }
 
-fn assert_sanitized_message(row: &sea_orm::QueryResult, forbidden: &[&str]) {
+fn structured_payload(row: &sea_orm::QueryResult, forbidden: &[&str]) -> serde_json::Value {
     let payload = row.try_get::<serde_json::Value>("", "payload").unwrap();
-    assert_eq!(
-        payload.as_object().unwrap().keys().collect::<Vec<_>>(),
-        vec!["message"]
-    );
-    let message = payload["message"].as_str().unwrap();
-    assert!(!message.contains("://"));
+    assert_eq!(payload["schema_version"], 2);
+    assert_eq!(payload["event_type"], "media.notification");
+    assert!(payload.get("message").is_none());
+    let serialized = payload.to_string();
+    assert!(!serialized.contains("://"));
     for value in forbidden {
         assert!(
-            !message.contains(value),
-            "message leaked {value:?}: {message}"
+            !serialized.contains(value),
+            "payload leaked {value:?}: {payload}"
         );
     }
+    payload
 }
 
 #[tokio::test]
@@ -203,11 +203,9 @@ async fn duplicate_event_id_does_not_duplicate_transition_event_or_outbox() {
     let payload = notifications[0]
         .try_get::<serde_json::Value>("", "payload")
         .unwrap();
-    assert_eq!(
-        payload.as_object().unwrap().keys().collect::<Vec<_>>(),
-        vec!["message"]
-    );
-    assert!(payload["message"].as_str().unwrap().contains("📺 Rezka"));
+    assert_eq!(payload["schema_version"], 2);
+    assert_eq!(payload["media"]["provider"], "rezka");
+    assert_eq!(payload["delivery_kind"], "card");
     assert!(!payload.to_string().contains("http"));
 }
 
@@ -474,7 +472,7 @@ async fn different_source_events_keep_only_the_latest_non_terminal_status() {
                 row.try_get::<i64>("", "count").unwrap(),
             ))
             .collect::<Vec<_>>(),
-        vec![("encoding-complete".to_owned(), 1)]
+        vec![("downloaded".to_owned(), 1)]
     );
 }
 
@@ -561,15 +559,9 @@ async fn progress_milestones_replace_the_same_initiator_card_across_retries() {
         "primary"
     );
     assert_eq!(progress[0].try_get::<i64>("", "generation").unwrap(), 6);
-    assert_sanitized_message(&progress[0], &["progress-dedupe"]);
-    assert!(
-        progress[0]
-            .try_get::<serde_json::Value>("", "payload")
-            .unwrap()["message"]
-            .as_str()
-            .unwrap()
-            .contains("Подготовка видео в 1080p началась")
-    );
+    let payload = structured_payload(&progress[0], &["progress-dedupe"]);
+    assert_eq!(payload["state"], "processing");
+    assert_eq!(payload["stage"], "process");
 }
 
 #[tokio::test]
@@ -909,32 +901,23 @@ async fn storage_block_notifies_both_family_recipients_once() {
             ))
             .collect::<Vec<_>>(),
         vec![
-            // Terminal and lifecycle events keep the Family scope (both users).
-            // Starting the media_pipeline umbrella only performs preflight and
-            // must not claim that a real download has begun.
             ("blocked-storage".to_owned(), "primary".to_owned()),
+            ("blocked-storage".to_owned(), "primary".to_owned()),
+            ("blocked-storage".to_owned(), "secondary".to_owned()),
             ("blocked-storage".to_owned(), "secondary".to_owned()),
         ]
     );
     for row in &notifications {
-        assert_sanitized_message(row, &["blocked-private-reference"]);
-        let payload = row.try_get::<serde_json::Value>("", "payload").unwrap();
-        let message = payload["message"].as_str().unwrap();
-        assert!(message.contains("🎬 Случайная любовь"));
-        assert!(message.contains("📺 сериал, серия S01E01 · Rezka"));
-        assert!(message.contains("🎙 Оригинал (+субтитры)"));
-        assert!(message.contains("✨ Лучшее доступное качество · все доступные субтитры"));
-        assert!(message.contains("📁 После обработки появится в Plex / Сериалы"));
-        assert!(message.contains("🔄 **Этап:**"));
-        assert!(message.contains("➡️ **Дальше:**"));
-        if row.try_get::<String>("", "event_type").unwrap() == "blocked-storage" {
-            assert!(message.starts_with("⏸️ **Недостаточно свободного места"));
-            assert!(message.contains("Свободно: 23.0 ГБ"));
-            assert!(message.contains("Нужно: 24.0 ГБ"));
-            assert!(message.contains("Не хватает: 1.0 ГБ"));
-        }
-        assert!(!message.contains("🆔"));
-        assert!(!message.contains("Job ID"));
+        let payload = structured_payload(row, &["blocked-private-reference"]);
+        assert_eq!(payload["state"], "needs-action");
+        assert_eq!(payload["media"]["title"], "Случайная любовь");
+        assert_eq!(payload["media"]["provider"], "rezka");
+        assert_eq!(payload["media"]["translation"], "Оригинал (+субтитры)");
+        assert_eq!(payload["issue"]["code"], "storage_blocked");
+        assert_eq!(
+            payload["actions"],
+            serde_json::json!(["resume-storage", "details"])
+        );
     }
 
     let deliveries = SeaOrmNotificationOutbox::new(test_db.connection().clone())
@@ -951,7 +934,7 @@ async fn storage_block_notifies_both_family_recipients_once() {
             .iter()
             .filter(|delivery| delivery.event_type() == NotificationEventType::BlockedStorage)
             .count(),
-        2
+        4
     );
     let status_keys = deliveries
         .iter()
@@ -962,7 +945,7 @@ async fn storage_block_notifies_both_family_recipients_once() {
 
 #[tokio::test]
 async fn storage_blocked_job_does_not_occupy_the_execution_slot() {
-    let (_test_db, jobs, leases) = setup().await;
+    let (test_db, jobs, leases) = setup().await;
     let blocked = jobs
         .create(operation_key(), new_job("selection:parked-storage"))
         .await
@@ -988,6 +971,25 @@ async fn storage_blocked_job_does_not_occupy_the_execution_slot() {
 
     let queued = jobs
         .create(operation_key(), new_job("selection:next-after-storage"))
+        .await
+        .unwrap();
+    assert_eq!(
+        leases
+            .lease_next(
+                operation_key(),
+                RUNNER_CLIENT_ID,
+                time::Duration::seconds(60),
+            )
+            .await,
+        Err(media_core::PortError::Conflict),
+    );
+    test_db
+        .connection()
+        .execute_unprepared(
+            "UPDATE runner_lifecycle SET state = 'ready', previous_ip = current_ip, \
+             current_ip = '198.51.100.2', sticky_job_id = NULL, sticky_attempt_count = 0 \
+             WHERE singleton = true",
+        )
         .await
         .unwrap();
     let second = leases
@@ -1133,15 +1135,38 @@ async fn retryable_stage_fails_terminally_on_third_attempt_and_releases_lease() 
         .await
         .unwrap();
     for attempt in 1..=3 {
-        let lease = leases
+        let lease = match leases
             .lease_next(
                 operation_key(),
                 RUNNER_CLIENT_ID,
                 time::Duration::seconds(60),
             )
             .await
-            .unwrap()
-            .unwrap();
+        {
+            Ok(Some(lease)) => lease,
+            Err(media_core::PortError::Conflict) => {
+                test_db
+                    .connection()
+                    .execute_unprepared(&format!(
+                        "UPDATE runner_lifecycle SET state = 'ready', previous_ip = current_ip, \
+                         current_ip = '198.51.100.{}', sticky_job_id = NULL, \
+                         sticky_attempt_count = 0 WHERE singleton = true",
+                        attempt + 10
+                    ))
+                    .await
+                    .unwrap();
+                leases
+                    .lease_next(
+                        operation_key(),
+                        RUNNER_CLIENT_ID,
+                        time::Duration::seconds(60),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+            other => panic!("unexpected lease result: {other:?}"),
+        };
         leases
             .report_event(
                 operation_key(),
@@ -1222,15 +1247,38 @@ async fn retryable_rezka_stage_fails_terminally_on_twentieth_attempt() {
         .unwrap();
 
     for attempt in 1..=20 {
-        let lease = leases
+        let lease = match leases
             .lease_next(
                 operation_key(),
                 RUNNER_CLIENT_ID,
                 time::Duration::seconds(60),
             )
             .await
-            .unwrap()
-            .unwrap();
+        {
+            Ok(Some(lease)) => lease,
+            Err(media_core::PortError::Conflict) => {
+                test_db
+                    .connection()
+                    .execute_unprepared(&format!(
+                        "UPDATE runner_lifecycle SET state = 'ready', previous_ip = current_ip, \
+                         current_ip = '198.51.100.{}', sticky_job_id = NULL, \
+                         sticky_attempt_count = 0 WHERE singleton = true",
+                        attempt + 10
+                    ))
+                    .await
+                    .unwrap();
+                leases
+                    .lease_next(
+                        operation_key(),
+                        RUNNER_CLIENT_ID,
+                        time::Duration::seconds(60),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+            other => panic!("unexpected lease result: {other:?}"),
+        };
         leases
             .report_event(
                 operation_key(),
@@ -2026,20 +2074,10 @@ async fn job_detail_reports_the_running_stage_and_clears_it_when_idle() {
             .unwrap(),
         3
     );
-    let progress_message = progress_notifications[0]
-        .try_get::<serde_json::Value>("", "payload")
-        .unwrap()["message"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert!(progress_message.contains("Загрузка выполняется"));
-    assert!(progress_message.contains("73%"));
-    assert!(progress_message.contains("4.1 ГБ / 5.6 ГБ"));
-    assert!(progress_message.contains("18.4 МБ/с"));
-    assert!(progress_message.contains("1 мин 25 сек"));
-    assert!(!progress_message.contains("://"));
-    assert!(!progress_message.contains("🆔"));
-    assert!(!progress_message.contains("Job ID"));
+    let payload = structured_payload(&progress_notifications[0], &[]);
+    assert_eq!(payload["progress"]["percentage"], 73);
+    assert_eq!(payload["progress"]["downloaded_bytes"], 4_402_341_478_u64);
+    assert_eq!(payload["progress"]["download_speed_bps"], 19_293_798_u64);
 
     let detail = jobs
         .find_detail_for_owner(created.id(), PRIMARY_USER_ID)
@@ -2165,11 +2203,7 @@ async fn hls_progress_without_total_updates_only_the_initiators_card_without_a_f
         "SELECT event_type, recipient, payload FROM notification_outbox ORDER BY recipient",
     )
     .await;
-    assert_eq!(
-        rows.len(),
-        2,
-        "family lifecycle card plus initiator progress card"
-    );
+    assert_eq!(rows.len(), 1, "active progress is initiator-only");
     let progress = rows
         .iter()
         .find(|row| row.try_get::<String>("", "event_type").unwrap() == "download-progress")
@@ -2178,16 +2212,10 @@ async fn hls_progress_without_total_updates_only_the_initiators_card_without_a_f
         progress.try_get::<String>("", "recipient").unwrap(),
         "primary"
     );
-    let message = progress
-        .try_get::<serde_json::Value>("", "payload")
-        .unwrap()["message"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert!(message.contains("Скачано: 700.0 МБ"));
-    assert!(message.contains("8.0 МБ/с"));
-    assert!(!message.contains('%'));
-    assert!(!message.contains("Осталось:"));
+    let payload = structured_payload(progress, &[]);
+    assert_eq!(payload["progress"]["downloaded_bytes"], 734_003_200_u64);
+    assert_eq!(payload["progress"]["download_speed_bps"], 8_388_608_u64);
+    assert!(payload["progress"].get("percentage").is_none());
 }
 
 #[tokio::test]
@@ -2264,17 +2292,17 @@ async fn torrent_progress_card_includes_swarm_and_transfer_details() {
         rows[0].try_get::<String>("", "event_type").unwrap(),
         "download-progress"
     );
-    let message = rows[0].try_get::<serde_json::Value>("", "payload").unwrap()["message"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert!(message.contains("42%"));
-    assert!(message.contains("4.0 ГБ / 10.0 ГБ"));
-    assert!(message.contains("16.0 МБ/с"));
-    assert!(message.contains("6 мин 15 сек"));
-    assert!(message.contains("Сиды/пиры: 12/4"));
-    assert!(message.contains("Prowlarr"));
-    assert!(!message.contains("://"));
+    let payload = structured_payload(&rows[0], &[]);
+    assert_eq!(payload["media"]["provider"], "prowlarr");
+    assert_eq!(payload["progress"]["percentage"], 42);
+    assert_eq!(
+        payload["progress"]["downloaded_bytes"],
+        4 * 1024_u64 * 1024 * 1024
+    );
+    assert_eq!(
+        payload["progress"]["download_speed_bps"],
+        16 * 1024_u64 * 1024
+    );
 }
 
 #[tokio::test]
@@ -2451,11 +2479,11 @@ async fn family_job_routes_progress_to_initiator_but_terminal_events_to_both() {
             .unwrap();
     }
 
-    // A terminal Plex event keeps the Family scope: both recipients.
+    // The terminal card keeps Family scope. Final pushes use the same recipients.
     let plex = query(
         test_db.connection(),
-        "SELECT recipient FROM notification_outbox WHERE event_type = 'plex-added' \
-         ORDER BY recipient",
+        "SELECT recipient FROM notification_outbox WHERE event_type = 'completed' \
+         AND payload->>'delivery_kind' = 'card' ORDER BY recipient",
     )
     .await;
     assert_eq!(

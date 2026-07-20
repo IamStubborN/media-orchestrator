@@ -1,8 +1,7 @@
 use media_core::{
     PRIMARY_USER_ID, Checkpoint, CheckpointValue, ClientId, Job, JobEvent, JobEventKind, JobLease,
-    JobState, LeaseId, LeaseStore, MAX_STICKY_VPN_ATTEMPTS, NotificationEventType, NotifyScope,
-    OperationKey, PortError, Provider, StageFailureOutcome, StageRef, SECONDARY_USER_ID,
-    max_stage_attempts,
+    JobState, LeaseId, LeaseStore, MAX_STICKY_VPN_ATTEMPTS, NotifyScope, OperationKey, PortError,
+    Provider, StageFailureOutcome, StageRef, SECONDARY_USER_ID, max_stage_attempts,
 };
 use sea_orm::{
     ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, Statement, TransactionTrait,
@@ -216,7 +215,7 @@ async fn insert_notification_outbox(
         std::slice::from_ref(&initiator)
     };
     for recipient in recipients {
-        insert_projected_notification(transaction, job, *recipient, &projected).await?;
+        insert_projected_notification(transaction, job, recipient, &projected).await?;
     }
     Ok(())
 }
@@ -286,6 +285,19 @@ async fn project_notification(
                 "processing",
                 false,
                 Some("process"),
+                Some("publish"),
+                None,
+                vec!["cancel", "details"],
+            )
+        }
+        JobEventKind::StageCompleted { stage, .. }
+            if matches!(stage.name(), "encode" | "encoding" | "transcode") =>
+        {
+            (
+                "encoding-complete",
+                "publishing",
+                false,
+                Some("publish"),
                 Some("publish"),
                 None,
                 vec!["cancel", "details"],
@@ -478,27 +490,27 @@ async fn project_notification(
     } else {
         Some(serde_json::json!({"completed_episodes": completed, "total_episodes": selected.len()}))
     };
-    if let (Some(progress), Some(ordinal)) = (&mut progress, current_ordinal) {
-        if let Some((_, episode)) = selected.get(ordinal) {
-            progress["current_episode"] = serde_json::json!(episode);
-        }
+    if let (Some(progress), Some(ordinal)) = (&mut progress, current_ordinal)
+        && let Some((_, episode)) = selected.get(ordinal)
+    {
+        progress["current_episode"] = serde_json::json!(episode);
     }
-    if let Some(progress) = &mut progress {
-        if !missing.is_empty() {
-            progress["missing_episodes"] = serde_json::Value::Array(missing.clone());
+    if !missing.is_empty() {
+        progress.get_or_insert_with(|| serde_json::json!({}))["missing_episodes"] =
+            serde_json::Value::Array(missing.clone());
+    }
+    if let JobEventKind::StageCheckpoint { checkpoint, .. } = event.kind() {
+        let transfer = progress.get_or_insert_with(|| serde_json::json!({}));
+        if let Some(value) = checkpoint_unsigned(checkpoint, "downloaded_bytes") {
+            transfer["downloaded_bytes"] = serde_json::json!(value);
         }
-        if let JobEventKind::StageCheckpoint { checkpoint, .. } = event.kind() {
-            if let Some(value) = checkpoint_unsigned(checkpoint, "downloaded_bytes") {
-                progress["downloaded_bytes"] = serde_json::json!(value);
-            }
-            if let Some(value) = checkpoint_unsigned(checkpoint, "download_speed_bps") {
-                progress["download_speed_bps"] = serde_json::json!(value);
-            }
-            if let Some(value) =
-                checkpoint_unsigned(checkpoint, "progress_percent").filter(|value| *value <= 100)
-            {
-                progress["percentage"] = serde_json::json!(value);
-            }
+        if let Some(value) = checkpoint_unsigned(checkpoint, "download_speed_bps") {
+            transfer["download_speed_bps"] = serde_json::json!(value);
+        }
+        if let Some(value) =
+            checkpoint_unsigned(checkpoint, "progress_percent").filter(|value| *value <= 100)
+        {
+            transfer["percentage"] = serde_json::json!(value);
         }
     }
     let issue = if state == "partial" && missing.is_empty() {
@@ -615,312 +627,10 @@ fn provider_value(provider: Provider) -> &'static str {
     }
 }
 
-#[derive(Debug, Default)]
-struct JobNotificationContext {
-    title: Option<String>,
-    media_kind: Option<String>,
-    season: Option<u64>,
-    episode: Option<u64>,
-    episode_count: Option<usize>,
-    translation: Option<String>,
-    storage_available_bytes: Option<u64>,
-    storage_required_bytes: Option<u64>,
-}
-
-impl JobNotificationContext {
-    fn details(&self, job: &Job) -> String {
-        let mut lines = Vec::with_capacity(6);
-        lines.push(format!(
-            "🎬 {}",
-            self.title.as_deref().unwrap_or("Название недоступно")
-        ));
-
-        let mut content = self.media_kind.clone();
-        match (self.season, self.episode) {
-            (Some(season), Some(episode)) => {
-                let episode = format!("S{season:02}E{episode:02}");
-                content = Some(match content {
-                    Some(kind) => format!("{kind}, серия {episode}"),
-                    None => format!("серия {episode}"),
-                });
-            }
-            _ => {
-                if let Some(count) = self.episode_count.filter(|count| *count > 0) {
-                    content = Some(match content {
-                        Some(kind) => format!("{kind}, серий в задаче: {count}"),
-                        None => format!("серий в задаче: {count}"),
-                    });
-                }
-            }
-        }
-        if let Some(content) = content {
-            lines.push(format!("📺 {content} · {}", provider_label(job)));
-        } else {
-            lines.push(format!("📺 {}", provider_label(job)));
-        }
-        if let Some(translation) = &self.translation {
-            lines.push(format!("🎙 {translation}"));
-        }
-        match job.provider() {
-            media_core::Provider::Rezka => {
-                lines.push("✨ Лучшее доступное качество · все доступные субтитры".to_owned());
-                lines.push(format!(
-                    "📁 После обработки появится в Plex / {}",
-                    if self.media_kind.as_deref() == Some("фильм") {
-                        "Фильмы"
-                    } else {
-                        "Сериалы"
-                    }
-                ));
-            }
-            media_core::Provider::Prowlarr => lines.push(format!(
-                "📁 После загрузки появится в Plex / {}",
-                if self.media_kind.as_deref() == Some("фильм") {
-                    "Фильмы"
-                } else {
-                    "Сериалы"
-                }
-            )),
-        }
-        lines.join("\n")
-    }
-
-    fn message(&self, job: &Job, summary: &str, status: &str, stage: &str, next: &str) -> String {
-        let (headline, note) = summary
-            .split_once('\n')
-            .map_or((summary, None), |(headline, note)| (headline, Some(note)));
-        let headline = headline.trim_end_matches('.');
-        let note = note.map_or_else(String::new, |note| format!("\n\n{note}"));
-        format!(
-            "{} **{headline}**{note}\n\n{}\n\n🔄 **Этап:** {stage}\n➡️ **Дальше:** {next}",
-            status_icon(status),
-            self.details(job),
-        )
-    }
-}
-
-fn status_icon(status: &str) -> &'static str {
-    match status {
-        "скачивается" => "⬇️",
-        "обрабатывается" | "публикуется" => "⚙️",
-        "скачано" | "обработано" | "доступно" | "завершено" => {
-            "✅"
-        }
-        "нужно действие" => "⚠️",
-        "приостановлено" => "⏸️",
-        "завершено частично" => "🟡",
-        "ошибка" => "❌",
-        _ => "⏳",
-    }
-}
-
-fn provider_label(job: &Job) -> &'static str {
-    match job.provider() {
-        media_core::Provider::Rezka => "Rezka",
-        media_core::Provider::Prowlarr => "Prowlarr",
-    }
-}
-
-fn stage_label(stage: &str) -> &'static str {
-    match stage {
-        "download" => "скачивание исходного видео",
-        "torrent_monitor" => "загрузка выбранного релиза",
-        "media_pipeline" => "проверка места и подготовка видео",
-        "encode" | "encoding" | "transcode" => "подготовка видео в 1080p",
-        "publish" | "publishing" => "публикация в Plex",
-        "subtitles" => "скачивание субтитров",
-        "resolve_manifest" => "подготовка ссылки на видео",
-        "resolve_identity" => "сопоставление сезона и серии",
-        _ => "обработка медиа",
-    }
-}
-
-fn after_download(job: &Job) -> &'static str {
-    match job.provider() {
-        media_core::Provider::Rezka => {
-            "после загрузки видео будет подготовлено в 1080p и добавлено в Plex"
-        }
-        media_core::Provider::Prowlarr => {
-            "после загрузки файл появится в Plex без дополнительной обработки"
-        }
-    }
-}
-
-async fn notification_context(
-    transaction: &sea_orm::DatabaseTransaction,
-    job: &Job,
-) -> Result<JobNotificationContext, sea_orm::DbErr> {
-    let payload = transaction
-        .query_one_raw(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            "SELECT payload FROM search_executions WHERE result_ref = $1",
-            [job.result_ref().into()],
-        ))
-        .await?
-        .map(|row| row.try_get::<serde_json::Value>("", "payload"))
-        .transpose()?;
-    let storage = transaction
-        .query_one_raw(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            "SELECT stage.checkpoint FROM job_stages AS stage \
-             JOIN job_tasks AS task ON task.id = stage.task_id \
-             WHERE task.job_id = $1 AND stage.name = 'media_pipeline' \
-             ORDER BY stage.updated_at DESC LIMIT 1",
-            [job.id().into_uuid().into()],
-        ))
-        .await?
-        .map(|row| row.try_get::<serde_json::Value>("", "checkpoint"))
-        .transpose()?
-        .unwrap_or_default();
-    let payload = payload.unwrap_or_default();
-    let safe = |name: &str| {
-        payload
-            .get(name)
-            .and_then(serde_json::Value::as_str)
-            .map(safe_notification_field)
-            .filter(|value| !value.is_empty())
-    };
-    let episodes = payload
-        .get("episodes")
-        .and_then(serde_json::Value::as_array)
-        .map(Vec::len);
-    Ok(JobNotificationContext {
-        title: safe("title"),
-        media_kind: payload
-            .get("media_kind")
-            .and_then(serde_json::Value::as_str)
-            .and_then(|kind| match kind {
-                "movie" => Some("фильм".to_owned()),
-                "series" => Some("сериал".to_owned()),
-                _ => None,
-            }),
-        season: payload.get("season").and_then(serde_json::Value::as_u64),
-        episode: payload.get("episode").and_then(serde_json::Value::as_u64),
-        episode_count: episodes,
-        translation: safe("translation"),
-        storage_available_bytes: storage
-            .get("storage_available_bytes")
-            .and_then(serde_json::Value::as_u64),
-        storage_required_bytes: storage
-            .get("storage_required_bytes")
-            .and_then(serde_json::Value::as_u64),
-    })
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-    format!("{:.1} ГБ", bytes as f64 / GIB)
-}
-
-fn format_transfer_bytes(bytes: u64) -> String {
-    const MIB: u64 = 1024 * 1024;
-    const GIB: u64 = 1024 * MIB;
-    if bytes >= GIB {
-        format!("{:.1} ГБ", bytes as f64 / GIB as f64)
-    } else {
-        format!("{:.1} МБ", bytes as f64 / MIB as f64)
-    }
-}
-
-fn format_transfer_speed(bytes_per_second: u64) -> String {
-    format!("{}/с", format_transfer_bytes(bytes_per_second))
-}
-
-fn format_duration(seconds: u64) -> String {
-    let hours = seconds / 3600;
-    let minutes = (seconds % 3600) / 60;
-    let seconds = seconds % 60;
-    match (hours, minutes) {
-        (0, 0) => format!("{seconds} сек"),
-        (0, _) => format!("{minutes} мин {seconds} сек"),
-        _ => format!("{hours} ч {minutes} мин"),
-    }
-}
-
 fn checkpoint_unsigned(checkpoint: &Checkpoint, key: &str) -> Option<u64> {
     match checkpoint.get(key) {
         Some(CheckpointValue::Unsigned(value)) => Some(*value),
         _ => None,
-    }
-}
-
-fn progress_bar(percent: u64) -> String {
-    let filled = usize::try_from(percent.min(100).div_ceil(10)).unwrap_or(10);
-    format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled))
-}
-
-fn progress_message(
-    job: &Job,
-    context: &JobNotificationContext,
-    stage: &str,
-    checkpoint: &Checkpoint,
-) -> Option<String> {
-    let percent = checkpoint_unsigned(checkpoint, "progress_percent").filter(|value| *value <= 100);
-    let downloaded = checkpoint_unsigned(checkpoint, "downloaded_bytes");
-    let total = checkpoint_unsigned(checkpoint, "total_bytes").filter(|value| *value > 0);
-    let speed = checkpoint_unsigned(checkpoint, "download_speed_bps").filter(|value| *value > 0);
-    let eta = checkpoint_unsigned(checkpoint, "eta_seconds");
-    let seeds = checkpoint_unsigned(checkpoint, "seeds");
-    let peers = checkpoint_unsigned(checkpoint, "peers");
-    if percent.is_none()
-        && downloaded.is_none()
-        && speed.is_none()
-        && eta.is_none()
-        && seeds.is_none()
-        && peers.is_none()
-    {
-        return None;
-    }
-
-    let mut metrics = Vec::with_capacity(5);
-    if let Some(percent) = percent {
-        metrics.push(format!("`{}` **{percent}%**", progress_bar(percent)));
-    }
-    match (downloaded, total) {
-        (Some(downloaded), Some(total)) => metrics.push(format!(
-            "📦 {} / {}",
-            format_transfer_bytes(downloaded),
-            format_transfer_bytes(total)
-        )),
-        (Some(downloaded), None) => {
-            metrics.push(format!("📦 Скачано: {}", format_transfer_bytes(downloaded)));
-        }
-        _ => {}
-    }
-    if let Some(speed) = speed {
-        metrics.push(format!("🚀 {}", format_transfer_speed(speed)));
-    }
-    if let Some(eta) = eta {
-        metrics.push(format!("⏱ Осталось: {}", format_duration(eta)));
-    }
-    match (seeds, peers) {
-        (Some(seeds), Some(peers)) => metrics.push(format!("🌱 Сиды/пиры: {seeds}/{peers}")),
-        (Some(seeds), None) => metrics.push(format!("🌱 Сиды: {seeds}")),
-        (None, Some(peers)) => metrics.push(format!("👥 Пиры: {peers}")),
-        (None, None) => {}
-    }
-
-    Some(format!(
-        "⬇️ **Загрузка выполняется**\n\n{}\n\n{}\n\n🔄 **Этап:** {}\n➡️ **Дальше:** {}",
-        context.details(job),
-        metrics.join("\n"),
-        stage_label(stage),
-        after_download(job),
-    ))
-}
-
-fn storage_blocked_description(context: &JobNotificationContext) -> String {
-    match (
-        context.storage_available_bytes,
-        context.storage_required_bytes,
-    ) {
-        (Some(available), Some(required)) => format!(
-            "Свободно: {}\nНужно: {} (исходное видео, обработка и резерв)\nНе хватает: {}",
-            format_bytes(available),
-            format_bytes(required),
-            format_bytes(required.saturating_sub(available)),
-        ),
-        _ => "Недостаточно места для исходного файла, обработки и настроенного резерва. Точные значения не сохранились в checkpoint этой задачи.".to_owned(),
     }
 }
 
@@ -933,280 +643,6 @@ fn safe_notification_field(value: &str) -> String {
         .collect::<String>()
         .trim()
         .to_owned()
-}
-
-fn notifications_for_event(
-    job: &Job,
-    event: &JobEvent,
-    context: &JobNotificationContext,
-) -> Vec<(&'static str, String)> {
-    let session_refresh = job.result_ref().starts_with("selection:session-refresh:");
-    match event.kind() {
-        JobEventKind::Started if session_refresh => Vec::new(),
-        JobEventKind::Started => vec![(
-            "started",
-            context.message(
-                job,
-                "Загрузка подготовлена.",
-                "выполняется",
-                "подготовка загрузки",
-                "система проверит источник, место на диске и начнёт скачивание",
-            ),
-        )],
-        // Intermediate progress. A stage start marks the beginning of a phase, so
-        // it maps to a "started" notification. Deduplication on
-        // (source_dedupe_key, recipient) collapses stage retries and per-episode
-        // repeats into a single notification per (job, phase). The runner carries
-        // no percent data, so these are milestones only, never progress fractions.
-        JobEventKind::StageStarted(stage)
-            if matches!(stage.name(), "download" | "torrent_monitor") =>
-        {
-            vec![(
-                "downloading-started",
-                context.message(
-                    job,
-                    "Скачивание исходного видео началось.",
-                    "скачивается",
-                    stage_label(stage.name()),
-                    after_download(job),
-                ),
-            )]
-        }
-        JobEventKind::StageStarted(stage)
-            if matches!(stage.name(), "encode" | "encoding" | "transcode") =>
-        {
-            vec![(
-                "transcoding-started",
-                context.message(
-                    job,
-                    "Подготовка видео в 1080p началась.",
-                    "обрабатывается",
-                    stage_label(stage.name()),
-                    "после проверки результата видео и субтитры будут опубликованы в Plex",
-                ),
-            )]
-        }
-        JobEventKind::StageCheckpoint { stage, checkpoint }
-            if matches!(stage.name(), "download" | "torrent_monitor") =>
-        {
-            progress_message(job, context, stage.name(), checkpoint)
-                .map(|message| vec![("download-progress", message)])
-                .unwrap_or_default()
-        }
-        JobEventKind::StageCompleted { stage, .. }
-            if matches!(stage.name(), "download" | "torrent_monitor") =>
-        {
-            vec![(
-                "downloaded",
-                context.message(
-                    job,
-                    "Скачивание исходного видео завершено.",
-                    "скачано",
-                    stage_label(stage.name()),
-                    "начнётся обработка и публикация в Plex",
-                ),
-            )]
-        }
-        JobEventKind::StageCompleted { stage, .. }
-            if matches!(stage.name(), "encode" | "encoding" | "transcode") =>
-        {
-            vec![(
-                "encoding-complete",
-                context.message(
-                    job,
-                    "Перекодирование завершено.",
-                    "обработано",
-                    stage_label(stage.name()),
-                    "видео и субтитры будут опубликованы в Plex",
-                ),
-            )]
-        }
-        JobEventKind::StageFailed { .. }
-            if session_refresh && job.state() == JobState::Failed =>
-        {
-            vec![(
-                "failed",
-                "❌ **Не удалось восстановить доступ к Rezka**\n\nПопробуйте загрузку позже. Если ошибка повторится, попросите технические детали."
-                    .to_owned(),
-            )]
-        }
-        JobEventKind::StageFailed {
-            stage, error_code, ..
-        } if job.state() == JobState::Failed => {
-            let error_code = sanitized_error_code(error_code);
-            vec![(
-                "failed",
-                context.message(
-                    job,
-                    &failure_description(error_code),
-                    "ошибка",
-                    stage_label(stage.name()),
-                    "повторите загрузку; если ошибка повторится, попросите технические детали",
-                ),
-            )]
-        }
-        JobEventKind::JobTransition {
-            state,
-            needs_action_reason,
-        } => match state {
-            JobState::NeedsAction => {
-                let description = match needs_action_reason {
-                    Some(media_core::NeedsActionReason::IdentityAmbiguous) => {
-                        "Нумерация эпизода неоднозначна. Нужно указать, какому сезону и эпизоду Plex соответствует серия источника."
-                    }
-                    Some(media_core::NeedsActionReason::PlexMismatch) => {
-                        "Plex обнаружил файл, но его путь или идентичность серии не совпали с ожидаемыми. Нужна ручная проверка сопоставления."
-                    }
-                    None => "Нужен дополнительный выбор, чтобы продолжить задачу.",
-                };
-                vec![(
-                    "choice-needed",
-                    context.message(
-                        job,
-                        description,
-                        "нужно действие",
-                        "сопоставление медиа",
-                        "укажите правильный сезон и эпизод, затем повторите задачу",
-                    ),
-                )]
-            }
-            JobState::BlockedStorage => vec![(
-                "blocked-storage",
-                context.message(
-                    job,
-                    &format!(
-                        "Недостаточно свободного места: задача приостановлена до скачивания.\n{}",
-                        storage_blocked_description(context)
-                    ),
-                    "приостановлено",
-                    "проверка свободного места",
-                    "освободите место и повторите загрузку; готовые данные автоматически не удаляются",
-                ),
-            )],
-            JobState::Publishing if session_refresh => Vec::new(),
-            JobState::Publishing => {
-                let mut notifications = vec![(
-                    "downloaded",
-                    context.message(
-                        job,
-                        "Скачивание завершено.",
-                        "публикуется",
-                        "подготовка библиотеки Plex",
-                        "файл будет перемещён в библиотеку и проверен в Plex",
-                    ),
-                )];
-                if job.provider() == media_core::Provider::Rezka {
-                    notifications.push((
-                        "encoding-complete",
-                        context.message(
-                            job,
-                            "Перекодирование завершено.",
-                            "публикуется",
-                            "подготовка библиотеки Plex",
-                            "видео и субтитры будут перемещены в библиотеку и проверены в Plex",
-                        ),
-                    ));
-                }
-                notifications
-            }
-            JobState::Partial => vec![
-                (
-                    "plex-added",
-                    context.message(
-                        job,
-                        "Видео добавлено в Plex.",
-                        "доступно",
-                        "публикация в Plex",
-                        "можно смотреть видео; список недостающих субтитров сохранён для повтора",
-                    ),
-                ),
-                (
-                    "partial",
-                    context.message(job, "Видео готово и добавлено в Plex, но часть субтитров скачать не удалось.", "завершено частично", "скачивание субтитров", "повторите задачу: готовое видео не будет скачиваться или перекодироваться заново"),
-                ),
-            ],
-            JobState::Completed if session_refresh => Vec::new(),
-            JobState::Completed => {
-                vec![
-                    (
-                        "plex-added",
-                        context.message(job, "Видео добавлено в Plex.", "доступно", "публикация в Plex", "можно смотреть в Plex"),
-                    ),
-                    (
-                        "completed",
-                        context.message(job, "Задача полностью завершена: видео и доступные субтитры готовы.", "завершено", "проверка результата", "дополнительных действий не требуется"),
-                    ),
-                ]
-            }
-            JobState::Failed => vec![(
-                "failed",
-                context.message(job, "Задача завершилась ошибкой.", "ошибка", "обработка медиа", "повторите загрузку; если ошибка повторится, попросите технические детали"),
-            )],
-            _ => Vec::new(),
-        },
-        _ => Vec::new(),
-    }
-}
-
-fn notification_dedupe_key(job: &Job, event_type: &str) -> Vec<u8> {
-    let mut key = job.id().into_uuid().as_bytes().to_vec();
-    if is_terminal_notification(event_type) {
-        key.extend_from_slice(event_type.as_bytes());
-    } else {
-        key.extend_from_slice(b"status-card");
-    }
-    key
-}
-
-fn is_terminal_notification(event_type: &str) -> bool {
-    matches!(
-        NotificationEventType::from_wire(event_type),
-        Some(
-            NotificationEventType::Completed
-                | NotificationEventType::Partial
-                | NotificationEventType::Failed
-        )
-    )
-}
-
-fn sanitized_error_code(error_code: &str) -> &str {
-    let safe_length = error_code
-        .char_indices()
-        .take_while(|(_, character)| {
-            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
-        })
-        .take(64)
-        .last()
-        .map_or(0, |(index, character)| index + character.len_utf8());
-    if safe_length == 0 {
-        "provider_error"
-    } else {
-        &error_code[..safe_length]
-    }
-}
-
-fn failure_description(error_code: &str) -> String {
-    let explanation = match error_code {
-        "stream_expired" => {
-            "Ссылка на видеопоток Rezka истекла. Автоматические попытки закончились; повторите задачу, чтобы получить новую ссылку."
-        }
-        "source_transfer_transient" => {
-            "CDN временно не смог передать видео. Автоматические попытки закончились; повторите задачу позже."
-        }
-        "source_transfer_rejected" => {
-            "CDN отклонил выбранный видеопоток. Проверьте доступ к переводу или выберите другой результат."
-        }
-        "runner_service_unavailable" => {
-            "Runner потерял связь с media-service. Повторите задачу после восстановления сервиса."
-        }
-        "runner_configuration_invalid" => {
-            "Runner настроен некорректно. Требуется проверить конфигурацию сервиса."
-        }
-        _ => {
-            "Не удалось скачать или обработать медиа. Повторите загрузку; если ошибка повторится, попросите технические детали."
-        }
-    };
-    explanation.to_owned()
 }
 
 fn replayed_lease(result: OperationResult) -> Result<Option<JobLease>, sea_orm::DbErr> {

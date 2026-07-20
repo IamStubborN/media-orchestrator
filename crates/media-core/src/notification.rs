@@ -9,7 +9,7 @@ const MAX_NOTIFICATION_CARD_KEY_BYTES: usize = 96;
 pub enum NotificationContent {
     /// Text payloads are retained only for outbox rows created before migration 24.
     LegacyMessage(String),
-    Media(MediaNotification),
+    Media(Box<MediaNotification>),
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
@@ -624,7 +624,7 @@ impl NotificationDelivery {
             event_type,
             status_key: Some(notification.card_key().to_owned()),
             message: String::new(),
-            content: NotificationContent::Media(notification),
+            content: NotificationContent::Media(Box::new(notification)),
             generation,
             attempt_count,
         })
