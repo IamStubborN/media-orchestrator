@@ -51,7 +51,8 @@ pub use notification::{
 pub use operation::OperationKey;
 pub use orchestration::{
     Checkpoint, CheckpointValue, JobEvent, JobEventKind, JobEventValidationError,
-    MAX_STAGE_ATTEMPTS, StageFailureOutcome, StageRef,
+    MAX_REZKA_STAGE_ATTEMPTS, MAX_STAGE_ATTEMPTS, StageFailureOutcome, StageRef,
+    max_stage_attempts,
 };
 pub use port::{
     ClientStore, IdentityStore, JobStore, LeaseStore, PortError, ReadinessPort,

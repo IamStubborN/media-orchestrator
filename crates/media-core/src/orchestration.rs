@@ -1,8 +1,17 @@
 use std::collections::BTreeMap;
 
-use crate::{JobEventId, JobState, NeedsActionReason};
+use crate::{JobEventId, JobState, NeedsActionReason, Provider};
 
 pub const MAX_STAGE_ATTEMPTS: u32 = 3;
+pub const MAX_REZKA_STAGE_ATTEMPTS: u32 = 20;
+
+#[must_use]
+pub const fn max_stage_attempts(provider: Provider) -> u32 {
+    match provider {
+        Provider::Rezka => MAX_REZKA_STAGE_ATTEMPTS,
+        Provider::Prowlarr => MAX_STAGE_ATTEMPTS,
+    }
+}
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum CheckpointValue {
@@ -22,7 +31,12 @@ pub enum StageFailureOutcome {
 impl StageFailureOutcome {
     #[must_use]
     pub const fn for_attempt(attempt: u32, retryable: bool) -> Self {
-        if retryable && attempt < MAX_STAGE_ATTEMPTS {
+        Self::for_attempt_with_limit(attempt, retryable, MAX_STAGE_ATTEMPTS)
+    }
+
+    #[must_use]
+    pub const fn for_attempt_with_limit(attempt: u32, retryable: bool, max_attempts: u32) -> Self {
+        if retryable && attempt < max_attempts {
             Self::Retry
         } else {
             Self::Failed

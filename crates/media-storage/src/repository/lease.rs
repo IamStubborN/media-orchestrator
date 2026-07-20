@@ -1,7 +1,7 @@
 use media_core::{
     PRIMARY_USER_ID, Checkpoint, CheckpointValue, ClientId, Job, JobEvent, JobEventKind, JobLease,
     JobState, LeaseId, LeaseStore, NotificationEventType, NotifyScope, OperationKey, PortError,
-    StageFailureOutcome, StageRef, SECONDARY_USER_ID,
+    Provider, StageFailureOutcome, StageRef, SECONDARY_USER_ID, max_stage_attempts,
 };
 use sea_orm::{
     ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, Statement, TransactionTrait,
@@ -867,7 +867,7 @@ async fn apply_event(
         }
         JobEventKind::StageStarted(stage) => {
             require_running(&current)?;
-            start_stage(transaction, current.id(), stage).await?;
+            start_stage(transaction, current.id(), current.provider(), stage).await?;
         }
         JobEventKind::StageCheckpoint { stage, checkpoint } => {
             require_running(&current)?;
@@ -883,8 +883,15 @@ async fn apply_event(
             error_code,
         } => {
             require_running(&current)?;
-            let terminal =
-                fail_stage(transaction, current.id(), stage, *retryable, error_code).await?;
+            let terminal = fail_stage(
+                transaction,
+                current.id(),
+                current.provider(),
+                stage,
+                *retryable,
+                error_code,
+            )
+            .await?;
             if terminal {
                 transition_job(transaction, &current, JobState::Failed, None).await?;
                 release_lease(transaction, lease).await?;
@@ -1027,6 +1034,7 @@ async fn find_task(
 async fn start_stage(
     transaction: &sea_orm::DatabaseTransaction,
     job_id: media_core::JobId,
+    provider: Provider,
     stage: &StageRef,
 ) -> Result<(), sea_orm::DbErr> {
     let task_id = ensure_task(transaction, job_id, stage.task_ordinal()).await?;
@@ -1044,13 +1052,18 @@ async fn start_stage(
              completed_at = NULL, \
              started_at = COALESCE(job_stages.started_at, now()), updated_at = now() \
              WHERE job_stages.state IN ('pending', 'completed') \
-             AND (job_stages.state = 'completed' OR job_stages.attempt_count < 3) \
+             AND (job_stages.state = 'completed' OR job_stages.attempt_count < $5) \
              AND job_stages.ordinal = EXCLUDED.ordinal RETURNING attempt_count",
             [
                 Uuid::new_v4().into(),
                 task_id.into(),
                 stage.name().into(),
                 ordinal.into(),
+                i32::try_from(max_stage_attempts(provider))
+                    .map_err(|_| {
+                        sea_orm::DbErr::Type("stage attempt limit is out of range".to_owned())
+                    })?
+                    .into(),
             ],
         ))
         .await?;
@@ -1105,6 +1118,7 @@ async fn update_stage_checkpoint(
 async fn fail_stage(
     transaction: &sea_orm::DatabaseTransaction,
     job_id: media_core::JobId,
+    provider: Provider,
     stage: &StageRef,
     retryable: bool,
     error_code: &str,
@@ -1123,8 +1137,11 @@ async fn fail_stage(
         .ok_or_else(|| sea_orm::DbErr::RecordNotFound("running stage not found".to_owned()))?;
     let attempt = u32::try_from(row.try_get::<i32>("", "attempt_count")?)
         .map_err(|_| sea_orm::DbErr::Type("invalid stage attempt count".to_owned()))?;
-    let terminal =
-        StageFailureOutcome::for_attempt(attempt, retryable) == StageFailureOutcome::Failed;
+    let terminal = StageFailureOutcome::for_attempt_with_limit(
+        attempt,
+        retryable,
+        max_stage_attempts(provider),
+    ) == StageFailureOutcome::Failed;
     let state = if terminal { "failed" } else { "pending" };
     transaction
         .execute_raw(Statement::from_sql_and_values(

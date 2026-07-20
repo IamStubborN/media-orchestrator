@@ -953,7 +953,15 @@ async fn successful_runner_transition_chain_reaches_completed_and_releases_the_l
 async fn retryable_stage_fails_terminally_on_third_attempt_and_releases_lease() {
     let (test_db, jobs, leases) = setup().await;
     let created = jobs
-        .create(operation_key(), new_job("retry-stage"))
+        .create(
+            operation_key(),
+            new_job_for_provider(
+                "retry-stage",
+                PRIMARY_USER_ID,
+                NotifyScope::Initiator,
+                Provider::Prowlarr,
+            ),
+        )
         .await
         .unwrap();
     for attempt in 1..=3 {
@@ -1035,6 +1043,87 @@ async fn retryable_stage_fails_terminally_on_third_attempt_and_releases_lease() 
         .unwrap()
         .unwrap();
     assert_eq!(persisted.state(), JobState::Failed);
+}
+
+#[tokio::test]
+async fn retryable_rezka_stage_fails_terminally_on_twentieth_attempt() {
+    let (test_db, jobs, leases) = setup().await;
+    let created = jobs
+        .create(operation_key(), new_job("rezka-retry-stage"))
+        .await
+        .unwrap();
+
+    for attempt in 1..=20 {
+        let lease = leases
+            .lease_next(
+                operation_key(),
+                RUNNER_CLIENT_ID,
+                time::Duration::seconds(60),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        leases
+            .report_event(
+                operation_key(),
+                lease.lease_id(),
+                RUNNER_CLIENT_ID,
+                JobEvent::started(JobEventId::new()),
+            )
+            .await
+            .unwrap();
+        leases
+            .report_event(
+                operation_key(),
+                lease.lease_id(),
+                RUNNER_CLIENT_ID,
+                JobEvent::stage_started(JobEventId::new(), 0, "download".to_owned(), 0).unwrap(),
+            )
+            .await
+            .unwrap();
+        let job = leases
+            .report_event(
+                operation_key(),
+                lease.lease_id(),
+                RUNNER_CLIENT_ID,
+                JobEvent::stage_failed(
+                    JobEventId::new(),
+                    0,
+                    "download".to_owned(),
+                    0,
+                    true,
+                    "source_transfer_transient".to_owned(),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            job.state(),
+            if attempt < 20 {
+                JobState::Queued
+            } else {
+                JobState::Failed
+            },
+        );
+    }
+
+    let stage = query(
+        test_db.connection(),
+        "SELECT state, attempt_count FROM job_stages WHERE name = 'download'",
+    )
+    .await;
+    assert_eq!(stage[0].try_get::<String>("", "state").unwrap(), "failed");
+    assert_eq!(stage[0].try_get::<i32>("", "attempt_count").unwrap(), 20);
+    assert_eq!(
+        jobs.find_for_owner(created.id(), PRIMARY_USER_ID)
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        JobState::Failed,
+    );
 }
 
 #[tokio::test]
