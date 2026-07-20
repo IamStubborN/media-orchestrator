@@ -112,8 +112,9 @@ DOCKER_HOST=ssh://host.example.invalid \
   -t "media-orchestrator-runner:local-$revision" .
 ```
 
-The runner package layer is independent of the application binary, so ffmpeg
-and VAAPI packages remain cached across normal Rust-only changes.
+The runner package layer is independent of the application binary, so ffmpeg,
+VAAPI packages, and the pinned checksum-verified `yt-dlp` executable remain
+cached across normal Rust-only changes.
 
 ## Safe Deployment
 
@@ -170,9 +171,9 @@ continue independently, and Rezka staging remains durable. Start the intended
 runner image and allow the lease to expire. The next lease attempt increments
 `attempt_count` and resumes from the durable provider/staging state.
 
-An exact Prowlarr info hash is reused idempotently. Rezka range downloads reuse a
-valid partial, completed video is not re-encoded during subtitle-only recovery,
-and published files are never automatically deleted.
+An exact Prowlarr info hash is reused idempotently. Rezka HTTP transfers resume
+through `yt-dlp` staging files, completed video is not re-encoded during
+subtitle-only recovery, and published files are never automatically deleted.
 
 ## Plex Pending
 

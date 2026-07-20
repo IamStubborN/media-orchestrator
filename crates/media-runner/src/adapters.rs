@@ -7,16 +7,18 @@ use std::{
 use async_trait::async_trait;
 use futures_util::StreamExt as _;
 use secrecy::{ExposeSecret as _, SecretString};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 
 use crate::{
-    Cancellation, FileSystemPort, HttpPort, MediaProbe, PlexCheck, PlexExpectation,
-    PlexObservation, ProcessCommand, ProcessPort, ResumeAction, RunnerPortError, RunnerServicePort,
-    SensitiveUrl, StorageRoots, decide_resume,
+    Cancellation, FileSystemPort, HttpPort, MediaProbe, MediaTransferPort, MediaTransferRequest,
+    PlexCheck, PlexExpectation, PlexObservation, ProcessCommand, ProcessPort, ResumeAction,
+    RunnerPortError, RunnerServicePort, SensitiveUrl, StorageRoots, TransferObservation,
+    TransferSource, VideoSourceKind, decide_resume,
 };
 
 const MAX_SUBTITLE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PROCESS_ERROR_BYTES: usize = 16 * 1024;
+const YT_DLP_PROGRESS_PREFIX: &str = "__MEDIA_PROGRESS__\t";
 
 #[derive(Debug, Copy, Clone, Default)]
 pub struct TokioFileSystem;
@@ -503,6 +505,235 @@ fn parse_unsatisfied_range(value: &str) -> Option<u64> {
 }
 
 #[derive(Debug, Clone)]
+pub struct YtDlpTransferAdapter {
+    program: PathBuf,
+    timeout: Duration,
+}
+
+impl YtDlpTransferAdapter {
+    #[must_use]
+    pub fn new(program: impl Into<PathBuf>, timeout: Duration) -> Self {
+        Self {
+            program: program.into(),
+            timeout,
+        }
+    }
+}
+
+#[async_trait]
+impl MediaTransferPort for YtDlpTransferAdapter {
+    async fn download(
+        &self,
+        request: MediaTransferRequest<'_>,
+        reporter: &dyn crate::StageReporter,
+        cancellation: &dyn Cancellation,
+    ) -> Result<(), RunnerPortError> {
+        if cancellation.is_cancelled() {
+            return Err(RunnerPortError::Cancelled);
+        }
+        let output = request
+            .output_path
+            .to_str()
+            .ok_or(RunnerPortError::InvalidWork)?;
+        let progress_template = concat!(
+            "download:",
+            "__MEDIA_PROGRESS__\t",
+            "%(progress.downloaded_bytes)s\t",
+            "%(progress.total_bytes)s\t",
+            "%(progress.total_bytes_estimate)s\t",
+            "%(progress.speed)s\t",
+            "%(progress.eta)s"
+        );
+        let mut child = tokio::process::Command::new(&self.program)
+            .args([
+                "--ignore-config",
+                "--no-playlist",
+                "--continue",
+                "--newline",
+                "--progress",
+                "--progress-delta",
+                "5",
+                "--socket-timeout",
+                "30",
+                "--retries",
+                "20",
+                "--fragment-retries",
+                "20",
+                "--file-access-retries",
+                "3",
+                "--retry-sleep",
+                "http:exp=1:20",
+                "--retry-sleep",
+                "fragment:exp=1:20",
+                "--concurrent-fragments",
+                "4",
+                "--progress-template",
+                progress_template,
+                "--output",
+                output,
+                "--batch-file",
+                "-",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|_| RunnerPortError::Process)?;
+        let mut stdin = child.stdin.take().ok_or(RunnerPortError::Process)?;
+        stdin
+            .write_all(request.source_url.as_url().as_str().as_bytes())
+            .await
+            .map_err(|_| RunnerPortError::Process)?;
+        stdin
+            .write_all(b"\n")
+            .await
+            .map_err(|_| RunnerPortError::Process)?;
+        drop(stdin);
+        let stdout = child.stdout.take().ok_or(RunnerPortError::Process)?;
+        let stderr = child.stderr.take().ok_or(RunnerPortError::Process)?;
+        let mut lines = BufReader::new(stdout).lines();
+        let mut stderr_task = Some(tokio::spawn(capture_process_stderr(stderr)));
+        let started = tokio::time::Instant::now();
+        let source = transfer_source(request.source_kind);
+        let status = loop {
+            if cancellation.is_cancelled() {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                let _ = collect_process_stderr(&mut stderr_task).await;
+                return Err(RunnerPortError::Cancelled);
+            }
+            if started.elapsed() >= self.timeout {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                let stderr = collect_process_stderr(&mut stderr_task).await;
+                log_process_failure("yt-dlp", None, &stderr, "timeout");
+                return Err(RunnerPortError::SourceTransferTransient);
+            }
+            match tokio::time::timeout(Duration::from_millis(200), lines.next_line()).await {
+                Ok(Ok(Some(line))) => {
+                    if let Some(observation) = parse_yt_dlp_progress(&line, source) {
+                        reporter.stage_progress("download", observation).await;
+                    }
+                }
+                Ok(Ok(None)) | Err(_) => {}
+                Ok(Err(_)) => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    let _ = collect_process_stderr(&mut stderr_task).await;
+                    return Err(RunnerPortError::SourceTransferTransient);
+                }
+            }
+            if let Some(status) = child.try_wait().map_err(|_| RunnerPortError::Process)? {
+                break status;
+            }
+        };
+        let stderr = collect_process_stderr(&mut stderr_task).await;
+        if !status.success() {
+            log_process_failure("yt-dlp", status.code(), &stderr, "exit");
+            return Err(classify_yt_dlp_failure(&stderr));
+        }
+        let downloaded_bytes = tokio::fs::metadata(request.output_path)
+            .await
+            .ok()
+            .filter(|metadata| metadata.is_file() && metadata.len() > 0)
+            .map(|metadata| metadata.len())
+            .ok_or(RunnerPortError::SourceTransferTransient)?;
+        reporter
+            .stage_progress(
+                "download",
+                TransferObservation {
+                    source,
+                    state: "complete".to_owned(),
+                    progress_percent: Some(100),
+                    downloaded_bytes: Some(downloaded_bytes),
+                    total_bytes: Some(downloaded_bytes),
+                    download_speed_bps: None,
+                    eta_seconds: Some(0),
+                    final_observation: true,
+                },
+            )
+            .await;
+        Ok(())
+    }
+}
+
+const fn transfer_source(kind: VideoSourceKind) -> TransferSource {
+    match kind {
+        VideoSourceKind::Mp4 => TransferSource::Direct,
+        VideoSourceKind::Hls => TransferSource::Hls,
+    }
+}
+
+fn parse_yt_dlp_progress(line: &str, source: TransferSource) -> Option<TransferObservation> {
+    let fields = line.strip_prefix(YT_DLP_PROGRESS_PREFIX)?;
+    let mut fields = fields.split('\t');
+    let downloaded_bytes = parse_yt_dlp_number(fields.next()?);
+    let exact_total_bytes = parse_yt_dlp_number(fields.next()?);
+    let estimated_total_bytes = parse_yt_dlp_number(fields.next().unwrap_or_default());
+    let total_bytes = exact_total_bytes.or(estimated_total_bytes);
+    let download_speed_bps = parse_yt_dlp_number(fields.next().unwrap_or_default());
+    let eta_seconds = parse_yt_dlp_number(fields.next().unwrap_or_default());
+    let progress_percent = match (downloaded_bytes, total_bytes) {
+        (Some(downloaded), Some(total)) if total > 0 => {
+            Some(((downloaded.min(total) as f64 / total as f64) * 100.0).round() as u8)
+        }
+        _ => None,
+    };
+    Some(TransferObservation {
+        source,
+        state: "downloading".to_owned(),
+        progress_percent,
+        downloaded_bytes,
+        total_bytes,
+        download_speed_bps,
+        eta_seconds,
+        final_observation: false,
+    })
+}
+
+fn parse_yt_dlp_number(value: &str) -> Option<u64> {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("NA") || value.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|number| number.is_finite() && *number >= 0.0 && *number <= u64::MAX as f64)
+        .map(|number| number.round() as u64)
+}
+
+fn classify_yt_dlp_failure(stderr: &[u8]) -> RunnerPortError {
+    let stderr = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    if [
+        "http error 401",
+        "http error 403",
+        "http error 410",
+        "url has expired",
+        "url expired",
+        "signature has expired",
+    ]
+    .iter()
+    .any(|marker| stderr.contains(marker))
+    {
+        RunnerPortError::SourceExpired
+    } else if [
+        "unsupported url",
+        "video unavailable",
+        "no video formats found",
+        "private video",
+    ]
+    .iter()
+    .any(|marker| stderr.contains(marker))
+    {
+        RunnerPortError::SourceTransferRejected
+    } else {
+        RunnerPortError::SourceTransferTransient
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct TokioProcessAdapter {
     ffprobe_program: PathBuf,
     ffmpeg_program: PathBuf,
@@ -594,7 +825,7 @@ impl ProcessPort for TokioProcessAdapter {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
                 let stderr = collect_process_stderr(&mut stderr_task).await;
-                log_process_failure(None, &stderr, "timeout");
+                log_process_failure("ffmpeg", None, &stderr, "timeout");
                 return Err(RunnerPortError::Process);
             }
             match child.try_wait().map_err(|_| RunnerPortError::Process)? {
@@ -604,92 +835,10 @@ impl ProcessPort for TokioProcessAdapter {
                 }
                 Some(status) => {
                     let stderr = collect_process_stderr(&mut stderr_task).await;
-                    log_process_failure(status.code(), &stderr, "exit");
+                    log_process_failure("ffmpeg", status.code(), &stderr, "exit");
                     return Err(RunnerPortError::Process);
                 }
                 None => tokio::time::sleep(Duration::from_millis(100)).await,
-            }
-        }
-    }
-
-    async fn run_with_progress(
-        &self,
-        command: &ProcessCommand,
-        output_path: &Path,
-        reporter: &dyn crate::StageReporter,
-        cancellation: &dyn Cancellation,
-    ) -> Result<(), RunnerPortError> {
-        if command.program() != "ffmpeg" {
-            return Err(RunnerPortError::Process);
-        }
-        if cancellation.is_cancelled() {
-            return Err(RunnerPortError::Cancelled);
-        }
-        let mut child = tokio::process::Command::new(&self.ffmpeg_program)
-            .args(command.args())
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|_| RunnerPortError::Process)?;
-        let stderr = child.stderr.take().ok_or(RunnerPortError::Process)?;
-        let mut stderr_task = Some(tokio::spawn(capture_process_stderr(stderr)));
-        let started = tokio::time::Instant::now();
-        let mut previous_sample = started;
-        let mut previous_bytes = 0_u64;
-        loop {
-            if cancellation.is_cancelled() {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                let _ = collect_process_stderr(&mut stderr_task).await;
-                return Err(RunnerPortError::Cancelled);
-            }
-            if started.elapsed() >= self.timeout {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                let stderr = collect_process_stderr(&mut stderr_task).await;
-                log_process_failure(None, &stderr, "timeout");
-                return Err(RunnerPortError::SourceTransferTransient);
-            }
-            match child.try_wait().map_err(|_| RunnerPortError::Process)? {
-                Some(status) if status.success() => {
-                    let _ = collect_process_stderr(&mut stderr_task).await;
-                    let downloaded_bytes = tokio::fs::metadata(output_path)
-                        .await
-                        .ok()
-                        .map(|metadata| metadata.len());
-                    reporter
-                        .stage_progress("download", hls_observation(downloaded_bytes, None, true))
-                        .await;
-                    return Ok(());
-                }
-                Some(status) => {
-                    let stderr = collect_process_stderr(&mut stderr_task).await;
-                    log_process_failure(status.code(), &stderr, "exit");
-                    return Err(RunnerPortError::SourceTransferTransient);
-                }
-                None => {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    let now = tokio::time::Instant::now();
-                    let downloaded_bytes = tokio::fs::metadata(output_path)
-                        .await
-                        .ok()
-                        .map(|metadata| metadata.len());
-                    let speed = downloaded_bytes.and_then(|bytes| {
-                        let elapsed = now.duration_since(previous_sample).as_secs_f64();
-                        (bytes > previous_bytes && elapsed > 0.0)
-                            .then(|| ((bytes - previous_bytes) as f64 / elapsed).round() as u64)
-                            .filter(|speed| *speed > 0)
-                    });
-                    if let Some(bytes) = downloaded_bytes {
-                        previous_bytes = bytes;
-                        previous_sample = now;
-                    }
-                    reporter
-                        .stage_progress("download", hls_observation(downloaded_bytes, speed, false))
-                        .await;
-                }
             }
         }
     }
@@ -716,13 +865,14 @@ async fn collect_process_stderr(task: &mut Option<tokio::task::JoinHandle<Vec<u8
     }
 }
 
-fn log_process_failure(exit_code: Option<i32>, stderr: &[u8], reason: &str) {
+fn log_process_failure(program: &str, exit_code: Option<i32>, stderr: &[u8], reason: &str) {
     let summary = redact_process_stderr(stderr);
     tracing::warn!(
         exit_code,
         reason,
         stderr = %summary,
-        "ffmpeg process failed"
+        program,
+        "media process failed"
     );
 }
 
@@ -767,27 +917,6 @@ mod process_error_tests {
         );
         assert!(!summary.contains("secret"));
         assert!(!summary.contains("cdn.example"));
-    }
-}
-
-fn hls_observation(
-    downloaded_bytes: Option<u64>,
-    download_speed_bps: Option<u64>,
-    final_observation: bool,
-) -> crate::TransferObservation {
-    crate::TransferObservation {
-        source: crate::TransferSource::Hls,
-        state: if final_observation {
-            "complete".to_owned()
-        } else {
-            "downloading".to_owned()
-        },
-        progress_percent: None,
-        downloaded_bytes,
-        total_bytes: None,
-        download_speed_bps,
-        eta_seconds: None,
-        final_observation,
     }
 }
 

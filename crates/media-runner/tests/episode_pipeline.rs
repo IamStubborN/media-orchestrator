@@ -7,9 +7,9 @@ use std::{
 use async_trait::async_trait;
 use media_runner::{
     Cancellation, EpisodeOutcome, EpisodePipeline, EpisodeWork, FileSystemPort, GIB, HttpPort,
-    MediaProbe, PlexCheck, PlexExpectation, PlexObservation, ProcessCommand, ProcessPort,
-    ProviderKind, RunnerPortError, RunnerServicePort, SensitiveUrl, StageReporter, SubtitleTrack,
-    VideoSourceKind,
+    MediaProbe, MediaTransferPort, MediaTransferRequest, PlexCheck, PlexExpectation,
+    PlexObservation, ProcessCommand, ProcessPort, ProviderKind, RunnerPortError, RunnerServicePort,
+    SensitiveUrl, StageReporter, SubtitleTrack, VideoSourceKind,
 };
 
 #[derive(Default)]
@@ -187,6 +187,25 @@ impl HttpPort for FakeHttp {
     }
 }
 
+#[async_trait]
+impl MediaTransferPort for FakeHttp {
+    async fn download(
+        &self,
+        _request: MediaTransferRequest<'_>,
+        _reporter: &dyn StageReporter,
+        _cancellation: &dyn Cancellation,
+    ) -> Result<(), RunnerPortError> {
+        if let Some(error) = self.video_failures.lock().unwrap().pop_front() {
+            return Err(error);
+        }
+        if self.cancel_video {
+            return Err(RunnerPortError::Cancelled);
+        }
+        self.video_offsets.lock().unwrap().push(0);
+        Ok(())
+    }
+}
+
 struct FakeProcess {
     probes: Mutex<VecDeque<MediaProbe>>,
     commands: Mutex<Vec<ProcessCommand>>,
@@ -329,7 +348,13 @@ async fn rezka_episode_runs_one_pipeline_and_publishes_video_last() {
         checks: Mutex::new(VecDeque::from([matched(&work.plex)])),
         scans: Mutex::default(),
     });
-    let pipeline = EpisodePipeline::new(filesystem.clone(), http.clone(), process.clone(), service);
+    let pipeline = EpisodePipeline::new(
+        filesystem.clone(),
+        http.clone(),
+        http.clone(),
+        process.clone(),
+        service,
+    );
 
     let outcome = pipeline.run(&work, &NeverCancelled, &()).await.unwrap();
 
@@ -357,7 +382,13 @@ async fn expired_source_retry_downloads_and_publishes_only_after_a_fresh_attempt
         checks: Mutex::new(VecDeque::from([matched(&work.plex)])),
         scans: Mutex::default(),
     });
-    let pipeline = EpisodePipeline::new(filesystem.clone(), http.clone(), process, service);
+    let pipeline = EpisodePipeline::new(
+        filesystem.clone(),
+        http.clone(),
+        http.clone(),
+        process,
+        service,
+    );
     let reporter = RecordingReporter::default();
 
     assert_eq!(
@@ -418,7 +449,13 @@ async fn mapped_special_publishes_video_and_subtitles_to_plex_specials() {
         checks: Mutex::new(VecDeque::from([matched(&work.plex)])),
         scans: Mutex::default(),
     });
-    let pipeline = EpisodePipeline::new(filesystem.clone(), http, process, service.clone());
+    let pipeline = EpisodePipeline::new(
+        filesystem.clone(),
+        http.clone(),
+        http,
+        process,
+        service.clone(),
+    );
 
     assert_eq!(
         pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
@@ -436,7 +473,7 @@ async fn mapped_special_publishes_video_and_subtitles_to_plex_specials() {
 }
 
 #[tokio::test]
-async fn rezka_hls_fallback_uses_ffmpeg_ingest_without_http_range_download() {
+async fn rezka_hls_uses_the_media_transfer_port_before_transcoding() {
     let mut work = work();
     work.source_kind = VideoSourceKind::Hls;
     let filesystem = Arc::new(FakeFs::with_available(50 * GIB));
@@ -451,7 +488,13 @@ async fn rezka_hls_fallback_uses_ffmpeg_ingest_without_http_range_download() {
         scans: Mutex::default(),
     });
     let reporter = RecordingReporter::default();
-    let pipeline = EpisodePipeline::new(filesystem, http.clone(), process.clone(), service);
+    let pipeline = EpisodePipeline::new(
+        filesystem,
+        http.clone(),
+        http.clone(),
+        process.clone(),
+        service,
+    );
 
     let outcome = pipeline
         .run(&work, &NeverCancelled, &reporter)
@@ -459,15 +502,9 @@ async fn rezka_hls_fallback_uses_ffmpeg_ingest_without_http_range_download() {
         .unwrap();
 
     assert_eq!(outcome, EpisodeOutcome::Completed);
-    assert!(http.video_offsets.lock().unwrap().is_empty());
+    assert_eq!(http.video_offsets.lock().unwrap().as_slice(), &[0]);
     let commands = process.commands.lock().unwrap();
-    assert_eq!(commands.len(), 2);
-    assert!(
-        commands[0]
-            .args()
-            .windows(2)
-            .any(|args| args == ["-c", "copy"])
-    );
+    assert_eq!(commands.len(), 1);
     assert!(!format!("{:?}", commands[0]).contains("token=secret"));
     assert_eq!(
         reporter.events.lock().unwrap().as_slice(),
@@ -497,7 +534,7 @@ async fn storage_preflight_uses_the_probed_source_size() {
         checks: Mutex::default(),
         scans: Mutex::default(),
     });
-    let pipeline = EpisodePipeline::new(filesystem, http.clone(), process, service)
+    let pipeline = EpisodePipeline::new(filesystem, http.clone(), http.clone(), process, service)
         .with_storage_reserve_bytes(20 * GIB);
     let reporter = RecordingReporter::default();
 
@@ -536,7 +573,7 @@ async fn unknown_source_size_uses_duration_instead_of_a_fixed_twenty_gib_peak() 
         checks: Mutex::new(VecDeque::from([matched(&work.plex)])),
         scans: Mutex::default(),
     });
-    let pipeline = EpisodePipeline::new(filesystem, http.clone(), process, service);
+    let pipeline = EpisodePipeline::new(filesystem, http.clone(), http.clone(), process, service);
 
     assert_eq!(
         pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
@@ -567,7 +604,7 @@ async fn failed_subtitle_is_partial_and_retry_fetches_only_that_track() {
         checks: Mutex::new(VecDeque::from([matched(&work.plex), matched(&work.plex)])),
         scans: Mutex::default(),
     });
-    let pipeline = EpisodePipeline::new(filesystem, http.clone(), process, service);
+    let pipeline = EpisodePipeline::new(filesystem, http.clone(), http.clone(), process, service);
 
     assert_eq!(
         pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
@@ -608,7 +645,13 @@ async fn existing_publication_skips_download_and_transcode_but_reconciles_plex()
         checks: Mutex::new(VecDeque::from([PlexCheck::Pending])),
         scans: Mutex::default(),
     });
-    let pipeline = EpisodePipeline::new(filesystem, http.clone(), process.clone(), service);
+    let pipeline = EpisodePipeline::new(
+        filesystem,
+        http.clone(),
+        http.clone(),
+        process.clone(),
+        service,
+    );
 
     assert_eq!(
         pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
@@ -641,7 +684,13 @@ async fn legacy_hd_publication_is_replaced_with_full_hd_output() {
         checks: Mutex::new(VecDeque::from([matched(&work.plex)])),
         scans: Mutex::default(),
     });
-    let pipeline = EpisodePipeline::new(filesystem.clone(), http.clone(), process.clone(), service);
+    let pipeline = EpisodePipeline::new(
+        filesystem.clone(),
+        http.clone(),
+        http.clone(),
+        process.clone(),
+        service,
+    );
 
     assert_eq!(
         pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
@@ -669,7 +718,7 @@ async fn rezka_transcode_emits_a_transcode_stage_start() {
         checks: Mutex::new(VecDeque::from([matched(&work.plex)])),
         scans: Mutex::default(),
     });
-    let pipeline = EpisodePipeline::new(filesystem, http, process, service);
+    let pipeline = EpisodePipeline::new(filesystem, http.clone(), http, process, service);
     let reporter = RecordingReporter::default();
 
     assert_eq!(
@@ -717,7 +766,13 @@ async fn publication_without_expected_audio_metadata_is_replaced() {
         checks: Mutex::new(VecDeque::from([matched(&work.plex)])),
         scans: Mutex::default(),
     });
-    let pipeline = EpisodePipeline::new(filesystem, http.clone(), process.clone(), service);
+    let pipeline = EpisodePipeline::new(
+        filesystem,
+        http.clone(),
+        http.clone(),
+        process.clone(),
+        service,
+    );
 
     assert_eq!(
         pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
@@ -765,7 +820,7 @@ async fn skipped_transcode_emits_no_transcode_stage_start() {
         checks: Mutex::new(VecDeque::from([matched(&work.plex)])),
         scans: Mutex::default(),
     });
-    let pipeline = EpisodePipeline::new(filesystem, http, process, service);
+    let pipeline = EpisodePipeline::new(filesystem, http.clone(), http, process, service);
     let reporter = RecordingReporter::default();
 
     pipeline
@@ -800,7 +855,13 @@ async fn complete_partial_skips_download_but_still_transcodes_and_publishes() {
         checks: Mutex::new(VecDeque::from([matched(&work.plex)])),
         scans: Mutex::default(),
     });
-    let pipeline = EpisodePipeline::new(filesystem.clone(), http.clone(), process.clone(), service);
+    let pipeline = EpisodePipeline::new(
+        filesystem.clone(),
+        http.clone(),
+        http.clone(),
+        process.clone(),
+        service,
+    );
 
     assert_eq!(
         pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
@@ -832,7 +893,13 @@ async fn torrent_work_never_touches_download_transcode_or_publication() {
         checks: Mutex::new(VecDeque::from([PlexCheck::Mismatch])),
         scans: Mutex::default(),
     });
-    let pipeline = EpisodePipeline::new(filesystem.clone(), http.clone(), process.clone(), service);
+    let pipeline = EpisodePipeline::new(
+        filesystem.clone(),
+        http.clone(),
+        http.clone(),
+        process.clone(),
+        service,
+    );
 
     assert_eq!(
         pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
@@ -860,7 +927,13 @@ async fn cancellation_from_a_port_stops_before_transcode_and_publication() {
         checks: Mutex::default(),
         scans: Mutex::default(),
     });
-    let pipeline = EpisodePipeline::new(filesystem.clone(), http, process.clone(), service);
+    let pipeline = EpisodePipeline::new(
+        filesystem.clone(),
+        http.clone(),
+        http,
+        process.clone(),
+        service,
+    );
 
     assert_eq!(
         pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
@@ -901,7 +974,7 @@ async fn job_runner_processes_episode_work_items_sequentially() {
         ])),
         scans: Mutex::default(),
     });
-    let pipeline = EpisodePipeline::new(filesystem, http, process, service);
+    let pipeline = EpisodePipeline::new(filesystem, http.clone(), http, process, service);
 
     assert_eq!(
         pipeline

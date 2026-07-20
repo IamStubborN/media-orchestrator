@@ -2,7 +2,9 @@ use std::path::Path;
 
 use async_trait::async_trait;
 
-use crate::{MediaProbe, PlexExpectation, PlexObservation, ProcessCommand, SensitiveUrl};
+use crate::{
+    MediaProbe, PlexExpectation, PlexObservation, ProcessCommand, SensitiveUrl, VideoSourceKind,
+};
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
 pub enum RunnerPortError {
@@ -51,6 +53,23 @@ pub struct TransferObservation {
 pub struct TransferProgressContext<'a> {
     pub total_bytes: Option<u64>,
     pub reporter: &'a dyn StageReporter,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct MediaTransferRequest<'a> {
+    pub source_url: &'a SensitiveUrl,
+    pub source_kind: VideoSourceKind,
+    pub output_path: &'a Path,
+}
+
+#[async_trait]
+pub trait MediaTransferPort: Send + Sync {
+    async fn download(
+        &self,
+        request: MediaTransferRequest<'_>,
+        reporter: &dyn StageReporter,
+        cancellation: &dyn Cancellation,
+    ) -> Result<(), RunnerPortError>;
 }
 
 /// Reports the start of a named pipeline sub-stage. These are best-effort
@@ -146,16 +165,6 @@ pub trait ProcessPort: Send + Sync {
         command: &ProcessCommand,
         cancellation: &dyn Cancellation,
     ) -> Result<(), RunnerPortError>;
-
-    async fn run_with_progress(
-        &self,
-        command: &ProcessCommand,
-        _output_path: &Path,
-        _reporter: &dyn StageReporter,
-        cancellation: &dyn Cancellation,
-    ) -> Result<(), RunnerPortError> {
-        self.run(command, cancellation).await
-    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

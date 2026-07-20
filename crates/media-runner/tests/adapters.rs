@@ -5,10 +5,11 @@ use std::{
 
 use async_trait::async_trait;
 use media_runner::{
-    Cancellation, FileSystemPort, HttpPort, HttpRunnerServiceAdapter, PlexCheck, PlexExpectation,
-    ProcessPort, ReqwestHttpAdapter, RunnerPortError, RunnerServicePort, SensitiveUrl,
-    StageReporter, StorageRoots, TokioFileSystem, TokioProcessAdapter, TransferObservation,
-    TransferSource, build_hls_ingest_command,
+    Cancellation, FileSystemPort, HttpPort, HttpRunnerServiceAdapter, MediaTransferPort,
+    MediaTransferRequest, PlexCheck, PlexExpectation, ProcessPort, ReqwestHttpAdapter,
+    RunnerPortError, RunnerServicePort, SensitiveUrl, StageReporter, StorageRoots, TokioFileSystem,
+    TokioProcessAdapter, TransferObservation, TransferSource, VideoSourceKind,
+    YtDlpTransferAdapter,
 };
 use secrecy::SecretString;
 use tempfile::tempdir;
@@ -389,69 +390,77 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"h264","width":1280,
 
 #[cfg(unix)]
 #[tokio::test]
-async fn process_adapter_reports_hls_bytes_without_inventing_percent_or_eta() {
+async fn yt_dlp_adapter_uses_resumable_retries_and_reports_machine_progress() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let temporary = tempdir().unwrap();
-    let ffmpeg = temporary.path().join("ffmpeg-fixture");
+    let executable = temporary.path().join("yt-dlp-fixture");
+    let arguments = temporary.path().join("arguments");
     std::fs::write(
-        &ffmpeg,
-        r#"#!/bin/sh
-for argument do output=$argument; done
-printf 'abc' > "$output"
-sleep 0.2
-printf 'def' >> "$output"
+        &executable,
+        format!(
+            r#"#!/bin/sh
+printf '%s\n' "$@" > '{}'
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output" ]; then shift; output=$1; fi
+  shift
+done
+printf '__MEDIA_PROGRESS__\t1024\t2048\tNA\t512\t2\n'
+printf 'video' > "$output"
 "#,
+            arguments.display()
+        ),
     )
     .unwrap();
-    std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let output = temporary.path().join("episode.partial.mkv");
-    let input = SensitiveUrl::parse("https://cdn.example/playlist.m3u8", "video").unwrap();
-    let command = build_hls_ingest_command(&input, &output).unwrap();
-    let adapter =
-        TokioProcessAdapter::new("/usr/bin/false", &ffmpeg, std::time::Duration::from_secs(2));
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let output = temporary.path().join("source.partial.mkv");
+    let url = SensitiveUrl::parse(
+        "https://cdn.example/playlist.m3u8?token=never-log-me",
+        "episode-video",
+    )
+    .unwrap();
     let reporter = ProgressRecorder::default();
+    let adapter = YtDlpTransferAdapter::new(&executable, std::time::Duration::from_secs(2));
 
     adapter
-        .run_with_progress(&command, &output, &reporter, &Active)
+        .download(
+            MediaTransferRequest {
+                source_url: &url,
+                source_kind: VideoSourceKind::Hls,
+                output_path: &output,
+            },
+            &reporter,
+            &Active,
+        )
         .await
         .unwrap();
 
+    assert_eq!(std::fs::read(&output).unwrap(), b"video");
+    let arguments = std::fs::read_to_string(arguments).unwrap();
+    for expected in [
+        "--ignore-config",
+        "--continue",
+        "--retries",
+        "20",
+        "--fragment-retries",
+        "--concurrent-fragments",
+        "4",
+        "--batch-file",
+        "-",
+    ] {
+        assert!(arguments.lines().any(|argument| argument == expected));
+    }
+    assert!(arguments.contains("__MEDIA_PROGRESS__\t%(progress.downloaded_bytes)s"));
+    assert!(!arguments.contains("never-log-me"));
     let observations = reporter.observations.lock().unwrap();
-    let final_observation = observations.last().expect("final HLS observation");
-    assert_eq!(final_observation.source, TransferSource::Hls);
-    assert_eq!(final_observation.downloaded_bytes, Some(6));
-    assert_eq!(final_observation.total_bytes, None);
-    assert_eq!(final_observation.progress_percent, None);
-    assert_eq!(final_observation.eta_seconds, None);
-    assert!(final_observation.final_observation);
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn process_adapter_classifies_hls_transport_failure_as_transient() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let temporary = tempdir().unwrap();
-    let ffmpeg = temporary.path().join("ffmpeg-fixture");
-    std::fs::write(
-        &ffmpeg,
-        "#!/bin/sh\nprintf >&2 'Connection timed out\\n'\nexit 1\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let output = temporary.path().join("episode.partial.mkv");
-    let input = SensitiveUrl::parse("https://cdn.example/playlist.m3u8", "video").unwrap();
-    let command = build_hls_ingest_command(&input, &output).unwrap();
-    let adapter =
-        TokioProcessAdapter::new("/usr/bin/false", &ffmpeg, std::time::Duration::from_secs(2));
-
-    let error = adapter
-        .run_with_progress(&command, &output, &ProgressRecorder::default(), &Active)
-        .await
-        .unwrap_err();
-
-    assert_eq!(error, RunnerPortError::SourceTransferTransient);
+    assert_eq!(observations.len(), 2);
+    assert_eq!(observations[0].source, TransferSource::Hls);
+    assert_eq!(observations[0].downloaded_bytes, Some(1024));
+    assert_eq!(observations[0].total_bytes, Some(2048));
+    assert_eq!(observations[0].progress_percent, Some(50));
+    assert_eq!(observations[0].download_speed_bps, Some(512));
+    assert_eq!(observations[0].eta_seconds, Some(2));
+    assert!(observations.last().unwrap().final_observation);
 }
 
 #[tokio::test]

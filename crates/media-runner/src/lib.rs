@@ -13,11 +13,11 @@ mod subtitle;
 
 pub use adapters::{
     HttpRunnerServiceAdapter, ReqwestHttpAdapter, TokioFileSystem, TokioProcessAdapter,
+    YtDlpTransferAdapter,
 };
 pub use download::{ResumeAction, ResumeError, decide_resume};
 pub use media::{
-    AudioTrackMetadata, MediaProbe, MediaProbeError, ProcessCommand, build_hls_ingest_command,
-    build_rezka_vaapi_command,
+    AudioTrackMetadata, MediaProbe, MediaProbeError, ProcessCommand, build_rezka_vaapi_command,
 };
 pub use pipeline::{
     EpisodeOutcome, EpisodePipeline, EpisodeWork, ProviderKind, SensitiveUrl, SensitiveUrlError,
@@ -25,8 +25,9 @@ pub use pipeline::{
 };
 pub use plex::{PlexExpectation, PlexMismatch, PlexObservation, validate_plex_observation};
 pub use ports::{
-    Cancellation, FileSystemPort, HttpPort, PlexCheck, ProcessPort, RunnerPortError,
-    RunnerServicePort, StageReporter, TransferObservation, TransferProgressContext, TransferSource,
+    Cancellation, FileSystemPort, HttpPort, MediaTransferPort, MediaTransferRequest, PlexCheck,
+    ProcessPort, RunnerPortError, RunnerServicePort, StageReporter, TransferObservation,
+    TransferProgressContext, TransferSource,
 };
 
 pub use retention::{

@@ -1,7 +1,5 @@
 use std::path::Path;
 
-use crate::SensitiveUrl;
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct MediaProbe {
     pub codec: String,
@@ -49,36 +47,6 @@ impl ProcessCommand {
     pub fn args(&self) -> &[String] {
         &self.args
     }
-}
-
-pub fn build_hls_ingest_command(
-    input: &SensitiveUrl,
-    output: &Path,
-) -> Result<ProcessCommand, MediaProbeError> {
-    let output = output.to_str().ok_or(MediaProbeError)?;
-    Ok(ProcessCommand {
-        program: "ffmpeg".to_owned(),
-        args: vec![
-            "-nostdin".to_owned(),
-            "-hide_banner".to_owned(),
-            "-loglevel".to_owned(),
-            "error".to_owned(),
-            "-y".to_owned(),
-            "-rw_timeout".to_owned(),
-            "30000000".to_owned(),
-            "-i".to_owned(),
-            input.as_url().as_str().to_owned(),
-            "-map".to_owned(),
-            "0:v:0".to_owned(),
-            "-map".to_owned(),
-            "0:a?".to_owned(),
-            "-c".to_owned(),
-            "copy".to_owned(),
-            "-f".to_owned(),
-            "matroska".to_owned(),
-            output.to_owned(),
-        ],
-    })
 }
 
 pub fn build_rezka_vaapi_command(

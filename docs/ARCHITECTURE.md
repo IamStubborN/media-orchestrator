@@ -153,13 +153,18 @@ Owns runner-side execution:
 - Cooperative cancellation and expired-lease recovery.
 - Sticky-job execution loop.
 - Rezka download pipeline.
+- Provider-neutral HTTP media transfer through a pinned `yt-dlp` adapter.
 - Encrypted Rezka session persistence in a runner-owned volume.
 - Storage preflight, dedicated Rezka staging, and atomic publication.
 - ffprobe and ffmpeg/VAAPI process adapters.
 - Subtitle validation and partial recovery.
 - Plex-compatible publication.
 
-Runner-specific ports are defined next to the use case that consumes them. Concrete process and filesystem adapters remain internal unless they acquire another consumer.
+Runner-specific ports are defined next to the use case that consumes them. The
+media transfer port accepts provider-resolved URLs, so future providers such as
+VK Video can reuse `yt-dlp` without coupling the pipeline to their discovery
+protocol. Concrete process and filesystem adapters remain internal unless they
+acquire another consumer.
 
 Architecture invariant: `media-runner` never connects directly to PostgreSQL and never owns torrent file placement or transcoding.
 

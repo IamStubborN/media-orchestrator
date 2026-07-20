@@ -31,6 +31,20 @@ COPY --from=builder /out/media /media
 
 FROM ${RUST_IMAGE} AS certificates
 
+FROM certificates AS yt-dlp
+ARG TARGETARCH
+ARG YT_DLP_VERSION=2026.07.04
+RUN case "${TARGETARCH}" in \
+      amd64) asset=yt-dlp_linux; checksum=6bbb3d314cde4febe36e5fa1d55462e29c974f63444e707871834f6d8cc210ae ;; \
+      arm64) asset=yt-dlp_linux_aarch64; checksum=b6ce97646773070d7a7ffd6bbbdcaecb47c48483909c54c915bf08a7a9b5e0b1 ;; \
+      *) echo "unsupported yt-dlp architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac && \
+    curl --fail --location --retry 3 \
+      --output /usr/local/bin/yt-dlp \
+      "https://github.com/yt-dlp/yt-dlp/releases/download/${YT_DLP_VERSION}/${asset}" && \
+    echo "${checksum}  /usr/local/bin/yt-dlp" | sha256sum --check --strict && \
+    chmod 0755 /usr/local/bin/yt-dlp
+
 FROM ${RUNTIME_IMAGE} AS runtime-base
 COPY --from=certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 RUN groupadd --gid 65532 media && \
@@ -52,6 +66,7 @@ LABEL org.opencontainers.image.created=$OCI_CREATED \
 
 FROM runtime-common AS service
 COPY --from=builder --chown=65532:65532 /out/media /usr/local/bin/media
+COPY --from=yt-dlp --chown=65532:65532 /usr/local/bin/yt-dlp /usr/local/bin/yt-dlp
 USER 65532:65532
 EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=6 \

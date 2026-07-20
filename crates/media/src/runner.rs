@@ -857,7 +857,7 @@ impl MediaJobExecutor {
             ),
             source_kind,
             staging_directory: staging.clone(),
-            source_partial: staging.join("source.partial"),
+            source_partial: staging.join("source.partial.mkv"),
             encoded_partial: staging.join("encoded.partial.mkv"),
             final_video: final_video.clone(),
             vaapi_device: self.vaapi_device.clone(),

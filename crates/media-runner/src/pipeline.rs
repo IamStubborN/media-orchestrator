@@ -1,9 +1,9 @@
 use std::{path::PathBuf, sync::Arc};
 
 use crate::{
-    AudioTrackMetadata, Cancellation, FileSystemPort, HttpPort, MediaProbe, PeakEstimate,
-    PlexCheck, PlexExpectation, ProcessPort, RunnerPortError, RunnerServicePort, StageReporter,
-    StorageBlocked, StoragePreflight, build_hls_ingest_command, build_rezka_vaapi_command,
+    AudioTrackMetadata, Cancellation, FileSystemPort, HttpPort, MediaProbe, MediaTransferPort,
+    MediaTransferRequest, PeakEstimate, PlexCheck, PlexExpectation, ProcessPort, RunnerPortError,
+    RunnerServicePort, StageReporter, StorageBlocked, StoragePreflight, build_rezka_vaapi_command,
     validate_plex_observation, validate_webvtt,
 };
 
@@ -108,6 +108,7 @@ pub enum EpisodeOutcome {
 pub struct EpisodePipeline {
     filesystem: Arc<dyn FileSystemPort>,
     http: Arc<dyn HttpPort>,
+    transfer: Arc<dyn MediaTransferPort>,
     process: Arc<dyn ProcessPort>,
     service: Arc<dyn RunnerServicePort>,
     storage: StoragePreflight,
@@ -118,12 +119,14 @@ impl EpisodePipeline {
     pub fn new(
         filesystem: Arc<dyn FileSystemPort>,
         http: Arc<dyn HttpPort>,
+        transfer: Arc<dyn MediaTransferPort>,
         process: Arc<dyn ProcessPort>,
         service: Arc<dyn RunnerServicePort>,
     ) -> Self {
         Self {
             filesystem,
             http,
+            transfer,
             process,
             service,
             storage: StoragePreflight::new(DEFAULT_RESERVE_BYTES),
@@ -189,56 +192,33 @@ impl EpisodePipeline {
                 .ok_or(RunnerPortError::InvalidWork)?;
             self.filesystem.create_dir_all(final_parent).await?;
 
-            match work.source_kind {
-                VideoSourceKind::Mp4 => {
-                    let partial_bytes = self
-                        .filesystem
-                        .file_len(&work.source_partial)
-                        .await?
-                        .unwrap_or(0);
-                    // Skip re-fetching a complete partial. Restart an oversized
-                    // partial instead of issuing an unsatisfiable range request.
-                    if partial_bytes != source_bytes {
-                        let resume_from = if partial_bytes < source_bytes {
-                            partial_bytes
-                        } else {
-                            0
-                        };
-                        reporter.stage_started("download").await;
-                        if let Err(error) = self
-                            .http
-                            .download_video_with_progress(
-                                source_url,
-                                &work.source_partial,
-                                resume_from,
-                                self.filesystem.as_ref(),
-                                cancellation,
-                                crate::TransferProgressContext {
-                                    total_bytes: probed_source_bytes,
-                                    reporter,
-                                },
-                            )
-                            .await
-                        {
-                            return cancellation_outcome(error);
-                        }
-                        reporter.stage_completed("download").await;
-                    }
+            let source_partial_bytes = self
+                .filesystem
+                .file_len(&work.source_partial)
+                .await?
+                .unwrap_or(0);
+            let transfer_needed = !matches!(
+                (work.source_kind, probed_source_bytes),
+                (VideoSourceKind::Mp4, Some(total)) if total == source_partial_bytes
+            );
+            if transfer_needed {
+                reporter.stage_started("download").await;
+                if let Err(error) = self
+                    .transfer
+                    .download(
+                        MediaTransferRequest {
+                            source_url,
+                            source_kind: work.source_kind,
+                            output_path: &work.source_partial,
+                        },
+                        reporter,
+                        cancellation,
+                    )
+                    .await
+                {
+                    return cancellation_outcome(error);
                 }
-                VideoSourceKind::Hls => {
-                    self.http.validate_video_source(source_url).await?;
-                    let command = build_hls_ingest_command(source_url, &work.source_partial)
-                        .map_err(|_| RunnerPortError::InvalidWork)?;
-                    reporter.stage_started("download").await;
-                    if let Err(error) = self
-                        .process
-                        .run_with_progress(&command, &work.source_partial, reporter, cancellation)
-                        .await
-                    {
-                        return cancellation_outcome(error);
-                    }
-                    reporter.stage_completed("download").await;
-                }
+                reporter.stage_completed("download").await;
             }
             if cancellation.is_cancelled() {
                 return Ok(EpisodeOutcome::Cancelled);

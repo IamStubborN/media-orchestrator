@@ -121,6 +121,10 @@ pub async fn run_runner(config: RunnerConfig) -> Result<(), RunnerError> {
         "ffmpeg",
         Duration::from_secs(6 * 60 * 60),
     ));
+    let transfer = Arc::new(media_runner::YtDlpTransferAdapter::new(
+        "/usr/local/bin/yt-dlp",
+        Duration::from_secs(6 * 60 * 60),
+    ));
     let (service_url, service_token) = config.service().cloned_parts();
     // The server-side Plex reconcile polls up to 30s (PlexReconcileAdapter
     // max_wait); the client needs headroom over that deadline so it does not time
@@ -133,8 +137,9 @@ pub async fn run_runner(config: RunnerConfig) -> Result<(), RunnerError> {
         )
         .map_err(|_| RunnerError::Configuration)?,
     );
-    let pipeline = media_runner::EpisodePipeline::new(filesystem, http, process, plex_service)
-        .with_storage_reserve_bytes(config.storage_reserve_bytes());
+    let pipeline =
+        media_runner::EpisodePipeline::new(filesystem, http, transfer, process, plex_service)
+            .with_storage_reserve_bytes(config.storage_reserve_bytes());
     let qbittorrent = match config.qbittorrent() {
         Some(config) => {
             let config = media_integrations::qbittorrent::QbittorrentConfig::new(
