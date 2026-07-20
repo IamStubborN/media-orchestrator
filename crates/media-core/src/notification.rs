@@ -197,6 +197,8 @@ pub enum NotificationValidationError {
     InvalidGeneration,
     #[error("notification display field is invalid")]
     InvalidDisplayField,
+    #[error("notification provider is invalid")]
+    InvalidProvider,
     #[error("notification card key is invalid")]
     InvalidCardKey,
     #[error("notification revision or lifecycle cycle is invalid")]
@@ -217,7 +219,9 @@ impl MediaNotificationMedia {
         translation: Option<String>,
     ) -> Result<Self, NotificationValidationError> {
         validate_display_field(&title)?;
-        validate_display_field(&provider)?;
+        if !matches!(provider.as_str(), "rezka" | "prowlarr") {
+            return Err(NotificationValidationError::InvalidProvider);
+        }
         if season == Some(0) {
             return Err(NotificationValidationError::InvalidEpisodeProgress);
         }
@@ -524,6 +528,42 @@ mod tests {
                     vec![],
                 ),
                 Err(NotificationValidationError::InvalidRevisionOrCycle),
+            );
+        }
+    }
+
+    #[test]
+    fn provider_is_limited_to_known_safe_identifiers() {
+        for provider in [
+            "https://rezka.example/video?token=secret",
+            "rezka/path",
+            "secret-token",
+            "Rezka",
+        ] {
+            assert_eq!(
+                MediaNotificationMedia::new(
+                    JobId::new(),
+                    "Example Show".to_owned(),
+                    MediaNotificationKind::Series,
+                    provider.to_owned(),
+                    Some(1),
+                    None,
+                ),
+                Err(NotificationValidationError::InvalidProvider),
+            );
+        }
+
+        for provider in ["rezka", "prowlarr"] {
+            assert!(
+                MediaNotificationMedia::new(
+                    JobId::new(),
+                    "Example Show".to_owned(),
+                    MediaNotificationKind::Series,
+                    provider.to_owned(),
+                    Some(1),
+                    None,
+                )
+                .is_ok()
             );
         }
     }
