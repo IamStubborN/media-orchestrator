@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use media_api::{SearchError, SearchService};
@@ -19,6 +19,8 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 const SEARCH_TTL: time::Duration = time::Duration::hours(24);
 const REZKA_CATALOG_CONTINUATION_PREFIX: &str = "catalog:";
+const REZKA_AUTH_ATTEMPTS: usize = 3;
+const REZKA_AUTH_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone)]
 pub struct ProviderPage {
@@ -481,20 +483,40 @@ impl ConcreteSearchProvider {
         prepared
             .reload_session()
             .map_err(|_| SearchError::Infrastructure)?;
-        prepared
-            .client
-            .ensure_authenticated(
-                prepared
-                    .credentials
-                    .as_ref()
-                    .ok_or(SearchError::Infrastructure)?,
-                &prepared.probe,
-            )
-            .await
-            .map_err(|error| {
-                tracing::warn!(stage = "authentication", error_code = ?error.code(), error = %error, "Rezka search failed");
-                SearchError::Provider
-            })?;
+        for attempt in 1..=REZKA_AUTH_ATTEMPTS {
+            let result = prepared
+                .client
+                .ensure_authenticated(
+                    prepared
+                        .credentials
+                        .as_ref()
+                        .ok_or(SearchError::Infrastructure)?,
+                    &prepared.probe,
+                )
+                .await;
+            match result {
+                Ok(_) => break,
+                Err(error)
+                    if retryable_rezka_auth_error(error.code())
+                        && attempt < REZKA_AUTH_ATTEMPTS =>
+                {
+                    tracing::warn!(
+                        stage = "authentication",
+                        attempt,
+                        error_code = ?error.code(),
+                        "temporary Rezka authentication failure; retrying with a fresh session"
+                    );
+                    tokio::time::sleep(REZKA_AUTH_RETRY_DELAY).await;
+                    prepared
+                        .reload_session()
+                        .map_err(|_| SearchError::Infrastructure)?;
+                }
+                Err(error) => {
+                    tracing::warn!(stage = "authentication", error_code = ?error.code(), error = %error, "Rezka search failed");
+                    return Err(SearchError::Provider);
+                }
+            }
+        }
         let snapshot = prepared
             .client
             .export_session()
@@ -832,6 +854,10 @@ fn skippable_title_error(code: rezka_client::RezkaErrorCode) -> bool {
             | rezka_client::RezkaErrorCode::TitleNotFound
             | rezka_client::RezkaErrorCode::Transport
     )
+}
+
+fn retryable_rezka_auth_error(code: rezka_client::RezkaErrorCode) -> bool {
+    code == rezka_client::RezkaErrorCode::Transport
 }
 
 fn encode_rezka_catalog_continuation(offset: usize, target: Option<&str>) -> String {
@@ -1741,7 +1767,10 @@ fn job_dto(job: &Job) -> JobDto {
 
 #[cfg(test)]
 mod tests {
-    use super::{ambiguous_episode_label, canonical_series_library_title, skippable_title_error};
+    use super::{
+        ambiguous_episode_label, canonical_series_library_title, retryable_rezka_auth_error,
+        skippable_title_error,
+    };
 
     #[test]
     fn season_release_titles_share_an_exact_base_query_as_the_plex_title() {
@@ -1789,5 +1818,21 @@ mod tests {
         assert!(!skippable_title_error(
             rezka_client::RezkaErrorCode::RateLimited
         ));
+    }
+
+    #[test]
+    fn only_transport_failures_retry_rezka_authentication() {
+        assert!(retryable_rezka_auth_error(
+            rezka_client::RezkaErrorCode::Transport
+        ));
+        for terminal in [
+            rezka_client::RezkaErrorCode::AuthenticationRequired,
+            rezka_client::RezkaErrorCode::AuthenticationFailed,
+            rezka_client::RezkaErrorCode::ChallengeFailed,
+            rezka_client::RezkaErrorCode::RateLimited,
+            rezka_client::RezkaErrorCode::ProviderResponseInvalid,
+        ] {
+            assert!(!retryable_rezka_auth_error(terminal));
+        }
     }
 }
