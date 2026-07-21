@@ -137,7 +137,8 @@ tracking and notification-outbox behavior in `crates/media-core`,
 `crates/media-integrations`, plus their tests).
 
 **Produces:** Personal/family tracking, ongoing-series prompts, future episode
-discovery without auto-download, transactional outbox dispatch, signed
+discovery with notification-only default and explicit Rezka auto-download,
+transactional outbox dispatch, signed
 `deliver_only` Hermes webhooks, initiator routing, and family routing.
 
 **Exit gate:** Personal state is isolated, family tracking is manageable by
@@ -149,10 +150,11 @@ is needed to deliver a prepared notification.
 **Focused plan name:** `2026-07-10-hermes-home-integration.md`
 
 Status: implemented without a focused plan document in this repository; the
-work lives in the separate private `hermes-home` repository (pinned Hermes
-image, installed `media` CLI, isolated profiles, and Telegram credentials).
+work lives in the separate private `hermes-home` repository (official Hermes
+image, mounted extensions, installed `media` CLI, isolated profiles, and
+Telegram credentials).
 
-**Produces:** Pinned derived Hermes image, installed `media` CLI, shared media
+**Produces:** Official Hermes image, mounted local integrations, installed `media` CLI, shared media
 skill, isolated Primary and Secondary profiles, Telegram credentials, separate
 memory/browser/Vaultwarden volumes, and narrow Bitwarden wrappers.
 

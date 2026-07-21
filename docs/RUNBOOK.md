@@ -121,9 +121,9 @@ cached across normal Rust-only changes.
 1. Confirm no job is active before replacing the runner. `queued` is safe;
    `leased`, `running`, `publishing`, `plex_pending`, or `cancel_requested` is not.
 2. Build both immutable image tags.
-3. Extract the Linux `media` binary from the service image, verify its SHA-256
-   while rebuilding the shared Hermes image, and keep both agents on the old
-   image until the backend rollout passes.
+3. Extract the Linux `media` binary from the service image and verify its
+   SHA-256. Hermes uses the official image; `hermes-home` synchronizes and
+   mounts the CLI, skills, profile configuration, and notification adapter.
 4. Record the current `MEDIA_SERVICE_IMAGE` and `DOWNLOAD_RUNNER_IMAGE` values.
 5. Update only those two lines in the private root `.env`.
 6. Run the new service image as a one-shot `media migrate` container. Stop the
@@ -131,8 +131,8 @@ cached across normal Rust-only changes.
 7. Recreate `media-service` and wait for health.
 8. Stop `gluetun-rezka-watcher` only while lifecycle is `ready`.
 9. Recreate `download-runner`, wait for health, then start the watcher again.
-10. Recreate both Hermes profiles from the prepared image and wait for both
-    health checks.
+10. Pull the official Hermes image, synchronize mounted extensions, recreate
+    both profiles, and wait for both health checks.
 11. Verify lifecycle `ready`, watcher health, image tags, queue state, and logs.
 
 Never replace the runner merely to deploy documentation or service-only changes.
@@ -163,6 +163,16 @@ queued job requires rotation immediately. The watcher reads this durable decisio
 rotates Gluetun only when required, and otherwise restarts the one-attempt runner
 on the current session. The provider-specific stage limit remains 20 attempts for
 Rezka.
+
+## Automatic Episode Downloads
+
+Tracking remains notification-only unless download parameters are explicitly
+present. Inspect subscriptions with `hermes-media tracking list --json`. An
+automatic subscription must contain `provider_media_ref`, `translation_id`,
+and `season`. When a new provider episode is discovered, `media-service`
+creates an episode job directly from the scheduler; Hermes and the LLM are not
+involved. Use `tracking enable-download` to configure an existing subscription.
+Never infer or switch the source or translation automatically.
 
 ## Stuck Runner Recovery
 

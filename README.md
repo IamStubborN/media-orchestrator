@@ -51,8 +51,10 @@ Alpine image. Provider and live-network tests are not part of either gate.
 
 `Dockerfile` builds the same locked `media` binary into separate `service` and
 `runner` runtime targets. The service target contains only CA certificates;
-the runner additionally contains ffmpeg/ffprobe with VAAPI support. Both run
-as UID/GID 65532 and support a read-only root filesystem.
+the runner additionally contains ffmpeg/ffprobe with VAAPI support and a
+checksum-pinned `yt-dlp`. `yt-dlp` owns provider-neutral HTTP video transfer,
+ffmpeg/VAAPI processes Rezka media, and qBittorrent remains the torrent engine.
+Both images run as UID/GID 65532 and support a read-only root filesystem.
 
 `compose.yaml` is a local-only stack with pinned PostgreSQL, `.env` configuration,
 private service/database networking, and an opt-in runner profile. Copy
@@ -136,7 +138,9 @@ job orchestration (leasing, heartbeat, checkpoints, retry, and the
 notification outbox), the complete Rezka runner pipeline with real ffprobe and
 ffmpeg/VAAPI adapters, Prowlarr/qBittorrent/Plex/Gluetun integrations, signed
 `deliver_only` Hermes notifications, and five-result-paginated search
-sessions. Hermes profile wiring and homelab deployment composition are tracked
+sessions. Tracking is notification-only by default and can explicitly enable
+Rezka auto-download for a fixed result, translation, and season; the scheduler
+then creates episode jobs without an LLM call. Hermes profile wiring and homelab deployment composition are tracked
 separately in the `hermes-home` and `homelab` repositories. See the
 [MVP roadmap](docs/superpowers/plans/2026-07-10-media-orchestrator-mvp-roadmap.md)
 for the phase-by-phase delivery history and executable architecture checks

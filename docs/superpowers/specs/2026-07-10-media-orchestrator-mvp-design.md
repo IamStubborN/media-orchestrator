@@ -70,7 +70,7 @@ Local path:
 
 Responsibilities:
 
-- Derived Hermes Docker image.
+- Official Hermes Docker image with mounted local extensions.
 - Shared media skills.
 - `primary` and `secondary` profile configuration.
 - Personal skill folders and safe helper wrappers.
@@ -408,7 +408,12 @@ download series  -> download episodes currently available
 track series     -> monitor future episode availability
 ```
 
-If a title is ongoing, Hermes explains that not all episodes are available and asks whether to create `personal` or `family` tracking. Tracking does not automatically download a future episode. When an episode appears, Hermes notifies the appropriate user and asks them to choose Rezka or Prowlarr.
+If a title is ongoing, Hermes explains that not all episodes are available and
+asks whether to create `personal` or `family` tracking. Tracking is
+notification-only by default. The user may explicitly enable automatic Rezka
+downloads after choosing a fixed result, translation, and season. In that mode
+the service scheduler creates one job per newly discovered episode without an
+LLM call or source fallback.
 
 The parent job, each episode task, and every artifact record retain the initiating
 `owner_id`. Personal tracking belongs to one user; family tracking can be viewed
@@ -590,13 +595,15 @@ hermes-home/
   scripts/
 ```
 
-Only `shared/skills` and the selected user's profile are included in each image/runtime configuration. Personal skills are never mounted into the other user's container.
+Only `shared/skills` and the selected user's profile are mounted into each
+runtime configuration. Personal skills are never mounted into the other user's
+container.
 
-The derived image includes:
+The runtime uses:
 
-- The pinned Hermes base image.
+- The official Hermes image, updated by the homelab container update policy.
 - The pinned `media` CLI release.
-- Chromium and the Hermes browser tooling required by non-media skills.
+- Mounted profile configuration, skills, browser tooling, and notification adapter.
 - The Bitwarden Password Manager CLI (`bw`) for Vaultwarden, behind narrow allowlisted wrappers.
 
 Vaultwarden does not support Bitwarden Secrets Manager (`bws`), so `bws` is not part of this design. Master passwords, session tokens, and secret values must not enter prompts or logs. Runtime memory, browser profiles, and Password Manager sessions live in separate persistent volumes for each user.

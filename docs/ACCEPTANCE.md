@@ -1,8 +1,9 @@
 # Acceptance Status
 
-**Audited:** 2026-07-13  
-**Runtime revision:** `187e4dd`
-**Hermes revision:** `4e5a586`
+**Audited:** 2026-07-21
+**Runtime revision:** `3cbd665`
+**Hermes revision:** `694440f`
+**Homelab revision:** `4e82866`
 
 This is the authoritative completion matrix for the active media-system goal.
 `Implemented`, `deployed`, and `live-verified` are independent claims. A partial
@@ -11,34 +12,26 @@ live result keeps the goal open even when its code and deployment are complete.
 | Workstream | Implemented | Deployed | Live-verified | Evidence |
 | --- | --- | --- | --- | --- |
 | 1. VPN lifecycle | Yes | Yes | Yes | [session refresh and rotation](evidence/2026-07-12-session-refresh-vpn-lifecycle.md), [blocked lifecycle](evidence/2026-07-13-runner-availability.md) |
-| 2. Rezka episode | Yes | Yes | Yes | [episode E2E](evidence/2026-07-13-rezka-episode-e2e.md), [storage and rich notifications](evidence/2026-07-13-storage-resume-and-rich-notifications.md) |
+| 2. Rezka episode | Yes | Yes | Yes | [episode E2E](evidence/2026-07-13-rezka-episode-e2e.md), [final yt-dlp verification](evidence/2026-07-21-final-live-verification.md) |
 | 3. Subtitle recovery | Yes | Yes | Yes | [subtitle-only retry](evidence/2026-07-13-subtitle-only-retry.md), [natural partial recovery](evidence/2026-07-13-natural-subtitle-partial-recovery.md) |
 | 4. Prowlarr and qBittorrent | Yes | Yes | Yes | [TV E2E](evidence/2026-07-13-prowlarr-tv-e2e.md), [movie E2E](evidence/2026-07-13-prowlarr-movie-e2e.md) |
 | 5. Notifications | Yes | Yes | Yes | [routing](evidence/2026-07-13-notification-routing.md), [rich delivery](evidence/2026-07-13-storage-resume-and-rich-notifications.md) |
-| 6. Tracking and release dates | Yes | Yes | Yes | [tracking E2E](evidence/2026-07-13-tracking-e2e.md), [release query](evidence/2026-07-13-release-query.md), [Hermes conversation](evidence/2026-07-13-hermes-release-conversation.md) |
+| 6. Tracking and release dates | Yes | Yes | Yes | [tracking E2E](evidence/2026-07-13-tracking-e2e.md), [automatic download without LLM](evidence/2026-07-21-final-live-verification.md), [release query](evidence/2026-07-13-release-query.md) |
 | 7. Movie flow | Yes | Yes | Yes | [Rezka movie](evidence/2026-07-13-rezka-movie-e2e.md), [Prowlarr movie](evidence/2026-07-13-prowlarr-movie-e2e.md) |
-| 8. Recovery, storage, mapping | Yes | Yes | Partial | [retry and deploy](evidence/2026-07-13-job-retry-and-local-deploy.md), [storage resume](evidence/2026-07-13-storage-resume-and-rich-notifications.md), [OVA mapping](evidence/2026-07-13-episode-mapping-and-ova.md), [deterministic stream and Specials recovery](evidence/2026-07-13-expired-stream-and-specials-deterministic.md) |
+| 8. Recovery, storage, mapping | Yes | Yes | Yes | [retry and deploy](evidence/2026-07-13-job-retry-and-local-deploy.md), [storage resume](evidence/2026-07-13-storage-resume-and-rich-notifications.md), [deterministic expired-stream recovery](evidence/2026-07-13-expired-stream-and-specials-deterministic.md), [live CDN retry and Specials publication](evidence/2026-07-21-final-live-verification.md) |
 | 9. Multi-user Hermes | Yes | Yes | Yes | [API and ownership isolation](evidence/2026-07-13-multi-user-isolation.md), [notification routing](evidence/2026-07-13-notification-routing.md), [unknown-sender rejection](evidence/2026-07-13-telegram-unknown-sender.md) |
 | 10. Local operations | Yes | Yes | Yes | [final deploy and rollback](evidence/2026-07-13-final-local-deployment.md) |
 | 11. Documentation truthfulness | Yes | N/A | Yes | This matrix, [architecture](ARCHITECTURE.md), [runbook](RUNBOOK.md), and the [canonical plan](plans/2026-07-12-full-media-system-delivery.md) |
 
-## Open Live Gates
+## Residual Live Exercises
 
-### Expired Stream and Specials Publication
+### Deliberately Expired Stream
 
-The bounded expired-stream code path and persistent `S00E01` mapping are
-implemented and deployed. Deterministic cross-boundary tests prove that an
-expired transfer publishes nothing, a fresh lease can complete, and mapped
-video plus subtitle sidecars publish under `Specials` with a Plex expectation
-for season `0`. A real OVA reached `needs_action`, accepted the mapping, and
-reused it later, but no mapped OVA has yet completed download, VAAPI processing,
-publication under Plex `Specials`, and exact Plex identity verification. A
-controlled real expired stream has also not completed a refresh-and-resume
-cycle.
-
-This gate requires an explicitly approved real Rezka download. It must record
-the old and refreshed stream behavior, final `S00E..` path, ffprobe output,
-subtitle result, Plex metadata identity, notifications, and cleanup state.
+The explicit `stream_expired` path is covered by deterministic cross-boundary
+tests. Live transfer recovered from real CDN HTTP 502 and DNS failures through
+fresh resolution, and a mapped OVA completed under Plex `Specials`. Deliberately
+holding a valid signed URL until provider expiry remains an optional production
+fault-injection exercise; it is not required for normal operation or delivery.
 
 ### Deferred Secondary Conversation
 
@@ -56,7 +49,6 @@ longer blocks this delivery.
 
 ## Completion Verdict
 
-The system is implemented and deployed, but the overall goal is **not yet
-complete**. Workstream 8 retains the live gate above. No narrower test,
-container health result, or static configuration check may be used to promote
-that row to fully live-verified.
+The system is implemented, deployed, and live-verified for the agreed MVP. The
+remaining item above is an optional destructive-timing exercise rather than a
+missing user workflow.

@@ -42,7 +42,7 @@ Owns the media domain and service-side application rules:
 - Canonical season and episode numbering with persisted ambiguity resolution.
 - Jobs, tasks, artifacts, and state transitions.
 - Search sessions and pagination rules.
-- Tracking subscriptions and notification intent.
+- Notification-only tracking and explicit Rezka auto-download subscriptions.
 - Ranking, storage, retention, and ownership policies.
 - Ports required by service-side use cases.
 
@@ -185,6 +185,7 @@ media jobs show JOB_ID [--json]  (aliases: get, status)
 media jobs cancel JOB_ID [--json]
 media queue status [--json]
 media tracking add ... [--json]
+media tracking enable-download TRACKING_ID ... [--json]
 media tracking list [--json]
 media tracking remove TRACKING_ID [--json]
 ```

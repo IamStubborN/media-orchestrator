@@ -271,14 +271,18 @@ confirmation.
 4. Support `personal` and `family` tracking scopes.
 5. Discover future episode dates from the best available structured source.
 6. Answer natural-language questions about the next episode and full release schedule.
-7. Notify the tracking owner about new availability without automatic download.
-8. Keep downloading and tracking as independent commands.
+7. Keep notification-only tracking as the default.
+8. Allow explicit Rezka auto-download only after fixing the provider result,
+   translation, and season; scheduler-created jobs do not invoke an LLM.
+9. Keep the initial download and creation of tracking as independent actions.
 
 ### Live Gate
 
 - An ongoing series can be downloaded without creating tracking.
 - Hermes offers tracking after explaining that not all episodes are released.
 - Personal tracking is isolated; family tracking is manageable by both profiles.
+- An explicitly configured Rezka subscription creates and completes one new
+  episode job without an LLM invocation.
 - Hermes answers a real next-episode date question with source and uncertainty handling.
 
 ## Workstream 7: Movie Flow
@@ -315,8 +319,10 @@ publication. The lease was released, the attempt count remained stable, and the
 job did not requeue after lease expiry. Explicit storage recovery after capacity
 became available is live-verified. A real OVA also entered `needs_action` before
 transfer, accepted an owner-confirmed `S00E01` mapping, resumed with a reset task
-ledger, and reused that mapping on a later selection. Expired-stream recovery and
-actual Plex publication under `Specials` remain pending.
+ledger, and reused that mapping on a later selection. Mapped Plex publication
+under `Specials` is now live-verified. A controlled, deliberately expired CDN
+URL remains a fault-injection gap; natural transient CDN and DNS failures have
+recovered through a fresh resolve.
 
 ### Implementation and Verification
 
@@ -333,7 +339,7 @@ actual Plex publication under `Specials` remain pending.
 8. Persist a resolved canonical mapping and reuse it for later episodes.
    **Live-verified with `S01E01 -> S00E01`.**
 9. Verify OVA and Specials mapping rather than treating them as duplicates.
-   **Mapping live-verified; Plex publication remains pending.**
+   **Live-verified through VAAPI publication as `Specials/S00E01`.**
 
 ### Live Gate
 

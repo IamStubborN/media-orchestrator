@@ -1,5 +1,7 @@
 # yt-dlp Media Transfer Implementation Plan
 
+**Status:** Implemented and live-verified on 2026-07-21.
+
 **Goal:** Replace reqwest/ffmpeg video ingestion with one bounded `yt-dlp`
 transfer adapter while preserving the existing Rezka processing pipeline.
 
@@ -13,4 +15,3 @@ transfer adapter while preserving the existing Rezka processing pipeline.
    checks.
 6. Wait for an idle queue, deploy the runner image, and verify a real Rezka
    transfer through Gluetun without exposing signed URLs.
-
