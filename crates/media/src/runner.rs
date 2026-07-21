@@ -594,9 +594,8 @@ impl MediaJobExecutor {
             .await
             .map_err(|_| RunnerError::Execution)?;
         tracing::info!(premium = ?premium_status, "resolved Rezka account status");
-        let expected_duration_seconds = details
-            .duration_minutes()
-            .map(|minutes| f64::from(minutes) * 60.0);
+        let expected_duration_seconds =
+            expected_source_duration_seconds(media_kind, details.duration_minutes());
         let translation_id =
             rezka_client::TranslationId::new(translation_id).map_err(|_| RunnerError::Execution)?;
         let key = match media_kind {
@@ -1146,6 +1145,20 @@ fn highest_standard_variant(
     variants
         .iter()
         .find(|variant| variant.advertised_quality().tier() == rezka_client::QualityTier::Standard)
+}
+
+fn expected_source_duration_seconds(
+    media_kind: media_contract::MediaKindDto,
+    title_duration_minutes: Option<u16>,
+) -> Option<f64> {
+    match media_kind {
+        media_contract::MediaKindDto::Movie => {
+            title_duration_minutes.map(|minutes| f64::from(minutes) * 60.0)
+        }
+        // Rezka exposes a title-level duration for a series. Individual episodes can
+        // legitimately be shorter, so it is not a valid truncation check for episodes.
+        media_contract::MediaKindDto::Series => None,
+    }
 }
 
 fn rezka_audio_language(translation: &str) -> Option<&'static str> {
@@ -1869,8 +1882,8 @@ mod tests {
 
     use super::{
         ExecutionOutcome, ProgressCheckpointGate, canonical_movie_name, combine_episode_outcome,
-        highest_standard_variant, matching_episode_videos, parse_episode_coordinates,
-        rezka_audio_language, rezka_final_video_path,
+        expected_source_duration_seconds, highest_standard_variant, matching_episode_videos,
+        parse_episode_coordinates, rezka_audio_language, rezka_final_video_path,
     };
 
     #[test]
@@ -1905,6 +1918,18 @@ mod tests {
         assert_eq!(rezka_audio_language("Український дубляж"), Some("ukr"));
         assert_eq!(rezka_audio_language("English"), Some("eng"));
         assert_eq!(rezka_audio_language("Оригинал (+субтитры)"), None);
+    }
+
+    #[test]
+    fn source_duration_is_only_strict_for_movies() {
+        assert_eq!(
+            expected_source_duration_seconds(media_contract::MediaKindDto::Movie, Some(90)),
+            Some(5_400.0)
+        );
+        assert_eq!(
+            expected_source_duration_seconds(media_contract::MediaKindDto::Series, Some(24)),
+            None
+        );
     }
 
     #[test]
