@@ -2529,6 +2529,7 @@ dependencies = [
  "fs2",
  "futures-util",
  "libc",
+ "nix",
  "rand 0.8.6",
  "reqwest",
  "rezka-client",

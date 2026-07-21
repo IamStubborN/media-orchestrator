@@ -544,7 +544,8 @@ impl MediaTransferPort for YtDlpTransferAdapter {
             "%(progress.speed)s\t",
             "%(progress.eta)s"
         );
-        let mut child = tokio::process::Command::new(&self.program)
+        let mut command = tokio::process::Command::new(&self.program);
+        command
             .args([
                 "--ignore-config",
                 "--no-playlist",
@@ -577,9 +578,10 @@ impl MediaTransferPort for YtDlpTransferAdapter {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|_| RunnerPortError::Process)?;
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
+        let mut child = command.spawn().map_err(|_| RunnerPortError::Process)?;
         let mut stdin = child.stdin.take().ok_or(RunnerPortError::Process)?;
         stdin
             .write_all(request.source_url.as_url().as_str().as_bytes())
@@ -598,9 +600,7 @@ impl MediaTransferPort for YtDlpTransferAdapter {
         let source = transfer_source(request.source_kind);
         let status = loop {
             if cancellation.is_cancelled() {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                let _ = collect_process_stderr(&mut stderr_task).await;
+                terminate_process(&mut child, &mut stderr_task).await;
                 return Err(RunnerPortError::Cancelled);
             }
             if started.elapsed() >= self.timeout {
@@ -655,6 +655,25 @@ impl MediaTransferPort for YtDlpTransferAdapter {
             )
             .await;
         Ok(())
+    }
+}
+
+async fn terminate_process(
+    child: &mut tokio::process::Child,
+    stderr_task: &mut Option<tokio::task::JoinHandle<Vec<u8>>>,
+) {
+    #[cfg(unix)]
+    if let Some(process_id) = child.id().and_then(|value| i32::try_from(value).ok()) {
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(process_id),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    if let Some(task) = stderr_task.take() {
+        task.abort();
+        let _ = task.await;
     }
 }
 

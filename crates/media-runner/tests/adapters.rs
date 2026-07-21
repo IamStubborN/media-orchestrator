@@ -1,6 +1,9 @@
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use async_trait::async_trait;
@@ -23,6 +26,14 @@ struct Active;
 impl Cancellation for Active {
     fn is_cancelled(&self) -> bool {
         false
+    }
+}
+
+struct SwitchableCancellation(Arc<AtomicBool>);
+
+impl Cancellation for SwitchableCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
     }
 }
 
@@ -461,6 +472,50 @@ printf 'video' > "$output"
     assert_eq!(observations[0].download_speed_bps, Some(512));
     assert_eq!(observations[0].eta_seconds, Some(2));
     assert!(observations.last().unwrap().final_observation);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn yt_dlp_cancellation_terminates_the_process_group_without_waiting_for_children() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temporary = tempdir().unwrap();
+    let executable = temporary.path().join("yt-dlp-cancellation-fixture");
+    std::fs::write(
+        &executable,
+        "#!/bin/sh\n(sleep 30) >&2 &\nwhile :; do sleep 1; done\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let output = temporary.path().join("source.partial.mkv");
+    let url = SensitiveUrl::parse("https://cdn.example/playlist.m3u8", "episode-video").unwrap();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancellation = SwitchableCancellation(cancelled.clone());
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancelled.store(true, Ordering::SeqCst);
+    });
+    let adapter = YtDlpTransferAdapter::new(&executable, std::time::Duration::from_secs(10));
+    let started = std::time::Instant::now();
+
+    let result = adapter
+        .download(
+            MediaTransferRequest {
+                source_url: &url,
+                source_kind: VideoSourceKind::Hls,
+                output_path: &output,
+            },
+            &ProgressRecorder::default(),
+            &cancellation,
+        )
+        .await;
+
+    assert_eq!(result, Err(RunnerPortError::Cancelled));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "cancellation waited for a child process: {:?}",
+        started.elapsed()
+    );
 }
 
 #[tokio::test]
