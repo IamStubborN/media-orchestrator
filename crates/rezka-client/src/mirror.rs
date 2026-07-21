@@ -77,11 +77,6 @@ impl MirrorSet {
         self.origins.rotate_left(self.selected);
         self.selected = 0;
     }
-
-    #[must_use]
-    pub(crate) fn len(&self) -> usize {
-        self.origins.len()
-    }
 }
 
 #[must_use]

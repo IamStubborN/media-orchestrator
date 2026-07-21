@@ -273,9 +273,7 @@ impl Transport {
         form: Option<&[(&str, &str)]>,
         status_policy: ResponseStatusPolicy,
     ) -> Result<TransportResponse, RezkaError> {
-        let max_attempts = usize::from(self.max_retries)
-            .saturating_add(1)
-            .min(self.mirrors.len());
+        let max_attempts = usize::from(self.max_retries).saturating_add(1);
         let original = url;
         let original_referer = referer;
 
@@ -301,12 +299,10 @@ impl Transport {
                     return Ok(response);
                 }
                 Err(failure) if failure.eligible && attempt + 1 < max_attempts => {
-                    if !self.mirrors.select_next() {
-                        self.mirrors.promote_selected();
-                        return Err(failure.error);
+                    if self.mirrors.select_next() {
+                        self.jar = SessionJar::bound_empty(self.mirrors.selected_origin())?;
+                        self.session_reset_by_failover = true;
                     }
-                    self.jar = SessionJar::bound_empty(self.mirrors.selected_origin())?;
-                    self.session_reset_by_failover = true;
                 }
                 Err(failure) => {
                     self.mirrors.promote_selected();
@@ -331,15 +327,14 @@ impl Transport {
 
         loop {
             let response = self
-                .send_first(
+                .send_idempotent_with_failover(
                     Method::GET,
                     current_url,
                     current_referer,
                     None,
                     ResponseStatusPolicy::Default,
                 )
-                .await
-                .map_err(|failure| failure.error)?;
+                .await?;
 
             if !response.status.is_redirection() {
                 return Ok(response);
@@ -484,11 +479,10 @@ impl Transport {
             .unwrap_or_default()
             .min(MAX_PROVIDER_RESPONSE_BODY_BYTES);
         let mut body = Vec::with_capacity(initial_capacity);
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| AttemptFailure::terminal(transport_error()))?
-        {
+        while let Some(chunk) = response.chunk().await.map_err(|_| AttemptFailure {
+            error: transport_error(),
+            eligible: true,
+        })? {
             let cumulative_length = body
                 .len()
                 .checked_add(chunk.len())

@@ -951,6 +951,51 @@ async fn eligible_connect_failure_selects_next_mirror_within_retry_bound() {
 }
 
 #[tokio::test]
+async fn authentication_probe_retries_an_eligible_failure_on_a_single_origin() {
+    use rezka_client::transport::Transport;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use time::Duration;
+    use wiremock::{
+        Mock, MockServer,
+        matchers::{method, path},
+    };
+
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .respond_with(MirrorResponseSequence {
+            calls: Arc::clone(&calls),
+            statuses: Arc::new(vec![503, 200]),
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![base.clone()]).unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        Duration::seconds(2),
+        1,
+    )
+    .unwrap();
+
+    let response = transport
+        .get_following(base.join("/account/probe").unwrap(), None, 1)
+        .await
+        .unwrap();
+
+    assert_eq!(response.body, "valid-marker");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(transport.selected_origin(), &base);
+}
+
+#[tokio::test]
 async fn later_failover_invocation_starts_at_the_currently_selected_mirror() {
     use rezka_client::transport::Transport;
     use std::net::TcpListener;
