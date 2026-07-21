@@ -1,8 +1,8 @@
 # Acceptance Status
 
 **Audited:** 2026-07-21
-**Runtime revision:** `3cbd665`
-**Hermes revision:** `694440f`
+**Runtime revision:** `2d876df`
+**Hermes revision:** `e758c20`
 **Homelab revision:** `4e82866`
 
 This is the authoritative completion matrix for the active media-system goal.
