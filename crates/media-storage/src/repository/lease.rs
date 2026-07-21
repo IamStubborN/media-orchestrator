@@ -417,7 +417,7 @@ async fn project_notification(
             [job.id().into_uuid().into()],
         ))
         .await?;
-    let selected = payload
+    let provider_selected = payload
         .get("episodes")
         .and_then(serde_json::Value::as_array)
         .map(|episodes| {
@@ -432,12 +432,60 @@ async fn project_notification(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let title = payload
-        .get("title")
-        .and_then(serde_json::Value::as_str)
-        .map(safe_notification_field)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "Media job".to_owned());
+    let episode_mappings = payload
+        .get("episode_mappings")
+        .and_then(serde_json::Value::as_array);
+    let selected = provider_selected
+        .iter()
+        .map(|coordinates| {
+            episode_mappings
+                .and_then(|mappings| {
+                    mappings.iter().find_map(|mapping| {
+                        let provider = mapping.get("provider")?;
+                        if json_episode_coordinates(provider)? != *coordinates {
+                            return None;
+                        }
+                        let canonical = mapping.get("canonical")?;
+                        json_episode_coordinates(canonical)
+                    })
+                })
+                .unwrap_or(*coordinates)
+        })
+        .collect::<Vec<_>>();
+    let canonical_titles = provider_selected
+        .iter()
+        .filter_map(|coordinates| {
+            episode_mappings?.iter().find_map(|mapping| {
+                let provider = mapping.get("provider")?;
+                if json_episode_coordinates(provider)? != *coordinates {
+                    return None;
+                }
+                mapping
+                    .get("canonical_title")?
+                    .as_str()
+                    .map(safe_notification_field)
+                    .filter(|value| !value.is_empty())
+            })
+        })
+        .collect::<Vec<_>>();
+    let canonical_title = if !provider_selected.is_empty()
+        && canonical_titles.len() == provider_selected.len()
+        && canonical_titles
+            .iter()
+            .all(|title| title == &canonical_titles[0])
+    {
+        canonical_titles.into_iter().next()
+    } else {
+        None
+    };
+    let title = canonical_title.unwrap_or_else(|| {
+        payload
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .map(safe_notification_field)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "Media job".to_owned())
+    });
     let kind = if payload
         .get("media_kind")
         .and_then(serde_json::Value::as_str)
@@ -447,11 +495,17 @@ async fn project_notification(
     } else {
         "series"
     };
-    let season = payload
-        .get("season")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .filter(|value| *value > 0);
+    let season = selected
+        .first()
+        .map(|coordinates| coordinates.0)
+        .filter(|season| selected.iter().all(|coordinates| coordinates.0 == *season))
+        .or_else(|| {
+            payload
+                .get("season")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .filter(|value| *value > 0)
+        });
     let translation = payload
         .get("translation")
         .and_then(serde_json::Value::as_str)
@@ -644,6 +698,13 @@ fn checkpoint_unsigned(checkpoint: &Checkpoint, key: &str) -> Option<u64> {
         Some(CheckpointValue::Unsigned(value)) => Some(*value),
         _ => None,
     }
+}
+
+fn json_episode_coordinates(value: &serde_json::Value) -> Option<(u32, u32)> {
+    Some((
+        u32::try_from(value.get("season")?.as_u64()?).ok()?,
+        u32::try_from(value.get("episode")?.as_u64()?).ok()?,
+    ))
 }
 
 fn safe_notification_field(value: &str) -> String {

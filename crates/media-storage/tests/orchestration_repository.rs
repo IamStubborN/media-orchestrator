@@ -711,6 +711,65 @@ async fn job_lifecycle_projects_one_terminal_card_and_one_final_push() {
 }
 
 #[tokio::test]
+async fn notification_card_uses_canonical_specials_coordinates() {
+    let (test_db, jobs, leases) = setup().await;
+    jobs.create(
+        operation_key(),
+        new_job("selection:canonical-specials-card"),
+    )
+    .await
+    .unwrap();
+    test_db
+        .connection()
+        .execute_unprepared(
+            "INSERT INTO search_executions (result_ref, payload) VALUES \
+             ('selection:canonical-specials-card', \
+              '{\"title\":\"Attack on Titan OVA-1\",\"media_kind\":\"series\",\"season\":1,\"translation\":\"Dub\",\"episodes\":[{\"season\":1,\"episode\":1}],\"episode_mappings\":[{\"provider\":{\"season\":1,\"episode\":1},\"canonical\":{\"season\":0,\"episode\":1},\"canonical_title\":\"Attack on Titan\"}]}')",
+        )
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    leases
+        .report_event(
+            operation_key(),
+            lease.lease_id(),
+            RUNNER_CLIENT_ID,
+            JobEvent::started(JobEventId::new()),
+        )
+        .await
+        .unwrap();
+    leases
+        .report_event(
+            operation_key(),
+            lease.lease_id(),
+            RUNNER_CLIENT_ID,
+            JobEvent::stage_started(JobEventId::new(), 0, "download".to_owned(), 0).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let card = query(
+        test_db.connection(),
+        "SELECT payload FROM notification_outbox WHERE payload->>'delivery_kind' = 'card'",
+    )
+    .await
+    .remove(0)
+    .try_get::<serde_json::Value>("", "payload")
+    .unwrap();
+    assert_eq!(card["media"]["title"], "Attack on Titan");
+    assert_eq!(card["media"]["season"], 0);
+    assert_eq!(card["progress"]["current_episode"], 1);
+}
+
+#[tokio::test]
 async fn partial_season_card_aggregates_task_states_and_episode_coordinates() {
     let (test_db, jobs, leases) = setup().await;
     let created = jobs

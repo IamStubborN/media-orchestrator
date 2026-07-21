@@ -309,8 +309,8 @@ async fn a_failed_migration_explicitly_rolls_back_partial_schema() {
     );
     assert_eq!(
         names.last().map(String::as_str),
-        Some("m20260721_000025_notification_episode_numbers"),
-        "episode-number notification fix must remain the latest schema change",
+        Some("m20260721_000026_notification_specials"),
+        "specials notification support must remain the latest schema change",
     );
     for migration in migrations {
         assert_eq!(
@@ -536,7 +536,7 @@ async fn structured_notifications_migration_preserves_legacy_rows_and_enforces_v
         "notification_payload_check",
     )
     .await;
-    assert_rejected(
+    execute(
         db,
         "UPDATE notification_outbox
          SET payload = jsonb_set(
@@ -544,6 +544,22 @@ async fn structured_notifications_migration_preserves_legacy_rows_and_enforces_v
              '{progress}',
              '{\"missing_episodes\": [{\"season\": 0, \"episode\": 9}]}'::jsonb
          )
+         WHERE id = '00000000-0000-0000-0000-000000000997'",
+    )
+    .await
+    .expect("specials may use season zero in notification progress");
+    execute(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(payload, '{media,season}', '0'::jsonb)
+         WHERE id = '00000000-0000-0000-0000-000000000997'",
+    )
+    .await
+    .expect("specials may use season zero in notification media");
+    assert_rejected(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(payload, '{media,season}', '-1'::jsonb)
          WHERE id = '00000000-0000-0000-0000-000000000997'",
         "notification_payload_check",
     )
@@ -599,7 +615,7 @@ async fn structured_notifications_migration_preserves_legacy_rows_and_enforces_v
     )
     .await;
 
-    Migrator::down(db, Some(2)).await.unwrap();
+    Migrator::down(db, Some(3)).await.unwrap();
 
     let retained_rows = query(
         db,
