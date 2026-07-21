@@ -467,6 +467,43 @@ async fn structured_notifications_migration_preserves_legacy_rows_and_enforces_v
     .await
     .unwrap();
 
+    execute(
+        db,
+        "INSERT INTO notification_outbox
+           (id, aggregate_type, aggregate_id, event_type, recipient, source_dedupe_key, payload)
+         VALUES ('00000000-0000-0000-0000-000000000996', 'job',
+                 '00000000-0000-0000-0000-000000000999', 'download-progress', 'primary',
+                 decode(repeat('03', 32), 'hex'),
+                 '{
+                   \"event_type\": \"media.notification\",
+                   \"schema_version\": 2,
+                   \"delivery_kind\": \"card\",
+                   \"card_key\": \"media-job:00000000-0000-0000-0000-000000000999\",
+                   \"revision\": 8,
+                   \"lifecycle_cycle\": 1,
+                   \"terminal\": false,
+                   \"state\": \"downloading\",
+                   \"media\": {
+                     \"job_id\": \"00000000-0000-0000-0000-000000000999\",
+                     \"title\": \"Example Show\",
+                     \"kind\": \"series\",
+                     \"provider\": \"rezka\",
+                     \"season\": 1,
+                     \"translation\": \"AniLibria\"
+                   },
+                   \"progress\": {
+                     \"completed_episodes\": 0,
+                     \"total_episodes\": 1,
+                     \"current_episode\": 13
+                   },
+                   \"stage\": \"download\",
+                   \"next_step\": \"process\",
+                   \"actions\": [\"cancel\", \"details\"]
+                 }'::jsonb)",
+    )
+    .await
+    .expect("an absolute episode number may exceed the number of tasks in the job");
+
     assert_rejected(
         db,
         "UPDATE notification_outbox
@@ -562,7 +599,7 @@ async fn structured_notifications_migration_preserves_legacy_rows_and_enforces_v
     )
     .await;
 
-    Migrator::down(db, Some(1)).await.unwrap();
+    Migrator::down(db, Some(2)).await.unwrap();
 
     let retained_rows = query(
         db,
