@@ -2,8 +2,9 @@ mod support;
 
 use media_core::{
     PRIMARY_USER_ID, BootstrapClient, CheckpointValue, ClientRole, ClientStore, CredentialDigest,
-    JobEvent, JobEventId, JobId, JobState, JobStore, LeaseStore, NewJob, NotificationEventType,
-    NotificationId, NotifyScope, Provider, RUNNER_CLIENT_ID, SECONDARY_USER_ID,
+    JobEvent, JobEventId, JobId, JobState, JobStore, LeaseStore, NewJob, NotificationContent,
+    NotificationEventType, NotificationId, NotifyScope, Provider, RUNNER_CLIENT_ID,
+    SECONDARY_USER_ID,
 };
 use media_storage::{
     SeaOrmClientStore, SeaOrmJobStore, SeaOrmLeaseStore, SeaOrmNotificationOutbox,
@@ -767,6 +768,21 @@ async fn notification_card_uses_canonical_specials_coordinates() {
     assert_eq!(card["media"]["title"], "Attack on Titan");
     assert_eq!(card["media"]["season"], 0);
     assert_eq!(card["progress"]["current_episode"], 1);
+
+    let deliveries = SeaOrmNotificationOutbox::new(test_db.connection().clone())
+        .lease_pending(
+            NotificationId::new(),
+            time::OffsetDateTime::now_utc() + time::Duration::seconds(1),
+            time::Duration::seconds(30),
+            10,
+        )
+        .await
+        .expect("the canonical specials card must be dispatchable");
+    let NotificationContent::Media(notification) = deliveries[0].content() else {
+        panic!("expected a structured media notification");
+    };
+    assert_eq!(notification.media().title(), "Attack on Titan");
+    assert_eq!(notification.media().season(), Some(0));
 }
 
 #[tokio::test]

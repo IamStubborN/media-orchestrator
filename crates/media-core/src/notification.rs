@@ -224,9 +224,6 @@ impl MediaNotificationMedia {
         if !matches!(provider.as_str(), "rezka" | "prowlarr") {
             return Err(NotificationValidationError::InvalidProvider);
         }
-        if season == Some(0) {
-            return Err(NotificationValidationError::InvalidEpisodeProgress);
-        }
         if let Some(translation) = &translation {
             validate_display_field(translation)?;
         }
@@ -280,9 +277,7 @@ impl MediaNotificationProgress {
         if total_episodes == Some(0)
             || completed_episodes
                 .is_some_and(|completed| total_episodes.is_none_or(|total| completed > total))
-            || current_episode.is_some_and(|current| {
-                total_episodes.is_none_or(|total| current == 0 || current > total)
-            })
+            || current_episode == Some(0)
             || (completed_episodes.is_some() && total_episodes.is_none())
         {
             return Err(NotificationValidationError::InvalidEpisodeProgress);
@@ -333,7 +328,7 @@ impl MediaNotificationProgress {
 
 impl MediaNotificationEpisode {
     pub const fn new(season: u32, episode: u32) -> Result<Self, NotificationValidationError> {
-        if season == 0 || episode == 0 {
+        if episode == 0 {
             return Err(NotificationValidationError::InvalidEpisodeProgress);
         }
         Ok(Self { season, episode })
@@ -479,8 +474,8 @@ fn valid_card_key(value: &str) -> bool {
 mod tests {
     use super::{
         MediaNotification, MediaNotificationDeliveryKind, MediaNotificationEpisode,
-        MediaNotificationKind, MediaNotificationMedia, MediaNotificationState,
-        NotificationValidationError,
+        MediaNotificationKind, MediaNotificationMedia, MediaNotificationProgress,
+        MediaNotificationState, NotificationValidationError,
     };
     use crate::JobId;
 
@@ -497,13 +492,39 @@ mod tests {
     }
 
     #[test]
-    fn missing_episode_coordinates_must_be_positive() {
-        for coordinates in [(0, 1), (1, 0)] {
-            assert_eq!(
-                MediaNotificationEpisode::new(coordinates.0, coordinates.1),
-                Err(NotificationValidationError::InvalidEpisodeProgress),
-            );
-        }
+    fn specials_use_zero_season_but_episode_numbers_remain_positive() {
+        assert!(MediaNotificationEpisode::new(0, 1).is_ok());
+        assert_eq!(
+            MediaNotificationEpisode::new(1, 0),
+            Err(NotificationValidationError::InvalidEpisodeProgress),
+        );
+        assert!(
+            MediaNotificationMedia::new(
+                JobId::new(),
+                "Example Show".to_owned(),
+                MediaNotificationKind::Series,
+                "rezka".to_owned(),
+                Some(0),
+                None,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn absolute_episode_number_is_independent_from_job_task_count() {
+        assert!(
+            MediaNotificationProgress::new(
+                Some(0),
+                Some(1),
+                Some(13),
+                Vec::new(),
+                None,
+                None,
+                None,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
