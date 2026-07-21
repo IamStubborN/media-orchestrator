@@ -659,6 +659,36 @@ async fn expired_cancel_requested_job_becomes_cancelled_instead_of_being_strande
             .await
             .is_empty()
     );
+    let notifications = query(
+        test_db.connection(),
+        "SELECT event_type, payload FROM notification_outbox \
+         WHERE aggregate_id = (SELECT id FROM jobs WHERE result_ref = 'cancel-job')",
+    )
+    .await;
+    assert_eq!(notifications.len(), 2);
+    assert!(notifications.iter().all(|row| {
+        row.try_get::<String>("", "event_type").unwrap() == "cancelled"
+            && row
+                .try_get::<serde_json::Value>("", "payload")
+                .unwrap()
+                .get("state")
+                .and_then(serde_json::Value::as_str)
+                == Some("cancelled")
+    }));
+    let outbox = query(
+        test_db.connection(),
+        "SELECT event_type, payload FROM outbox_events \
+         WHERE aggregate_id = (SELECT id FROM jobs WHERE result_ref = 'cancel-job') \
+         AND event_type = 'job.cancelled'",
+    )
+    .await;
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(
+        outbox[0]
+            .try_get::<serde_json::Value>("", "payload")
+            .unwrap(),
+        serde_json::json!({"state": "cancelled"}),
+    );
 }
 
 #[tokio::test]

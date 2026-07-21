@@ -1,7 +1,7 @@
 use media_core::{
-    PRIMARY_USER_ID, Checkpoint, CheckpointValue, ClientId, Job, JobEvent, JobEventKind, JobLease,
-    JobState, LeaseId, LeaseStore, MAX_STICKY_VPN_ATTEMPTS, NotifyScope, OperationKey, PortError,
-    Provider, StageFailureOutcome, StageRef, SECONDARY_USER_ID, max_stage_attempts,
+    PRIMARY_USER_ID, Checkpoint, CheckpointValue, ClientId, Job, JobEvent, JobEventId, JobEventKind,
+    JobLease, JobState, LeaseId, LeaseStore, MAX_STICKY_VPN_ATTEMPTS, NotifyScope, OperationKey,
+    PortError, Provider, StageFailureOutcome, StageRef, SECONDARY_USER_ID, max_stage_attempts,
 };
 use sea_orm::{
     ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, Statement, TransactionTrait,
@@ -1187,15 +1187,19 @@ async fn lease_next_in_transaction(
     if let Some(existing) = transaction
         .query_one_raw(Statement::from_string(
             DatabaseBackend::Postgres,
-            "SELECT job_id, expires_at > now() AS active \
-             FROM job_leases WHERE slot = 1 FOR UPDATE",
+            "SELECT job_leases.id, job_leases.job_id, expires_at > now() AS active, \
+             jobs.state AS job_state FROM job_leases JOIN jobs \
+             ON jobs.id = job_leases.job_id WHERE slot = 1 \
+             FOR UPDATE OF job_leases, jobs",
         ))
         .await?
     {
         if existing.try_get::<bool>("", "active")? {
             return Ok(LeaseDecision::Available(None));
         }
+        let expired_lease = existing.try_get::<Uuid>("", "id")?;
         let expired_job = existing.try_get::<Uuid>("", "job_id")?;
+        let cancelled = existing.try_get::<String>("", "job_state")? == "cancel_requested";
         transaction
             .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
@@ -1205,6 +1209,20 @@ async fn lease_next_in_transaction(
                 [expired_job.into()],
             ))
             .await?;
+        if cancelled {
+            let job = load_job(transaction, expired_job).await?;
+            let event = JobEvent::transition(JobEventId::new(), JobState::Cancelled, None)
+                .map_err(|_| sea_orm::DbErr::Type("invalid cancellation event".to_owned()))?;
+            insert_outbox(
+                transaction,
+                job.id(),
+                "job.cancelled",
+                expired_lease.as_bytes().to_vec(),
+                serde_json::json!({"state": "cancelled"}),
+            )
+            .await?;
+            insert_notification_outbox(transaction, &job, &event).await?;
+        }
         transaction
             .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
