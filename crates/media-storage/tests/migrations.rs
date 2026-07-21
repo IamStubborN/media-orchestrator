@@ -309,8 +309,8 @@ async fn a_failed_migration_explicitly_rolls_back_partial_schema() {
     );
     assert_eq!(
         names.last().map(String::as_str),
-        Some("m20260720_000024_structured_notifications"),
-        "structured notifications migration must remain the latest schema change",
+        Some("m20260721_000025_notification_episode_numbers"),
+        "episode-number notification fix must remain the latest schema change",
     );
     for migration in migrations {
         assert_eq!(
