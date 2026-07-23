@@ -560,6 +560,7 @@ impl MediaTransferPort for YtDlpTransferAdapter {
                 "20",
                 "--fragment-retries",
                 "20",
+                "--abort-on-unavailable-fragments",
                 "--file-access-retries",
                 "3",
                 "--retry-sleep",
@@ -789,8 +790,9 @@ impl ProcessPort for TokioProcessAdapter {
             .args([
                 "-v",
                 "error",
+                "-show_packets",
                 "-show_entries",
-                "stream=codec_type,codec_name,profile,width,height,bit_rate,channels,channel_layout:stream_tags=language,title:format=duration,bit_rate",
+                "stream=index,codec_type,codec_name,profile,width,height,bit_rate,channels,channel_layout:stream_tags=language,title:packet=stream_index,pts_time,dts_time,duration_time:format=duration,bit_rate",
                 "-of",
                 "json",
             ])
@@ -942,11 +944,14 @@ mod process_error_tests {
 #[derive(serde::Deserialize)]
 struct ProbeDocument {
     streams: Vec<ProbeStream>,
+    #[serde(default)]
+    packets: Vec<ProbePacket>,
     format: ProbeFormat,
 }
 
 #[derive(serde::Deserialize)]
 struct ProbeStream {
+    index: u32,
     codec_type: String,
     codec_name: String,
     profile: Option<String>,
@@ -957,6 +962,14 @@ struct ProbeStream {
     channel_layout: Option<String>,
     #[serde(default)]
     tags: ProbeTags,
+}
+
+#[derive(serde::Deserialize)]
+struct ProbePacket {
+    stream_index: u32,
+    pts_time: Option<String>,
+    dts_time: Option<String>,
+    duration_time: Option<String>,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -989,6 +1002,7 @@ fn parse_probe(contents: &[u8]) -> Result<MediaProbe, RunnerPortError> {
                 &stream.codec_name,
                 stream.channels,
                 &stream.channel_layout,
+                stream.index,
             )
         });
     let duration_seconds = document
@@ -1010,6 +1024,10 @@ fn parse_probe(contents: &[u8]) -> Result<MediaProbe, RunnerPortError> {
     {
         return Err(RunnerPortError::Process);
     }
+    let video_timeline = parse_stream_timeline(&document.packets, stream.index)?;
+    let audio_timeline = audio
+        .map(|(_, _, _, _, index)| parse_stream_timeline(&document.packets, index))
+        .transpose()?;
     Ok(MediaProbe {
         codec: stream.codec_name.clone(),
         width: stream.width.ok_or(RunnerPortError::Process)?,
@@ -1020,8 +1038,71 @@ fn parse_probe(contents: &[u8]) -> Result<MediaProbe, RunnerPortError> {
         audio_language: audio.and_then(|(tags, ..)| tags.language.clone()),
         audio_title: audio.and_then(|(tags, ..)| tags.title.clone()),
         audio_codec: audio.map(|(_, codec, ..)| codec.clone()),
-        audio_channels: audio.and_then(|(_, _, channels, _)| channels),
-        audio_channel_layout: audio.and_then(|(_, _, _, channel_layout)| channel_layout.clone()),
+        audio_channels: audio.and_then(|(_, _, channels, ..)| channels),
+        audio_channel_layout: audio.and_then(|(_, _, _, channel_layout, _)| channel_layout.clone()),
+        timeline: crate::MediaTimeline {
+            video_packet_count: video_timeline.packet_count,
+            audio_packet_count: audio_timeline.map(|timeline| timeline.packet_count),
+            max_video_gap_seconds: video_timeline.max_gap_seconds,
+            max_audio_gap_seconds: audio_timeline.map(|timeline| timeline.max_gap_seconds),
+            video_end_seconds: video_timeline.end_seconds,
+            audio_end_seconds: audio_timeline.map(|timeline| timeline.end_seconds),
+        },
+    })
+}
+
+#[derive(Debug, Copy, Clone)]
+struct StreamTimeline {
+    packet_count: u64,
+    max_gap_seconds: f64,
+    end_seconds: f64,
+}
+
+fn parse_stream_timeline(
+    packets: &[ProbePacket],
+    stream_index: u32,
+) -> Result<StreamTimeline, RunnerPortError> {
+    let mut packet_count = 0_u64;
+    let mut timestamps = Vec::new();
+    let mut end_seconds = f64::NEG_INFINITY;
+
+    for packet in packets
+        .iter()
+        .filter(|packet| packet.stream_index == stream_index)
+    {
+        let Some(timestamp) = packet.dts_time.as_deref().or(packet.pts_time.as_deref()) else {
+            continue;
+        };
+        let Ok(timestamp_seconds) = timestamp.parse::<f64>() else {
+            if timestamp == "N/A" {
+                continue;
+            }
+            return Err(RunnerPortError::Process);
+        };
+        let duration = match packet.duration_time.as_deref().unwrap_or("0") {
+            "N/A" => 0.0,
+            value => value.parse::<f64>().map_err(|_| RunnerPortError::Process)?,
+        };
+        if !timestamp_seconds.is_finite() || !duration.is_finite() || duration < 0.0 {
+            return Err(RunnerPortError::Process);
+        }
+        timestamps.push(timestamp_seconds);
+        end_seconds = end_seconds.max(timestamp_seconds + duration);
+        packet_count = packet_count.saturating_add(1);
+    }
+
+    if packet_count == 0 || !end_seconds.is_finite() {
+        return Err(RunnerPortError::Process);
+    }
+    timestamps.sort_by(f64::total_cmp);
+    let max_gap_seconds = timestamps
+        .windows(2)
+        .map(|timestamps| timestamps[1] - timestamps[0])
+        .fold(0.0_f64, f64::max);
+    Ok(StreamTimeline {
+        packet_count,
+        max_gap_seconds,
+        end_seconds,
     })
 }
 

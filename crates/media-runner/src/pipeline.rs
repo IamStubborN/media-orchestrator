@@ -4,7 +4,7 @@ use crate::{
     AudioTrackMetadata, Cancellation, FileSystemPort, HttpPort, MediaProbe, MediaTransferPort,
     MediaTransferRequest, PeakEstimate, PlexCheck, PlexExpectation, ProcessPort, RunnerPortError,
     RunnerServicePort, StageReporter, StorageBlocked, StoragePreflight, build_rezka_vaapi_command,
-    validate_plex_observation, validate_webvtt,
+    validate_media_timeline, validate_plex_observation, validate_webvtt,
 };
 
 const DEFAULT_RESERVE_BYTES: u64 = 0;
@@ -186,7 +186,10 @@ impl EpisodePipeline {
             self.process
                 .probe(&work.final_video, cancellation)
                 .await
-                .is_ok_and(|probe| is_full_hd_rezka_output(&probe, work.audio.as_ref()))
+                .is_ok_and(|probe| {
+                    validate_media_timeline(&probe).is_ok()
+                        && is_full_hd_rezka_output(&probe, work.audio.as_ref())
+                })
         } else {
             false
         };
@@ -259,6 +262,7 @@ impl EpisodePipeline {
                 Err(error) => return cancellation_report(error),
             };
             validate_source_duration(&source_probe, work.expected_duration_seconds)?;
+            validate_media_timeline(&source_probe).map_err(|_| RunnerPortError::Process)?;
             let command = build_rezka_vaapi_command(
                 &work.source_partial,
                 &work.encoded_partial,
@@ -286,6 +290,7 @@ impl EpisodePipeline {
                 Err(error) => return cancellation_report(error),
             };
             validate_encoded_probe(&source_probe, &encoded_probe, work.audio.as_ref())?;
+            validate_media_timeline(&encoded_probe).map_err(|_| RunnerPortError::Process)?;
             let processing = Some(MediaProcessing {
                 mode: ProcessingMode::VaapiUpscale,
                 elapsed_seconds: processing_started.elapsed().as_secs(),

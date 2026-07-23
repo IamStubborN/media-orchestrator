@@ -13,6 +13,17 @@ pub struct MediaProbe {
     pub audio_codec: Option<String>,
     pub audio_channels: Option<u32>,
     pub audio_channel_layout: Option<String>,
+    pub timeline: MediaTimeline,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MediaTimeline {
+    pub video_packet_count: u64,
+    pub audio_packet_count: Option<u64>,
+    pub max_video_gap_seconds: f64,
+    pub max_audio_gap_seconds: Option<f64>,
+    pub video_end_seconds: f64,
+    pub audio_end_seconds: Option<f64>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -24,6 +35,42 @@ pub struct AudioTrackMetadata {
 #[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
 #[error("media probe is invalid")]
 pub struct MediaProbeError;
+
+const MAX_VIDEO_PACKET_GAP_SECONDS: f64 = 1.0;
+const MAX_AUDIO_PACKET_GAP_SECONDS: f64 = 0.5;
+const MAX_TRACK_TAIL_SECONDS: f64 = 2.0;
+const MAX_AUDIO_VIDEO_END_DELTA_SECONDS: f64 = 2.0;
+
+pub fn validate_media_timeline(probe: &MediaProbe) -> Result<(), MediaProbeError> {
+    let timeline = &probe.timeline;
+    if timeline.video_packet_count < 2
+        || !timeline.max_video_gap_seconds.is_finite()
+        || timeline.max_video_gap_seconds > MAX_VIDEO_PACKET_GAP_SECONDS
+        || !timeline.video_end_seconds.is_finite()
+        || probe.duration_seconds - timeline.video_end_seconds > MAX_TRACK_TAIL_SECONDS
+    {
+        return Err(MediaProbeError);
+    }
+
+    match (
+        timeline.audio_packet_count,
+        timeline.max_audio_gap_seconds,
+        timeline.audio_end_seconds,
+    ) {
+        (None, None, None) => {}
+        (Some(packet_count), Some(max_gap), Some(end_seconds))
+            if packet_count >= 2
+                && max_gap.is_finite()
+                && max_gap <= MAX_AUDIO_PACKET_GAP_SECONDS
+                && end_seconds.is_finite()
+                && probe.duration_seconds - end_seconds <= MAX_TRACK_TAIL_SECONDS
+                && (timeline.video_end_seconds - end_seconds).abs()
+                    <= MAX_AUDIO_VIDEO_END_DELTA_SECONDS => {}
+        _ => return Err(MediaProbeError),
+    }
+
+    Ok(())
+}
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct ProcessCommand {

@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use media_runner::{
-    AudioTrackMetadata, GIB, MediaProbe, PeakEstimate, PlexExpectation, PlexObservation,
-    ResumeAction, StoragePreflight, StorageRoots, build_rezka_vaapi_command, decide_resume,
-    validate_plex_observation, validate_webvtt,
+    AudioTrackMetadata, GIB, MediaProbe, MediaTimeline, PeakEstimate, PlexExpectation,
+    PlexObservation, ResumeAction, StoragePreflight, StorageRoots, build_rezka_vaapi_command,
+    decide_resume, validate_media_timeline, validate_plex_observation, validate_webvtt,
 };
 
 #[test]
@@ -56,6 +56,14 @@ fn rezka_vaapi_command_uses_low_power_full_hd_upscale() {
         audio_codec: None,
         audio_channels: None,
         audio_channel_layout: None,
+        timeline: MediaTimeline {
+            video_packet_count: 30_000,
+            audio_packet_count: Some(60_000),
+            max_video_gap_seconds: 0.04,
+            max_audio_gap_seconds: Some(0.02),
+            video_end_seconds: 1_234.48,
+            audio_end_seconds: Some(1_234.49),
+        },
     };
 
     let command = build_rezka_vaapi_command(
@@ -113,6 +121,40 @@ fn rezka_vaapi_command_uses_low_power_full_hd_upscale() {
             .windows(2)
             .any(|args| args == ["-metadata:s:a:0", "title=DEEP"])
     );
+}
+
+#[test]
+fn media_timeline_rejects_missing_fragments_and_truncated_tracks() {
+    let mut probe = MediaProbe {
+        codec: "h264".to_owned(),
+        width: 1280,
+        height: 720,
+        duration_seconds: 60.0,
+        bitrate: Some(4_000_000),
+        video_profile: None,
+        audio_language: Some("rus".to_owned()),
+        audio_title: Some("AniLibria".to_owned()),
+        audio_codec: Some("aac".to_owned()),
+        audio_channels: Some(2),
+        audio_channel_layout: Some("stereo".to_owned()),
+        timeline: MediaTimeline {
+            video_packet_count: 1_500,
+            audio_packet_count: Some(3_000),
+            max_video_gap_seconds: 0.04,
+            max_audio_gap_seconds: Some(0.02),
+            video_end_seconds: 59.98,
+            audio_end_seconds: Some(59.99),
+        },
+    };
+
+    assert!(validate_media_timeline(&probe).is_ok());
+
+    probe.timeline.max_audio_gap_seconds = Some(6.0);
+    assert!(validate_media_timeline(&probe).is_err());
+
+    probe.timeline.max_audio_gap_seconds = Some(0.02);
+    probe.timeline.video_end_seconds = 56.8;
+    assert!(validate_media_timeline(&probe).is_err());
 }
 
 #[test]

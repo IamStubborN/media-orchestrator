@@ -377,9 +377,9 @@ async fn process_adapter_parses_truthful_ffprobe_dimensions() {
     std::fs::write(
         &ffprobe,
         r#"#!/bin/sh
-printf '%s\n' "$@" > 'ARGUMENTS_PATH'
-printf '%s' '{"streams":[{"codec_type":"video","codec_name":"hevc","profile":"Main","width":1920,"height":1080,"bit_rate":"2100000"},{"codec_type":"audio","codec_name":"aac","channels":2,"channel_layout":"stereo","tags":{"language":"rus","title":"AniLibria"}}],"format":{"duration":"61.25","bit_rate":"4100000"}}'
-"#
+	printf '%s\n' "$@" > 'ARGUMENTS_PATH'
+	printf '%s' '{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","profile":"Main","width":1920,"height":1080,"bit_rate":"2100000"},{"index":1,"codec_type":"audio","codec_name":"aac","channels":2,"channel_layout":"stereo","tags":{"language":"rus","title":"AniLibria"}}],"packets":[{"stream_index":0,"dts_time":"0.000","duration_time":"0.040"},{"stream_index":1,"dts_time":"0.000","duration_time":"0.020"},{"stream_index":1,"dts_time":"0.020","duration_time":"0.020"},{"stream_index":0,"dts_time":"0.040","duration_time":"0.040"},{"stream_index":1,"dts_time":"0.040","duration_time":"0.020"},{"stream_index":1,"dts_time":"0.060","duration_time":"0.020"},{"stream_index":0,"dts_time":"0.080","duration_time":"0.040"},{"stream_index":1,"dts_time":"0.080","duration_time":"0.020"},{"stream_index":1,"dts_time":"0.100","duration_time":"0.020"}],"format":{"duration":"0.12","bit_rate":"4100000"}}'
+	"#
         .replace("ARGUMENTS_PATH", &arguments.display().to_string()),
     )
     .unwrap();
@@ -398,16 +398,24 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"hevc","profile":"Ma
     assert_eq!((probe.width, probe.height), (1920, 1080));
     assert_eq!(probe.codec, "hevc");
     assert_eq!(probe.video_profile.as_deref(), Some("Main"));
-    assert_eq!(probe.duration_seconds, 61.25);
+    assert_eq!(probe.duration_seconds, 0.12);
     assert_eq!(probe.audio_language.as_deref(), Some("rus"));
     assert_eq!(probe.audio_title.as_deref(), Some("AniLibria"));
     assert_eq!(probe.audio_codec.as_deref(), Some("aac"));
     assert_eq!(probe.audio_channels, Some(2));
     assert_eq!(probe.audio_channel_layout.as_deref(), Some("stereo"));
+    assert_eq!(probe.timeline.video_packet_count, 3);
+    assert_eq!(probe.timeline.audio_packet_count, Some(6));
+    assert!((probe.timeline.max_video_gap_seconds - 0.04).abs() < f64::EPSILON);
+    assert!((probe.timeline.max_audio_gap_seconds.unwrap() - 0.02).abs() < f64::EPSILON);
+    assert!((probe.timeline.video_end_seconds - 0.12).abs() < f64::EPSILON);
+    assert!((probe.timeline.audio_end_seconds.unwrap() - 0.12).abs() < f64::EPSILON);
     let arguments = std::fs::read_to_string(arguments).unwrap();
     assert!(arguments.contains("profile"));
     assert!(arguments.contains("channels"));
     assert!(arguments.contains("channel_layout"));
+    assert!(arguments.contains("-show_packets"));
+    assert!(arguments.contains("dts_time"));
 }
 
 #[cfg(unix)]
@@ -465,6 +473,7 @@ printf 'video' > "$output"
         "--retries",
         "20",
         "--fragment-retries",
+        "--abort-on-unavailable-fragments",
         "--concurrent-fragments",
         "4",
         "--batch-file",

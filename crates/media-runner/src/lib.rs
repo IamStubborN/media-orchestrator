@@ -17,7 +17,8 @@ pub use adapters::{
 };
 pub use download::{ResumeAction, ResumeError, decide_resume};
 pub use media::{
-    AudioTrackMetadata, MediaProbe, MediaProbeError, ProcessCommand, build_rezka_vaapi_command,
+    AudioTrackMetadata, MediaProbe, MediaProbeError, MediaTimeline, ProcessCommand,
+    build_rezka_vaapi_command, validate_media_timeline,
 };
 pub use pipeline::{
     EpisodeOutcome, EpisodePipeline, EpisodeReport, EpisodeWork, MediaProcessing, ProcessingMode,

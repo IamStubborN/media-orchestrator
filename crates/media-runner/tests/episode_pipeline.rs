@@ -7,7 +7,7 @@ use std::{
 use async_trait::async_trait;
 use media_runner::{
     Cancellation, EpisodeOutcome, EpisodePipeline, EpisodeWork, FileSystemPort, GIB, HttpPort,
-    MediaProbe, MediaTransferPort, MediaTransferRequest, PlexCheck, PlexExpectation,
+    MediaProbe, MediaTimeline, MediaTransferPort, MediaTransferRequest, PlexCheck, PlexExpectation,
     PlexObservation, ProcessCommand, ProcessPort, ProcessingMode, ProviderKind, RunnerPortError,
     RunnerServicePort, SensitiveUrl, StageReporter, SubtitleTrack, VideoSourceKind,
 };
@@ -323,6 +323,7 @@ fn probe(codec: &str) -> MediaProbe {
         audio_codec: None,
         audio_channels: None,
         audio_channel_layout: None,
+        timeline: continuous_timeline(60.0),
     }
 }
 
@@ -339,6 +340,18 @@ fn encoded_probe() -> MediaProbe {
         audio_codec: None,
         audio_channels: None,
         audio_channel_layout: None,
+        timeline: continuous_timeline(60.0),
+    }
+}
+
+fn continuous_timeline(duration_seconds: f64) -> MediaTimeline {
+    MediaTimeline {
+        video_packet_count: 1_500,
+        audio_packet_count: Some(3_000),
+        max_video_gap_seconds: 0.04,
+        max_audio_gap_seconds: Some(0.02),
+        video_end_seconds: duration_seconds - 0.02,
+        audio_end_seconds: Some(duration_seconds - 0.01),
     }
 }
 
@@ -635,6 +648,38 @@ async fn rezka_episode_runs_one_pipeline_and_publishes_video_last() {
 }
 
 #[tokio::test]
+async fn rezka_episode_with_a_missing_media_fragment_is_never_transcoded_or_published() {
+    let work = work();
+    let filesystem = Arc::new(FakeFs::with_available(30 * GIB));
+    let http = Arc::new(FakeHttp::default());
+    let mut damaged_probe = probe("h264");
+    damaged_probe.timeline.max_audio_gap_seconds = Some(6.0);
+    let process = Arc::new(FakeProcess {
+        probes: Mutex::new(VecDeque::from([damaged_probe])),
+        commands: Mutex::default(),
+        filesystem: filesystem.clone(),
+    });
+    let service = Arc::new(FakeService {
+        checks: Mutex::default(),
+        scans: Mutex::default(),
+    });
+    let pipeline = EpisodePipeline::new(
+        filesystem.clone(),
+        http.clone(),
+        http,
+        process.clone(),
+        service,
+    );
+
+    assert_eq!(
+        pipeline.run(&work, &NeverCancelled, &()).await,
+        Err(RunnerPortError::Process)
+    );
+    assert!(process.commands.lock().unwrap().is_empty());
+    assert!(filesystem.published.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn expired_source_retry_downloads_and_publishes_only_after_a_fresh_attempt() {
     let work = work();
     let filesystem = Arc::new(FakeFs::with_available(30 * GIB));
@@ -849,8 +894,10 @@ async fn unknown_source_size_uses_duration_instead_of_a_fixed_twenty_gib_peak() 
     });
     let mut source_probe = probe("h264");
     source_probe.duration_seconds = 45.0 * 60.0;
+    source_probe.timeline = continuous_timeline(source_probe.duration_seconds);
     let mut encoded_probe = encoded_probe();
     encoded_probe.duration_seconds = 45.0 * 60.0;
+    encoded_probe.timeline = continuous_timeline(encoded_probe.duration_seconds);
     let process = Arc::new(FakeProcess {
         probes: Mutex::new(VecDeque::from([
             source_probe,
