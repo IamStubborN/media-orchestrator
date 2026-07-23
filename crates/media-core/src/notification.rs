@@ -804,7 +804,6 @@ impl MediaNotification {
     pub fn result(&self) -> Option<&MediaNotificationResult> {
         self.result.as_ref()
     }
-    #[must_use]
     pub fn with_result(
         mut self,
         result: MediaNotificationResult,

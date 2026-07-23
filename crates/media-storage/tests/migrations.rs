@@ -309,8 +309,8 @@ async fn a_failed_migration_explicitly_rolls_back_partial_schema() {
     );
     assert_eq!(
         names.last().map(String::as_str),
-        Some("m20260721_000026_notification_specials"),
-        "specials notification support must remain the latest schema change",
+        Some("m20260723_000027_detailed_notifications"),
+        "detailed notification support must remain the latest schema change",
     );
     for migration in migrations {
         assert_eq!(
@@ -615,7 +615,7 @@ async fn structured_notifications_migration_preserves_legacy_rows_and_enforces_v
     )
     .await;
 
-    Migrator::down(db, Some(3)).await.unwrap();
+    Migrator::down(db, Some(4)).await.unwrap();
 
     let retained_rows = query(
         db,

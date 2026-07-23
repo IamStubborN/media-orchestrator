@@ -184,6 +184,17 @@ async fn bootstrap_database_clients(database: &DatabaseConnection) {
         .unwrap();
 }
 
+async fn mark_runner_ready(database: &DatabaseConnection) {
+    database
+        .execute_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "UPDATE runner_lifecycle SET state = 'ready', reason = NULL \
+             WHERE singleton = true",
+        ))
+        .await
+        .expect("test runner lifecycle must become ready");
+}
+
 fn database_router(
     database: &DatabaseConnection,
     idempotency: Arc<dyn IdempotencyStore>,
@@ -333,6 +344,9 @@ async fn postgres_api_foundation_works_end_to_end() {
     migrate(&database_config(&database_url))
         .await
         .expect("explicit migrations must apply");
+    let database = Database::connect(&database_url).await.unwrap();
+    mark_runner_ready(&database).await;
+    database.close().await.unwrap();
     let config = server_config(&database_url, "127.0.0.1:0".parse().unwrap());
     let service = prepare_service(&config)
         .await
@@ -442,7 +456,7 @@ async fn postgres_api_foundation_works_end_to_end() {
     assert_eq!(queue.status(), StatusCode::OK);
     assert_eq!(
         queue.json::<serde_json::Value>().await.unwrap(),
-        serde_json::json!({ "queued": 0, "active": true })
+        serde_json::json!({ "queued": 0, "active": true, "runner_state": "ready" })
     );
 
     shutdown.send(()).unwrap();
@@ -480,6 +494,7 @@ async fn postgres_mutations_reenter_after_replay_completion_failure_across_route
     migrate(&database_config(&database_url)).await.unwrap();
     let database = Database::connect(&database_url).await.unwrap();
     bootstrap_database_clients(&database).await;
+    mark_runner_ready(&database).await;
     let failing = || {
         database_router(
             &database,
@@ -665,6 +680,7 @@ async fn stranded_http_reservations_reconcile_completed_mutations_without_abort(
     migrate(&database_config(&database_url)).await.unwrap();
     let database = Database::connect(&database_url).await.unwrap();
     bootstrap_database_clients(&database).await;
+    mark_runner_ready(&database).await;
     let completing = || database_router(&database, Arc::new(storage_idempotency(&database)));
 
     let create_body =
