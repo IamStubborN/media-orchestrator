@@ -373,11 +373,14 @@ async fn process_adapter_parses_truthful_ffprobe_dimensions() {
 
     let temporary = tempdir().unwrap();
     let ffprobe = temporary.path().join("ffprobe-fixture");
+    let arguments = temporary.path().join("ffprobe-arguments");
     std::fs::write(
         &ffprobe,
         r#"#!/bin/sh
+printf '%s\n' "$@" > 'ARGUMENTS_PATH'
 printf '%s' '{"streams":[{"codec_type":"video","codec_name":"hevc","profile":"Main","width":1920,"height":1080,"bit_rate":"2100000"},{"codec_type":"audio","codec_name":"aac","channels":2,"channel_layout":"stereo","tags":{"language":"rus","title":"AniLibria"}}],"format":{"duration":"61.25","bit_rate":"4100000"}}'
-"#,
+"#
+        .replace("ARGUMENTS_PATH", &arguments.display().to_string()),
     )
     .unwrap();
     std::fs::set_permissions(&ffprobe, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -401,6 +404,10 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"hevc","profile":"Ma
     assert_eq!(probe.audio_codec.as_deref(), Some("aac"));
     assert_eq!(probe.audio_channels, Some(2));
     assert_eq!(probe.audio_channel_layout.as_deref(), Some("stereo"));
+    let arguments = std::fs::read_to_string(arguments).unwrap();
+    assert!(arguments.contains("profile"));
+    assert!(arguments.contains("channels"));
+    assert!(arguments.contains("channel_layout"));
 }
 
 #[cfg(unix)]

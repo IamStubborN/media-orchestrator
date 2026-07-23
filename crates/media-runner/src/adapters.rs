@@ -790,7 +790,7 @@ impl ProcessPort for TokioProcessAdapter {
                 "-v",
                 "error",
                 "-show_entries",
-                "stream=codec_type,codec_name,width,height,bit_rate:stream_tags=language,title:format=duration,bit_rate",
+                "stream=codec_type,codec_name,profile,width,height,bit_rate,channels,channel_layout:stream_tags=language,title:format=duration,bit_rate",
                 "-of",
                 "json",
             ])
