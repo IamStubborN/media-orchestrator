@@ -657,6 +657,195 @@ async fn structured_notifications_migration_preserves_legacy_rows_and_enforces_v
 }
 
 #[tokio::test]
+async fn detailed_notifications_migration_preserves_legacy_payloads_and_validates_new_content() {
+    let test_db = TestDatabase::start().await;
+    let db = test_db.connection();
+    Migrator::up(db, Some(26)).await.unwrap();
+
+    execute(
+        db,
+        "INSERT INTO jobs (id, owner_id, provider, result_ref, state, notify_scope)
+         VALUES ('00000000-0000-0000-0000-000000000999',
+                 '00000000-0000-0000-0000-000000000001', 'rezka', 'example', 'queued', 'initiator');
+         INSERT INTO notification_outbox
+           (id, aggregate_type, aggregate_id, event_type, recipient, source_dedupe_key, payload)
+         VALUES ('00000000-0000-0000-0000-000000000994', 'job',
+                 '00000000-0000-0000-0000-000000000999', 'started', 'primary',
+                 decode(repeat('01', 32), 'hex'),
+                 '{
+                   \"event_type\": \"media.notification\",
+                   \"schema_version\": 2,
+                   \"delivery_kind\": \"card\",
+                   \"card_key\": \"media-job:00000000-0000-0000-0000-000000000999\",
+                   \"revision\": 1,
+                   \"lifecycle_cycle\": 1,
+                   \"terminal\": false,
+                   \"state\": \"queued\",
+                   \"media\": {
+                     \"job_id\": \"00000000-0000-0000-0000-000000000999\",
+                     \"title\": \"Example Show\",
+                     \"kind\": \"series\",
+                     \"provider\": \"rezka\"
+                   },
+                   \"actions\": [\"details\"]
+                 }'::jsonb)",
+    )
+    .await
+    .unwrap();
+
+    Migrator::up(db, None).await.unwrap();
+
+    execute(
+        db,
+        "INSERT INTO notification_outbox
+           (id, aggregate_type, aggregate_id, event_type, recipient, source_dedupe_key, payload)
+         VALUES
+           ('00000000-0000-0000-0000-000000000993', 'job',
+            '00000000-0000-0000-0000-000000000999', 'completed', 'primary',
+            decode(repeat('02', 32), 'hex'),
+            '{
+              \"event_type\": \"media.notification\",
+              \"schema_version\": 2,
+              \"delivery_kind\": \"card\",
+              \"card_key\": \"media-job:00000000-0000-0000-0000-000000000999\",
+              \"revision\": 2,
+              \"lifecycle_cycle\": 1,
+              \"terminal\": true,
+              \"state\": \"completed\",
+              \"media\": {
+                \"job_id\": \"00000000-0000-0000-0000-000000000999\",
+                \"title\": \"Example Show\",
+                \"kind\": \"series\",
+                \"provider\": \"rezka\",
+                \"origin\": \"tracked-episode\"
+              },
+              \"progress\": {\"completed_episodes\": 1, \"total_episodes\": 1, \"current_episode\": 8},
+              \"result\": {
+                \"video\": {\"codec\": \"hevc\", \"profile\": \"Main\", \"width\": 1920, \"height\": 1080},
+                \"audio\": {\"language\": \"rus\", \"codec\": \"aac\", \"channels\": 2, \"channel_layout\": \"stereo\", \"title\": \"AniLibria\"},
+                \"subtitles\": {\"downloaded\": 2, \"missing\": 0},
+                \"file_size_bytes\": 440401920,
+                \"duration_seconds\": 1421,
+                \"processing\": {\"mode\": \"vaapi-upscale\", \"elapsed_seconds\": 252},
+                \"publication\": {\"library\": \"tv-shows\", \"title\": \"Example Show\", \"season\": 2, \"episode\": 8}
+              },
+              \"actions\": [\"details\"]
+            }'::jsonb),
+           ('00000000-0000-0000-0000-000000000992', 'job',
+            '00000000-0000-0000-0000-000000000999', 'failed', 'primary',
+            decode(repeat('03', 32), 'hex'),
+            '{
+              \"event_type\": \"media.notification\",
+              \"schema_version\": 2,
+              \"delivery_kind\": \"card\",
+              \"card_key\": \"media-job:00000000-0000-0000-0000-000000000999\",
+              \"revision\": 3,
+              \"lifecycle_cycle\": 1,
+              \"terminal\": false,
+              \"state\": \"needs-action\",
+              \"media\": {\"job_id\": \"00000000-0000-0000-0000-000000000999\", \"title\": \"Example Show\", \"kind\": \"series\", \"provider\": \"rezka\"},
+              \"progress\": {\"connection_attempt\": 5, \"connection_attempt_limit\": 20, \"vpn_rotation_pending\": true},
+              \"actions\": [\"retry\", \"search-alternative\"]
+            }'::jsonb),
+           ('00000000-0000-0000-0000-000000000991', 'job',
+            '00000000-0000-0000-0000-000000000999', 'blocked-storage', 'primary',
+            decode(repeat('04', 32), 'hex'),
+            '{
+              \"event_type\": \"media.notification\",
+              \"schema_version\": 2,
+              \"delivery_kind\": \"card\",
+              \"card_key\": \"media-job:00000000-0000-0000-0000-000000000999\",
+              \"revision\": 4,
+              \"lifecycle_cycle\": 1,
+              \"terminal\": false,
+              \"state\": \"needs-action\",
+              \"media\": {\"job_id\": \"00000000-0000-0000-0000-000000000999\", \"title\": \"Example Show\", \"kind\": \"series\", \"provider\": \"rezka\"},
+              \"progress\": {\"storage_available_bytes\": 100, \"storage_required_bytes\": 440401920},
+              \"actions\": [\"resume-storage\"]
+            }'::jsonb)",
+    )
+    .await
+    .unwrap();
+
+    let payloads = query(
+        db,
+        "SELECT id::text AS id FROM notification_outbox
+         WHERE id IN (
+           '00000000-0000-0000-0000-000000000994',
+           '00000000-0000-0000-0000-000000000993',
+           '00000000-0000-0000-0000-000000000992',
+           '00000000-0000-0000-0000-000000000991'
+         ) ORDER BY id",
+    )
+    .await;
+    assert_eq!(
+        payloads.len(),
+        4,
+        "all schema-v2 payload variants must survive"
+    );
+
+    assert_rejected(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(payload, '{result,video,width}', '0'::jsonb)
+         WHERE id = '00000000-0000-0000-0000-000000000993'",
+        "notification_payload_check",
+    )
+    .await;
+    assert_rejected(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(payload, '{progress,connection_attempt}', '21'::jsonb)
+         WHERE id = '00000000-0000-0000-0000-000000000992'",
+        "notification_payload_check",
+    )
+    .await;
+    assert_rejected(
+        db,
+        "UPDATE notification_outbox
+         SET payload = payload #- '{progress,storage_required_bytes}'
+         WHERE id = '00000000-0000-0000-0000-000000000991'",
+        "notification_payload_check",
+    )
+    .await;
+    assert_rejected(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(payload, '{result,unknown}', '\"value\"'::jsonb)
+         WHERE id = '00000000-0000-0000-0000-000000000993'",
+        "notification_payload_check",
+    )
+    .await;
+
+    Migrator::down(db, Some(1)).await.unwrap();
+
+    let normalized = query(
+        db,
+        "SELECT payload FROM notification_outbox
+         WHERE id IN (
+           '00000000-0000-0000-0000-000000000993',
+           '00000000-0000-0000-0000-000000000992',
+           '00000000-0000-0000-0000-000000000991'
+         )",
+    )
+    .await;
+    for row in normalized {
+        let payload = row.try_get::<serde_json::Value>("", "payload").unwrap();
+        assert!(payload.get("result").is_none());
+        assert!(payload["media"].get("origin").is_none());
+        for key in [
+            "connection_attempt",
+            "connection_attempt_limit",
+            "vpn_rotation_pending",
+            "storage_available_bytes",
+            "storage_required_bytes",
+        ] {
+            assert!(payload["progress"].get(key).is_none());
+        }
+    }
+}
+
+#[tokio::test]
 async fn postgres_enforces_domain_and_concurrency_invariants() {
     let test_db = TestDatabase::start().await;
     let db = test_db.connection();

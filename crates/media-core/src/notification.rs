@@ -59,6 +59,12 @@ pub enum MediaNotificationAction {
     Retry,
     RetryMissing,
     ResumeStorage,
+    SearchAlternative,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum MediaNotificationOrigin {
+    TrackedEpisode,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -69,6 +75,7 @@ pub struct MediaNotificationMedia {
     provider: String,
     season: Option<u32>,
     translation: Option<String>,
+    origin: Option<MediaNotificationOrigin>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -80,6 +87,11 @@ pub struct MediaNotificationProgress {
     downloaded_bytes: Option<u64>,
     download_speed_bps: Option<u64>,
     percentage: Option<u8>,
+    connection_attempt: Option<u32>,
+    connection_attempt_limit: Option<u32>,
+    vpn_rotation_pending: Option<bool>,
+    storage_available_bytes: Option<u64>,
+    storage_required_bytes: Option<u64>,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -95,6 +107,66 @@ pub struct MediaNotificationIssue {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MediaNotificationResult {
+    video: Option<MediaNotificationVideo>,
+    audio: Option<MediaNotificationAudio>,
+    subtitles: Option<MediaNotificationSubtitles>,
+    file_size_bytes: Option<u64>,
+    duration_seconds: Option<u64>,
+    processing: Option<MediaNotificationProcessing>,
+    publication: Option<MediaNotificationPublication>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MediaNotificationVideo {
+    codec: String,
+    profile: Option<String>,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MediaNotificationAudio {
+    language: Option<String>,
+    codec: String,
+    channels: Option<u32>,
+    channel_layout: Option<String>,
+    title: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MediaNotificationSubtitles {
+    downloaded: u32,
+    missing: u32,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum MediaNotificationProcessingMode {
+    VaapiUpscale,
+    Original,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MediaNotificationProcessing {
+    mode: MediaNotificationProcessingMode,
+    elapsed_seconds: Option<u64>,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum MediaNotificationLibrary {
+    Movies,
+    TvShows,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MediaNotificationPublication {
+    library: MediaNotificationLibrary,
+    title: String,
+    season: Option<u32>,
+    episode: Option<u32>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct MediaNotification {
     delivery_kind: MediaNotificationDeliveryKind,
     card_key: String,
@@ -107,6 +179,7 @@ pub struct MediaNotification {
     stage: Option<MediaNotificationStage>,
     next_step: Option<MediaNotificationNextStep>,
     issue: Option<MediaNotificationIssue>,
+    result: Option<MediaNotificationResult>,
     actions: Vec<MediaNotificationAction>,
 }
 
@@ -209,6 +282,12 @@ pub enum NotificationValidationError {
     InvalidEpisodeProgress,
     #[error("notification percentage is invalid")]
     InvalidPercentage,
+    #[error("notification media result is invalid")]
+    InvalidMediaResult,
+    #[error("notification connection attempt progress is invalid")]
+    InvalidAttemptProgress,
+    #[error("notification storage progress is invalid")]
+    InvalidStorageProgress,
 }
 
 impl MediaNotificationMedia {
@@ -234,6 +313,7 @@ impl MediaNotificationMedia {
             provider,
             season,
             translation,
+            origin: None,
         })
     }
 
@@ -260,6 +340,15 @@ impl MediaNotificationMedia {
     #[must_use]
     pub fn translation(&self) -> Option<&str> {
         self.translation.as_deref()
+    }
+    #[must_use]
+    pub const fn origin(&self) -> Option<MediaNotificationOrigin> {
+        self.origin
+    }
+    #[must_use]
+    pub fn with_origin(mut self, origin: MediaNotificationOrigin) -> Self {
+        self.origin = Some(origin);
+        self
     }
 }
 
@@ -293,6 +382,11 @@ impl MediaNotificationProgress {
             downloaded_bytes,
             download_speed_bps,
             percentage,
+            connection_attempt: None,
+            connection_attempt_limit: None,
+            vpn_rotation_pending: None,
+            storage_available_bytes: None,
+            storage_required_bytes: None,
         })
     }
 
@@ -323,6 +417,57 @@ impl MediaNotificationProgress {
     #[must_use]
     pub const fn percentage(&self) -> Option<u8> {
         self.percentage
+    }
+    #[must_use]
+    pub const fn connection_attempt(&self) -> Option<u32> {
+        self.connection_attempt
+    }
+    #[must_use]
+    pub const fn connection_attempt_limit(&self) -> Option<u32> {
+        self.connection_attempt_limit
+    }
+    #[must_use]
+    pub const fn vpn_rotation_pending(&self) -> Option<bool> {
+        self.vpn_rotation_pending
+    }
+    #[must_use]
+    pub const fn storage_available_bytes(&self) -> Option<u64> {
+        self.storage_available_bytes
+    }
+    #[must_use]
+    pub const fn storage_required_bytes(&self) -> Option<u64> {
+        self.storage_required_bytes
+    }
+    pub fn with_recovery(
+        mut self,
+        connection_attempt: Option<u32>,
+        connection_attempt_limit: Option<u32>,
+        vpn_rotation_pending: Option<bool>,
+    ) -> Result<Self, NotificationValidationError> {
+        if connection_attempt == Some(0)
+            || connection_attempt_limit == Some(0)
+            || connection_attempt.is_some_and(|attempt| {
+                connection_attempt_limit.is_some_and(|limit| attempt > limit)
+            })
+        {
+            return Err(NotificationValidationError::InvalidAttemptProgress);
+        }
+        self.connection_attempt = connection_attempt;
+        self.connection_attempt_limit = connection_attempt_limit;
+        self.vpn_rotation_pending = vpn_rotation_pending;
+        Ok(self)
+    }
+    pub fn with_storage(
+        mut self,
+        storage_available_bytes: Option<u64>,
+        storage_required_bytes: Option<u64>,
+    ) -> Result<Self, NotificationValidationError> {
+        if storage_required_bytes.is_some() != storage_available_bytes.is_some() {
+            return Err(NotificationValidationError::InvalidStorageProgress);
+        }
+        self.storage_available_bytes = storage_available_bytes;
+        self.storage_required_bytes = storage_required_bytes;
+        Ok(self)
     }
 }
 
@@ -358,6 +503,215 @@ impl MediaNotificationIssue {
     #[must_use]
     pub fn message(&self) -> &str {
         &self.message
+    }
+}
+
+impl MediaNotificationResult {
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn new(
+        video: Option<MediaNotificationVideo>,
+        audio: Option<MediaNotificationAudio>,
+        subtitles: Option<MediaNotificationSubtitles>,
+        file_size_bytes: Option<u64>,
+        duration_seconds: Option<u64>,
+        processing: Option<MediaNotificationProcessing>,
+        publication: Option<MediaNotificationPublication>,
+    ) -> Self {
+        Self {
+            video,
+            audio,
+            subtitles,
+            file_size_bytes,
+            duration_seconds,
+            processing,
+            publication,
+        }
+    }
+    #[must_use]
+    pub fn video(&self) -> Option<&MediaNotificationVideo> {
+        self.video.as_ref()
+    }
+    #[must_use]
+    pub fn audio(&self) -> Option<&MediaNotificationAudio> {
+        self.audio.as_ref()
+    }
+    #[must_use]
+    pub fn subtitles(&self) -> Option<&MediaNotificationSubtitles> {
+        self.subtitles.as_ref()
+    }
+    #[must_use]
+    pub const fn file_size_bytes(&self) -> Option<u64> {
+        self.file_size_bytes
+    }
+    #[must_use]
+    pub const fn duration_seconds(&self) -> Option<u64> {
+        self.duration_seconds
+    }
+    #[must_use]
+    pub fn processing(&self) -> Option<&MediaNotificationProcessing> {
+        self.processing.as_ref()
+    }
+    #[must_use]
+    pub fn publication(&self) -> Option<&MediaNotificationPublication> {
+        self.publication.as_ref()
+    }
+}
+
+impl MediaNotificationVideo {
+    pub fn new(
+        codec: String,
+        profile: Option<String>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, NotificationValidationError> {
+        validate_display_field(&codec)?;
+        if let Some(profile) = &profile {
+            validate_display_field(profile)?;
+        }
+        if width == 0 || height == 0 {
+            return Err(NotificationValidationError::InvalidMediaResult);
+        }
+        Ok(Self {
+            codec,
+            profile,
+            width,
+            height,
+        })
+    }
+    #[must_use]
+    pub fn codec(&self) -> &str {
+        &self.codec
+    }
+    #[must_use]
+    pub fn profile(&self) -> Option<&str> {
+        self.profile.as_deref()
+    }
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+}
+
+impl MediaNotificationAudio {
+    pub fn new(
+        language: Option<String>,
+        codec: String,
+        channels: Option<u32>,
+        channel_layout: Option<String>,
+        title: Option<String>,
+    ) -> Result<Self, NotificationValidationError> {
+        for value in [
+            language.as_deref(),
+            Some(codec.as_str()),
+            channel_layout.as_deref(),
+            title.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            validate_display_field(value)?;
+        }
+        Ok(Self {
+            language,
+            codec,
+            channels,
+            channel_layout,
+            title,
+        })
+    }
+    #[must_use]
+    pub fn language(&self) -> Option<&str> {
+        self.language.as_deref()
+    }
+    #[must_use]
+    pub fn codec(&self) -> &str {
+        &self.codec
+    }
+    #[must_use]
+    pub const fn channels(&self) -> Option<u32> {
+        self.channels
+    }
+    #[must_use]
+    pub fn channel_layout(&self) -> Option<&str> {
+        self.channel_layout.as_deref()
+    }
+    #[must_use]
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+}
+
+impl MediaNotificationSubtitles {
+    #[must_use]
+    pub const fn new(downloaded: u32, missing: u32) -> Self {
+        Self {
+            downloaded,
+            missing,
+        }
+    }
+    #[must_use]
+    pub const fn downloaded(&self) -> u32 {
+        self.downloaded
+    }
+    #[must_use]
+    pub const fn missing(&self) -> u32 {
+        self.missing
+    }
+}
+
+impl MediaNotificationProcessing {
+    #[must_use]
+    pub const fn new(mode: MediaNotificationProcessingMode, elapsed_seconds: Option<u64>) -> Self {
+        Self {
+            mode,
+            elapsed_seconds,
+        }
+    }
+    #[must_use]
+    pub const fn mode(&self) -> MediaNotificationProcessingMode {
+        self.mode
+    }
+    #[must_use]
+    pub const fn elapsed_seconds(&self) -> Option<u64> {
+        self.elapsed_seconds
+    }
+}
+
+impl MediaNotificationPublication {
+    pub fn new(
+        library: MediaNotificationLibrary,
+        title: String,
+        season: Option<u32>,
+        episode: Option<u32>,
+    ) -> Result<Self, NotificationValidationError> {
+        validate_display_field(&title)?;
+        Ok(Self {
+            library,
+            title,
+            season,
+            episode,
+        })
+    }
+    #[must_use]
+    pub const fn library(&self) -> MediaNotificationLibrary {
+        self.library
+    }
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+    #[must_use]
+    pub const fn season(&self) -> Option<u32> {
+        self.season
+    }
+    #[must_use]
+    pub const fn episode(&self) -> Option<u32> {
+        self.episode
     }
 }
 
@@ -399,6 +753,7 @@ impl MediaNotification {
             stage,
             next_step,
             issue,
+            result: None,
             actions,
         })
     }
@@ -447,6 +802,15 @@ impl MediaNotification {
         self.issue.as_ref()
     }
     #[must_use]
+    pub fn result(&self) -> Option<&MediaNotificationResult> {
+        self.result.as_ref()
+    }
+    #[must_use]
+    pub fn with_result(mut self, result: MediaNotificationResult) -> Self {
+        self.result = Some(result);
+        self
+    }
+    #[must_use]
     pub fn actions(&self) -> &[MediaNotificationAction] {
         &self.actions
     }
@@ -475,7 +839,7 @@ mod tests {
     use super::{
         MediaNotification, MediaNotificationDeliveryKind, MediaNotificationEpisode,
         MediaNotificationKind, MediaNotificationMedia, MediaNotificationProgress,
-        MediaNotificationState, NotificationValidationError,
+        MediaNotificationState, MediaNotificationVideo, NotificationValidationError,
     };
     use crate::JobId;
 
@@ -589,6 +953,38 @@ mod tests {
                 .is_ok()
             );
         }
+    }
+
+    #[test]
+    fn detailed_result_requires_nonzero_video_dimensions() {
+        assert_eq!(
+            MediaNotificationVideo::new("hevc".to_owned(), None, 0, 1080),
+            Err(NotificationValidationError::InvalidMediaResult),
+        );
+    }
+
+    #[test]
+    fn recovery_progress_rejects_zero_or_exhausted_connection_attempts() {
+        let progress =
+            MediaNotificationProgress::new(None, None, None, Vec::new(), None, None, None).unwrap();
+
+        for (attempt, limit) in [(Some(0), None), (None, Some(0)), (Some(21), Some(20))] {
+            assert_eq!(
+                progress.clone().with_recovery(attempt, limit, None),
+                Err(NotificationValidationError::InvalidAttemptProgress),
+            );
+        }
+    }
+
+    #[test]
+    fn storage_progress_requires_available_and_required_bytes_together() {
+        let progress =
+            MediaNotificationProgress::new(None, None, None, Vec::new(), None, None, None).unwrap();
+
+        assert_eq!(
+            progress.with_storage(Some(440_401_920), None),
+            Err(NotificationValidationError::InvalidStorageProgress),
+        );
     }
 }
 

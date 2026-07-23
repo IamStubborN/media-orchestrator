@@ -46,10 +46,13 @@ pub use lifecycle::{
 };
 pub use metrics::{MetricsSnapshot, MetricsSource};
 pub use notification::{
-    MediaNotification, MediaNotificationAction, MediaNotificationDeliveryKind,
-    MediaNotificationEpisode, MediaNotificationIssue, MediaNotificationKind,
-    MediaNotificationMedia, MediaNotificationNextStep, MediaNotificationProgress,
-    MediaNotificationStage, MediaNotificationState, NotificationContent, NotificationDelivery,
+    MediaNotification, MediaNotificationAction, MediaNotificationAudio,
+    MediaNotificationDeliveryKind, MediaNotificationEpisode, MediaNotificationIssue,
+    MediaNotificationKind, MediaNotificationLibrary, MediaNotificationMedia,
+    MediaNotificationNextStep, MediaNotificationOrigin, MediaNotificationProcessing,
+    MediaNotificationProcessingMode, MediaNotificationProgress, MediaNotificationPublication,
+    MediaNotificationResult, MediaNotificationStage, MediaNotificationState,
+    MediaNotificationSubtitles, MediaNotificationVideo, NotificationContent, NotificationDelivery,
     NotificationDeliveryFailure, NotificationDispatchResult, NotificationDispatcher,
     NotificationEventType, NotificationOutboxPort, NotificationRecipient, NotificationSink,
     NotificationValidationError,

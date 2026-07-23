@@ -117,6 +117,7 @@ fn hermes_media_notification_webhook_has_schema_version_two_shape() {
             provider: "rezka".to_owned(),
             season: Some(1),
             translation: Some("AniLibria".to_owned()),
+            origin: None,
         },
         progress: Some(MediaNotificationProgressDto {
             completed_episodes: Some(7),
@@ -125,6 +126,11 @@ fn hermes_media_notification_webhook_has_schema_version_two_shape() {
             downloaded_bytes: Some(195_035_136),
             download_speed_bps: Some(5_452_595),
             percentage: None,
+            connection_attempt: None,
+            connection_attempt_limit: None,
+            vpn_rotation_pending: None,
+            storage_available_bytes: None,
+            storage_required_bytes: None,
             missing_episodes: vec![MediaNotificationEpisodeDto {
                 season: 1,
                 episode: 9,
@@ -133,6 +139,7 @@ fn hermes_media_notification_webhook_has_schema_version_two_shape() {
         stage: Some(MediaNotificationStageDto::Download),
         next_step: Some(MediaNotificationNextStepDto::Process),
         issue: None,
+        result: None,
         actions: vec![
             MediaNotificationActionDto::RetryMissing,
             MediaNotificationActionDto::ResumeStorage,
@@ -179,8 +186,117 @@ fn media_notification_actions_use_exact_kebab_case_wire_tags() {
         serde_json::to_value(vec![
             MediaNotificationActionDto::RetryMissing,
             MediaNotificationActionDto::ResumeStorage,
+            MediaNotificationActionDto::SearchAlternative,
         ])
         .unwrap(),
-        serde_json::json!(["retry-missing", "resume-storage"])
+        serde_json::json!(["retry-missing", "resume-storage", "search-alternative"])
     );
+}
+
+#[test]
+fn detailed_result_serializes_as_optional_schema_v2_content() {
+    let value = serde_json::json!({
+        "event_type": "media.notification",
+        "schema_version": 2,
+        "delivery_kind": "card",
+        "card_key": "media-job:00000000-0000-0000-0000-000000000999",
+        "revision": 8,
+        "lifecycle_cycle": 1,
+        "terminal": true,
+        "state": "completed",
+        "media": {
+            "job_id": "00000000-0000-0000-0000-000000000999",
+            "title": "Клинки Хранителей",
+            "kind": "series",
+            "provider": "rezka",
+            "season": 2,
+            "translation": "AniLibria"
+        },
+        "progress": {
+            "completed_episodes": 1,
+            "total_episodes": 1,
+            "current_episode": 8
+        },
+        "stage": "publish",
+        "next_step": "none",
+        "result": {
+            "video": {"codec": "hevc", "profile": "Main", "width": 1920, "height": 1080},
+            "audio": {
+                "language": "rus",
+                "codec": "aac",
+                "channels": 2,
+                "channel_layout": "stereo",
+                "title": "AniLibria"
+            },
+            "subtitles": {"downloaded": 2, "missing": 0},
+            "file_size_bytes": 440401920,
+            "duration_seconds": 1421,
+            "processing": {"mode": "vaapi-upscale", "elapsed_seconds": 252},
+            "publication": {
+                "library": "tv-shows",
+                "title": "Клинки Хранителей",
+                "season": 2,
+                "episode": 8
+            }
+        },
+        "actions": ["details"]
+    });
+    let payload: HermesMediaNotificationWebhook = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(payload).unwrap(), value);
+
+    assert_eq!(value["progress"]["current_episode"], 8);
+    assert_eq!(value["progress"]["total_episodes"], 1);
+    assert_eq!(
+        value["result"]["video"],
+        serde_json::json!({
+            "codec": "hevc",
+            "profile": "Main",
+            "width": 1920,
+            "height": 1080
+        })
+    );
+    assert_eq!(
+        value["result"]["audio"],
+        serde_json::json!({
+            "language": "rus",
+            "codec": "aac",
+            "channels": 2,
+            "channel_layout": "stereo",
+            "title": "AniLibria"
+        })
+    );
+    assert_eq!(
+        value["result"]["subtitles"],
+        serde_json::json!({"downloaded": 2, "missing": 0})
+    );
+    assert_eq!(
+        value["result"]["processing"],
+        serde_json::json!({"mode": "vaapi-upscale", "elapsed_seconds": 252})
+    );
+    assert_eq!(value["result"]["publication"]["episode"], 8);
+}
+
+#[test]
+fn existing_schema_v2_payload_without_detailed_fields_remains_accepted() {
+    let value = serde_json::json!({
+        "event_type": "media.notification",
+        "schema_version": 2,
+        "delivery_kind": "card",
+        "card_key": "media-job:00000000-0000-0000-0000-000000000999",
+        "revision": 7,
+        "lifecycle_cycle": 1,
+        "terminal": false,
+        "state": "downloading",
+        "media": {
+            "job_id": "00000000-0000-0000-0000-000000000999",
+            "title": "Example Show",
+            "kind": "series",
+            "provider": "rezka"
+        },
+        "progress": {"completed_episodes": 0, "total_episodes": 1, "current_episode": 8},
+        "actions": ["cancel"]
+    });
+
+    let payload: HermesMediaNotificationWebhook = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(payload).unwrap(), value);
 }
