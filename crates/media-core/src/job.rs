@@ -136,6 +136,7 @@ pub struct JobLease {
     lease_id: LeaseId,
     job: Job,
     runner_client_id: ClientId,
+    completed_task_ordinals: Vec<u32>,
     expires_at: time::OffsetDateTime,
 }
 
@@ -151,8 +152,15 @@ impl JobLease {
             lease_id,
             job,
             runner_client_id,
+            completed_task_ordinals: Vec::new(),
             expires_at,
         }
+    }
+
+    #[must_use]
+    pub fn with_completed_task_ordinals(mut self, completed_task_ordinals: Vec<u32>) -> Self {
+        self.completed_task_ordinals = completed_task_ordinals;
+        self
     }
 
     #[must_use]
@@ -168,6 +176,11 @@ impl JobLease {
     #[must_use]
     pub const fn runner_client_id(&self) -> ClientId {
         self.runner_client_id
+    }
+
+    #[must_use]
+    pub fn completed_task_ordinals(&self) -> &[u32] {
+        &self.completed_task_ordinals
     }
 
     #[must_use]

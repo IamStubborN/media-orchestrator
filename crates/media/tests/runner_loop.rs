@@ -273,6 +273,7 @@ fn lease() -> LeaseDto {
             season: None,
             title: "Movie".to_owned(),
         }),
+        completed_task_ordinals: Vec::new(),
         expires_at: "2026-07-13T12:00:00Z".to_owned(),
     }
 }

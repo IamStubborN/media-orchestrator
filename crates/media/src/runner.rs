@@ -748,6 +748,15 @@ impl MediaJobExecutor {
         let mut aggregate = ExecutionOutcome::Completed;
         for (task_ordinal, (season, episode, request)) in requests.into_iter().enumerate() {
             let task_ordinal = u32::try_from(task_ordinal).map_err(|_| RunnerError::Execution)?;
+            if lease.completed_task_ordinals.contains(&task_ordinal) {
+                tracing::info!(
+                    task_ordinal,
+                    season,
+                    episode,
+                    "skipping completed media task"
+                );
+                continue;
+            }
             control
                 .stage_started(task_ordinal, "resolve_manifest", 0)
                 .await?;

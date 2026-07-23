@@ -7,6 +7,8 @@ pub struct LeaseDto {
     pub job: JobDto,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution: Option<ExecutionSelectionDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub completed_task_ordinals: Vec<u32>,
     pub expires_at: String,
 }
 
@@ -28,6 +30,7 @@ mod tests {
                 notify_scope: NotifyScopeDto::Initiator,
             },
             execution: None,
+            completed_task_ordinals: vec![0, 1],
             expires_at: "2026-07-10T18:01:00Z".to_owned(),
         };
 
@@ -44,6 +47,7 @@ mod tests {
                     "needs_action_reason": "identity_ambiguous",
                     "notify_scope": "initiator"
                 },
+                "completed_task_ordinals": [0, 1],
                 "expires_at": "2026-07-10T18:01:00Z"
             }),
         );

@@ -94,6 +94,48 @@ async fn return_job_to_queue(test_db: &TestDatabase, job_id: JobId) {
 }
 
 #[tokio::test]
+async fn lease_exposes_completed_task_ordinals_for_episode_resume() {
+    let (test_db, jobs, leases) = setup().await;
+    let job = jobs
+        .create(operation_key(), new_job("selection:completed-task-resume"))
+        .await
+        .unwrap();
+    test_db
+        .connection()
+        .execute_raw(Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            "UPDATE job_tasks SET state = 'completed', completed_at = now() \
+             WHERE job_id = $1 AND ordinal = 0",
+            [job.id().into_uuid().into()],
+        ))
+        .await
+        .unwrap();
+    test_db
+        .connection()
+        .execute_raw(Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            "INSERT INTO job_tasks (id, job_id, ordinal, state, completed_at) \
+             VALUES (gen_random_uuid(), $1, 1, 'completed', now()), \
+                    (gen_random_uuid(), $1, 2, 'pending', NULL)",
+            [job.id().into_uuid().into()],
+        ))
+        .await
+        .unwrap();
+
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(lease.completed_task_ordinals(), &[0, 1]);
+}
+
+#[tokio::test]
 async fn same_job_gets_three_leases_on_one_vpn_session_then_requires_rotation() {
     let (test_db, jobs, leases) = setup().await;
     let job = jobs

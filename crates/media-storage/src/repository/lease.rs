@@ -1795,13 +1795,12 @@ async fn lease_next_in_transaction(
     };
     let expires_at = inserted.try_get("", "expires_at")?;
     let job = load_job(transaction, job_id).await?;
+    let completed_task_ordinals = load_completed_task_ordinals(transaction, job_id).await?;
     debug_assert_eq!(job.state(), JobState::Leased);
-    Ok(LeaseDecision::Available(Some(JobLease::new(
-        LeaseId::from_uuid(lease_id),
-        job,
-        runner,
-        expires_at,
-    ))))
+    Ok(LeaseDecision::Available(Some(
+        JobLease::new(LeaseId::from_uuid(lease_id), job, runner, expires_at)
+            .with_completed_task_ordinals(completed_task_ordinals),
+    )))
 }
 
 async fn heartbeat_in_transaction(
@@ -1827,13 +1826,13 @@ async fn heartbeat_in_transaction(
     else {
         return Ok(None);
     };
-    let job = load_job(transaction, updated.try_get("", "job_id")?).await?;
-    Ok(Some(JobLease::new(
-        lease,
-        job,
-        runner,
-        updated.try_get("", "expires_at")?,
-    )))
+    let job_id = updated.try_get("", "job_id")?;
+    let job = load_job(transaction, job_id).await?;
+    let completed_task_ordinals = load_completed_task_ordinals(transaction, job_id).await?;
+    Ok(Some(
+        JobLease::new(lease, job, runner, updated.try_get("", "expires_at")?)
+            .with_completed_task_ordinals(completed_task_ordinals),
+    ))
 }
 
 fn valid_ttl_seconds(ttl: time::Duration) -> Result<i64, PortError> {
@@ -1854,6 +1853,27 @@ async fn load_job(
         .ok_or_else(|| sea_orm::DbErr::RecordNotFound("leased job disappeared".to_owned()))?
         .try_into()
         .map_err(|error| sea_orm::DbErr::Type(format!("invalid persisted job: {error:?}")))
+}
+
+async fn load_completed_task_ordinals(
+    transaction: &sea_orm::DatabaseTransaction,
+    job_id: Uuid,
+) -> Result<Vec<u32>, sea_orm::DbErr> {
+    transaction
+        .query_all_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "SELECT ordinal FROM job_tasks \
+             WHERE job_id = $1 AND state = 'completed' ORDER BY ordinal",
+            [job_id.into()],
+        ))
+        .await?
+        .into_iter()
+        .map(|row| {
+            let ordinal = row.try_get::<i32>("", "ordinal")?;
+            u32::try_from(ordinal)
+                .map_err(|_| sea_orm::DbErr::Type("invalid completed task ordinal".to_owned()))
+        })
+        .collect()
 }
 
 async fn finish<T>(

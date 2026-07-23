@@ -349,6 +349,7 @@ pub(crate) fn lease(lease: &JobLease) -> Result<LeaseDto, time::error::Format> {
         lease_id: public_id(lease.lease_id().to_string()),
         job: job(lease.job()),
         execution: None,
+        completed_task_ordinals: lease.completed_task_ordinals().to_vec(),
         expires_at: lease.expires_at().format(&Rfc3339)?,
     })
 }
