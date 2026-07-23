@@ -31,6 +31,21 @@ pub enum RunnerError {
     SourceTransferTransient,
     #[error("source transfer was rejected")]
     SourceTransferRejected,
+    #[error("runner task stage failed")]
+    TaskStage {
+        task_ordinal: u32,
+        stage_name: &'static str,
+        stage_ordinal: u32,
+        failure: RunnerFailureKind,
+    },
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum RunnerFailureKind {
+    Execution,
+    SourceExpired,
+    SourceTransferTransient,
+    SourceTransferRejected,
 }
 
 impl RunnerError {
@@ -39,6 +54,51 @@ impl RunnerError {
             Self::Configuration => (false, "runner_configuration_invalid"),
             Self::Service => (true, "runner_service_unavailable"),
             Self::RotationRequired => (false, "vpn_rotation_required"),
+            Self::Execution => (true, "execution_failed"),
+            Self::SourceExpired => (true, "stream_expired"),
+            Self::SourceTransferTransient => (true, "source_transfer_transient"),
+            Self::SourceTransferRejected => (false, "source_transfer_rejected"),
+            Self::TaskStage { failure, .. } => failure.stage_failure(),
+        }
+    }
+
+    #[must_use]
+    pub const fn at_stage(
+        self,
+        task_ordinal: u32,
+        stage_name: &'static str,
+        stage_ordinal: u32,
+    ) -> Self {
+        let failure = match self {
+            Self::SourceExpired => RunnerFailureKind::SourceExpired,
+            Self::SourceTransferTransient => RunnerFailureKind::SourceTransferTransient,
+            Self::SourceTransferRejected => RunnerFailureKind::SourceTransferRejected,
+            _ => RunnerFailureKind::Execution,
+        };
+        Self::TaskStage {
+            task_ordinal,
+            stage_name,
+            stage_ordinal,
+            failure,
+        }
+    }
+
+    const fn failure_stage(self) -> (u32, &'static str, u32) {
+        match self {
+            Self::TaskStage {
+                task_ordinal,
+                stage_name,
+                stage_ordinal,
+                ..
+            } => (task_ordinal, stage_name, stage_ordinal),
+            _ => (EXECUTION_TASK_ORDINAL, "execution", EXECUTION_STAGE_ORDINAL),
+        }
+    }
+}
+
+impl RunnerFailureKind {
+    const fn stage_failure(self) -> (bool, &'static str) {
+        match self {
             Self::Execution => (true, "execution_failed"),
             Self::SourceExpired => (true, "stream_expired"),
             Self::SourceTransferTransient => (true, "source_transfer_transient"),
@@ -244,8 +304,13 @@ const TRANSCODE_STAGE_ORDINAL: u32 = 2;
 /// to satisfy the storage `UNIQUE (task_id, ordinal)` constraint.
 const DOWNLOAD_STAGE_ORDINAL: u32 = 3;
 
-/// Stage ordinal for the internal "execution" wrapper reported on task 0 around
-/// the whole job. It is deliberately placed in a reserved high band, well above
+/// Reserved task ordinal for the job-level execution wrapper. It must not share
+/// task 0 with the first movie/episode, otherwise a retry of a later episode can
+/// overwrite the already completed first task with the wrapper's failure.
+const EXECUTION_TASK_ORDINAL: u32 = 2_000_000_000;
+
+/// Stage ordinal for the internal job-level "execution" wrapper. It is
+/// deliberately placed in a reserved high band, well above
 /// any pipeline sub-stage ordinal (`resolve_manifest` 0, `media_pipeline` 1,
 /// `transcode` 2, `download` 3, torrent stages 0/1), so it can never collide with a real
 /// sub-stage under the `job_stages` `UNIQUE (task_id, ordinal)` constraint — a
@@ -687,14 +752,19 @@ impl MediaJobExecutor {
                 .stage_started(task_ordinal, "resolve_manifest", 0)
                 .await?;
             let mut prepared = self.rezka.lock().await;
-            let manifest = prepared.client.resolve(request).await.map_err(|error| {
-                tracing::warn!(
-                    error_code = ?error.code(),
-                    error = %error,
-                    "Rezka playback resolve failed"
-                );
-                RunnerError::Execution
-            })?;
+            let manifest = prepared
+                .client
+                .resolve(request)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(
+                        error_code = ?error.code(),
+                        error = %error,
+                        "Rezka playback resolve failed"
+                    );
+                    RunnerError::Execution
+                })
+                .map_err(|error| error.at_stage(task_ordinal, "resolve_manifest", 0))?;
             let snapshot = prepared
                 .client
                 .export_session()
@@ -742,7 +812,8 @@ impl MediaJobExecutor {
                 .map_err(|error| {
                     tracing::warn!(error = ?error, "Rezka media pipeline failed");
                     map_pipeline_error(error)
-                })?;
+                })
+                .map_err(|error| error.at_stage(task_ordinal, "media_pipeline", 1))?;
             let mut checkpoint = match &report.outcome {
                 media_runner::EpisodeOutcome::BlockedStorage(blocked) => {
                     storage_checkpoint(blocked)
@@ -1731,7 +1802,7 @@ pub async fn run_single_iteration(
         cancelled,
     };
     control
-        .stage_started(0, "execution", EXECUTION_STAGE_ORDINAL)
+        .stage_started(EXECUTION_TASK_ORDINAL, "execution", EXECUTION_STAGE_ORDINAL)
         .await?;
     let outcome = executor.execute(&lease, &control).await;
     // Wake the heartbeat task immediately instead of waiting out its sleep.
@@ -1740,12 +1811,13 @@ pub async fn run_single_iteration(
     let outcome = match outcome {
         Ok(outcome) => {
             control
-                .stage_completed(0, "execution", EXECUTION_STAGE_ORDINAL)
+                .stage_completed(EXECUTION_TASK_ORDINAL, "execution", EXECUTION_STAGE_ORDINAL)
                 .await?;
             outcome
         }
         Err(error) => {
             let (mut retryable, error_code) = error.stage_failure();
+            let (task_ordinal, stage_name, stage_ordinal) = error.failure_stage();
             if matches!(
                 lease.execution.as_ref(),
                 Some(media_contract::ExecutionSelectionDto::RezkaSessionRefresh { .. })
@@ -1754,9 +1826,9 @@ pub async fn run_single_iteration(
             }
             let job = control
                 .stage_failed(
-                    0,
-                    "execution",
-                    EXECUTION_STAGE_ORDINAL,
+                    task_ordinal,
+                    stage_name,
+                    stage_ordinal,
                     retryable,
                     error_code,
                 )

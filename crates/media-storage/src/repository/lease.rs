@@ -1421,6 +1421,21 @@ async fn update_stage_checkpoint(
     if updated.rows_affected() != 1 {
         return Err(sea_orm::DbErr::RecordNotUpdated);
     }
+    let task_completed = complete
+        && (stage.name() == "plex_reconcile"
+            || (stage.name() == "media_pipeline"
+                && checkpoint.contains_key("artifact_file_size_bytes")));
+    if task_completed {
+        transaction
+            .execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "UPDATE job_tasks SET state = 'completed', completed_at = now(), \
+                 updated_at = now(), error_snapshot = NULL WHERE id = $1 \
+                 AND state IN ('pending', 'running', 'completed')",
+                [task_id.into()],
+            ))
+            .await?;
+    }
     Ok(())
 }
 

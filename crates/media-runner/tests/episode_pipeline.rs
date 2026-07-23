@@ -10,6 +10,7 @@ use media_runner::{
     MediaProbe, MediaTimeline, MediaTransferPort, MediaTransferRequest, PlexCheck, PlexExpectation,
     PlexObservation, ProcessCommand, ProcessPort, ProcessingMode, ProviderKind, RunnerPortError,
     RunnerServicePort, SensitiveUrl, StageReporter, SubtitleTrack, VideoSourceKind,
+    validate_media_timeline,
 };
 
 #[derive(Default)]
@@ -353,6 +354,30 @@ fn continuous_timeline(duration_seconds: f64) -> MediaTimeline {
         video_end_seconds: duration_seconds - 0.02,
         audio_end_seconds: Some(duration_seconds - 0.01),
     }
+}
+
+#[test]
+fn valid_mux_with_a_three_second_video_tail_is_accepted() {
+    let mut probe = probe("h264");
+    probe.duration_seconds = 1_420.48;
+    probe.timeline = MediaTimeline {
+        video_packet_count: 33_984,
+        audio_packet_count: Some(66_585),
+        max_video_gap_seconds: 0.208_545,
+        max_audio_gap_seconds: Some(0.021_334),
+        video_end_seconds: 1_417.436_989,
+        audio_end_seconds: Some(1_420.48),
+    };
+
+    assert_eq!(validate_media_timeline(&probe), Ok(()));
+}
+
+#[test]
+fn a_large_missing_video_tail_is_still_rejected() {
+    let mut probe = probe("h264");
+    probe.timeline.video_end_seconds = 50.0;
+
+    assert!(validate_media_timeline(&probe).is_err());
 }
 
 fn work() -> EpisodeWork {

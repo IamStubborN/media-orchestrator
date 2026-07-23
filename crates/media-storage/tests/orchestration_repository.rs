@@ -400,6 +400,68 @@ async fn rezka_runner_events_create_each_success_notification_once() {
 }
 
 #[tokio::test]
+async fn published_episode_is_completed_before_a_later_episode_retries() {
+    let (test_db, jobs, leases) = setup().await;
+    jobs.create(operation_key(), new_job("rezka://season-resume"))
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::stage_started(JobEventId::new(), 0, "media_pipeline".to_owned(), 1).unwrap(),
+        JobEvent::stage_completed(
+            JobEventId::new(),
+            0,
+            "media_pipeline".to_owned(),
+            1,
+            std::collections::BTreeMap::from([(
+                "artifact_file_size_bytes".to_owned(),
+                CheckpointValue::Unsigned(248_300_093),
+            )]),
+        )
+        .unwrap(),
+        JobEvent::stage_started(JobEventId::new(), 1, "media_pipeline".to_owned(), 1).unwrap(),
+        JobEvent::stage_failed(
+            JobEventId::new(),
+            1,
+            "media_pipeline".to_owned(),
+            1,
+            true,
+            "source_transfer_transient".to_owned(),
+        )
+        .unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    let tasks = query(
+        test_db.connection(),
+        "SELECT ordinal, state FROM job_tasks WHERE job_id = \
+         (SELECT id FROM jobs WHERE result_ref = 'rezka://season-resume') ORDER BY ordinal",
+    )
+    .await;
+    assert_eq!(tasks[0].try_get::<i32>("", "ordinal").unwrap(), 0);
+    assert_eq!(
+        tasks[0].try_get::<String>("", "state").unwrap(),
+        "completed"
+    );
+    assert_eq!(tasks[1].try_get::<i32>("", "ordinal").unwrap(), 1);
+    assert_eq!(tasks[1].try_get::<String>("", "state").unwrap(), "pending");
+}
+
+#[tokio::test]
 async fn partial_completion_creates_plex_and_partial_notifications_once() {
     let (test_db, jobs, leases) = setup().await;
     jobs.create(operation_key(), new_job("partial-private-reference"))

@@ -38,8 +38,12 @@ pub struct MediaProbeError;
 
 const MAX_VIDEO_PACKET_GAP_SECONDS: f64 = 1.0;
 const MAX_AUDIO_PACKET_GAP_SECONDS: f64 = 0.5;
-const MAX_TRACK_TAIL_SECONDS: f64 = 2.0;
-const MAX_AUDIO_VIDEO_END_DELTA_SECONDS: f64 = 2.0;
+// Some valid Rezka muxes hold the final video frame while audio continues for
+// roughly three seconds. Internal packet-gap checks still reject missing HLS
+// fragments; this tail allowance only avoids treating that normal muxing shape
+// as corruption.
+const MAX_TRACK_TAIL_SECONDS: f64 = 4.0;
+const MAX_AUDIO_VIDEO_END_DELTA_SECONDS: f64 = 4.0;
 
 pub fn validate_media_timeline(probe: &MediaProbe) -> Result<(), MediaProbeError> {
     let timeline = &probe.timeline;

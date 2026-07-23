@@ -153,7 +153,7 @@ fn media_timeline_rejects_missing_fragments_and_truncated_tracks() {
     assert!(validate_media_timeline(&probe).is_err());
 
     probe.timeline.max_audio_gap_seconds = Some(0.02);
-    probe.timeline.video_end_seconds = 56.8;
+    probe.timeline.video_end_seconds = 55.8;
     assert!(validate_media_timeline(&probe).is_err());
 }
 

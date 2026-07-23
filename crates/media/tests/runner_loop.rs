@@ -665,11 +665,48 @@ async fn execution_failure_is_reported_without_stopping_the_runner_loop() {
     assert!(events.iter().any(|event| matches!(
         event,
         RunnerEventDto::StageFailed {
+            task_ordinal: 2_000_000_000,
             stage_name,
             retryable: true,
             error_code,
             ..
         } if stage_name == "execution" && error_code == "execution_failed"
+    )));
+}
+
+#[tokio::test]
+async fn episode_failure_is_reported_against_the_actual_episode_stage() {
+    let api = Arc::new(FakeApi {
+        lease: Mutex::new(Some(lease())),
+        events: Mutex::default(),
+        heartbeats: AtomicUsize::new(0),
+    });
+
+    assert!(
+        run_single_iteration(
+            api.clone(),
+            Arc::new(TypedFailingExecutor(
+                media::runner::RunnerError::SourceTransferTransient.at_stage(
+                    7,
+                    "media_pipeline",
+                    1,
+                ),
+            )),
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap()
+    );
+    let events = api.events.lock().unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RunnerEventDto::StageFailed {
+            task_ordinal: 7,
+            stage_name,
+            stage_ordinal: 1,
+            retryable: true,
+            error_code,
+        } if stage_name == "media_pipeline" && error_code == "source_transfer_transient"
     )));
 }
 
@@ -694,6 +731,7 @@ async fn consumed_session_refresh_failure_is_terminal_instead_of_requeued() {
     assert!(events.iter().any(|event| matches!(
         event,
         RunnerEventDto::StageFailed {
+            task_ordinal: 2_000_000_000,
             stage_name,
             retryable: false,
             error_code,
