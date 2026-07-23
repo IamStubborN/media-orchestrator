@@ -92,6 +92,75 @@ fn structured_payload(row: &sea_orm::QueryResult, forbidden: &[&str]) -> serde_j
     payload
 }
 
+fn detailed_artifact_checkpoint(
+    audio_layout: &str,
+    file_size_bytes: u64,
+    duration_seconds: u64,
+    processing_seconds: u64,
+) -> media_core::Checkpoint {
+    [
+        (
+            "artifact_video_codec".to_owned(),
+            CheckpointValue::String("hevc".to_owned()),
+        ),
+        (
+            "artifact_video_profile".to_owned(),
+            CheckpointValue::String("Main".to_owned()),
+        ),
+        ("artifact_width".to_owned(), CheckpointValue::Unsigned(1920)),
+        (
+            "artifact_height".to_owned(),
+            CheckpointValue::Unsigned(1080),
+        ),
+        (
+            "artifact_audio_language".to_owned(),
+            CheckpointValue::String("rus".to_owned()),
+        ),
+        (
+            "artifact_audio_codec".to_owned(),
+            CheckpointValue::String("aac".to_owned()),
+        ),
+        (
+            "artifact_audio_channels".to_owned(),
+            CheckpointValue::Unsigned(2),
+        ),
+        (
+            "artifact_audio_channel_layout".to_owned(),
+            CheckpointValue::String(audio_layout.to_owned()),
+        ),
+        (
+            "artifact_audio_title".to_owned(),
+            CheckpointValue::String("AniLibria".to_owned()),
+        ),
+        (
+            "artifact_subtitles_downloaded".to_owned(),
+            CheckpointValue::Unsigned(2),
+        ),
+        (
+            "artifact_subtitles_missing".to_owned(),
+            CheckpointValue::Unsigned(0),
+        ),
+        (
+            "artifact_file_size_bytes".to_owned(),
+            CheckpointValue::Unsigned(file_size_bytes),
+        ),
+        (
+            "artifact_duration_seconds".to_owned(),
+            CheckpointValue::Unsigned(duration_seconds),
+        ),
+        (
+            "artifact_processing_mode".to_owned(),
+            CheckpointValue::String("vaapi-upscale".to_owned()),
+        ),
+        (
+            "artifact_processing_seconds".to_owned(),
+            CheckpointValue::Unsigned(processing_seconds),
+        ),
+    ]
+    .into_iter()
+    .collect()
+}
+
 #[tokio::test]
 async fn create_persists_initial_task_and_transactional_outbox_record() {
     let (test_db, jobs, _) = setup().await;
@@ -484,9 +553,8 @@ async fn progress_milestones_replace_the_same_initiator_card_across_retries() {
         .await
         .unwrap();
 
-    // First lease: downloading starts, then fails retryably. The stage start
-    // produces one "downloading-started" notification; the retry must not add a
-    // second one.
+    // First lease: downloading starts, then fails retryably. The same card is
+    // updated with curated recovery state instead of creating another row.
     let first = leases
         .lease_next(
             operation_key(),
@@ -559,7 +627,7 @@ async fn progress_milestones_replace_the_same_initiator_card_across_retries() {
         progress[0].try_get::<String>("", "recipient").unwrap(),
         "primary"
     );
-    assert_eq!(progress[0].try_get::<i64>("", "generation").unwrap(), 6);
+    assert_eq!(progress[0].try_get::<i64>("", "generation").unwrap(), 7);
     let payload = structured_payload(&progress[0], &["progress-dedupe"]);
     assert_eq!(payload["state"], "processing");
     assert_eq!(payload["stage"], "process");
@@ -709,6 +777,486 @@ async fn job_lifecycle_projects_one_terminal_card_and_one_final_push() {
     assert_eq!(push_payload["state"], "completed");
     assert_eq!(push_payload["terminal"], true);
     assert_eq!(push_payload["revision"], card_payload["revision"]);
+}
+
+#[tokio::test]
+async fn detailed_notification_projects_exact_tracked_episode_and_published_artifact() {
+    let (test_db, jobs, leases) = setup().await;
+    let result_ref = "selection:tracking:00000000-0000-0000-0000-000000000777:2:8";
+    let created = jobs
+        .create(operation_key(), new_job(result_ref))
+        .await
+        .unwrap();
+    test_db
+        .connection()
+        .execute_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "INSERT INTO search_executions (result_ref, payload) VALUES ($1, $2)",
+            [
+                result_ref.into(),
+                serde_json::json!({
+                    "title": "Клинки Хранителей",
+                    "media_kind": "series",
+                    "translation": "AniLibria",
+                    "episodes": [{"season": 2, "episode": 8}]
+                })
+                .into(),
+            ],
+        ))
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::stage_started(JobEventId::new(), 0, "media_pipeline".to_owned(), 1).unwrap(),
+        JobEvent::stage_completed(
+            JobEventId::new(),
+            0,
+            "media_pipeline".to_owned(),
+            1,
+            detailed_artifact_checkpoint("stereo", 440_401_920, 1_421, 252),
+        )
+        .unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::Publishing, None).unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::PlexPending, None).unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    let publishing = query(
+        test_db.connection(),
+        "SELECT payload FROM notification_outbox \
+         WHERE payload->>'delivery_kind' = 'card'",
+    )
+    .await
+    .remove(0)
+    .try_get::<serde_json::Value>("", "payload")
+    .unwrap();
+    assert_eq!(publishing["state"], "publishing");
+    assert_eq!(publishing["progress"]["current_episode"], 8);
+    assert_eq!(publishing["progress"]["total_episodes"], 1);
+    assert_eq!(publishing["result"]["publication"]["episode"], 8);
+    assert_eq!(publishing["issue"]["code"], "plex_publish_recovering");
+    assert_eq!(
+        publishing["actions"],
+        serde_json::json!(["retry", "details"])
+    );
+
+    leases
+        .report_event(
+            operation_key(),
+            lease.lease_id(),
+            RUNNER_CLIENT_ID,
+            JobEvent::transition(JobEventId::new(), JobState::Completed, None).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let rows = query(
+        test_db.connection(),
+        "SELECT aggregate_type, payload FROM notification_outbox ORDER BY id",
+    )
+    .await;
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .all(|row| row.try_get::<String>("", "aggregate_type").unwrap() == "job"),
+        "automatic tracking download must not create a separate discovery delivery",
+    );
+    let card = rows
+        .iter()
+        .map(|row| row.try_get::<serde_json::Value>("", "payload").unwrap())
+        .find(|payload| payload["delivery_kind"] == "card")
+        .unwrap();
+    assert_eq!(card["card_key"], format!("media-job:{}", created.id()));
+    assert_eq!(card["media"]["origin"], "tracked-episode");
+    assert_eq!(card["progress"]["current_episode"], 8);
+    assert_eq!(card["progress"]["total_episodes"], 1);
+    assert_eq!(
+        card["result"]["video"],
+        serde_json::json!({
+            "codec": "hevc",
+            "profile": "Main",
+            "width": 1920,
+            "height": 1080
+        })
+    );
+    assert_eq!(
+        card["result"]["audio"],
+        serde_json::json!({
+            "language": "rus",
+            "codec": "aac",
+            "channels": 2,
+            "channel_layout": "stereo",
+            "title": "AniLibria"
+        })
+    );
+    assert_eq!(card["result"]["subtitles"]["downloaded"], 2);
+    assert_eq!(card["result"]["file_size_bytes"], 440_401_920);
+    assert_eq!(card["result"]["duration_seconds"], 1_421);
+    assert_eq!(
+        card["result"]["processing"],
+        serde_json::json!({"mode": "vaapi-upscale", "elapsed_seconds": 252})
+    );
+    assert_eq!(card["result"]["publication"]["library"], "tv-shows");
+    assert_eq!(card["result"]["publication"]["season"], 2);
+    assert_eq!(card["result"]["publication"]["episode"], 8);
+}
+
+#[tokio::test]
+async fn detailed_notification_aggregates_only_consistent_measured_artifacts() {
+    let (test_db, jobs, leases) = setup().await;
+    let result_ref = "selection:detailed-season";
+    jobs.create(operation_key(), new_job(result_ref))
+        .await
+        .unwrap();
+    test_db
+        .connection()
+        .execute_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "INSERT INTO search_executions (result_ref, payload) VALUES ($1, $2)",
+            [
+                result_ref.into(),
+                serde_json::json!({
+                    "title": "Season Show",
+                    "media_kind": "series",
+                    "season": 1,
+                    "translation": "AniLibria",
+                    "episodes": [
+                        {"season": 1, "episode": 1},
+                        {"season": 1, "episode": 2}
+                    ]
+                })
+                .into(),
+            ],
+        ))
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    leases
+        .report_event(
+            operation_key(),
+            lease.lease_id(),
+            RUNNER_CLIENT_ID,
+            JobEvent::started(JobEventId::new()),
+        )
+        .await
+        .unwrap();
+    for (ordinal, checkpoint) in [
+        (
+            0,
+            detailed_artifact_checkpoint("stereo", 400_000_000, 1_400, 200),
+        ),
+        (
+            1,
+            detailed_artifact_checkpoint("5.1", 500_000_000, 1_500, 250),
+        ),
+    ] {
+        for event in [
+            JobEvent::stage_started(JobEventId::new(), ordinal, "media_pipeline".to_owned(), 1)
+                .unwrap(),
+            JobEvent::stage_completed(
+                JobEventId::new(),
+                ordinal,
+                "media_pipeline".to_owned(),
+                1,
+                checkpoint,
+            )
+            .unwrap(),
+        ] {
+            leases
+                .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+                .await
+                .unwrap();
+        }
+    }
+    for state in [
+        JobState::Publishing,
+        JobState::PlexPending,
+        JobState::Completed,
+    ] {
+        leases
+            .report_event(
+                operation_key(),
+                lease.lease_id(),
+                RUNNER_CLIENT_ID,
+                JobEvent::transition(JobEventId::new(), state, None).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let card = query(
+        test_db.connection(),
+        "SELECT payload FROM notification_outbox \
+         WHERE payload->>'delivery_kind' = 'card'",
+    )
+    .await
+    .remove(0)
+    .try_get::<serde_json::Value>("", "payload")
+    .unwrap();
+    assert_eq!(card["progress"]["completed_episodes"], 2);
+    assert_eq!(card["progress"]["total_episodes"], 2);
+    assert_eq!(card["result"]["file_size_bytes"], 900_000_000_u64);
+    assert_eq!(card["result"]["duration_seconds"], 2_900_u64);
+    assert_eq!(card["result"]["subtitles"]["downloaded"], 4);
+    assert_eq!(card["result"]["subtitles"]["missing"], 0);
+    assert_eq!(card["result"]["processing"]["elapsed_seconds"], 450);
+    assert_eq!(card["result"]["video"]["width"], 1920);
+    assert!(
+        card["result"].get("audio").is_none(),
+        "conflicting measured audio layouts must omit aggregate audio",
+    );
+    assert_eq!(card["result"]["publication"]["season"], 1);
+    assert!(card["result"]["publication"].get("episode").is_none());
+}
+
+#[tokio::test]
+async fn detailed_notification_prowlarr_reports_original_without_unmeasured_probe_fields() {
+    let (test_db, jobs, leases) = setup().await;
+    let result_ref = "selection:detailed-prowlarr";
+    jobs.create(
+        operation_key(),
+        new_job_for_provider(
+            result_ref,
+            PRIMARY_USER_ID,
+            NotifyScope::Initiator,
+            Provider::Prowlarr,
+        ),
+    )
+    .await
+    .unwrap();
+    test_db
+        .connection()
+        .execute_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "INSERT INTO search_executions (result_ref, payload) VALUES ($1, $2)",
+            [
+                result_ref.into(),
+                serde_json::json!({
+                    "title": "Torrent Movie",
+                    "media_kind": "movie"
+                })
+                .into(),
+            ],
+        ))
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::transition(JobEventId::new(), JobState::Publishing, None).unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::PlexPending, None).unwrap(),
+        JobEvent::transition(JobEventId::new(), JobState::Completed, None).unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+
+    let card = query(
+        test_db.connection(),
+        "SELECT payload FROM notification_outbox \
+         WHERE payload->>'delivery_kind' = 'card'",
+    )
+    .await
+    .remove(0)
+    .try_get::<serde_json::Value>("", "payload")
+    .unwrap();
+    assert_eq!(
+        card["result"]["processing"],
+        serde_json::json!({"mode": "original"})
+    );
+    assert_eq!(card["result"]["publication"]["library"], "movies");
+    assert!(card["result"].get("video").is_none());
+    assert!(card["result"].get("audio").is_none());
+    assert!(!card.to_string().contains("vaapi"));
+}
+
+#[tokio::test]
+async fn detailed_notification_projects_retry_recovery_and_terminal_actions() {
+    let (test_db, jobs, leases) = setup().await;
+    let result_ref = "selection:detailed-recovery";
+    jobs.create(operation_key(), new_job(result_ref))
+        .await
+        .unwrap();
+    test_db
+        .connection()
+        .execute_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "INSERT INTO search_executions (result_ref, payload) VALUES ($1, $2)",
+            [
+                result_ref.into(),
+                serde_json::json!({
+                    "title": "Recovery Show",
+                    "media_kind": "series",
+                    "translation": "AniLibria",
+                    "episodes": [{"season": 1, "episode": 7}]
+                })
+                .into(),
+            ],
+        ))
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::stage_started(JobEventId::new(), 0, "download".to_owned(), 0).unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+    test_db
+        .connection()
+        .execute_unprepared(
+            "UPDATE job_stages SET attempt_count = 3 WHERE name = 'download'; \
+             UPDATE runner_lifecycle SET sticky_attempt_count = 3 WHERE singleton = true",
+        )
+        .await
+        .unwrap();
+    leases
+        .report_event(
+            operation_key(),
+            lease.lease_id(),
+            RUNNER_CLIENT_ID,
+            JobEvent::stage_failed(
+                JobEventId::new(),
+                0,
+                "download".to_owned(),
+                0,
+                true,
+                "source_transfer_transient".to_owned(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let recovering = query(
+        test_db.connection(),
+        "SELECT payload FROM notification_outbox \
+         WHERE payload->>'delivery_kind' = 'card'",
+    )
+    .await
+    .remove(0)
+    .try_get::<serde_json::Value>("", "payload")
+    .unwrap();
+    assert_eq!(recovering["state"], "downloading");
+    assert_eq!(recovering["progress"]["current_episode"], 7);
+    assert_eq!(recovering["progress"]["connection_attempt"], 3);
+    assert_eq!(recovering["progress"]["connection_attempt_limit"], 20);
+    assert_eq!(recovering["progress"]["vpn_rotation_pending"], true);
+    assert_eq!(recovering["issue"]["code"], "source_recovering");
+    assert_eq!(
+        recovering["issue"]["message"],
+        "source transfer is being recovered"
+    );
+    assert!(!recovering.to_string().contains("source_transfer_transient"));
+
+    test_db
+        .connection()
+        .execute_unprepared(
+            "UPDATE runner_lifecycle SET state = 'ready', previous_ip = current_ip, \
+             current_ip = '198.51.100.44', sticky_job_id = NULL, sticky_attempt_count = 0 \
+             WHERE singleton = true",
+        )
+        .await
+        .unwrap();
+    let retry = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::stage_started(JobEventId::new(), 0, "download".to_owned(), 0).unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), retry.lease_id(), RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+    test_db
+        .connection()
+        .execute_unprepared("UPDATE job_stages SET attempt_count = 20 WHERE name = 'download'")
+        .await
+        .unwrap();
+    leases
+        .report_event(
+            operation_key(),
+            retry.lease_id(),
+            RUNNER_CLIENT_ID,
+            JobEvent::stage_failed(
+                JobEventId::new(),
+                0,
+                "download".to_owned(),
+                0,
+                true,
+                "source_transfer_transient".to_owned(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let failed = query(
+        test_db.connection(),
+        "SELECT payload FROM notification_outbox \
+         WHERE payload->>'delivery_kind' = 'card'",
+    )
+    .await
+    .remove(0)
+    .try_get::<serde_json::Value>("", "payload")
+    .unwrap();
+    assert_eq!(failed["state"], "failed");
+    assert_eq!(failed["progress"]["connection_attempt"], 20);
+    assert_eq!(failed["progress"]["connection_attempt_limit"], 20);
+    assert_eq!(
+        failed["actions"],
+        serde_json::json!(["retry", "search-alternative", "details"])
+    );
 }
 
 #[tokio::test]
@@ -871,7 +1419,7 @@ async fn partial_season_card_aggregates_task_states_and_episode_coordinates() {
     );
     assert_eq!(
         card["actions"],
-        serde_json::json!(["retry-missing", "details"])
+        serde_json::json!(["retry-missing", "search-alternative", "details"])
     );
     assert!(card.get("issue").is_none());
 }
@@ -990,6 +1538,14 @@ async fn storage_block_notifies_both_family_recipients_once() {
         assert_eq!(payload["media"]["provider"], "rezka");
         assert_eq!(payload["media"]["translation"], "Оригинал (+субтитры)");
         assert_eq!(payload["issue"]["code"], "storage_blocked");
+        assert_eq!(
+            payload["progress"]["storage_available_bytes"],
+            23 * 1024_u64 * 1024 * 1024
+        );
+        assert_eq!(
+            payload["progress"]["storage_required_bytes"],
+            24 * 1024_u64 * 1024 * 1024
+        );
         assert_eq!(
             payload["actions"],
             serde_json::json!(["resume-storage", "details"])

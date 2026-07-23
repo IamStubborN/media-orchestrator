@@ -1,8 +1,11 @@
 use media_core::{
     PRIMARY_USER_ID, EpisodeSnapshot, JobId, MediaNotification, MediaNotificationAction,
-    MediaNotificationDeliveryKind, MediaNotificationEpisode, MediaNotificationIssue,
-    MediaNotificationKind, MediaNotificationMedia, MediaNotificationNextStep,
-    MediaNotificationProgress, MediaNotificationStage, MediaNotificationState,
+    MediaNotificationAudio, MediaNotificationDeliveryKind, MediaNotificationEpisode,
+    MediaNotificationIssue, MediaNotificationKind, MediaNotificationLibrary,
+    MediaNotificationMedia, MediaNotificationNextStep, MediaNotificationOrigin,
+    MediaNotificationProcessing, MediaNotificationProcessingMode, MediaNotificationProgress,
+    MediaNotificationPublication, MediaNotificationResult, MediaNotificationStage,
+    MediaNotificationState, MediaNotificationSubtitles, MediaNotificationVideo,
     NewTrackingSubscription, NotificationDelivery, NotificationEventType, NotificationId,
     NotificationOutboxPort, NotificationRecipient, OperationKey, PortError, Provider,
     TrackingDownload, TrackingDownloadPatch, TrackingId, TrackingScheduleStore, TrackingScope,
@@ -546,7 +549,12 @@ fn media_notification_from_payload(
         "series" => MediaNotificationKind::Series,
         _ => return Err(PortError::Infrastructure),
     };
-    let media = MediaNotificationMedia::new(
+    let origin = match media.get("origin").and_then(serde_json::Value::as_str) {
+        None => None,
+        Some("tracked-episode") => Some(MediaNotificationOrigin::TrackedEpisode),
+        _ => return Err(PortError::Infrastructure),
+    };
+    let mut media = MediaNotificationMedia::new(
         JobId::from_uuid(job_id),
         media_value("title")?.to_owned(),
         kind,
@@ -561,6 +569,9 @@ fn media_notification_from_payload(
             .map(ToOwned::to_owned),
     )
     .map_err(|_| PortError::Infrastructure)?;
+    if let Some(origin) = origin {
+        media = media.with_origin(origin);
+    }
     let progress = payload
         .get("progress")
         .map(|progress| {
@@ -612,6 +623,25 @@ fn media_notification_from_payload(
                     .and_then(serde_json::Value::as_u64)
                     .and_then(|value| u8::try_from(value).ok()),
             )
+            .and_then(|progress| {
+                progress.with_recovery(
+                    number("connection_attempt"),
+                    number("connection_attempt_limit"),
+                    object
+                        .get("vpn_rotation_pending")
+                        .and_then(serde_json::Value::as_bool),
+                )
+            })
+            .and_then(|progress| {
+                progress.with_storage(
+                    object
+                        .get("storage_available_bytes")
+                        .and_then(serde_json::Value::as_u64),
+                    object
+                        .get("storage_required_bytes")
+                        .and_then(serde_json::Value::as_u64),
+                )
+            })
             .map_err(|_| PortError::Infrastructure)
         })
         .transpose()?;
@@ -665,6 +695,10 @@ fn media_notification_from_payload(
         Some("none") => Some(MediaNotificationNextStep::None),
         _ => return Err(PortError::Infrastructure),
     };
+    let result = payload
+        .get("result")
+        .map(media_result_from_payload)
+        .transpose()?;
     let actions = payload
         .get("actions")
         .and_then(serde_json::Value::as_array)
@@ -676,10 +710,11 @@ fn media_notification_from_payload(
             Some("retry") => Ok(MediaNotificationAction::Retry),
             Some("retry-missing") => Ok(MediaNotificationAction::RetryMissing),
             Some("resume-storage") => Ok(MediaNotificationAction::ResumeStorage),
+            Some("search-alternative") => Ok(MediaNotificationAction::SearchAlternative),
             _ => Err(PortError::Infrastructure),
         })
         .collect::<Result<Vec<_>, _>>()?;
-    MediaNotification::new(
+    let notification = MediaNotification::new(
         delivery_kind,
         value("card_key")?.to_owned(),
         payload
@@ -702,7 +737,143 @@ fn media_notification_from_payload(
         issue,
         actions,
     )
-    .map_err(|_| PortError::Infrastructure)
+    .map_err(|_| PortError::Infrastructure)?;
+    match result {
+        Some(result) => notification
+            .with_result(result)
+            .map_err(|_| PortError::Infrastructure),
+        None => Ok(notification),
+    }
+}
+
+fn media_result_from_payload(
+    result: &serde_json::Value,
+) -> Result<MediaNotificationResult, PortError> {
+    let object = result.as_object().ok_or(PortError::Infrastructure)?;
+    let video = object
+        .get("video")
+        .map(|video| {
+            MediaNotificationVideo::new(
+                required_string(video, "codec")?,
+                optional_string(video, "profile")?,
+                required_u32(video, "width")?,
+                required_u32(video, "height")?,
+            )
+            .map_err(|_| PortError::Infrastructure)
+        })
+        .transpose()?;
+    let audio = object
+        .get("audio")
+        .map(|audio| {
+            MediaNotificationAudio::new(
+                optional_string(audio, "language")?,
+                required_string(audio, "codec")?,
+                optional_u32(audio, "channels")?,
+                optional_string(audio, "channel_layout")?,
+                optional_string(audio, "title")?,
+            )
+            .map_err(|_| PortError::Infrastructure)
+        })
+        .transpose()?;
+    let subtitles = object
+        .get("subtitles")
+        .map(|subtitles| {
+            Ok(MediaNotificationSubtitles::new(
+                required_u32(subtitles, "downloaded")?,
+                required_u32(subtitles, "missing")?,
+            ))
+        })
+        .transpose()?;
+    let processing = object
+        .get("processing")
+        .map(|processing| {
+            let mode = match required_str(processing, "mode")? {
+                "vaapi-upscale" => MediaNotificationProcessingMode::VaapiUpscale,
+                "original" => MediaNotificationProcessingMode::Original,
+                _ => return Err(PortError::Infrastructure),
+            };
+            Ok(MediaNotificationProcessing::new(
+                mode,
+                optional_u64(processing, "elapsed_seconds")?,
+            ))
+        })
+        .transpose()?;
+    let publication = object
+        .get("publication")
+        .map(|publication| {
+            let library = match required_str(publication, "library")? {
+                "movies" => MediaNotificationLibrary::Movies,
+                "tv-shows" => MediaNotificationLibrary::TvShows,
+                _ => return Err(PortError::Infrastructure),
+            };
+            MediaNotificationPublication::new(
+                library,
+                required_string(publication, "title")?,
+                optional_u32(publication, "season")?,
+                optional_u32(publication, "episode")?,
+            )
+            .map_err(|_| PortError::Infrastructure)
+        })
+        .transpose()?;
+    Ok(MediaNotificationResult::new(
+        video,
+        audio,
+        subtitles,
+        optional_u64(result, "file_size_bytes")?,
+        optional_u64(result, "duration_seconds")?,
+        processing,
+        publication,
+    ))
+}
+
+fn required_str<'a>(value: &'a serde_json::Value, name: &str) -> Result<&'a str, PortError> {
+    value
+        .get(name)
+        .and_then(serde_json::Value::as_str)
+        .ok_or(PortError::Infrastructure)
+}
+
+fn required_string(value: &serde_json::Value, name: &str) -> Result<String, PortError> {
+    required_str(value, name).map(ToOwned::to_owned)
+}
+
+fn optional_string(value: &serde_json::Value, name: &str) -> Result<Option<String>, PortError> {
+    value
+        .get(name)
+        .map(|value| {
+            value
+                .as_str()
+                .map(ToOwned::to_owned)
+                .ok_or(PortError::Infrastructure)
+        })
+        .transpose()
+}
+
+fn required_u32(value: &serde_json::Value, name: &str) -> Result<u32, PortError> {
+    value
+        .get(name)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or(PortError::Infrastructure)
+}
+
+fn optional_u32(value: &serde_json::Value, name: &str) -> Result<Option<u32>, PortError> {
+    value
+        .get(name)
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or(PortError::Infrastructure)
+        })
+        .transpose()
+}
+
+fn optional_u64(value: &serde_json::Value, name: &str) -> Result<Option<u64>, PortError> {
+    value
+        .get(name)
+        .map(|value| value.as_u64().ok_or(PortError::Infrastructure))
+        .transpose()
 }
 
 fn episode_json(values: &[EpisodeSnapshot]) -> serde_json::Value {

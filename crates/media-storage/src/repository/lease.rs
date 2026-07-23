@@ -1,7 +1,10 @@
 use media_core::{
     PRIMARY_USER_ID, Checkpoint, CheckpointValue, ClientId, Job, JobEvent, JobEventId, JobEventKind,
-    JobLease, JobState, LeaseId, LeaseStore, MAX_STICKY_VPN_ATTEMPTS, NotifyScope, OperationKey,
-    PortError, Provider, StageFailureOutcome, StageRef, SECONDARY_USER_ID, max_stage_attempts,
+    JobLease, JobState, LeaseId, LeaseStore, MAX_STICKY_VPN_ATTEMPTS, MediaNotificationAudio,
+    MediaNotificationLibrary, MediaNotificationProcessing, MediaNotificationProcessingMode,
+    MediaNotificationPublication, MediaNotificationResult, MediaNotificationSubtitles,
+    MediaNotificationVideo, NotifyScope, OperationKey, PortError, Provider, StageFailureOutcome,
+    StageRef, SECONDARY_USER_ID, max_stage_attempts,
 };
 use sea_orm::{
     ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, Statement, TransactionTrait,
@@ -230,7 +233,32 @@ struct ProjectedNotification {
     stage: Option<&'static str>,
     next_step: Option<&'static str>,
     issue: Option<serde_json::Value>,
+    result: Option<MediaNotificationResult>,
     actions: Vec<&'static str>,
+}
+
+#[derive(Clone)]
+struct TaskArtifactProjection {
+    season: Option<u32>,
+    episode: Option<u32>,
+    state: String,
+    video: Option<MediaNotificationVideo>,
+    audio: Option<MediaNotificationAudio>,
+    subtitles: Option<MediaNotificationSubtitles>,
+    file_size_bytes: Option<u64>,
+    duration_seconds: Option<u64>,
+    processing: Option<MediaNotificationProcessing>,
+}
+
+impl TaskArtifactProjection {
+    fn has_measured_artifact(&self) -> bool {
+        self.video.is_some()
+            || self.audio.is_some()
+            || self.subtitles.is_some()
+            || self.file_size_bytes.is_some()
+            || self.duration_seconds.is_some()
+            || self.processing.is_some()
+    }
 }
 
 async fn project_notification(
@@ -316,6 +344,21 @@ async fn project_notification(
             vec!["cancel", "details"],
         ),
         JobEventKind::JobTransition {
+            state: JobState::PlexPending,
+            ..
+        } => (
+            "plex-added",
+            "publishing",
+            false,
+            Some("publish"),
+            Some("publish"),
+            Some(serde_json::json!({
+                "code":"plex_publish_recovering",
+                "message":"Plex publication is being recovered"
+            })),
+            vec!["retry", "details"],
+        ),
+        JobEventKind::JobTransition {
             state: JobState::Completed,
             ..
         } => (
@@ -365,6 +408,20 @@ async fn project_notification(
             ),
             vec!["details"],
         ),
+        JobEventKind::StageFailed {
+            retryable: true, ..
+        } if job.state() == JobState::Queued => (
+            "download-progress",
+            "downloading",
+            false,
+            Some("download"),
+            Some("download"),
+            Some(serde_json::json!({
+                "code":"source_recovering",
+                "message":"source transfer is being recovered"
+            })),
+            vec!["cancel", "details"],
+        ),
         JobEventKind::StageFailed { .. } if job.state() == JobState::Failed => (
             "failed",
             "failed",
@@ -372,7 +429,7 @@ async fn project_notification(
             None,
             Some("none"),
             Some(serde_json::json!({"code":"media_failed","message":"media processing failed"})),
-            vec!["retry", "details"],
+            vec!["retry", "search-alternative", "details"],
         ),
         JobEventKind::JobTransition {
             state: JobState::Failed,
@@ -384,7 +441,7 @@ async fn project_notification(
             None,
             Some("none"),
             Some(serde_json::json!({"code":"media_failed","message":"media processing failed"})),
-            vec!["retry", "details"],
+            vec!["retry", "search-alternative", "details"],
         ),
         JobEventKind::JobTransition {
             state: JobState::Cancelled,
@@ -561,6 +618,10 @@ async fn project_notification(
     {
         progress["current_episode"] = serde_json::json!(episode);
     }
+    if selected.len() == 1 {
+        progress.get_or_insert_with(|| serde_json::json!({}))["current_episode"] =
+            serde_json::json!(selected[0].1);
+    }
     if !missing.is_empty() {
         progress.get_or_insert_with(|| serde_json::json!({}))["missing_episodes"] =
             serde_json::Value::Array(missing.clone());
@@ -579,6 +640,35 @@ async fn project_notification(
             transfer["percentage"] = serde_json::json!(value);
         }
     }
+    if let JobEventKind::StageFailed {
+        stage,
+        retryable,
+        error_code,
+    } = event.kind()
+        && let Some(attempt) = load_stage_attempt(transaction, job.id(), stage).await?
+    {
+        let limit = max_stage_attempts(job.provider());
+        let recovery = progress.get_or_insert_with(|| serde_json::json!({}));
+        recovery["connection_attempt"] = serde_json::json!(attempt);
+        recovery["connection_attempt_limit"] = serde_json::json!(limit);
+        recovery["vpn_rotation_pending"] = serde_json::json!(
+            job.provider() == Provider::Rezka
+                && *retryable
+                && matches!(
+                    error_code.as_str(),
+                    "source_transfer_transient" | "stream_expired" | "execution_failed"
+                )
+                && attempt < limit
+                && attempt % MAX_STICKY_VPN_ATTEMPTS == 0
+        );
+    }
+    if state == "needs-action"
+        && let Some((available, required)) = load_storage_projection(transaction, job.id()).await?
+    {
+        let storage = progress.get_or_insert_with(|| serde_json::json!({}));
+        storage["storage_available_bytes"] = serde_json::json!(available);
+        storage["storage_required_bytes"] = serde_json::json!(required);
+    }
     let issue = if state == "partial" && missing.is_empty() {
         Some(
             serde_json::json!({"code":"subtitles_missing","message":"some subtitles are unavailable"}),
@@ -587,7 +677,7 @@ async fn project_notification(
         issue
     };
     let actions = if state == "partial" && !missing.is_empty() {
-        vec!["retry-missing", "details"]
+        vec!["retry-missing", "search-alternative", "details"]
     } else {
         actions
     };
@@ -599,6 +689,19 @@ async fn project_notification(
         .as_object_mut()
         .expect("media payload is an object")
         .retain(|_, value| !value.is_null());
+    if job.result_ref().starts_with("selection:tracking:") {
+        media["origin"] = serde_json::json!("tracked-episode");
+    }
+    let task_artifacts = load_task_artifacts(transaction, job.id(), &selected).await?;
+    let result = aggregate_result(
+        job.provider(),
+        kind,
+        &title,
+        season,
+        &selected,
+        &task_artifacts,
+        matches!(state, "publishing" | "completed" | "partial"),
+    );
     Ok(Some(ProjectedNotification {
         event_type,
         state,
@@ -610,6 +713,7 @@ async fn project_notification(
         stage,
         next_step,
         issue,
+        result,
         actions,
     }))
 }
@@ -683,7 +787,339 @@ fn projected_payload(
     if let Some(issue) = &projected.issue {
         value["issue"] = issue.clone();
     }
+    if let Some(result) = &projected.result {
+        value["result"] = result_payload(result);
+    }
     value
+}
+
+async fn load_task_artifacts(
+    transaction: &sea_orm::DatabaseTransaction,
+    job_id: media_core::JobId,
+    selected: &[(u32, u32)],
+) -> Result<Vec<TaskArtifactProjection>, sea_orm::DbErr> {
+    transaction
+        .query_all_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "SELECT t.ordinal, t.state, COALESCE(s.checkpoint, '{}'::jsonb) AS checkpoint \
+             FROM job_tasks t LEFT JOIN job_stages s \
+             ON s.task_id = t.id AND s.name = 'media_pipeline' \
+             WHERE t.job_id = $1 ORDER BY t.ordinal",
+            [job_id.into_uuid().into()],
+        ))
+        .await?
+        .into_iter()
+        .map(|row| {
+            let ordinal = usize::try_from(row.try_get::<i32>("", "ordinal")?)
+                .map_err(|_| sea_orm::DbErr::Type("invalid task ordinal".to_owned()))?;
+            let checkpoint = row.try_get::<serde_json::Value>("", "checkpoint")?;
+            Ok(task_artifact_projection(
+                selected.get(ordinal).copied(),
+                row.try_get("", "state")?,
+                &checkpoint,
+            ))
+        })
+        .collect()
+}
+
+fn task_artifact_projection(
+    coordinates: Option<(u32, u32)>,
+    state: String,
+    checkpoint: &serde_json::Value,
+) -> TaskArtifactProjection {
+    let object = checkpoint.as_object();
+    let unsigned = |name: &str| object?.get(name)?.as_u64();
+    let text = |name: &str| bounded_artifact_text(object?.get(name)?.as_str()?);
+    let video = (|| {
+        MediaNotificationVideo::new(
+            text("artifact_video_codec")?,
+            text("artifact_video_profile"),
+            u32::try_from(unsigned("artifact_width")?).ok()?,
+            u32::try_from(unsigned("artifact_height")?).ok()?,
+        )
+        .ok()
+    })();
+    let audio = (|| {
+        MediaNotificationAudio::new(
+            text("artifact_audio_language"),
+            text("artifact_audio_codec")?,
+            unsigned("artifact_audio_channels").and_then(|value| u32::try_from(value).ok()),
+            text("artifact_audio_channel_layout"),
+            text("artifact_audio_title"),
+        )
+        .ok()
+    })();
+    let subtitles = match (
+        unsigned("artifact_subtitles_downloaded").and_then(|value| u32::try_from(value).ok()),
+        unsigned("artifact_subtitles_missing").and_then(|value| u32::try_from(value).ok()),
+    ) {
+        (Some(downloaded), Some(missing)) => {
+            Some(MediaNotificationSubtitles::new(downloaded, missing))
+        }
+        _ => None,
+    };
+    let processing = match text("artifact_processing_mode").as_deref() {
+        Some("vaapi-upscale") => Some(MediaNotificationProcessing::new(
+            MediaNotificationProcessingMode::VaapiUpscale,
+            unsigned("artifact_processing_seconds"),
+        )),
+        _ => None,
+    };
+    TaskArtifactProjection {
+        season: coordinates.map(|value| value.0),
+        episode: coordinates.map(|value| value.1),
+        state,
+        video,
+        audio,
+        subtitles,
+        file_size_bytes: unsigned("artifact_file_size_bytes"),
+        duration_seconds: unsigned("artifact_duration_seconds"),
+        processing,
+    }
+}
+
+fn aggregate_result(
+    provider: Provider,
+    kind: &str,
+    title: &str,
+    season: Option<u32>,
+    selected: &[(u32, u32)],
+    tasks: &[TaskArtifactProjection],
+    publication_reached: bool,
+) -> Option<MediaNotificationResult> {
+    let artifacts = tasks
+        .iter()
+        .filter(|task| task.state == "completed" || task.has_measured_artifact())
+        .collect::<Vec<_>>();
+    if artifacts.is_empty() && !(provider == Provider::Prowlarr && publication_reached) {
+        return None;
+    }
+    let video = equal_complete_value(&artifacts, |task| task.video.clone());
+    let audio = equal_complete_value(&artifacts, |task| task.audio.clone());
+    let subtitles = sum_subtitles(&artifacts);
+    let file_size_bytes = sum_complete(&artifacts, |task| task.file_size_bytes);
+    let duration_seconds = sum_complete(&artifacts, |task| task.duration_seconds);
+    let processing = if provider == Provider::Prowlarr {
+        Some(MediaNotificationProcessing::new(
+            MediaNotificationProcessingMode::Original,
+            None,
+        ))
+    } else {
+        aggregate_processing(&artifacts)
+    };
+    let exact_coordinates = if selected.len() == 1 {
+        Some(selected[0])
+    } else if artifacts.len() == 1 {
+        artifacts[0].season.zip(artifacts[0].episode)
+    } else {
+        None
+    };
+    let publication = if publication_reached {
+        MediaNotificationPublication::new(
+            if kind == "movie" {
+                MediaNotificationLibrary::Movies
+            } else {
+                MediaNotificationLibrary::TvShows
+            },
+            title.to_owned(),
+            if kind == "movie" {
+                None
+            } else {
+                exact_coordinates.map(|value| value.0).or(season)
+            },
+            exact_coordinates.map(|value| value.1),
+        )
+        .ok()
+    } else {
+        None
+    };
+    Some(MediaNotificationResult::new(
+        video,
+        audio,
+        subtitles,
+        file_size_bytes,
+        duration_seconds,
+        processing,
+        publication,
+    ))
+}
+
+fn equal_complete_value<T: Clone + Eq>(
+    tasks: &[&TaskArtifactProjection],
+    value: impl Fn(&TaskArtifactProjection) -> Option<T>,
+) -> Option<T> {
+    let first = value(tasks.first()?)?;
+    tasks
+        .iter()
+        .all(|task| value(task).as_ref() == Some(&first))
+        .then_some(first)
+}
+
+fn sum_complete(
+    tasks: &[&TaskArtifactProjection],
+    value: impl Fn(&TaskArtifactProjection) -> Option<u64>,
+) -> Option<u64> {
+    tasks
+        .iter()
+        .try_fold(0_u64, |total, task| total.checked_add(value(task)?))
+}
+
+fn sum_subtitles(tasks: &[&TaskArtifactProjection]) -> Option<MediaNotificationSubtitles> {
+    let (downloaded, missing) =
+        tasks
+            .iter()
+            .try_fold((0_u32, 0_u32), |(downloaded, missing), task| {
+                let subtitles = task.subtitles.as_ref()?;
+                Some((
+                    downloaded.checked_add(subtitles.downloaded())?,
+                    missing.checked_add(subtitles.missing())?,
+                ))
+            })?;
+    Some(MediaNotificationSubtitles::new(downloaded, missing))
+}
+
+fn aggregate_processing(tasks: &[&TaskArtifactProjection]) -> Option<MediaNotificationProcessing> {
+    let first = tasks.first()?.processing.as_ref()?;
+    if !tasks.iter().all(|task| {
+        task.processing
+            .as_ref()
+            .map(MediaNotificationProcessing::mode)
+            == Some(first.mode())
+    }) {
+        return None;
+    }
+    let elapsed_seconds = sum_complete(tasks, |task| task.processing.as_ref()?.elapsed_seconds());
+    Some(MediaNotificationProcessing::new(
+        first.mode(),
+        elapsed_seconds,
+    ))
+}
+
+async fn load_stage_attempt(
+    transaction: &sea_orm::DatabaseTransaction,
+    job_id: media_core::JobId,
+    stage: &StageRef,
+) -> Result<Option<u32>, sea_orm::DbErr> {
+    transaction
+        .query_one_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "SELECT s.attempt_count FROM job_stages s JOIN job_tasks t ON t.id = s.task_id \
+             WHERE t.job_id = $1 AND t.ordinal = $2 AND s.name = $3 AND s.ordinal = $4",
+            [
+                job_id.into_uuid().into(),
+                i32::try_from(stage.task_ordinal())
+                    .map_err(|_| sea_orm::DbErr::Type("invalid task ordinal".to_owned()))?
+                    .into(),
+                stage.name().into(),
+                i32::try_from(stage.ordinal())
+                    .map_err(|_| sea_orm::DbErr::Type("invalid stage ordinal".to_owned()))?
+                    .into(),
+            ],
+        ))
+        .await?
+        .map(|row| {
+            u32::try_from(row.try_get::<i32>("", "attempt_count")?)
+                .map_err(|_| sea_orm::DbErr::Type("invalid stage attempt count".to_owned()))
+        })
+        .transpose()
+}
+
+async fn load_storage_projection(
+    transaction: &sea_orm::DatabaseTransaction,
+    job_id: media_core::JobId,
+) -> Result<Option<(u64, u64)>, sea_orm::DbErr> {
+    let checkpoint = transaction
+        .query_one_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "SELECT s.checkpoint FROM job_stages s JOIN job_tasks t ON t.id = s.task_id \
+             WHERE t.job_id = $1 AND s.name = 'media_pipeline' \
+             AND s.checkpoint ? 'storage_available_bytes' \
+             AND s.checkpoint ? 'storage_required_bytes' \
+             ORDER BY t.ordinal DESC LIMIT 1",
+            [job_id.into_uuid().into()],
+        ))
+        .await?
+        .map(|row| row.try_get::<serde_json::Value>("", "checkpoint"))
+        .transpose()?;
+    Ok(checkpoint.and_then(|checkpoint| {
+        Some((
+            checkpoint.get("storage_available_bytes")?.as_u64()?,
+            checkpoint.get("storage_required_bytes")?.as_u64()?,
+        ))
+    }))
+}
+
+fn bounded_artifact_text(value: &str) -> Option<String> {
+    (!value.is_empty()
+        && value.len() <= 160
+        && !value.contains("://")
+        && !value.chars().any(char::is_control))
+    .then(|| value.to_owned())
+}
+
+fn result_payload(result: &MediaNotificationResult) -> serde_json::Value {
+    let mut value = serde_json::json!({});
+    if let Some(video) = result.video() {
+        value["video"] = serde_json::json!({
+            "codec": video.codec(),
+            "profile": video.profile(),
+            "width": video.width(),
+            "height": video.height(),
+        });
+        remove_null_fields(&mut value["video"]);
+    }
+    if let Some(audio) = result.audio() {
+        value["audio"] = serde_json::json!({
+            "language": audio.language(),
+            "codec": audio.codec(),
+            "channels": audio.channels(),
+            "channel_layout": audio.channel_layout(),
+            "title": audio.title(),
+        });
+        remove_null_fields(&mut value["audio"]);
+    }
+    if let Some(subtitles) = result.subtitles() {
+        value["subtitles"] = serde_json::json!({
+            "downloaded": subtitles.downloaded(),
+            "missing": subtitles.missing(),
+        });
+    }
+    if let Some(file_size_bytes) = result.file_size_bytes() {
+        value["file_size_bytes"] = serde_json::json!(file_size_bytes);
+    }
+    if let Some(duration_seconds) = result.duration_seconds() {
+        value["duration_seconds"] = serde_json::json!(duration_seconds);
+    }
+    if let Some(processing) = result.processing() {
+        value["processing"] = serde_json::json!({
+            "mode": match processing.mode() {
+                MediaNotificationProcessingMode::VaapiUpscale => "vaapi-upscale",
+                MediaNotificationProcessingMode::Original => "original",
+            },
+            "elapsed_seconds": processing.elapsed_seconds(),
+        });
+        remove_null_fields(&mut value["processing"]);
+    }
+    if let Some(publication) = result.publication() {
+        value["publication"] = serde_json::json!({
+            "library": match publication.library() {
+                MediaNotificationLibrary::Movies => "movies",
+                MediaNotificationLibrary::TvShows => "tv-shows",
+            },
+            "title": publication.title(),
+            "season": publication.season(),
+            "episode": publication.episode(),
+        });
+        remove_null_fields(&mut value["publication"]);
+    }
+    value
+}
+
+fn remove_null_fields(value: &mut serde_json::Value) {
+    value
+        .as_object_mut()
+        .expect("notification result section is an object")
+        .retain(|_, value| !value.is_null());
 }
 
 fn provider_value(provider: Provider) -> &'static str {

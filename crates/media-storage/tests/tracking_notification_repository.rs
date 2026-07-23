@@ -89,6 +89,127 @@ async fn cancelled_structured_notification_can_be_leased() {
 }
 
 #[tokio::test]
+async fn detailed_notification_payload_can_be_leased_without_losing_result_state() {
+    let test_db = TestDatabase::start_migrated().await;
+    test_db
+        .connection()
+        .execute_unprepared(
+            r#"
+            INSERT INTO notification_outbox (
+                id, aggregate_type, aggregate_id, event_type, recipient,
+                source_dedupe_key, payload
+            ) VALUES (
+                '00000000-0000-4000-8000-000000000111',
+                'job',
+                '00000000-0000-4000-8000-000000000112',
+                'completed',
+                'primary',
+                decode('11', 'hex'),
+                '{
+                    "event_type":"media.notification",
+                    "schema_version":2,
+                    "delivery_kind":"card",
+                    "card_key":"media-job:00000000-0000-4000-8000-000000000112",
+                    "revision":8,
+                    "lifecycle_cycle":1,
+                    "terminal":true,
+                    "state":"completed",
+                    "media":{
+                        "job_id":"00000000-0000-4000-8000-000000000112",
+                        "title":"Клинки Хранителей",
+                        "kind":"series",
+                        "provider":"rezka",
+                        "season":2,
+                        "translation":"AniLibria",
+                        "origin":"tracked-episode"
+                    },
+                    "progress":{
+                        "completed_episodes":1,
+                        "total_episodes":1,
+                        "current_episode":8,
+                        "connection_attempt":5,
+                        "connection_attempt_limit":20,
+                        "vpn_rotation_pending":false,
+                        "storage_available_bytes":53687091200,
+                        "storage_required_bytes":1073741824
+                    },
+                    "result":{
+                        "video":{
+                            "codec":"hevc",
+                            "profile":"Main",
+                            "width":1920,
+                            "height":1080
+                        },
+                        "audio":{
+                            "language":"rus",
+                            "codec":"aac",
+                            "channels":2,
+                            "channel_layout":"stereo",
+                            "title":"AniLibria"
+                        },
+                        "subtitles":{"downloaded":2,"missing":0},
+                        "file_size_bytes":440401920,
+                        "duration_seconds":1421,
+                        "processing":{"mode":"vaapi-upscale","elapsed_seconds":252},
+                        "publication":{
+                            "library":"tv-shows",
+                            "title":"Клинки Хранителей",
+                            "season":2,
+                            "episode":8
+                        }
+                    },
+                    "actions":["search-alternative","details"]
+                }'::jsonb
+            )
+            "#,
+        )
+        .await
+        .unwrap();
+    let deliveries = SeaOrmNotificationOutbox::new(test_db.connection().clone())
+        .lease_pending(
+            NotificationId::new(),
+            time::OffsetDateTime::now_utc(),
+            time::Duration::seconds(30),
+            10,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(deliveries.len(), 1);
+    let NotificationContent::Media(notification) = deliveries[0].content() else {
+        panic!("expected a structured media notification");
+    };
+    assert_eq!(
+        notification.media().origin(),
+        Some(media_core::MediaNotificationOrigin::TrackedEpisode)
+    );
+    let progress = notification.progress().unwrap();
+    assert_eq!(progress.current_episode(), Some(8));
+    assert_eq!(progress.connection_attempt(), Some(5));
+    assert_eq!(progress.connection_attempt_limit(), Some(20));
+    assert_eq!(progress.vpn_rotation_pending(), Some(false));
+    assert_eq!(progress.storage_available_bytes(), Some(53_687_091_200));
+    assert_eq!(progress.storage_required_bytes(), Some(1_073_741_824));
+    let result = notification.result().unwrap();
+    assert_eq!(result.video().unwrap().width(), 1920);
+    assert_eq!(result.audio().unwrap().language(), Some("rus"));
+    assert_eq!(result.subtitles().unwrap().downloaded(), 2);
+    assert_eq!(result.file_size_bytes(), Some(440_401_920));
+    assert_eq!(
+        result.processing().unwrap().mode(),
+        media_core::MediaNotificationProcessingMode::VaapiUpscale
+    );
+    assert_eq!(result.publication().unwrap().episode(), Some(8));
+    assert_eq!(
+        notification.actions(),
+        &[
+            media_core::MediaNotificationAction::SearchAlternative,
+            media_core::MediaNotificationAction::Details
+        ]
+    );
+}
+
+#[tokio::test]
 async fn add_list_and_remove_are_idempotent_and_apply_scope_visibility() {
     let test_db = TestDatabase::start_migrated().await;
     let store = SeaOrmTrackingStore::new(test_db.connection().clone());
