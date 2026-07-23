@@ -1,8 +1,8 @@
 # Acceptance Status
 
-**Audited:** 2026-07-21
-**Runtime revision:** `2d876df`
-**Hermes revision:** `e758c20`
+**Audited:** 2026-07-23
+**Runtime revision:** `aa69027`
+**Hermes revision:** `307ad63`
 **Homelab revision:** `4e82866`
 
 This is the authoritative completion matrix for the active media-system goal.
@@ -15,7 +15,7 @@ live result keeps the goal open even when its code and deployment are complete.
 | 2. Rezka episode | Yes | Yes | Yes | [episode E2E](evidence/2026-07-13-rezka-episode-e2e.md), [final yt-dlp verification](evidence/2026-07-21-final-live-verification.md) |
 | 3. Subtitle recovery | Yes | Yes | Yes | [subtitle-only retry](evidence/2026-07-13-subtitle-only-retry.md), [natural partial recovery](evidence/2026-07-13-natural-subtitle-partial-recovery.md) |
 | 4. Prowlarr and qBittorrent | Yes | Yes | Yes | [TV E2E](evidence/2026-07-13-prowlarr-tv-e2e.md), [movie E2E](evidence/2026-07-13-prowlarr-movie-e2e.md) |
-| 5. Notifications | Yes | Yes | Yes | [routing](evidence/2026-07-13-notification-routing.md), [rich delivery](evidence/2026-07-13-storage-resume-and-rich-notifications.md) |
+| 5. Notifications | Yes | Yes | Yes | [routing](evidence/2026-07-13-notification-routing.md), [rich delivery](evidence/2026-07-13-storage-resume-and-rich-notifications.md), [detailed mutable Telegram cards](evidence/2026-07-23-detailed-telegram-media-notifications.md) |
 | 6. Tracking and release dates | Yes | Yes | Yes | [tracking E2E](evidence/2026-07-13-tracking-e2e.md), [automatic download without LLM](evidence/2026-07-21-final-live-verification.md), [release query](evidence/2026-07-13-release-query.md) |
 | 7. Movie flow | Yes | Yes | Yes | [Rezka movie](evidence/2026-07-13-rezka-movie-e2e.md), [Prowlarr movie](evidence/2026-07-13-prowlarr-movie-e2e.md) |
 | 8. Recovery, storage, mapping | Yes | Yes | Yes | [retry and deploy](evidence/2026-07-13-job-retry-and-local-deploy.md), [storage resume](evidence/2026-07-13-storage-resume-and-rich-notifications.md), [deterministic expired-stream recovery](evidence/2026-07-13-expired-stream-and-specials-deterministic.md), [live CDN retry and Specials publication](evidence/2026-07-21-final-live-verification.md) |

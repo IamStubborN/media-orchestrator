@@ -1165,7 +1165,7 @@ git commit -m "feat: improve Telegram media actions"
 - Produces: deployed service/runner/Hermes versions and live evidence.
 - Preserves: active downloads and all non-test media.
 
-- [ ] **Step 1: Run complete local verification**
+- [x] **Step 1: Run complete local verification**
 
 In `media-orchestrator`:
 
@@ -1186,7 +1186,7 @@ git diff --check
 
 Expected: every command exits zero.
 
-- [ ] **Step 2: Verify synthetic cards before touching live jobs**
+- [x] **Step 2: Verify synthetic cards before touching live jobs**
 
 Send signed synthetic payloads for:
 
@@ -1204,7 +1204,7 @@ terminal failed 20/20
 
 Assert each lifecycle edits one Telegram message. Assert the completed payload creates exactly one short reply. Assert delayed progress cannot overwrite a terminal card.
 
-- [ ] **Step 3: Inspect live queue before deployment**
+- [x] **Step 3: Inspect live queue before deployment**
 
 Run:
 
@@ -1215,7 +1215,7 @@ ssh host.example.invalid \
 
 If `active` is true, build images but defer replacement of `download-runner` until the current task reaches a safe terminal or stage boundary. Do not cancel the job.
 
-- [ ] **Step 4: Push both repositories and deploy through the existing guarded path**
+- [x] **Step 4: Push both repositories and deploy through the existing guarded path**
 
 Push `main` in each repository, then from `media-orchestrator` run:
 
@@ -1225,7 +1225,7 @@ mise run homelab-deploy
 
 Expected: migrations complete, health gates pass, and the deployment guard refuses an unsafe runner replacement rather than interrupting work.
 
-- [ ] **Step 5: Verify deployed health and configuration**
+- [x] **Step 5: Verify deployed health and configuration**
 
 Run:
 
@@ -1243,7 +1243,7 @@ ssh host.example.invalid \
 
 Expected: containers are healthy, queue state is coherent, and logs contain no migration, payload validation, callback, or Telegram delivery errors.
 
-- [ ] **Step 6: Verify Telegram mobile and Web Telegram**
+- [x] **Step 6: Verify Telegram mobile and Web Telegram**
 
 Use Chrome/Computer Use against the existing authenticated sessions. Confirm:
 
@@ -1254,7 +1254,7 @@ Use Chrome/Computer Use against the existing authenticated sessions. Confirm:
 - exact episode identity and detailed final layout fit without truncation;
 - no raw quick-reply tag, standalone UUID, or `execution_failed` appears.
 
-- [ ] **Step 7: Run one real low-volume Rezka episode**
+- [x] **Step 7: Run one real low-volume Rezka episode**
 
 Choose one explicitly requested episode that is not currently active. Confirm in the card:
 
@@ -1285,15 +1285,15 @@ ssh host.example.invalid \
 
 and with the published subtitle sidecars and Plex canonical season/episode placement. Record only sanitized measurements in evidence; do not record the provider URL or local secret material.
 
-- [ ] **Step 8: Exercise controlled recovery**
+- [x] **Step 8: Exercise controlled recovery**
 
 Use a synthetic retry event or a naturally occurring transient transfer failure. Confirm the same card shows `Попытка соединения: N из 20`, VPN rotation wording only when scheduled, and no per-attempt message spam. Use a synthetic terminal failure to verify `Выбрать другой источник`; confirm it opens an opposite-provider search with up to five results and does not create a download.
 
-- [ ] **Step 9: Remove test artifacts**
+- [x] **Step 9: Remove test artifacts**
 
 Delete only the test episode and its subtitle sidecars from the test Plex location, remove its staging directory, trigger the appropriate Plex library scan, and verify the item disappears. Do not remove pre-existing media, completed user jobs, or current tracking subscriptions.
 
-- [ ] **Step 10: Record evidence and final acceptance**
+- [x] **Step 10: Record evidence and final acceptance**
 
 Write `docs/evidence/2026-07-23-detailed-telegram-media-notifications.md` with:
 
@@ -1308,7 +1308,7 @@ Write `docs/evidence/2026-07-23-detailed-telegram-media-notifications.md` with:
 
 Update the notification row in `docs/ACCEPTANCE.md` to `Implemented`, `Deployed`, and `Live verified` only when all three have direct evidence.
 
-- [ ] **Step 11: Commit evidence**
+- [x] **Step 11: Commit evidence**
 
 Run:
 
