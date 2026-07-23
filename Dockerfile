@@ -74,20 +74,26 @@ ENTRYPOINT ["/usr/local/bin/media"]
 CMD ["serve"]
 
 FROM runtime-base AS runner-packages
+ARG TARGETARCH
 RUN apt-get \
       -o Acquire::Retries=3 \
       -o Acquire::http::Timeout=20 \
       -o Acquire::https::Timeout=20 \
       update && \
+    case "${TARGETARCH}" in \
+      amd64) vaapi_driver="intel-media-va-driver=23.1.1+dfsg1-1" ;; \
+      arm64) vaapi_driver="" ;; \
+      *) echo "unsupported runner architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac && \
     apt-get \
       -o Acquire::Retries=3 \
       -o Acquire::http::Timeout=20 \
       -o Acquire::https::Timeout=20 \
       install --yes --no-install-recommends \
       ffmpeg=7:5.1.9-0+deb12u1 \
-      intel-media-va-driver=23.1.1+dfsg1-1 \
       libva-drm2=2.17.0-1 \
-      libva2=2.17.0-1 && \
+      libva2=2.17.0-1 \
+      ${vaapi_driver} && \
     rm -rf /var/lib/apt/lists/*
 
 FROM runner-packages AS runner

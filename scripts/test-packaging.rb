@@ -19,6 +19,7 @@ dockerfile = read("Dockerfile")
 compose_text = read("compose.yaml")
 workflow = read(".github/workflows/release.yml")
 tasks = read(".mise.toml")
+smoke = read("scripts/docker-smoke.sh")
 
 compose = YAML.safe_load(compose_text, aliases: true)
 services = compose.fetch("services")
@@ -43,6 +44,19 @@ assert(dockerfile.include?("HEALTHCHECK") && dockerfile.include?("media\", \"hea
 service_section = dockerfile.split(/^FROM .* AS service$/, 2).fetch(1).split(/^FROM .* AS runner-packages$/, 2).fetch(0)
 assert(!service_section.match?(/ffmpeg|ffprobe|libva/i), "service target must not install runner media tooling")
 assert(dockerfile.match?(/ffmpeg=.*ffprobe|ffmpeg=.*libva|ffmpeg/i), "runner target must install ffmpeg")
+assert(dockerfile.match?(/amd64\).*intel-media-va-driver/) &&
+       dockerfile.match?(/arm64\).*vaapi_driver=""/),
+       "Intel VAAPI driver must be installed only for the amd64 runner")
+%w[
+  MEDIA_POSTGRES_PASSWORD
+  MEDIA_DATABASE_URL
+  MEDIA_PRIMARY_TOKEN
+  MEDIA_SECONDARY_TOKEN
+  MEDIA_RUNNER_TOKEN
+  MEDIA_LIFECYCLE_TOKEN
+].each do |name|
+  assert(smoke.include?("#{name}=${#{name}:-"), "docker smoke must provide a disposable #{name}")
+end
 
 %w[postgres migrate service runner].each do |name|
   assert(services.key?(name), "compose stack is missing #{name}")
@@ -50,6 +64,8 @@ end
 
 service = services.fetch("service")
 runner = services.fetch("runner")
+assert(service.fetch("environment").key?("MEDIA_LIFECYCLE_TOKEN"),
+       "service must receive the lifecycle credential")
 assert(service.fetch("networks").sort == ["backend"], "service must only join the backend network")
 assert(!service.key?("network_mode"), "service must not use a VPN network namespace")
 assert(runner.fetch("secrets", []).none? { |secret| secret.to_s.include?("database") },
