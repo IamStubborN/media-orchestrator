@@ -105,6 +105,32 @@ pub enum EpisodeOutcome {
     Cancelled,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum ProcessingMode {
+    VaapiUpscale,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MediaProcessing {
+    pub mode: ProcessingMode,
+    pub elapsed_seconds: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PublishedArtifact {
+    pub probe: MediaProbe,
+    pub file_size_bytes: u64,
+    pub subtitles_downloaded: u32,
+    pub subtitles_missing: u32,
+    pub processing: Option<MediaProcessing>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EpisodeReport {
+    pub outcome: EpisodeOutcome,
+    pub artifact: Option<PublishedArtifact>,
+}
+
 pub struct EpisodePipeline {
     filesystem: Arc<dyn FileSystemPort>,
     http: Arc<dyn HttpPort>,
@@ -144,13 +170,15 @@ impl EpisodePipeline {
         work: &EpisodeWork,
         cancellation: &dyn Cancellation,
         reporter: &dyn StageReporter,
-    ) -> Result<EpisodeOutcome, RunnerPortError> {
+    ) -> Result<EpisodeReport, RunnerPortError> {
         self.validate_work(work)?;
         if cancellation.is_cancelled() {
-            return Ok(EpisodeOutcome::Cancelled);
+            return Ok(EpisodeReport::without_artifact(EpisodeOutcome::Cancelled));
         }
         if work.provider == ProviderKind::Torrent {
-            return self.reconcile(&work.plex).await;
+            return Ok(EpisodeReport::without_artifact(
+                self.reconcile(&work.plex).await?,
+            ));
         }
 
         let existing_video = self.filesystem.file_len(&work.final_video).await?.is_some();
@@ -162,7 +190,7 @@ impl EpisodePipeline {
         } else {
             false
         };
-        if !video_published {
+        let processing = if !video_published {
             let source_url = work
                 .source_url
                 .as_ref()
@@ -183,7 +211,9 @@ impl EpisodePipeline {
             let estimate = PeakEstimate::new(source_bytes, source_bytes, 0)
                 .map_err(|_| RunnerPortError::InvalidWork)?;
             if let Err(blocked) = self.storage.check(available, estimate) {
-                return Ok(EpisodeOutcome::BlockedStorage(blocked));
+                return Ok(EpisodeReport::without_artifact(
+                    EpisodeOutcome::BlockedStorage(blocked),
+                ));
             }
 
             let final_parent = work
@@ -216,17 +246,17 @@ impl EpisodePipeline {
                     )
                     .await
                 {
-                    return cancellation_outcome(error);
+                    return cancellation_report(error);
                 }
                 reporter.stage_completed("download").await;
             }
             if cancellation.is_cancelled() {
-                return Ok(EpisodeOutcome::Cancelled);
+                return Ok(EpisodeReport::without_artifact(EpisodeOutcome::Cancelled));
             }
 
             let source_probe = match self.process.probe(&work.source_partial, cancellation).await {
                 Ok(probe) => probe,
-                Err(error) => return cancellation_outcome(error),
+                Err(error) => return cancellation_report(error),
             };
             validate_source_duration(&source_probe, work.expected_duration_seconds)?;
             let command = build_rezka_vaapi_command(
@@ -240,11 +270,12 @@ impl EpisodePipeline {
             // Milestone marking the start of the VAAPI/ffmpeg transcode; drives
             // the "transcoding started" notification. Best-effort progress only.
             reporter.stage_started("transcode").await;
+            let processing_started = tokio::time::Instant::now();
             if let Err(error) = self.process.run(&command, cancellation).await {
-                return cancellation_outcome(error);
+                return cancellation_report(error);
             }
             if cancellation.is_cancelled() {
-                return Ok(EpisodeOutcome::Cancelled);
+                return Ok(EpisodeReport::without_artifact(EpisodeOutcome::Cancelled));
             }
             let encoded_probe = match self
                 .process
@@ -252,18 +283,25 @@ impl EpisodePipeline {
                 .await
             {
                 Ok(probe) => probe,
-                Err(error) => return cancellation_outcome(error),
+                Err(error) => return cancellation_report(error),
             };
             validate_encoded_probe(&source_probe, &encoded_probe, work.audio.as_ref())?;
+            let processing = Some(MediaProcessing {
+                mode: ProcessingMode::VaapiUpscale,
+                elapsed_seconds: processing_started.elapsed().as_secs(),
+            });
             reporter.stage_completed("transcode").await;
-        }
+            processing
+        } else {
+            None
+        };
 
         let missing_subtitles = match self.recover_subtitles(work, cancellation).await {
             Ok(missing) => missing,
-            Err(error) => return cancellation_outcome(error),
+            Err(error) => return cancellation_report(error),
         };
         if cancellation.is_cancelled() {
-            return Ok(EpisodeOutcome::Cancelled);
+            return Ok(EpisodeReport::without_artifact(EpisodeOutcome::Cancelled));
         }
         if !video_published {
             if existing_video {
@@ -277,12 +315,23 @@ impl EpisodePipeline {
             }
         }
 
-        match self.reconcile(&work.plex).await? {
+        let artifact = match self
+            .published_artifact(work, cancellation, &missing_subtitles, processing)
+            .await
+        {
+            Ok(artifact) => artifact,
+            Err(error) => return cancellation_report(error),
+        };
+        let outcome = match self.reconcile(&work.plex).await? {
             EpisodeOutcome::Completed if !missing_subtitles.is_empty() => {
-                Ok(EpisodeOutcome::Partial { missing_subtitles })
+                EpisodeOutcome::Partial { missing_subtitles }
             }
-            outcome => Ok(outcome),
-        }
+            outcome => outcome,
+        };
+        Ok(EpisodeReport {
+            outcome,
+            artifact: Some(artifact),
+        })
     }
 
     pub async fn run_all(
@@ -293,14 +342,50 @@ impl EpisodePipeline {
     ) -> Result<Vec<EpisodeOutcome>, RunnerPortError> {
         let mut outcomes = Vec::with_capacity(work_items.len());
         for work in work_items {
-            let outcome = self.run(work, cancellation, reporter).await?;
-            let cancelled = outcome == EpisodeOutcome::Cancelled;
-            outcomes.push(outcome);
+            let report = self.run(work, cancellation, reporter).await?;
+            let cancelled = report.outcome == EpisodeOutcome::Cancelled;
+            outcomes.push(report.outcome);
             if cancelled {
                 break;
             }
         }
         Ok(outcomes)
+    }
+
+    async fn published_artifact(
+        &self,
+        work: &EpisodeWork,
+        cancellation: &dyn Cancellation,
+        missing_subtitles: &[String],
+        processing: Option<MediaProcessing>,
+    ) -> Result<PublishedArtifact, RunnerPortError> {
+        let probe = self.process.probe(&work.final_video, cancellation).await?;
+        if processing.is_some() && !is_full_hd_rezka_output(&probe, work.audio.as_ref()) {
+            return Err(RunnerPortError::Process);
+        }
+        let file_size_bytes = self
+            .filesystem
+            .file_len(&work.final_video)
+            .await?
+            .ok_or(RunnerPortError::Filesystem)?;
+        let mut subtitles_downloaded = 0_u32;
+        for track in &work.subtitles {
+            if self.filesystem.file_len(&track.final_path).await?.is_some() {
+                subtitles_downloaded = subtitles_downloaded
+                    .checked_add(1)
+                    .ok_or(RunnerPortError::InvalidWork)?;
+            }
+        }
+        let subtitles_missing =
+            u32::try_from(missing_subtitles.len()).map_err(|_| RunnerPortError::InvalidWork)?;
+
+        Ok(PublishedArtifact {
+            probe,
+            file_size_bytes,
+            subtitles_downloaded,
+            subtitles_missing,
+            processing,
+        })
     }
 
     fn validate_work(&self, work: &EpisodeWork) -> Result<(), RunnerPortError> {
@@ -389,6 +474,15 @@ impl EpisodePipeline {
     }
 }
 
+impl EpisodeReport {
+    const fn without_artifact(outcome: EpisodeOutcome) -> Self {
+        Self {
+            outcome,
+            artifact: None,
+        }
+    }
+}
+
 fn estimate_unknown_source_bytes(expected_duration_seconds: Option<f64>) -> u64 {
     let seconds = expected_duration_seconds
         .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
@@ -418,9 +512,11 @@ fn validate_source_duration(
     Ok(())
 }
 
-fn cancellation_outcome(error: RunnerPortError) -> Result<EpisodeOutcome, RunnerPortError> {
+fn cancellation_report(error: RunnerPortError) -> Result<EpisodeReport, RunnerPortError> {
     match error {
-        RunnerPortError::Cancelled => Ok(EpisodeOutcome::Cancelled),
+        RunnerPortError::Cancelled => {
+            Ok(EpisodeReport::without_artifact(EpisodeOutcome::Cancelled))
+        }
         error => Err(error),
     }
 }

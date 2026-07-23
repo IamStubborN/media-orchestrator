@@ -949,9 +949,12 @@ struct ProbeDocument {
 struct ProbeStream {
     codec_type: String,
     codec_name: String,
+    profile: Option<String>,
     width: Option<u32>,
     height: Option<u32>,
     bit_rate: Option<String>,
+    channels: Option<u32>,
+    channel_layout: Option<String>,
     #[serde(default)]
     tags: ProbeTags,
 }
@@ -980,7 +983,14 @@ fn parse_probe(contents: &[u8]) -> Result<MediaProbe, RunnerPortError> {
         .streams
         .iter()
         .find(|stream| stream.codec_type == "audio")
-        .map(|stream| &stream.tags);
+        .map(|stream| {
+            (
+                &stream.tags,
+                &stream.codec_name,
+                stream.channels,
+                &stream.channel_layout,
+            )
+        });
     let duration_seconds = document
         .format
         .duration
@@ -1006,8 +1016,12 @@ fn parse_probe(contents: &[u8]) -> Result<MediaProbe, RunnerPortError> {
         height: stream.height.ok_or(RunnerPortError::Process)?,
         duration_seconds,
         bitrate,
-        audio_language: audio.and_then(|tags| tags.language.clone()),
-        audio_title: audio.and_then(|tags| tags.title.clone()),
+        video_profile: stream.profile.clone(),
+        audio_language: audio.and_then(|(tags, ..)| tags.language.clone()),
+        audio_title: audio.and_then(|(tags, ..)| tags.title.clone()),
+        audio_codec: audio.map(|(_, codec, ..)| codec.clone()),
+        audio_channels: audio.and_then(|(_, _, channels, _)| channels),
+        audio_channel_layout: audio.and_then(|(_, _, _, channel_layout)| channel_layout.clone()),
     })
 }
 

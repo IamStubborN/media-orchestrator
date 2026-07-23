@@ -7,8 +7,12 @@ pub struct MediaProbe {
     pub height: u32,
     pub duration_seconds: f64,
     pub bitrate: Option<u64>,
+    pub video_profile: Option<String>,
     pub audio_language: Option<String>,
     pub audio_title: Option<String>,
+    pub audio_codec: Option<String>,
+    pub audio_channels: Option<u32>,
+    pub audio_channel_layout: Option<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

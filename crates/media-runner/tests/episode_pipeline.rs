@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use media_runner::{
     Cancellation, EpisodeOutcome, EpisodePipeline, EpisodeWork, FileSystemPort, GIB, HttpPort,
     MediaProbe, MediaTransferPort, MediaTransferRequest, PlexCheck, PlexExpectation,
-    PlexObservation, ProcessCommand, ProcessPort, ProviderKind, RunnerPortError, RunnerServicePort,
-    SensitiveUrl, StageReporter, SubtitleTrack, VideoSourceKind,
+    PlexObservation, ProcessCommand, ProcessPort, ProcessingMode, ProviderKind, RunnerPortError,
+    RunnerServicePort, SensitiveUrl, StageReporter, SubtitleTrack, VideoSourceKind,
 };
 
 #[derive(Default)]
@@ -46,6 +46,7 @@ impl Cancellation for NeverCancelled {
 #[derive(Default)]
 struct FakeFs {
     files: Mutex<HashMap<PathBuf, Vec<u8>>>,
+    file_lengths: Mutex<HashMap<PathBuf, u64>>,
     published: Mutex<Vec<PathBuf>>,
     available: u64,
 }
@@ -66,6 +67,9 @@ impl FileSystemPort for FakeFs {
     }
 
     async fn file_len(&self, path: &Path) -> Result<Option<u64>, RunnerPortError> {
+        if let Some(length) = self.file_lengths.lock().unwrap().get(path).copied() {
+            return Ok(Some(length));
+        }
         Ok(self
             .files
             .lock()
@@ -118,6 +122,10 @@ impl FileSystemPort for FakeFs {
         }
         let contents = files.remove(source).ok_or(RunnerPortError::Filesystem)?;
         files.insert(destination.to_owned(), contents);
+        let mut file_lengths = self.file_lengths.lock().unwrap();
+        if let Some(length) = file_lengths.remove(source) {
+            file_lengths.insert(destination.to_owned(), length);
+        }
         self.published.lock().unwrap().push(destination.to_owned());
         Ok(())
     }
@@ -130,6 +138,10 @@ impl FileSystemPort for FakeFs {
         let mut files = self.files.lock().unwrap();
         let contents = files.remove(source).ok_or(RunnerPortError::Filesystem)?;
         files.insert(destination.to_owned(), contents);
+        let mut file_lengths = self.file_lengths.lock().unwrap();
+        if let Some(length) = file_lengths.remove(source) {
+            file_lengths.insert(destination.to_owned(), length);
+        }
         self.published.lock().unwrap().push(destination.to_owned());
         Ok(())
     }
@@ -212,6 +224,42 @@ struct FakeProcess {
     filesystem: Arc<FakeFs>,
 }
 
+struct FinalProbeCancellationProcess {
+    probes: Mutex<u8>,
+    filesystem: Arc<FakeFs>,
+}
+
+#[async_trait]
+impl ProcessPort for FinalProbeCancellationProcess {
+    async fn probe(
+        &self,
+        _path: &Path,
+        _cancellation: &dyn Cancellation,
+    ) -> Result<MediaProbe, RunnerPortError> {
+        let mut probes = self.probes.lock().unwrap();
+        *probes += 1;
+        match *probes {
+            1 => Ok(probe("h264")),
+            2 => Ok(encoded_probe()),
+            _ => Err(RunnerPortError::Cancelled),
+        }
+    }
+
+    async fn run(
+        &self,
+        command: &ProcessCommand,
+        _cancellation: &dyn Cancellation,
+    ) -> Result<(), RunnerPortError> {
+        let output = command.args().last().ok_or(RunnerPortError::Process)?;
+        self.filesystem
+            .files
+            .lock()
+            .unwrap()
+            .insert(PathBuf::from(output), b"encoded".to_vec());
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl ProcessPort for FakeProcess {
     async fn probe(
@@ -269,8 +317,12 @@ fn probe(codec: &str) -> MediaProbe {
         height: 682,
         duration_seconds: 60.0,
         bitrate: Some(1_000_000),
+        video_profile: None,
         audio_language: None,
         audio_title: None,
+        audio_codec: None,
+        audio_channels: None,
+        audio_channel_layout: None,
     }
 }
 
@@ -281,8 +333,12 @@ fn encoded_probe() -> MediaProbe {
         height: 1080,
         duration_seconds: 60.0,
         bitrate: Some(1_000_000),
+        video_profile: None,
         audio_language: None,
         audio_title: None,
+        audio_codec: None,
+        audio_channels: None,
+        audio_channel_layout: None,
     }
 }
 
@@ -335,12 +391,225 @@ fn matched(expectation: &PlexExpectation) -> PlexCheck {
 }
 
 #[tokio::test]
+async fn artifact_report_newly_transcoded_rezka_records_final_facts_and_vaapi_processing() {
+    let work = work();
+    let filesystem = Arc::new(FakeFs::with_available(30 * GIB));
+    filesystem
+        .file_lengths
+        .lock()
+        .unwrap()
+        .insert(work.encoded_partial.clone(), 440_401_920);
+    let http = Arc::new(FakeHttp::default());
+    let process = Arc::new(FakeProcess {
+        probes: Mutex::new(VecDeque::from([
+            probe("h264"),
+            encoded_probe(),
+            encoded_probe(),
+        ])),
+        commands: Mutex::default(),
+        filesystem: filesystem.clone(),
+    });
+    let service = Arc::new(FakeService {
+        checks: Mutex::new(VecDeque::from([matched(&work.plex)])),
+        scans: Mutex::default(),
+    });
+    let pipeline = EpisodePipeline::new(filesystem, http.clone(), http, process, service);
+
+    let report = pipeline.run(&work, &NeverCancelled, &()).await.unwrap();
+
+    assert_eq!(report.outcome, EpisodeOutcome::Completed);
+    let artifact = report.artifact.unwrap();
+    assert_eq!(artifact.file_size_bytes, 440_401_920);
+    assert_eq!(artifact.subtitles_downloaded, 2);
+    assert_eq!(artifact.subtitles_missing, 0);
+    assert_eq!(
+        artifact.processing.unwrap().mode,
+        ProcessingMode::VaapiUpscale
+    );
+    assert_eq!(artifact.probe.width, 1920);
+    assert_eq!(artifact.probe.height, 1080);
+}
+
+#[tokio::test]
+async fn artifact_report_existing_rezka_publication_has_facts_without_processing_claim() {
+    let work = work();
+    let filesystem = Arc::new(FakeFs::with_available(30 * GIB));
+    filesystem
+        .files
+        .lock()
+        .unwrap()
+        .insert(work.final_video.clone(), b"published".to_vec());
+    filesystem
+        .file_lengths
+        .lock()
+        .unwrap()
+        .insert(work.final_video.clone(), 440_401_920);
+    for subtitle in &work.subtitles {
+        filesystem.files.lock().unwrap().insert(
+            subtitle.final_path.clone(),
+            b"WEBVTT\n\n00 --> 01\ntext".to_vec(),
+        );
+    }
+    let http = Arc::new(FakeHttp::default());
+    let process = Arc::new(FakeProcess {
+        probes: Mutex::new(VecDeque::from([encoded_probe(), encoded_probe()])),
+        commands: Mutex::default(),
+        filesystem: filesystem.clone(),
+    });
+    let service = Arc::new(FakeService {
+        checks: Mutex::new(VecDeque::from([matched(&work.plex)])),
+        scans: Mutex::default(),
+    });
+    let pipeline = EpisodePipeline::new(filesystem, http.clone(), http, process, service);
+
+    let report = pipeline.run(&work, &NeverCancelled, &()).await.unwrap();
+
+    assert_eq!(report.outcome, EpisodeOutcome::Completed);
+    let artifact = report.artifact.unwrap();
+    assert_eq!(artifact.file_size_bytes, 440_401_920);
+    assert_eq!(artifact.subtitles_downloaded, 2);
+    assert_eq!(artifact.subtitles_missing, 0);
+    assert_eq!(artifact.processing, None);
+    assert_eq!(artifact.probe.width, 1920);
+    assert_eq!(artifact.probe.height, 1080);
+}
+
+#[tokio::test]
+async fn artifact_report_partial_subtitles_keeps_final_media_facts() {
+    let work = work();
+    let filesystem = Arc::new(FakeFs::with_available(30 * GIB));
+    filesystem
+        .file_lengths
+        .lock()
+        .unwrap()
+        .insert(work.encoded_partial.clone(), 440_401_920);
+    let http = Arc::new(FakeHttp::default());
+    http.subtitle_failures
+        .lock()
+        .unwrap()
+        .insert("uk".to_owned());
+    let process = Arc::new(FakeProcess {
+        probes: Mutex::new(VecDeque::from([
+            probe("h264"),
+            encoded_probe(),
+            encoded_probe(),
+        ])),
+        commands: Mutex::default(),
+        filesystem: filesystem.clone(),
+    });
+    let service = Arc::new(FakeService {
+        checks: Mutex::new(VecDeque::from([matched(&work.plex)])),
+        scans: Mutex::default(),
+    });
+    let pipeline = EpisodePipeline::new(filesystem, http.clone(), http, process, service);
+
+    let report = pipeline.run(&work, &NeverCancelled, &()).await.unwrap();
+
+    assert_eq!(
+        report.outcome,
+        EpisodeOutcome::Partial {
+            missing_subtitles: vec!["uk".to_owned()]
+        }
+    );
+    let artifact = report.artifact.unwrap();
+    assert_eq!(artifact.file_size_bytes, 440_401_920);
+    assert_eq!(artifact.subtitles_downloaded, 1);
+    assert_eq!(artifact.subtitles_missing, 1);
+    assert_eq!(artifact.probe.width, 1920);
+    assert_eq!(artifact.probe.height, 1080);
+}
+
+#[tokio::test]
+async fn artifact_report_blocked_storage_and_cancelled_work_have_no_artifact() {
+    let work = work();
+    let blocked_filesystem = Arc::new(FakeFs::with_available(1));
+    let blocked_http = Arc::new(FakeHttp::default());
+    let blocked_process = Arc::new(FakeProcess {
+        probes: Mutex::default(),
+        commands: Mutex::default(),
+        filesystem: blocked_filesystem.clone(),
+    });
+    let blocked_service = Arc::new(FakeService {
+        checks: Mutex::default(),
+        scans: Mutex::default(),
+    });
+    let blocked_pipeline = EpisodePipeline::new(
+        blocked_filesystem,
+        blocked_http.clone(),
+        blocked_http,
+        blocked_process,
+        blocked_service,
+    );
+
+    let blocked = blocked_pipeline
+        .run(&work, &NeverCancelled, &())
+        .await
+        .unwrap();
+    assert!(matches!(blocked.outcome, EpisodeOutcome::BlockedStorage(_)));
+    assert_eq!(blocked.artifact, None);
+
+    let cancelled_filesystem = Arc::new(FakeFs::with_available(30 * GIB));
+    let cancelled_http = Arc::new(FakeHttp {
+        cancel_video: true,
+        ..FakeHttp::default()
+    });
+    let cancelled_process = Arc::new(FakeProcess {
+        probes: Mutex::default(),
+        commands: Mutex::default(),
+        filesystem: cancelled_filesystem.clone(),
+    });
+    let cancelled_service = Arc::new(FakeService {
+        checks: Mutex::default(),
+        scans: Mutex::default(),
+    });
+    let cancelled_pipeline = EpisodePipeline::new(
+        cancelled_filesystem,
+        cancelled_http.clone(),
+        cancelled_http,
+        cancelled_process,
+        cancelled_service,
+    );
+
+    let cancelled = cancelled_pipeline
+        .run(&work, &NeverCancelled, &())
+        .await
+        .unwrap();
+    assert_eq!(cancelled.outcome, EpisodeOutcome::Cancelled);
+    assert_eq!(cancelled.artifact, None);
+}
+
+#[tokio::test]
+async fn artifact_report_cancelled_final_probe_has_no_artifact() {
+    let work = work();
+    let filesystem = Arc::new(FakeFs::with_available(30 * GIB));
+    let http = Arc::new(FakeHttp::default());
+    let process = Arc::new(FinalProbeCancellationProcess {
+        probes: Mutex::new(0),
+        filesystem: filesystem.clone(),
+    });
+    let service = Arc::new(FakeService {
+        checks: Mutex::default(),
+        scans: Mutex::default(),
+    });
+    let pipeline = EpisodePipeline::new(filesystem, http.clone(), http, process, service);
+
+    let report = pipeline.run(&work, &NeverCancelled, &()).await.unwrap();
+
+    assert_eq!(report.outcome, EpisodeOutcome::Cancelled);
+    assert_eq!(report.artifact, None);
+}
+
+#[tokio::test]
 async fn rezka_episode_runs_one_pipeline_and_publishes_video_last() {
     let work = work();
     let filesystem = Arc::new(FakeFs::with_available(30 * GIB));
     let http = Arc::new(FakeHttp::default());
     let process = Arc::new(FakeProcess {
-        probes: Mutex::new(VecDeque::from([probe("h264"), encoded_probe()])),
+        probes: Mutex::new(VecDeque::from([
+            probe("h264"),
+            encoded_probe(),
+            encoded_probe(),
+        ])),
         commands: Mutex::default(),
         filesystem: filesystem.clone(),
     });
@@ -358,7 +627,7 @@ async fn rezka_episode_runs_one_pipeline_and_publishes_video_last() {
 
     let outcome = pipeline.run(&work, &NeverCancelled, &()).await.unwrap();
 
-    assert_eq!(outcome, EpisodeOutcome::Completed);
+    assert_eq!(outcome.outcome, EpisodeOutcome::Completed);
     assert_eq!(process.commands.lock().unwrap().len(), 1);
     assert_eq!(http.video_offsets.lock().unwrap().as_slice(), &[0]);
     let published = filesystem.published.lock().unwrap();
@@ -374,7 +643,11 @@ async fn expired_source_retry_downloads_and_publishes_only_after_a_fresh_attempt
         ..FakeHttp::default()
     });
     let process = Arc::new(FakeProcess {
-        probes: Mutex::new(VecDeque::from([probe("h264"), encoded_probe()])),
+        probes: Mutex::new(VecDeque::from([
+            probe("h264"),
+            encoded_probe(),
+            encoded_probe(),
+        ])),
         commands: Mutex::default(),
         filesystem: filesystem.clone(),
     });
@@ -405,7 +678,8 @@ async fn expired_source_retry_downloads_and_publishes_only_after_a_fresh_attempt
         pipeline
             .run(&work, &NeverCancelled, &reporter)
             .await
-            .unwrap(),
+            .unwrap()
+            .outcome,
         EpisodeOutcome::Completed
     );
     assert_eq!(http.video_offsets.lock().unwrap().as_slice(), &[0]);
@@ -441,7 +715,11 @@ async fn mapped_special_publishes_video_and_subtitles_to_plex_specials() {
     let filesystem = Arc::new(FakeFs::with_available(30 * GIB));
     let http = Arc::new(FakeHttp::default());
     let process = Arc::new(FakeProcess {
-        probes: Mutex::new(VecDeque::from([probe("h264"), encoded_probe()])),
+        probes: Mutex::new(VecDeque::from([
+            probe("h264"),
+            encoded_probe(),
+            encoded_probe(),
+        ])),
         commands: Mutex::default(),
         filesystem: filesystem.clone(),
     });
@@ -458,7 +736,11 @@ async fn mapped_special_publishes_video_and_subtitles_to_plex_specials() {
     );
 
     assert_eq!(
-        pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
+        pipeline
+            .run(&work, &NeverCancelled, &())
+            .await
+            .unwrap()
+            .outcome,
         EpisodeOutcome::Completed
     );
     assert_eq!(filesystem.published.lock().unwrap().last(), Some(&special));
@@ -479,7 +761,11 @@ async fn rezka_hls_uses_the_media_transfer_port_before_transcoding() {
     let filesystem = Arc::new(FakeFs::with_available(50 * GIB));
     let http = Arc::new(FakeHttp::default());
     let process = Arc::new(FakeProcess {
-        probes: Mutex::new(VecDeque::from([probe("h264"), encoded_probe()])),
+        probes: Mutex::new(VecDeque::from([
+            probe("h264"),
+            encoded_probe(),
+            encoded_probe(),
+        ])),
         commands: Mutex::default(),
         filesystem: filesystem.clone(),
     });
@@ -501,7 +787,7 @@ async fn rezka_hls_uses_the_media_transfer_port_before_transcoding() {
         .await
         .unwrap();
 
-    assert_eq!(outcome, EpisodeOutcome::Completed);
+    assert_eq!(outcome.outcome, EpisodeOutcome::Completed);
     assert_eq!(http.video_offsets.lock().unwrap().as_slice(), &[0]);
     let commands = process.commands.lock().unwrap();
     assert_eq!(commands.len(), 1);
@@ -542,6 +828,7 @@ async fn storage_preflight_uses_the_probed_source_size() {
         .run(&work, &NeverCancelled, &reporter)
         .await
         .unwrap()
+        .outcome
     else {
         panic!("expected storage-blocked outcome");
     };
@@ -565,7 +852,11 @@ async fn unknown_source_size_uses_duration_instead_of_a_fixed_twenty_gib_peak() 
     let mut encoded_probe = encoded_probe();
     encoded_probe.duration_seconds = 45.0 * 60.0;
     let process = Arc::new(FakeProcess {
-        probes: Mutex::new(VecDeque::from([source_probe, encoded_probe])),
+        probes: Mutex::new(VecDeque::from([
+            source_probe,
+            encoded_probe.clone(),
+            encoded_probe,
+        ])),
         commands: Mutex::default(),
         filesystem: filesystem.clone(),
     });
@@ -576,7 +867,11 @@ async fn unknown_source_size_uses_duration_instead_of_a_fixed_twenty_gib_peak() 
     let pipeline = EpisodePipeline::new(filesystem, http.clone(), http.clone(), process, service);
 
     assert_eq!(
-        pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
+        pipeline
+            .run(&work, &NeverCancelled, &())
+            .await
+            .unwrap()
+            .outcome,
         EpisodeOutcome::Completed
     );
     assert_eq!(http.video_offsets.lock().unwrap().as_slice(), &[0]);
@@ -596,6 +891,8 @@ async fn failed_subtitle_is_partial_and_retry_fetches_only_that_track() {
             probe("h264"),
             encoded_probe(),
             encoded_probe(),
+            encoded_probe(),
+            encoded_probe(),
         ])),
         commands: Mutex::default(),
         filesystem: filesystem.clone(),
@@ -607,14 +904,22 @@ async fn failed_subtitle_is_partial_and_retry_fetches_only_that_track() {
     let pipeline = EpisodePipeline::new(filesystem, http.clone(), http.clone(), process, service);
 
     assert_eq!(
-        pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
+        pipeline
+            .run(&work, &NeverCancelled, &())
+            .await
+            .unwrap()
+            .outcome,
         EpisodeOutcome::Partial {
             missing_subtitles: vec!["uk".to_owned()]
         }
     );
     http.subtitle_requests.lock().unwrap().clear();
     assert_eq!(
-        pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
+        pipeline
+            .run(&work, &NeverCancelled, &())
+            .await
+            .unwrap()
+            .outcome,
         EpisodeOutcome::Completed
     );
     assert_eq!(http.subtitle_requests.lock().unwrap().as_slice(), &["uk"]);
@@ -637,7 +942,7 @@ async fn existing_publication_skips_download_and_transcode_but_reconciles_plex()
     }
     let http = Arc::new(FakeHttp::default());
     let process = Arc::new(FakeProcess {
-        probes: Mutex::new(VecDeque::from([encoded_probe()])),
+        probes: Mutex::new(VecDeque::from([encoded_probe(), encoded_probe()])),
         commands: Mutex::default(),
         filesystem: filesystem.clone(),
     });
@@ -654,7 +959,11 @@ async fn existing_publication_skips_download_and_transcode_but_reconciles_plex()
     );
 
     assert_eq!(
-        pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
+        pipeline
+            .run(&work, &NeverCancelled, &())
+            .await
+            .unwrap()
+            .outcome,
         EpisodeOutcome::PlexPending
     );
     assert!(http.video_offsets.lock().unwrap().is_empty());
@@ -676,6 +985,7 @@ async fn legacy_hd_publication_is_replaced_with_full_hd_output() {
             probe("hevc"),
             probe("h264"),
             encoded_probe(),
+            encoded_probe(),
         ])),
         commands: Mutex::default(),
         filesystem: filesystem.clone(),
@@ -693,7 +1003,11 @@ async fn legacy_hd_publication_is_replaced_with_full_hd_output() {
     );
 
     assert_eq!(
-        pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
+        pipeline
+            .run(&work, &NeverCancelled, &())
+            .await
+            .unwrap()
+            .outcome,
         EpisodeOutcome::Completed
     );
     assert_eq!(http.video_offsets.lock().unwrap().as_slice(), &[0]);
@@ -710,7 +1024,11 @@ async fn rezka_transcode_emits_a_transcode_stage_start() {
     let filesystem = Arc::new(FakeFs::with_available(30 * GIB));
     let http = Arc::new(FakeHttp::default());
     let process = Arc::new(FakeProcess {
-        probes: Mutex::new(VecDeque::from([probe("h264"), encoded_probe()])),
+        probes: Mutex::new(VecDeque::from([
+            probe("h264"),
+            encoded_probe(),
+            encoded_probe(),
+        ])),
         commands: Mutex::default(),
         filesystem: filesystem.clone(),
     });
@@ -725,7 +1043,8 @@ async fn rezka_transcode_emits_a_transcode_stage_start() {
         pipeline
             .run(&work, &NeverCancelled, &reporter)
             .await
-            .unwrap(),
+            .unwrap()
+            .outcome,
         EpisodeOutcome::Completed
     );
     // The transfer and transcode milestones wrap the actual work, not preflight.
@@ -758,7 +1077,12 @@ async fn publication_without_expected_audio_metadata_is_replaced() {
     tagged.audio_title = Some("DEEP".to_owned());
     let http = Arc::new(FakeHttp::default());
     let process = Arc::new(FakeProcess {
-        probes: Mutex::new(VecDeque::from([encoded_probe(), probe("h264"), tagged])),
+        probes: Mutex::new(VecDeque::from([
+            encoded_probe(),
+            probe("h264"),
+            tagged.clone(),
+            tagged,
+        ])),
         commands: Mutex::default(),
         filesystem: filesystem.clone(),
     });
@@ -775,7 +1099,11 @@ async fn publication_without_expected_audio_metadata_is_replaced() {
     );
 
     assert_eq!(
-        pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
+        pipeline
+            .run(&work, &NeverCancelled, &())
+            .await
+            .unwrap()
+            .outcome,
         EpisodeOutcome::Completed
     );
     assert_eq!(http.video_offsets.lock().unwrap().as_slice(), &[0]);
@@ -812,7 +1140,7 @@ async fn skipped_transcode_emits_no_transcode_stage_start() {
     }
     let http = Arc::new(FakeHttp::default());
     let process = Arc::new(FakeProcess {
-        probes: Mutex::new(VecDeque::from([encoded_probe()])),
+        probes: Mutex::new(VecDeque::from([encoded_probe(), encoded_probe()])),
         commands: Mutex::default(),
         filesystem: filesystem.clone(),
     });
@@ -847,7 +1175,11 @@ async fn complete_partial_skips_download_but_still_transcodes_and_publishes() {
         ..FakeHttp::default()
     });
     let process = Arc::new(FakeProcess {
-        probes: Mutex::new(VecDeque::from([probe("h264"), encoded_probe()])),
+        probes: Mutex::new(VecDeque::from([
+            probe("h264"),
+            encoded_probe(),
+            encoded_probe(),
+        ])),
         commands: Mutex::default(),
         filesystem: filesystem.clone(),
     });
@@ -864,7 +1196,11 @@ async fn complete_partial_skips_download_but_still_transcodes_and_publishes() {
     );
 
     assert_eq!(
-        pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
+        pipeline
+            .run(&work, &NeverCancelled, &())
+            .await
+            .unwrap()
+            .outcome,
         EpisodeOutcome::Completed
     );
     // The download was skipped because the partial already spanned the source.
@@ -902,7 +1238,11 @@ async fn torrent_work_never_touches_download_transcode_or_publication() {
     );
 
     assert_eq!(
-        pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
+        pipeline
+            .run(&work, &NeverCancelled, &())
+            .await
+            .unwrap()
+            .outcome,
         EpisodeOutcome::NeedsActionPlexMismatch
     );
     assert!(filesystem.published.lock().unwrap().is_empty());
@@ -936,7 +1276,11 @@ async fn cancellation_from_a_port_stops_before_transcode_and_publication() {
     );
 
     assert_eq!(
-        pipeline.run(&work, &NeverCancelled, &()).await.unwrap(),
+        pipeline
+            .run(&work, &NeverCancelled, &())
+            .await
+            .unwrap()
+            .outcome,
         EpisodeOutcome::Cancelled
     );
     assert!(process.commands.lock().unwrap().is_empty());
@@ -961,7 +1305,9 @@ async fn job_runner_processes_episode_work_items_sequentially() {
         probes: Mutex::new(VecDeque::from([
             probe("h264"),
             encoded_probe(),
+            encoded_probe(),
             probe("h264"),
+            encoded_probe(),
             encoded_probe(),
         ])),
         commands: Mutex::default(),

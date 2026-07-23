@@ -50,8 +50,12 @@ fn rezka_vaapi_command_uses_low_power_full_hd_upscale() {
         height: 682,
         duration_seconds: 1_234.5,
         bitrate: Some(4_000_000),
+        video_profile: None,
         audio_language: None,
         audio_title: None,
+        audio_codec: None,
+        audio_channels: None,
+        audio_channel_layout: None,
     };
 
     let command = build_rezka_vaapi_command(

@@ -20,8 +20,9 @@ pub use media::{
     AudioTrackMetadata, MediaProbe, MediaProbeError, ProcessCommand, build_rezka_vaapi_command,
 };
 pub use pipeline::{
-    EpisodeOutcome, EpisodePipeline, EpisodeWork, ProviderKind, SensitiveUrl, SensitiveUrlError,
-    SubtitleTrack, VideoSourceKind,
+    EpisodeOutcome, EpisodePipeline, EpisodeReport, EpisodeWork, MediaProcessing, ProcessingMode,
+    ProviderKind, PublishedArtifact, SensitiveUrl, SensitiveUrlError, SubtitleTrack,
+    VideoSourceKind,
 };
 pub use plex::{PlexExpectation, PlexMismatch, PlexObservation, validate_plex_observation};
 pub use ports::{

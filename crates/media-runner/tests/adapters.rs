@@ -376,7 +376,7 @@ async fn process_adapter_parses_truthful_ffprobe_dimensions() {
     std::fs::write(
         &ffprobe,
         r#"#!/bin/sh
-printf '%s' '{"streams":[{"codec_type":"video","codec_name":"h264","width":1280,"height":682,"bit_rate":"4000000"},{"codec_type":"audio","codec_name":"aac","tags":{"language":"rus","title":"DEEP"}}],"format":{"duration":"61.25","bit_rate":"4100000"}}'
+printf '%s' '{"streams":[{"codec_type":"video","codec_name":"hevc","profile":"Main","width":1920,"height":1080,"bit_rate":"2100000"},{"codec_type":"audio","codec_name":"aac","channels":2,"channel_layout":"stereo","tags":{"language":"rus","title":"AniLibria"}}],"format":{"duration":"61.25","bit_rate":"4100000"}}'
 "#,
     )
     .unwrap();
@@ -392,11 +392,15 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"h264","width":1280,
         .await
         .unwrap();
 
-    assert_eq!((probe.width, probe.height), (1280, 682));
-    assert_eq!(probe.codec, "h264");
+    assert_eq!((probe.width, probe.height), (1920, 1080));
+    assert_eq!(probe.codec, "hevc");
+    assert_eq!(probe.video_profile.as_deref(), Some("Main"));
     assert_eq!(probe.duration_seconds, 61.25);
     assert_eq!(probe.audio_language.as_deref(), Some("rus"));
-    assert_eq!(probe.audio_title.as_deref(), Some("DEEP"));
+    assert_eq!(probe.audio_title.as_deref(), Some("AniLibria"));
+    assert_eq!(probe.audio_codec.as_deref(), Some("aac"));
+    assert_eq!(probe.audio_channels, Some(2));
+    assert_eq!(probe.audio_channel_layout.as_deref(), Some("stereo"));
 }
 
 #[cfg(unix)]
