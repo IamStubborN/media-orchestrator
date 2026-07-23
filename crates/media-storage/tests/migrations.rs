@@ -817,6 +817,67 @@ async fn detailed_notifications_migration_preserves_legacy_payloads_and_validate
     )
     .await;
 
+    execute(
+        db,
+        r#"UPDATE notification_outbox
+           SET payload = jsonb_set(
+               jsonb_set(
+                   jsonb_set(
+                       jsonb_set(
+                           jsonb_set(
+                               jsonb_set(
+                                   jsonb_set(
+                                       jsonb_set(payload, '{result,video,codec}', '"H.265 / HEVC"'::jsonb),
+                                       '{result,video,profile}', '"Main 10-bit"'::jsonb
+                                   ),
+                                   '{result,audio,language}', '"Русский / 日本語"'::jsonb
+                               ),
+                               '{result,audio,codec}', '"AAC-LC"'::jsonb
+                           ),
+                           '{result,audio,channel_layout}', '"5.1 (side)"'::jsonb
+                       ),
+                       '{result,audio,title}', '"AniLibria, Dub!"'::jsonb
+                   ),
+                   '{result,publication,title}', '"Клинки Хранителей: сезон 2"'::jsonb
+               ),
+               '{result,publication,season}', '2'::jsonb
+           )
+         WHERE id = '00000000-0000-0000-0000-000000000993'"#,
+    )
+    .await
+    .expect("human-readable multilingual detailed fields must remain valid");
+
+    for (path, value) in [
+        ("{result,video,codec}", r#""https://example.invalid/video""#),
+        ("{result,video,profile}", r#""/srv/media/private.mkv""#),
+        ("{result,audio,language}", r#""~/private/audio""#),
+        ("{result,audio,codec}", r#""C:\\media\\private.mkv""#),
+        (
+            "{result,audio,channel_layout}",
+            r#""curl --data token=value""#,
+        ),
+        ("{result,audio,title}", r#""api_key=very-secret-value""#),
+        ("{result,publication,title}", r#""MEDIA_PROCESSING_FAILED""#),
+    ] {
+        assert_rejected(
+            db,
+            &format!(
+                "UPDATE notification_outbox\n                 SET payload = jsonb_set(payload, '{path}', $value${value}$value$::jsonb)\n                 WHERE id = '00000000-0000-0000-0000-000000000993'"
+            ),
+            "notification_payload_check",
+        )
+        .await;
+    }
+
+    assert_rejected(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(payload, '{media,provider}', '\"prowlarr\"'::jsonb)
+         WHERE id = '00000000-0000-0000-0000-000000000993'",
+        "notification_payload_check",
+    )
+    .await;
+
     Migrator::down(db, Some(1)).await.unwrap();
 
     let normalized = query(

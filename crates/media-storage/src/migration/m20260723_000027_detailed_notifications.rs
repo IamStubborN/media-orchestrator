@@ -205,7 +205,47 @@ impl MigrationTrait for Migration {
                                         )
                                     )
                                 )
+                                AND NOT EXISTS (
+                                    SELECT 1
+                                    FROM unnest(ARRAY[
+                                        candidate #>> '{result,video,codec}',
+                                        candidate #>> '{result,video,profile}',
+                                        candidate #>> '{result,audio,language}',
+                                        candidate #>> '{result,audio,codec}',
+                                        candidate #>> '{result,audio,channel_layout}',
+                                        candidate #>> '{result,audio,title}',
+                                        candidate #>> '{result,publication,title}'
+                                    ]) AS display(value)
+                                    WHERE display.value IS NOT NULL
+                                      AND (
+                                          btrim(display.value) = ''
+                                          OR octet_length(display.value) > 256
+                                          OR display.value ~ '[[:cntrl:]]'
+                                          OR lower(display.value) LIKE '%://%'
+                                          OR lower(btrim(display.value)) LIKE 'www.%'
+                                          OR lower(btrim(display.value)) LIKE 'magnet:?%'
+                                          OR btrim(display.value) ~ '^/'
+                                          OR btrim(display.value) ~ '^~[^[:space:]]*[/\\\\]'
+                                          OR btrim(display.value) ~ '^[[:alpha:]]:[/\\\\]'
+                                          OR btrim(display.value) ~ '^\\\\\\\\'
+                                          OR lower(btrim(display.value)) ~ '^(curl|wget|bash|sh|zsh|pwsh|powershell|cmd|sudo|rm|python3?|ffmpeg|yt-dlp)([[:space:]]|$)'
+                                          OR display.value LIKE '%$(%'
+                                          OR display.value LIKE '%`%'
+                                          OR display.value ~* '(^|[[:space:];,])(api[ _-]?key|access[ _-]?token|authorization|token|password|passwd|secret|credential|private[ _-]?key)[[:space:]]*[:=]'
+                                          OR display.value ~* '(^|[[:space:];,])bearer[[:space:]]+'
+                                          OR display.value ~ '^[Ee][0-9]{3,}$'
+                                          OR (
+                                              display.value ~ '^[[:alnum:]_]+$'
+                                              AND position('_' IN display.value) > 0
+                                              AND lower(display.value) ~ '(^|_)(error|failed|failure|invalid|not|found|unavailable|forbidden|denied|timeout|internal|exception)(_|$)'
+                                          )
+                                      )
+                                )
                             )
+                        )
+                        AND (
+                            candidate #>> '{media,provider}' <> 'prowlarr'
+                            OR candidate #>> '{result,processing,mode}' IS DISTINCT FROM 'vaapi-upscale'
                         )
                         AND (
                             NOT (candidate #> '{media,origin}' IS NOT NULL)

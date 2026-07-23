@@ -565,9 +565,9 @@ impl MediaNotificationVideo {
         width: u32,
         height: u32,
     ) -> Result<Self, NotificationValidationError> {
-        validate_display_field(&codec)?;
+        validate_public_display_field(&codec)?;
         if let Some(profile) = &profile {
-            validate_display_field(profile)?;
+            validate_public_display_field(profile)?;
         }
         if width == 0 || height == 0 {
             return Err(NotificationValidationError::InvalidMediaResult);
@@ -614,7 +614,7 @@ impl MediaNotificationAudio {
         .into_iter()
         .flatten()
         {
-            validate_display_field(value)?;
+            validate_public_display_field(value)?;
         }
         Ok(Self {
             language,
@@ -689,7 +689,7 @@ impl MediaNotificationPublication {
         season: Option<u32>,
         episode: Option<u32>,
     ) -> Result<Self, NotificationValidationError> {
-        validate_display_field(&title)?;
+        validate_public_display_field(&title)?;
         Ok(Self {
             library,
             title,
@@ -806,9 +806,19 @@ impl MediaNotification {
         self.result.as_ref()
     }
     #[must_use]
-    pub fn with_result(mut self, result: MediaNotificationResult) -> Self {
+    pub fn with_result(
+        mut self,
+        result: MediaNotificationResult,
+    ) -> Result<Self, NotificationValidationError> {
+        if self.media.provider == "prowlarr"
+            && result.processing().is_some_and(|processing| {
+                processing.mode() == MediaNotificationProcessingMode::VaapiUpscale
+            })
+        {
+            return Err(NotificationValidationError::InvalidMediaResult);
+        }
         self.result = Some(result);
-        self
+        Ok(self)
     }
     #[must_use]
     pub fn actions(&self) -> &[MediaNotificationAction] {
@@ -826,6 +836,137 @@ fn validate_display_field(value: &str) -> Result<(), NotificationValidationError
     Ok(())
 }
 
+fn validate_public_display_field(value: &str) -> Result<(), NotificationValidationError> {
+    validate_display_field(value)?;
+
+    let trimmed = value.trim();
+    let lowercase = trimmed.to_ascii_lowercase();
+    if lowercase.contains("://")
+        || lowercase.starts_with("www.")
+        || lowercase.starts_with("magnet:?")
+        || is_absolute_or_home_path(trimmed)
+        || is_shell_command_like(&lowercase)
+        || contains_secret_label(&lowercase)
+        || is_internal_error_code(trimmed)
+    {
+        return Err(NotificationValidationError::InvalidDisplayField);
+    }
+    Ok(())
+}
+
+fn is_absolute_or_home_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    value.starts_with('/')
+        || (value.starts_with('~')
+            && value[1..]
+                .chars()
+                .take_while(|character| !character.is_whitespace())
+                .any(|character| matches!(character, '/' | '\\')))
+        || value.starts_with("\\\\")
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'))
+}
+
+fn is_shell_command_like(value: &str) -> bool {
+    const COMMANDS: [&str; 14] = [
+        "curl",
+        "wget",
+        "bash",
+        "sh",
+        "zsh",
+        "pwsh",
+        "powershell",
+        "cmd",
+        "sudo",
+        "rm",
+        "python",
+        "python3",
+        "ffmpeg",
+        "yt-dlp",
+    ];
+
+    value.contains("$(")
+        || value.contains('`')
+        || COMMANDS.iter().any(|command| {
+            value == *command
+                || value
+                    .strip_prefix(command)
+                    .and_then(|suffix| suffix.chars().next())
+                    .is_some_and(char::is_whitespace)
+        })
+}
+
+fn contains_secret_label(value: &str) -> bool {
+    const LABELS: [&str; 14] = [
+        "api key",
+        "api_key",
+        "api-key",
+        "access token",
+        "access_token",
+        "authorization",
+        "token",
+        "password",
+        "passwd",
+        "secret",
+        "credential",
+        "private key",
+        "private_key",
+        "private-key",
+    ];
+
+    LABELS.iter().any(|label| {
+        value.match_indices(label).any(|(index, _)| {
+            let prefix_is_boundary = index == 0
+                || value.as_bytes()[index - 1].is_ascii_whitespace()
+                || matches!(value.as_bytes()[index - 1], b';' | b',');
+            let suffix = &value[index + label.len()..];
+            prefix_is_boundary
+                && matches!(suffix.trim_start().as_bytes().first(), Some(b':' | b'='))
+        })
+    }) || value.match_indices("bearer").any(|(index, _)| {
+        let prefix_is_boundary = index == 0
+            || value.as_bytes()[index - 1].is_ascii_whitespace()
+            || matches!(value.as_bytes()[index - 1], b';' | b',');
+        prefix_is_boundary
+            && value[index + "bearer".len()..]
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace)
+    })
+}
+
+fn is_internal_error_code(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let error_number = bytes.len() >= 4
+        && matches!(bytes[0], b'E' | b'e')
+        && bytes[1..].iter().all(|byte| byte.is_ascii_digit());
+    let lower = value.to_ascii_lowercase();
+    error_number
+        || (value.contains('_')
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            && lower.split('_').any(|segment| {
+                matches!(
+                    segment,
+                    "error"
+                        | "failed"
+                        | "failure"
+                        | "invalid"
+                        | "not"
+                        | "found"
+                        | "unavailable"
+                        | "forbidden"
+                        | "denied"
+                        | "timeout"
+                        | "internal"
+                        | "exception"
+                )
+            }))
+}
+
 fn valid_card_key(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_NOTIFICATION_CARD_KEY_BYTES
@@ -837,8 +978,10 @@ fn valid_card_key(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        MediaNotification, MediaNotificationDeliveryKind, MediaNotificationEpisode,
-        MediaNotificationKind, MediaNotificationMedia, MediaNotificationProgress,
+        MediaNotification, MediaNotificationAudio, MediaNotificationDeliveryKind,
+        MediaNotificationEpisode, MediaNotificationKind, MediaNotificationLibrary,
+        MediaNotificationMedia, MediaNotificationProcessing, MediaNotificationProcessingMode,
+        MediaNotificationProgress, MediaNotificationPublication, MediaNotificationResult,
         MediaNotificationState, MediaNotificationVideo, NotificationValidationError,
     };
     use crate::JobId;
@@ -851,6 +994,32 @@ mod tests {
             "rezka".to_owned(),
             Some(1),
             None,
+        )
+        .unwrap()
+    }
+
+    fn notification(provider: &str) -> MediaNotification {
+        MediaNotification::new(
+            MediaNotificationDeliveryKind::Card,
+            "media-job:example".to_owned(),
+            1,
+            1,
+            false,
+            MediaNotificationState::Processing,
+            MediaNotificationMedia::new(
+                JobId::new(),
+                "Example Show".to_owned(),
+                MediaNotificationKind::Series,
+                provider.to_owned(),
+                Some(1),
+                None,
+            )
+            .unwrap(),
+            None,
+            None,
+            None,
+            None,
+            vec![],
         )
         .unwrap()
     }
@@ -961,6 +1130,128 @@ mod tests {
             MediaNotificationVideo::new("hevc".to_owned(), None, 0, 1080),
             Err(NotificationValidationError::InvalidMediaResult),
         );
+    }
+
+    #[test]
+    fn detailed_result_text_fields_allow_human_labels_but_reject_internal_values() {
+        assert!(
+            MediaNotificationVideo::new(
+                "H.265 / HEVC".to_owned(),
+                Some("Main 10-bit".to_owned()),
+                1920,
+                1080,
+            )
+            .is_ok()
+        );
+        assert!(
+            MediaNotificationAudio::new(
+                Some("Русский / 日本語".to_owned()),
+                "AAC-LC".to_owned(),
+                Some(6),
+                Some("5.1 (side)".to_owned()),
+                Some("AniLibria, Dub!".to_owned()),
+            )
+            .is_ok()
+        );
+        assert!(
+            MediaNotificationPublication::new(
+                MediaNotificationLibrary::TvShows,
+                "Клинки Хранителей: сезон 2".to_owned(),
+                Some(2),
+                Some(8),
+            )
+            .is_ok()
+        );
+
+        assert_eq!(
+            MediaNotificationVideo::new(
+                "https://example.invalid/video".to_owned(),
+                None,
+                1920,
+                1080
+            ),
+            Err(NotificationValidationError::InvalidDisplayField),
+        );
+        assert_eq!(
+            MediaNotificationVideo::new(
+                "hevc".to_owned(),
+                Some("/srv/media/private.mkv".to_owned()),
+                1920,
+                1080,
+            ),
+            Err(NotificationValidationError::InvalidDisplayField),
+        );
+        assert_eq!(
+            MediaNotificationAudio::new(
+                Some("~/private/audio".to_owned()),
+                "aac".to_owned(),
+                None,
+                None,
+                None,
+            ),
+            Err(NotificationValidationError::InvalidDisplayField),
+        );
+        assert_eq!(
+            MediaNotificationAudio::new(
+                None,
+                "C:\\media\\private.mkv".to_owned(),
+                None,
+                None,
+                None,
+            ),
+            Err(NotificationValidationError::InvalidDisplayField),
+        );
+        assert_eq!(
+            MediaNotificationAudio::new(
+                None,
+                "aac".to_owned(),
+                None,
+                Some("curl --data token=value".to_owned()),
+                None,
+            ),
+            Err(NotificationValidationError::InvalidDisplayField),
+        );
+        assert_eq!(
+            MediaNotificationAudio::new(
+                None,
+                "aac".to_owned(),
+                None,
+                None,
+                Some("api_key=very-secret-value".to_owned()),
+            ),
+            Err(NotificationValidationError::InvalidDisplayField),
+        );
+        assert_eq!(
+            MediaNotificationPublication::new(
+                MediaNotificationLibrary::TvShows,
+                "MEDIA_PROCESSING_FAILED".to_owned(),
+                Some(2),
+                Some(8),
+            ),
+            Err(NotificationValidationError::InvalidDisplayField),
+        );
+    }
+
+    #[test]
+    fn prowlarr_result_cannot_claim_vaapi_upscale() {
+        let result = MediaNotificationResult::new(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(MediaNotificationProcessing::new(
+                MediaNotificationProcessingMode::VaapiUpscale,
+                Some(252),
+            )),
+            None,
+        );
+
+        assert_eq!(
+            notification("prowlarr").with_result(result.clone()),
+            Err(NotificationValidationError::InvalidMediaResult),
+        );
+        assert!(notification("rezka").with_result(result).is_ok());
     }
 
     #[test]

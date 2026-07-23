@@ -170,6 +170,7 @@ fn media_webhook(notification: &MediaNotification) -> HermesMediaNotificationWeb
             provider: media.provider().to_owned(),
             season: media.season(),
             translation: media.translation().map(ToOwned::to_owned),
+            origin: None,
         },
         progress: notification
             .progress()
@@ -188,6 +189,11 @@ fn media_webhook(notification: &MediaNotification) -> HermesMediaNotificationWeb
                 downloaded_bytes: progress.downloaded_bytes(),
                 download_speed_bps: progress.download_speed_bps(),
                 percentage: progress.percentage(),
+                connection_attempt: None,
+                connection_attempt_limit: None,
+                vpn_rotation_pending: None,
+                storage_available_bytes: None,
+                storage_required_bytes: None,
             }),
         stage: notification.stage().map(|stage| match stage {
             MediaNotificationStage::Download => MediaNotificationStageDto::Download,
@@ -204,6 +210,7 @@ fn media_webhook(notification: &MediaNotification) -> HermesMediaNotificationWeb
             code: issue.code().to_owned(),
             message: issue.message().to_owned(),
         }),
+        result: None,
         actions: notification
             .actions()
             .iter()
@@ -213,6 +220,9 @@ fn media_webhook(notification: &MediaNotification) -> HermesMediaNotificationWeb
                 MediaNotificationAction::Retry => MediaNotificationActionDto::Retry,
                 MediaNotificationAction::RetryMissing => MediaNotificationActionDto::RetryMissing,
                 MediaNotificationAction::ResumeStorage => MediaNotificationActionDto::ResumeStorage,
+                MediaNotificationAction::SearchAlternative => {
+                    MediaNotificationActionDto::SearchAlternative
+                }
             })
             .collect(),
     }
