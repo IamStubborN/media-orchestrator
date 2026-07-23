@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -734,7 +735,7 @@ impl MediaJobExecutor {
                 task_ordinal,
                 progress_gate: tokio::sync::Mutex::new(ProgressCheckpointGate::default()),
             };
-            let outcome = self
+            let report = self
                 .pipeline
                 .run(&work, control, &reporter)
                 .await
@@ -742,25 +743,19 @@ impl MediaJobExecutor {
                     tracing::warn!(error = ?error, "Rezka media pipeline failed");
                     map_pipeline_error(error)
                 })?;
-            let checkpoint = match &outcome {
+            let mut checkpoint = match &report.outcome {
                 media_runner::EpisodeOutcome::BlockedStorage(blocked) => {
-                    std::collections::BTreeMap::from([
-                        (
-                            "storage_available_bytes".to_owned(),
-                            CheckpointValueDto::Unsigned(blocked.available_bytes()),
-                        ),
-                        (
-                            "storage_required_bytes".to_owned(),
-                            CheckpointValueDto::Unsigned(blocked.required_bytes()),
-                        ),
-                    ])
+                    storage_checkpoint(blocked)
                 }
                 _ => Default::default(),
             };
+            if let Some(artifact) = &report.artifact {
+                checkpoint.extend(artifact_checkpoint(artifact));
+            }
             control
                 .stage_completed_with_checkpoint(task_ordinal, "media_pipeline", 1, checkpoint)
                 .await?;
-            aggregate = combine_episode_outcome(aggregate, map_pipeline_outcome(outcome));
+            aggregate = combine_episode_outcome(aggregate, map_pipeline_outcome(report.outcome));
             if !matches!(
                 aggregate,
                 ExecutionOutcome::Completed | ExecutionOutcome::Partial
@@ -1021,7 +1016,7 @@ impl MediaJobExecutor {
             };
             // Torrent work reconciles Plex without a transcode step, so no
             // pipeline sub-stage is reported.
-            let outcome = self
+            let report = self
                 .pipeline
                 .run(&work, control, &())
                 .await
@@ -1029,7 +1024,7 @@ impl MediaJobExecutor {
             control
                 .stage_completed(task_ordinal, "plex_reconcile", 0)
                 .await?;
-            aggregate = combine_episode_outcome(aggregate, map_pipeline_outcome(outcome));
+            aggregate = combine_episode_outcome(aggregate, map_pipeline_outcome(report.outcome));
             if !matches!(
                 aggregate,
                 ExecutionOutcome::Completed | ExecutionOutcome::Partial
@@ -1111,6 +1106,123 @@ fn transfer_checkpoint(
     );
     insert_checkpoint_value(&mut checkpoint, "eta_seconds", observation.eta_seconds);
     checkpoint
+}
+
+fn storage_checkpoint(
+    blocked: &media_runner::StorageBlocked,
+) -> BTreeMap<String, CheckpointValueDto> {
+    BTreeMap::from([
+        (
+            "storage_available_bytes".to_owned(),
+            CheckpointValueDto::Unsigned(blocked.available_bytes()),
+        ),
+        (
+            "storage_required_bytes".to_owned(),
+            CheckpointValueDto::Unsigned(blocked.required_bytes()),
+        ),
+    ])
+}
+
+fn artifact_checkpoint(
+    artifact: &media_runner::PublishedArtifact,
+) -> BTreeMap<String, CheckpointValueDto> {
+    let mut checkpoint = BTreeMap::from([
+        (
+            "artifact_width".to_owned(),
+            CheckpointValueDto::Unsigned(u64::from(artifact.probe.width)),
+        ),
+        (
+            "artifact_height".to_owned(),
+            CheckpointValueDto::Unsigned(u64::from(artifact.probe.height)),
+        ),
+        (
+            "artifact_duration_seconds".to_owned(),
+            CheckpointValueDto::Unsigned(artifact.probe.duration_seconds.floor() as u64),
+        ),
+        (
+            "artifact_file_size_bytes".to_owned(),
+            CheckpointValueDto::Unsigned(artifact.file_size_bytes),
+        ),
+        (
+            "artifact_subtitles_downloaded".to_owned(),
+            CheckpointValueDto::Unsigned(u64::from(artifact.subtitles_downloaded)),
+        ),
+        (
+            "artifact_subtitles_missing".to_owned(),
+            CheckpointValueDto::Unsigned(u64::from(artifact.subtitles_missing)),
+        ),
+    ]);
+    insert_sanitized_checkpoint_text(
+        &mut checkpoint,
+        "artifact_video_codec",
+        &artifact.probe.codec,
+    );
+    if let Some(value) = artifact.probe.video_profile.as_deref() {
+        insert_sanitized_checkpoint_text(&mut checkpoint, "artifact_video_profile", value);
+    }
+    if let Some(value) = artifact.probe.audio_language.as_deref() {
+        insert_sanitized_checkpoint_text(&mut checkpoint, "artifact_audio_language", value);
+    }
+    if let Some(value) = artifact.probe.audio_codec.as_deref() {
+        insert_sanitized_checkpoint_text(&mut checkpoint, "artifact_audio_codec", value);
+    }
+    if let Some(value) = artifact.probe.audio_channel_layout.as_deref() {
+        insert_sanitized_checkpoint_text(&mut checkpoint, "artifact_audio_channel_layout", value);
+    }
+    if let Some(value) = artifact.probe.audio_title.as_deref() {
+        insert_sanitized_checkpoint_text(&mut checkpoint, "artifact_audio_title", value);
+    }
+    if let Some(value) = artifact.probe.audio_channels {
+        checkpoint.insert(
+            "artifact_audio_channels".to_owned(),
+            CheckpointValueDto::Unsigned(u64::from(value)),
+        );
+    }
+    if let Some(processing) = &artifact.processing {
+        let mode = match processing.mode {
+            media_runner::ProcessingMode::VaapiUpscale => "vaapi-upscale",
+        };
+        checkpoint.insert(
+            "artifact_processing_mode".to_owned(),
+            CheckpointValueDto::String(mode.to_owned()),
+        );
+        checkpoint.insert(
+            "artifact_processing_seconds".to_owned(),
+            CheckpointValueDto::Unsigned(processing.elapsed_seconds),
+        );
+    }
+    checkpoint
+}
+
+fn insert_sanitized_checkpoint_text(
+    checkpoint: &mut BTreeMap<String, CheckpointValueDto>,
+    name: &str,
+    value: &str,
+) {
+    if let Some(value) = sanitize_checkpoint_text(value) {
+        checkpoint.insert(name.to_owned(), CheckpointValueDto::String(value));
+    }
+}
+
+fn sanitize_checkpoint_text(value: &str) -> Option<String> {
+    let sanitized = value
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect::<String>();
+    let trimmed = sanitized.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let end = if trimmed.len() <= 64 {
+        trimmed.len()
+    } else {
+        let mut end = 64;
+        while !trimmed.is_char_boundary(end) {
+            end -= 1;
+        }
+        end
+    };
+    Some(trimmed[..end].to_owned())
 }
 
 fn insert_checkpoint_value(
@@ -1881,9 +1993,10 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        ExecutionOutcome, ProgressCheckpointGate, canonical_movie_name, combine_episode_outcome,
-        expected_source_duration_seconds, highest_standard_variant, matching_episode_videos,
-        parse_episode_coordinates, rezka_audio_language, rezka_final_video_path,
+        ExecutionOutcome, ProgressCheckpointGate, artifact_checkpoint, canonical_movie_name,
+        combine_episode_outcome, expected_source_duration_seconds, highest_standard_variant,
+        matching_episode_videos, parse_episode_coordinates, rezka_audio_language,
+        rezka_final_video_path,
     };
 
     #[test]
@@ -2040,5 +2153,102 @@ mod tests {
             "complete",
             true
         ));
+    }
+
+    #[test]
+    fn published_artifact_checkpoint_contains_only_bounded_media_facts() {
+        let artifact = media_runner::PublishedArtifact {
+            probe: media_runner::MediaProbe {
+                codec: "hevc".to_owned(),
+                width: 1_920,
+                height: 1_080,
+                duration_seconds: 1_421.9,
+                bitrate: Some(2_000_000),
+                video_profile: Some("Main".to_owned()),
+                audio_language: Some("rus".to_owned()),
+                audio_title: Some(format!("Ani\u{0000}Libria {}", "Я".repeat(64))),
+                audio_codec: Some("aac".to_owned()),
+                audio_channels: Some(2),
+                audio_channel_layout: Some("stereo".to_owned()),
+            },
+            file_size_bytes: 440_401_920,
+            subtitles_downloaded: 2,
+            subtitles_missing: 0,
+            processing: Some(media_runner::MediaProcessing {
+                mode: media_runner::ProcessingMode::VaapiUpscale,
+                elapsed_seconds: 252,
+            }),
+        };
+
+        let checkpoint = artifact_checkpoint(&artifact);
+
+        assert_eq!(
+            checkpoint["artifact_video_codec"],
+            media_contract::CheckpointValueDto::String("hevc".to_owned())
+        );
+        assert_eq!(
+            checkpoint["artifact_video_profile"],
+            media_contract::CheckpointValueDto::String("Main".to_owned())
+        );
+        assert_eq!(
+            checkpoint["artifact_width"],
+            media_contract::CheckpointValueDto::Unsigned(1_920)
+        );
+        assert_eq!(
+            checkpoint["artifact_height"],
+            media_contract::CheckpointValueDto::Unsigned(1_080)
+        );
+        assert_eq!(
+            checkpoint["artifact_duration_seconds"],
+            media_contract::CheckpointValueDto::Unsigned(1_421)
+        );
+        assert_eq!(
+            checkpoint["artifact_file_size_bytes"],
+            media_contract::CheckpointValueDto::Unsigned(440_401_920)
+        );
+        assert_eq!(
+            checkpoint["artifact_audio_language"],
+            media_contract::CheckpointValueDto::String("rus".to_owned())
+        );
+        assert_eq!(
+            checkpoint["artifact_audio_codec"],
+            media_contract::CheckpointValueDto::String("aac".to_owned())
+        );
+        assert_eq!(
+            checkpoint["artifact_audio_channels"],
+            media_contract::CheckpointValueDto::Unsigned(2)
+        );
+        assert_eq!(
+            checkpoint["artifact_audio_channel_layout"],
+            media_contract::CheckpointValueDto::String("stereo".to_owned())
+        );
+        assert_eq!(
+            checkpoint["artifact_subtitles_downloaded"],
+            media_contract::CheckpointValueDto::Unsigned(2)
+        );
+        assert_eq!(
+            checkpoint["artifact_subtitles_missing"],
+            media_contract::CheckpointValueDto::Unsigned(0)
+        );
+        assert_eq!(
+            checkpoint["artifact_processing_mode"],
+            media_contract::CheckpointValueDto::String("vaapi-upscale".to_owned())
+        );
+        assert_eq!(
+            checkpoint["artifact_processing_seconds"],
+            media_contract::CheckpointValueDto::Unsigned(252)
+        );
+        let media_contract::CheckpointValueDto::String(audio_title) =
+            &checkpoint["artifact_audio_title"]
+        else {
+            panic!("audio title must be a string");
+        };
+        assert!(!audio_title.chars().any(char::is_control));
+        assert!(audio_title.len() <= 64);
+        assert!(checkpoint.keys().all(|key| {
+            !["path", "url", "cookie", "token"]
+                .iter()
+                .any(|forbidden| key.contains(forbidden))
+        }));
     }
 }
