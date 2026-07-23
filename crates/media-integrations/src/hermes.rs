@@ -3,15 +3,20 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use hmac::{Hmac, KeyInit, Mac};
 use media_contract::{
     HermesDeliverOnlyWebhook, HermesMediaNotificationWebhook, MediaNotificationActionDto,
-    MediaNotificationDeliveryKindDto, MediaNotificationDto, MediaNotificationEpisodeDto,
-    MediaNotificationIssueDto, MediaNotificationKindDto, MediaNotificationNextStepDto,
-    MediaNotificationProgressDto, MediaNotificationStageDto, MediaNotificationStateDto, PublicId,
+    MediaNotificationAudioDto, MediaNotificationDeliveryKindDto, MediaNotificationDto,
+    MediaNotificationEpisodeDto, MediaNotificationIssueDto, MediaNotificationKindDto,
+    MediaNotificationLibraryDto, MediaNotificationNextStepDto, MediaNotificationOriginDto,
+    MediaNotificationProcessingDto, MediaNotificationProcessingModeDto,
+    MediaNotificationProgressDto, MediaNotificationPublicationDto, MediaNotificationResultDto,
+    MediaNotificationStageDto, MediaNotificationStateDto, MediaNotificationSubtitlesDto,
+    MediaNotificationVideoDto, PublicId,
 };
 use media_core::{
     MediaNotification, MediaNotificationAction, MediaNotificationDeliveryKind,
-    MediaNotificationKind, MediaNotificationNextStep, MediaNotificationStage,
-    MediaNotificationState, NotificationContent, NotificationDelivery, NotificationDeliveryFailure,
-    NotificationRecipient, NotificationSink,
+    MediaNotificationKind, MediaNotificationLibrary, MediaNotificationNextStep,
+    MediaNotificationOrigin, MediaNotificationProcessingMode, MediaNotificationResult,
+    MediaNotificationStage, MediaNotificationState, NotificationContent, NotificationDelivery,
+    NotificationDeliveryFailure, NotificationRecipient, NotificationSink,
 };
 use secrecy::{ExposeSecret, SecretString};
 use sha2::Sha256;
@@ -170,7 +175,11 @@ fn media_webhook(notification: &MediaNotification) -> HermesMediaNotificationWeb
             provider: media.provider().to_owned(),
             season: media.season(),
             translation: media.translation().map(ToOwned::to_owned),
-            origin: None,
+            origin: media.origin().map(|origin| match origin {
+                MediaNotificationOrigin::TrackedEpisode => {
+                    MediaNotificationOriginDto::TrackedEpisode
+                }
+            }),
         },
         progress: notification
             .progress()
@@ -189,11 +198,11 @@ fn media_webhook(notification: &MediaNotification) -> HermesMediaNotificationWeb
                 downloaded_bytes: progress.downloaded_bytes(),
                 download_speed_bps: progress.download_speed_bps(),
                 percentage: progress.percentage(),
-                connection_attempt: None,
-                connection_attempt_limit: None,
-                vpn_rotation_pending: None,
-                storage_available_bytes: None,
-                storage_required_bytes: None,
+                connection_attempt: progress.connection_attempt(),
+                connection_attempt_limit: progress.connection_attempt_limit(),
+                vpn_rotation_pending: progress.vpn_rotation_pending(),
+                storage_available_bytes: progress.storage_available_bytes(),
+                storage_required_bytes: progress.storage_required_bytes(),
             }),
         stage: notification.stage().map(|stage| match stage {
             MediaNotificationStage::Download => MediaNotificationStageDto::Download,
@@ -210,7 +219,7 @@ fn media_webhook(notification: &MediaNotification) -> HermesMediaNotificationWeb
             code: issue.code().to_owned(),
             message: issue.message().to_owned(),
         }),
-        result: None,
+        result: notification.result().map(media_result_dto),
         actions: notification
             .actions()
             .iter()
@@ -225,6 +234,56 @@ fn media_webhook(notification: &MediaNotification) -> HermesMediaNotificationWeb
                 }
             })
             .collect(),
+    }
+}
+
+fn media_result_dto(result: &MediaNotificationResult) -> MediaNotificationResultDto {
+    MediaNotificationResultDto {
+        video: result.video().map(|video| MediaNotificationVideoDto {
+            codec: video.codec().to_owned(),
+            profile: video.profile().map(ToOwned::to_owned),
+            width: video.width(),
+            height: video.height(),
+        }),
+        audio: result.audio().map(|audio| MediaNotificationAudioDto {
+            language: audio.language().map(ToOwned::to_owned),
+            codec: audio.codec().to_owned(),
+            channels: audio.channels(),
+            channel_layout: audio.channel_layout().map(ToOwned::to_owned),
+            title: audio.title().map(ToOwned::to_owned),
+        }),
+        subtitles: result
+            .subtitles()
+            .map(|subtitles| MediaNotificationSubtitlesDto {
+                downloaded: subtitles.downloaded(),
+                missing: subtitles.missing(),
+            }),
+        file_size_bytes: result.file_size_bytes(),
+        duration_seconds: result.duration_seconds(),
+        processing: result
+            .processing()
+            .map(|processing| MediaNotificationProcessingDto {
+                mode: match processing.mode() {
+                    MediaNotificationProcessingMode::VaapiUpscale => {
+                        MediaNotificationProcessingModeDto::VaapiUpscale
+                    }
+                    MediaNotificationProcessingMode::Original => {
+                        MediaNotificationProcessingModeDto::Original
+                    }
+                },
+                elapsed_seconds: processing.elapsed_seconds(),
+            }),
+        publication: result
+            .publication()
+            .map(|publication| MediaNotificationPublicationDto {
+                library: match publication.library() {
+                    MediaNotificationLibrary::Movies => MediaNotificationLibraryDto::Movies,
+                    MediaNotificationLibrary::TvShows => MediaNotificationLibraryDto::TvShows,
+                },
+                title: publication.title().to_owned(),
+                season: publication.season(),
+                episode: publication.episode(),
+            }),
     }
 }
 

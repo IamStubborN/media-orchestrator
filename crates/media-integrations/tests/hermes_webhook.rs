@@ -1,9 +1,11 @@
 use media_core::{
-    JobId, MediaNotification, MediaNotificationAction, MediaNotificationDeliveryKind,
-    MediaNotificationEpisode, MediaNotificationKind, MediaNotificationMedia,
-    MediaNotificationNextStep, MediaNotificationProgress, MediaNotificationStage,
-    MediaNotificationState, NotificationDelivery, NotificationEventType, NotificationId,
-    NotificationRecipient,
+    JobId, MediaNotification, MediaNotificationAction, MediaNotificationAudio,
+    MediaNotificationDeliveryKind, MediaNotificationEpisode, MediaNotificationKind,
+    MediaNotificationLibrary, MediaNotificationMedia, MediaNotificationNextStep,
+    MediaNotificationProcessing, MediaNotificationProcessingMode, MediaNotificationProgress,
+    MediaNotificationPublication, MediaNotificationResult, MediaNotificationStage,
+    MediaNotificationState, MediaNotificationSubtitles, MediaNotificationVideo,
+    NotificationDelivery, NotificationEventType, NotificationId, NotificationRecipient,
 };
 use media_integrations::hermes::{HermesWebhookClient, HermesWebhookConfig, WebhookError};
 use secrecy::SecretString;
@@ -75,6 +77,86 @@ fn media_delivery() -> NotificationDelivery {
         NotificationEventType::DownloadProgress,
         notification,
         7,
+        0,
+    )
+    .unwrap()
+}
+
+fn completed_media_delivery() -> NotificationDelivery {
+    let job_id =
+        JobId::from_uuid(uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000998").unwrap());
+    let progress =
+        MediaNotificationProgress::new(Some(1), Some(1), Some(13), Vec::new(), None, None, None)
+            .unwrap()
+            .with_recovery(Some(5), Some(20), Some(true))
+            .unwrap()
+            .with_storage(Some(42_949_672_960), Some(5_368_709_120))
+            .unwrap();
+    let result = MediaNotificationResult::new(
+        Some(
+            MediaNotificationVideo::new("hevc".to_owned(), Some("Main".to_owned()), 1920, 1080)
+                .unwrap(),
+        ),
+        Some(
+            MediaNotificationAudio::new(
+                Some("rus".to_owned()),
+                "aac".to_owned(),
+                Some(2),
+                Some("stereo".to_owned()),
+                Some("AniLibria".to_owned()),
+            )
+            .unwrap(),
+        ),
+        Some(MediaNotificationSubtitles::new(2, 0)),
+        Some(264_317_334),
+        Some(1_387),
+        Some(MediaNotificationProcessing::new(
+            MediaNotificationProcessingMode::VaapiUpscale,
+            Some(167),
+        )),
+        Some(
+            MediaNotificationPublication::new(
+                MediaNotificationLibrary::TvShows,
+                "Example Show".to_owned(),
+                Some(1),
+                Some(13),
+            )
+            .unwrap(),
+        ),
+    );
+    let notification = MediaNotification::new(
+        MediaNotificationDeliveryKind::Card,
+        format!("media-job:{job_id}"),
+        30,
+        1,
+        true,
+        MediaNotificationState::Completed,
+        MediaNotificationMedia::new(
+            job_id,
+            "Example Show".to_owned(),
+            MediaNotificationKind::Series,
+            "rezka".to_owned(),
+            Some(1),
+            Some("AniLibria".to_owned()),
+        )
+        .unwrap(),
+        Some(progress),
+        None,
+        Some(MediaNotificationNextStep::None),
+        None,
+        vec![MediaNotificationAction::Details],
+    )
+    .unwrap()
+    .with_result(result)
+    .unwrap();
+    NotificationDelivery::rehydrate_media(
+        NotificationId::from_uuid(
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000125").unwrap(),
+        ),
+        NotificationRecipient::Primary,
+        NotificationEventType::Completed,
+        notification,
+        30,
         0,
     )
     .unwrap()
@@ -175,6 +257,78 @@ async fn posts_exact_schema_v2_payload_with_generation_aware_identity() {
     HermesWebhookClient::new(config(&server))
         .unwrap()
         .deliver_at(&media_delivery(), 1_720_785_600)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn posts_measured_result_and_operational_progress_without_dropping_fields() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/webhooks/media-notify"))
+        .and(body_json(serde_json::json!({
+            "event_type": "media.notification",
+            "schema_version": 2,
+            "delivery_kind": "card",
+            "card_key": "media-job:00000000-0000-0000-0000-000000000998",
+            "revision": 30,
+            "lifecycle_cycle": 1,
+            "terminal": true,
+            "state": "completed",
+            "media": {
+                "job_id": "00000000-0000-0000-0000-000000000998",
+                "title": "Example Show",
+                "kind": "series",
+                "provider": "rezka",
+                "season": 1,
+                "translation": "AniLibria"
+            },
+            "progress": {
+                "completed_episodes": 1,
+                "total_episodes": 1,
+                "current_episode": 13,
+                "connection_attempt": 5,
+                "connection_attempt_limit": 20,
+                "vpn_rotation_pending": true,
+                "storage_available_bytes": 42949672960_u64,
+                "storage_required_bytes": 5368709120_u64
+            },
+            "next_step": "none",
+            "result": {
+                "video": {
+                    "codec": "hevc",
+                    "profile": "Main",
+                    "width": 1920,
+                    "height": 1080
+                },
+                "audio": {
+                    "language": "rus",
+                    "codec": "aac",
+                    "channels": 2,
+                    "channel_layout": "stereo",
+                    "title": "AniLibria"
+                },
+                "subtitles": {"downloaded": 2, "missing": 0},
+                "file_size_bytes": 264317334,
+                "duration_seconds": 1387,
+                "processing": {"mode": "vaapi-upscale", "elapsed_seconds": 167},
+                "publication": {
+                    "library": "tv-shows",
+                    "title": "Example Show",
+                    "season": 1,
+                    "episode": 13
+                }
+            },
+            "actions": ["details"]
+        })))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    HermesWebhookClient::new(config(&server))
+        .unwrap()
+        .deliver_at(&completed_media_delivery(), 1_720_785_600)
         .await
         .unwrap();
 }
