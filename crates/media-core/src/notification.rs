@@ -299,12 +299,12 @@ impl MediaNotificationMedia {
         season: Option<u32>,
         translation: Option<String>,
     ) -> Result<Self, NotificationValidationError> {
-        validate_display_field(&title)?;
+        validate_human_label(&title)?;
         if !matches!(provider.as_str(), "rezka" | "prowlarr") {
             return Err(NotificationValidationError::InvalidProvider);
         }
         if let Some(translation) = &translation {
-            validate_display_field(translation)?;
+            validate_human_label(translation)?;
         }
         Ok(Self {
             job_id,
@@ -565,9 +565,9 @@ impl MediaNotificationVideo {
         width: u32,
         height: u32,
     ) -> Result<Self, NotificationValidationError> {
-        validate_public_display_field(&codec)?;
+        validate_codec(&codec)?;
         if let Some(profile) = &profile {
-            validate_public_display_field(profile)?;
+            validate_profile(profile)?;
         }
         if width == 0 || height == 0 {
             return Err(NotificationValidationError::InvalidMediaResult);
@@ -605,16 +605,15 @@ impl MediaNotificationAudio {
         channel_layout: Option<String>,
         title: Option<String>,
     ) -> Result<Self, NotificationValidationError> {
-        for value in [
-            language.as_deref(),
-            Some(codec.as_str()),
-            channel_layout.as_deref(),
-            title.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            validate_public_display_field(value)?;
+        if let Some(language) = &language {
+            validate_language(language)?;
+        }
+        validate_codec(&codec)?;
+        if let Some(channel_layout) = &channel_layout {
+            validate_channel_layout(channel_layout)?;
+        }
+        if let Some(title) = &title {
+            validate_human_label(title)?;
         }
         Ok(Self {
             language,
@@ -689,7 +688,7 @@ impl MediaNotificationPublication {
         season: Option<u32>,
         episode: Option<u32>,
     ) -> Result<Self, NotificationValidationError> {
-        validate_public_display_field(&title)?;
+        validate_human_label(&title)?;
         Ok(Self {
             library,
             title,
@@ -836,6 +835,74 @@ fn validate_display_field(value: &str) -> Result<(), NotificationValidationError
     Ok(())
 }
 
+fn validate_human_label(value: &str) -> Result<(), NotificationValidationError> {
+    validate_public_display_field(value)?;
+    if !value.chars().all(|character| {
+        character.is_alphanumeric()
+            || character.is_whitespace()
+            || matches!(
+                character,
+                '.' | ','
+                    | ':'
+                    | '!'
+                    | '?'
+                    | '\''
+                    | '"'
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | '+'
+                    | '-'
+                    | '_'
+                    | '/'
+            )
+    }) {
+        return Err(NotificationValidationError::InvalidDisplayField);
+    }
+    Ok(())
+}
+
+fn validate_codec(value: &str) -> Result<(), NotificationValidationError> {
+    validate_machine_metadata(value, |character| {
+        character.is_ascii_alphanumeric()
+            || matches!(character, ' ' | '.' | '_' | '-' | '/' | '+' | '@' | ':')
+    })
+}
+
+fn validate_profile(value: &str) -> Result<(), NotificationValidationError> {
+    validate_machine_metadata(value, |character| {
+        character.is_ascii_alphanumeric()
+            || matches!(character, ' ' | '.' | '_' | '-' | '+' | '@' | ':')
+    })
+}
+
+fn validate_language(value: &str) -> Result<(), NotificationValidationError> {
+    validate_machine_metadata(value, |character| {
+        character.is_alphanumeric()
+            || character.is_whitespace()
+            || matches!(character, '-' | '_' | '/' | '(' | ')')
+    })
+}
+
+fn validate_channel_layout(value: &str) -> Result<(), NotificationValidationError> {
+    validate_machine_metadata(value, |character| {
+        character.is_ascii_alphanumeric()
+            || matches!(character, ' ' | '.' | '_' | '-' | '+' | '(' | ')')
+    })
+}
+
+fn validate_machine_metadata(
+    value: &str,
+    is_allowed: impl Fn(char) -> bool,
+) -> Result<(), NotificationValidationError> {
+    validate_public_display_field(value)?;
+    if !value.chars().all(is_allowed) {
+        return Err(NotificationValidationError::InvalidDisplayField);
+    }
+    Ok(())
+}
+
 fn validate_public_display_field(value: &str) -> Result<(), NotificationValidationError> {
     validate_display_field(value)?;
 
@@ -844,7 +911,7 @@ fn validate_public_display_field(value: &str) -> Result<(), NotificationValidati
     if lowercase.contains("://")
         || lowercase.starts_with("www.")
         || lowercase.starts_with("magnet:?")
-        || is_absolute_or_home_path(trimmed)
+        || is_path_like(trimmed)
         || is_shell_command_like(&lowercase)
         || contains_secret_label(&lowercase)
         || is_internal_error_code(trimmed)
@@ -854,9 +921,12 @@ fn validate_public_display_field(value: &str) -> Result<(), NotificationValidati
     Ok(())
 }
 
-fn is_absolute_or_home_path(value: &str) -> bool {
+fn is_path_like(value: &str) -> bool {
     let bytes = value.as_bytes();
     value.starts_with('/')
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || value.contains('\\')
         || (value.starts_with('~')
             && value[1..]
                 .chars()
@@ -867,10 +937,23 @@ fn is_absolute_or_home_path(value: &str) -> bool {
             && bytes[0].is_ascii_alphabetic()
             && bytes[1] == b':'
             && matches!(bytes[2], b'/' | b'\\'))
+        || (value.contains('/') && has_path_extension(value))
+}
+
+fn has_path_extension(value: &str) -> bool {
+    const PATH_EXTENSIONS: [&str; 26] = [
+        ".mkv", ".mp4", ".m4v", ".avi", ".mov", ".mpg", ".mpeg", ".webm", ".ts", ".m2ts", ".srt",
+        ".ass", ".ssa", ".vtt", ".sub", ".idx", ".conf", ".config", ".ini", ".yaml", ".yml",
+        ".json", ".toml", ".sh", ".ps1", ".bat",
+    ];
+    let lowercase = value.to_ascii_lowercase();
+    PATH_EXTENSIONS
+        .iter()
+        .any(|extension| lowercase.ends_with(extension))
 }
 
 fn is_shell_command_like(value: &str) -> bool {
-    const COMMANDS: [&str; 14] = [
+    const COMMANDS: [&str; 23] = [
         "curl",
         "wget",
         "bash",
@@ -885,10 +968,23 @@ fn is_shell_command_like(value: &str) -> bool {
         "python3",
         "ffmpeg",
         "yt-dlp",
+        "ls",
+        "cat",
+        "find",
+        "head",
+        "tail",
+        "less",
+        "more",
+        "env",
+        "printenv",
     ];
 
-    value.contains("$(")
+    value.starts_with('-')
+        || value.contains("$(")
         || value.contains('`')
+        || value
+            .chars()
+            .any(|character| matches!(character, ';' | '|' | '&' | '$' | '<' | '>'))
         || COMMANDS.iter().any(|command| {
             value == *command
                 || value
@@ -1227,6 +1323,124 @@ mod tests {
                 "MEDIA_PROCESSING_FAILED".to_owned(),
                 Some(2),
                 Some(8),
+            ),
+            Err(NotificationValidationError::InvalidDisplayField),
+        );
+    }
+
+    #[test]
+    fn detailed_result_text_fields_reject_relative_paths_and_command_forms() {
+        assert!(
+            MediaNotificationMedia::new(
+                JobId::new(),
+                "Title / Alternate: сезон 2".to_owned(),
+                MediaNotificationKind::Series,
+                "rezka".to_owned(),
+                Some(2),
+                Some("Русский / 日本語".to_owned()),
+            )
+            .is_ok()
+        );
+        assert!(
+            MediaNotificationVideo::new(
+                "H.265 / HEVC".to_owned(),
+                Some("Main 10@L5.1".to_owned()),
+                1920,
+                1080,
+            )
+            .is_ok()
+        );
+        assert!(
+            MediaNotificationAudio::new(
+                Some("Русский / 日本語".to_owned()),
+                "AAC-LC".to_owned(),
+                Some(6),
+                Some("5.1 (side)".to_owned()),
+                Some("Title / Alternate".to_owned()),
+            )
+            .is_ok()
+        );
+        assert!(
+            MediaNotificationPublication::new(
+                MediaNotificationLibrary::TvShows,
+                "Title / Alternate: сезон 2".to_owned(),
+                Some(2),
+                Some(8),
+            )
+            .is_ok()
+        );
+
+        assert_eq!(
+            MediaNotificationVideo::new("../private.mkv".to_owned(), None, 1920, 1080),
+            Err(NotificationValidationError::InvalidDisplayField),
+        );
+        assert_eq!(
+            MediaNotificationVideo::new(
+                "hevc".to_owned(),
+                Some("media/private.mkv".to_owned()),
+                1920,
+                1080,
+            ),
+            Err(NotificationValidationError::InvalidDisplayField),
+        );
+        assert_eq!(
+            MediaNotificationAudio::new(
+                Some("media\\private.srt".to_owned()),
+                "aac".to_owned(),
+                None,
+                None,
+                None,
+            ),
+            Err(NotificationValidationError::InvalidDisplayField),
+        );
+        assert_eq!(
+            MediaNotificationAudio::new(None, "ls -la".to_owned(), None, None, None),
+            Err(NotificationValidationError::InvalidDisplayField),
+        );
+        assert_eq!(
+            MediaNotificationAudio::new(
+                None,
+                "aac".to_owned(),
+                None,
+                Some("cat private.mkv".to_owned()),
+                Some("title; cat private.mkv".to_owned()),
+            ),
+            Err(NotificationValidationError::InvalidDisplayField),
+        );
+
+        for value in [
+            "../private.mkv",
+            "media/private.mkv",
+            ".\\private.mkv",
+            "media\\private.srt",
+            "ls -la",
+            "cat private.mkv",
+            "--version",
+            "title; cat private.mkv",
+            "$(cat private.mkv)",
+            "token=very-secret-value",
+            "MEDIA_PROCESSING_FAILED",
+        ] {
+            assert_eq!(
+                MediaNotificationPublication::new(
+                    MediaNotificationLibrary::TvShows,
+                    value.to_owned(),
+                    Some(2),
+                    Some(8),
+                ),
+                Err(NotificationValidationError::InvalidDisplayField),
+                "{value} must not be accepted as a public display label",
+            );
+        }
+
+        assert_eq!(
+            MediaNotificationMedia::new(
+                JobId::new(),
+                "../private.mkv".to_owned(),
+                MediaNotificationKind::Series,
+                "rezka".to_owned(),
+                Some(2),
+                Some("media/private.mkv".to_owned()),
             ),
             Err(NotificationValidationError::InvalidDisplayField),
         );

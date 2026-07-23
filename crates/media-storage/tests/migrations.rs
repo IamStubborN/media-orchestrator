@@ -827,20 +827,26 @@ async fn detailed_notifications_migration_preserves_legacy_payloads_and_validate
                            jsonb_set(
                                jsonb_set(
                                    jsonb_set(
-                                       jsonb_set(payload, '{result,video,codec}', '"H.265 / HEVC"'::jsonb),
-                                       '{result,video,profile}', '"Main 10-bit"'::jsonb
+                                       jsonb_set(
+                                           jsonb_set(
+                                               jsonb_set(payload, '{result,video,codec}', '"H.265 / HEVC"'::jsonb),
+                                               '{result,video,profile}', '"Main 10-bit"'::jsonb
+                                           ),
+                                           '{result,audio,language}', '"Русский / 日本語"'::jsonb
+                                       ),
+                                       '{result,audio,codec}', '"AAC-LC"'::jsonb
                                    ),
-                                   '{result,audio,language}', '"Русский / 日本語"'::jsonb
+                                   '{result,audio,channel_layout}', '"5.1 (side)"'::jsonb
                                ),
-                               '{result,audio,codec}', '"AAC-LC"'::jsonb
+                               '{result,audio,title}', '"AniLibria, Dub!"'::jsonb
                            ),
-                           '{result,audio,channel_layout}', '"5.1 (side)"'::jsonb
+                           '{result,publication,title}', '"Клинки Хранителей: сезон 2"'::jsonb
                        ),
-                       '{result,audio,title}', '"AniLibria, Dub!"'::jsonb
+                       '{result,publication,season}', '2'::jsonb
                    ),
-                   '{result,publication,title}', '"Клинки Хранителей: сезон 2"'::jsonb
+                   '{media,title}', '"Title / Alternate: сезон 2"'::jsonb
                ),
-               '{result,publication,season}', '2'::jsonb
+               '{media,translation}', '"Русский / 日本語"'::jsonb
            )
          WHERE id = '00000000-0000-0000-0000-000000000993'"#,
     )
@@ -858,6 +864,27 @@ async fn detailed_notifications_migration_preserves_legacy_payloads_and_validate
         ),
         ("{result,audio,title}", r#""api_key=very-secret-value""#),
         ("{result,publication,title}", r#""MEDIA_PROCESSING_FAILED""#),
+    ] {
+        assert_rejected(
+            db,
+            &format!(
+                "UPDATE notification_outbox\n                 SET payload = jsonb_set(payload, '{path}', $value${value}$value$::jsonb)\n                 WHERE id = '00000000-0000-0000-0000-000000000993'"
+            ),
+            "notification_payload_check",
+        )
+        .await;
+    }
+
+    for (path, value) in [
+        ("{media,title}", r#""../private.mkv""#),
+        ("{media,translation}", r#""media/private.mkv""#),
+        ("{result,video,codec}", r#""../private.mkv""#),
+        ("{result,video,profile}", r#""media/private.mkv""#),
+        ("{result,audio,language}", r#""media\\private.srt""#),
+        ("{result,audio,codec}", r#""ls -la""#),
+        ("{result,audio,channel_layout}", r#""cat private.mkv""#),
+        ("{result,audio,title}", r#""title; cat private.mkv""#),
+        ("{result,publication,title}", r#""--version""#),
     ] {
         assert_rejected(
             db,

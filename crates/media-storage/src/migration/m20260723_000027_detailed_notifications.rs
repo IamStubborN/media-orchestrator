@@ -208,6 +208,8 @@ impl MigrationTrait for Migration {
                                 AND NOT EXISTS (
                                     SELECT 1
                                     FROM unnest(ARRAY[
+                                        candidate #>> '{media,title}',
+                                        candidate #>> '{media,translation}',
                                         candidate #>> '{result,video,codec}',
                                         candidate #>> '{result,video,profile}',
                                         candidate #>> '{result,audio,language}',
@@ -225,12 +227,20 @@ impl MigrationTrait for Migration {
                                           OR lower(btrim(display.value)) LIKE 'www.%'
                                           OR lower(btrim(display.value)) LIKE 'magnet:?%'
                                           OR btrim(display.value) ~ '^/'
+                                          OR btrim(display.value) ~ '^\.?\.?/'
                                           OR btrim(display.value) ~ '^~[^[:space:]]*[/\\\\]'
                                           OR btrim(display.value) ~ '^[[:alpha:]]:[/\\\\]'
                                           OR btrim(display.value) ~ '^\\\\\\\\'
-                                          OR lower(btrim(display.value)) ~ '^(curl|wget|bash|sh|zsh|pwsh|powershell|cmd|sudo|rm|python3?|ffmpeg|yt-dlp)([[:space:]]|$)'
+                                          OR position(chr(92) IN display.value) > 0
+                                          OR (
+                                              position('/' IN display.value) > 0
+                                              AND lower(btrim(display.value)) ~ '\.(mkv|mp4|m4v|avi|mov|mpg|mpeg|webm|ts|m2ts|srt|ass|ssa|vtt|sub|idx|conf|config|ini|yaml|yml|json|toml|sh|ps1|bat)$'
+                                          )
+                                          OR lower(btrim(display.value)) ~ '^(curl|wget|bash|sh|zsh|pwsh|powershell|cmd|sudo|rm|python3?|ffmpeg|yt-dlp|ls|cat|find|head|tail|less|more|env|printenv)([[:space:]]|$)'
+                                          OR lower(btrim(display.value)) ~ '^-'
                                           OR display.value LIKE '%$(%'
                                           OR display.value LIKE '%`%'
+                                          OR display.value ~ '[;|&$`<>]'
                                           OR display.value ~* '(^|[[:space:];,])(api[ _-]?key|access[ _-]?token|authorization|token|password|passwd|secret|credential|private[ _-]?key)[[:space:]]*[:=]'
                                           OR display.value ~* '(^|[[:space:];,])bearer[[:space:]]+'
                                           OR display.value ~ '^[Ee][0-9]{3,}$'
@@ -240,6 +250,44 @@ impl MigrationTrait for Migration {
                                               AND lower(display.value) ~ '(^|_)(error|failed|failure|invalid|not|found|unavailable|forbidden|denied|timeout|internal|exception)(_|$)'
                                           )
                                       )
+                                )
+                                AND NOT EXISTS (
+                                    SELECT 1
+                                    FROM unnest(ARRAY[
+                                        candidate #>> '{media,title}',
+                                        candidate #>> '{media,translation}',
+                                        candidate #>> '{result,audio,title}',
+                                        candidate #>> '{result,publication,title}'
+                                    ]) AS label(value)
+                                    WHERE label.value IS NOT NULL
+                                      AND label.value !~ '^[[:alnum:][:space:].,!?''"():/\[\]+_-]+$'
+                                )
+                                AND NOT EXISTS (
+                                    SELECT 1
+                                    FROM unnest(ARRAY[
+                                        candidate #>> '{result,video,codec}',
+                                        candidate #>> '{result,audio,codec}'
+                                    ]) AS codec(value)
+                                    WHERE codec.value IS NOT NULL
+                                      AND codec.value !~ '^[[:alnum:]][[:alnum:] ._/@:+-]*$'
+                                )
+                                AND NOT EXISTS (
+                                    SELECT 1
+                                    FROM unnest(ARRAY[candidate #>> '{result,video,profile}']) AS profile(value)
+                                    WHERE profile.value IS NOT NULL
+                                      AND profile.value !~ '^[[:alnum:]][[:alnum:] ._+@:-]*$'
+                                )
+                                AND NOT EXISTS (
+                                    SELECT 1
+                                    FROM unnest(ARRAY[candidate #>> '{result,audio,language}']) AS language(value)
+                                    WHERE language.value IS NOT NULL
+                                      AND language.value !~ '^[[:alnum:]][[:alnum:][:space:]_()/ -]*$'
+                                )
+                                AND NOT EXISTS (
+                                    SELECT 1
+                                    FROM unnest(ARRAY[candidate #>> '{result,audio,channel_layout}']) AS channel_layout(value)
+                                    WHERE channel_layout.value IS NOT NULL
+                                      AND channel_layout.value !~ '^[[:alnum:]][[:alnum:][:space:]_.()+-]*$'
                                 )
                             )
                         )
