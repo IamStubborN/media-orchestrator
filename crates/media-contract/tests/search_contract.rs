@@ -1,6 +1,6 @@
 use media_contract::{
-    ContinueSearchRequest, ExecutionSelectionDto, MediaKindDto, ProwlarrRankingDto, SearchPageDto,
-    SearchResultDto, SelectResultRequest, StartSearchRequest,
+    AlternativeSearchRequest, ContinueSearchRequest, ExecutionSelectionDto, MediaKindDto,
+    ProwlarrRankingDto, SearchPageDto, SearchResultDto, SelectResultRequest, StartSearchRequest,
 };
 
 #[test]
@@ -77,6 +77,32 @@ fn start_and_continue_reject_caller_identity_fields() {
         };
         assert!(error.contains("unknown field"), "unexpected error: {error}");
     }
+}
+
+#[test]
+fn alternative_search_contains_only_the_conversation_scope() {
+    let request = AlternativeSearchRequest {
+        scope: media_contract::SearchScopeDto {
+            platform: "telegram".to_owned(),
+            chat_id: "42".to_owned(),
+            thread_id: None,
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(request).unwrap(),
+        serde_json::json!({
+            "scope":{"platform":"telegram","chat_id":"42"}
+        })
+    );
+    assert!(
+        serde_json::from_value::<AlternativeSearchRequest>(serde_json::json!({
+            "scope":{"platform":"telegram","chat_id":"42"},
+            "owner_id":"other"
+        }))
+        .unwrap_err()
+        .to_string()
+        .contains("unknown field")
+    );
 }
 
 #[test]

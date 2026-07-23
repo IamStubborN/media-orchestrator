@@ -9,9 +9,9 @@ use media::search::{
 };
 use media_api::{SearchError, SearchService};
 use media_contract::{
-    ContinueSearchRequest, MediaKindDto, ProviderDto, ProwlarrRankingDto, RezkaTranslationDto,
-    SearchResultDto, SearchScopeDto, SeasonAvailabilityDto, SelectResultRequest,
-    SeriesAvailabilityDto, StartSearchRequest, TrackingPromptDto,
+    AlternativeSearchRequest, ContinueSearchRequest, MediaKindDto, ProviderDto, ProwlarrRankingDto,
+    RezkaTranslationDto, SearchResultDto, SearchScopeDto, SeasonAvailabilityDto,
+    SelectResultRequest, SeriesAvailabilityDto, StartSearchRequest, TrackingPromptDto,
 };
 use media_core::{
     PRIMARY_USER_ID, CanonicalEpisode, CanonicalEpisodeCoordinates, CanonicalMedia, CanonicalSeason,
@@ -631,6 +631,106 @@ fn service(pages: HashMap<ProviderDto, Vec<ProviderPage>>) -> DurableSearchServi
         }),
         Arc::new(JobApplication::new(Arc::new(MemoryJobStore::default()))),
     )
+}
+
+#[tokio::test]
+async fn alternative_search_is_owner_scoped_and_uses_the_opposite_provider() {
+    let persistence = Arc::new(MemorySearchPersistence::default());
+    let jobs = Arc::new(MemoryJobStore::default());
+    let job_id = JobId::new();
+    let result_ref = "selection:original";
+    jobs.jobs.lock().unwrap().push(
+        Job::rehydrate(
+            job_id,
+            PRIMARY_USER_ID,
+            Provider::Rezka,
+            result_ref.to_owned(),
+            media_core::JobState::Failed,
+            None,
+            NotifyScope::Initiator,
+        )
+        .unwrap(),
+    );
+    persistence
+        .insert_execution(
+            result_ref.to_owned(),
+            media_contract::ExecutionSelectionDto::Rezka {
+                locator: "/show.html".to_owned(),
+                title_id: 42,
+                media_kind: MediaKindDto::Series,
+                translation_id: 19,
+                translation: Some("Studio Dub".to_owned()),
+                director: false,
+                camrip: false,
+                has_ads: false,
+                season: Some(2),
+                episode: Some(8),
+                episodes: vec![media_contract::EpisodeSnapshotDto {
+                    season: 2,
+                    episode: 8,
+                }],
+                episode_mappings: Vec::new(),
+                ambiguous_episodes: Vec::new(),
+                release_year: Some(2026),
+                library_title: None,
+                title: "Blades of the Guardians".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+    let service = DurableSearchService::new(
+        persistence.clone(),
+        Arc::new(FakeProvider {
+            pages: Mutex::new(HashMap::from([(
+                ProviderDto::Prowlarr,
+                vec![ProviderPage {
+                    results: vec![prowlarr_result(1)],
+                    provider_continuation: None,
+                }],
+            )])),
+        }),
+        Arc::new(JobApplication::new(jobs.clone())),
+    );
+    let scope = telegram_scope("42", None);
+
+    let page = service
+        .start_alternative(
+            PRIMARY_USER_ID,
+            job_id,
+            AlternativeSearchRequest {
+                scope: scope.clone(),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(page.source, ProviderDto::Prowlarr);
+    assert_eq!(page.results.len(), 1);
+    let session = persistence
+        .sessions
+        .lock()
+        .unwrap()
+        .get(&page.session_id)
+        .cloned()
+        .unwrap();
+    assert_eq!(session.request.query, "Blades of the Guardians");
+    assert_eq!(session.request.media_kind, Some(MediaKindDto::Series));
+    assert_eq!(session.request.season, Some(2));
+    assert_eq!(session.request.scope, scope);
+    assert_eq!(jobs.jobs.lock().unwrap().len(), 1);
+    assert_eq!(
+        service
+            .start_alternative(
+                SECONDARY_USER_ID,
+                job_id,
+                AlternativeSearchRequest {
+                    scope: telegram_scope("99", None),
+                },
+            )
+            .await
+            .unwrap_err(),
+        SearchError::NotFound
+    );
 }
 
 #[tokio::test]

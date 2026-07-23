@@ -197,6 +197,11 @@ enum JobsCommand {
         #[arg(long)]
         json: bool,
     },
+    Alternatives {
+        job_id: String,
+        #[arg(long)]
+        json: bool,
+    },
     MappingAction {
         job_id: String,
         #[arg(long)]
@@ -691,6 +696,12 @@ async fn run_jobs(args: JobsArgs) -> Result<(), RunError> {
             emit(&output, json, |value| {
                 render::job(value, Some("Retried job"))
             });
+        }
+        JobsCommand::Alternatives { job_id, json } => {
+            let output = client
+                .alternative_search(&job_id, current_search_scope())
+                .await?;
+            emit(&output, json, render::alternative_search_page);
         }
         JobsCommand::MappingAction { job_id, json } => {
             let output = client.episode_mapping_action(&job_id).await?;

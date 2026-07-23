@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use media_contract::{
-    ContinueSearchRequest, CreateJobRequest, CreateTrackingRequest, EpisodeSnapshotDto,
-    NotifyScopeDto, PatchTrackingRequest, ProviderDto, ReleaseQueryRequest,
+    AlternativeSearchRequest, ContinueSearchRequest, CreateJobRequest, CreateTrackingRequest,
+    EpisodeSnapshotDto, NotifyScopeDto, PatchTrackingRequest, ProviderDto, ReleaseQueryRequest,
     ResolveEpisodeMappingRequest, SelectResultRequest, StartSearchRequest, TrackingScopeDto,
 };
 use secrecy::{ExposeSecret, SecretString};
@@ -77,6 +77,20 @@ impl HttpClient {
             self.request(reqwest::Method::POST, &path)?
                 .header(IDEMPOTENCY_KEY_HEADER, generated_identifier())
                 .json(&serde_json::json!({})),
+        )
+        .await
+    }
+
+    pub async fn alternative_search(
+        &self,
+        job_id: &str,
+        scope: media_contract::SearchScopeDto,
+    ) -> Result<String, ClientError> {
+        let path = format!("v1/jobs/{job_id}/alternative-search");
+        self.execute(
+            self.request(reqwest::Method::POST, &path)?
+                .timeout(Duration::from_secs(150))
+                .json(&AlternativeSearchRequest { scope }),
         )
         .await
     }

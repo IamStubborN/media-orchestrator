@@ -3,10 +3,10 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use media_api::{SearchError, SearchService};
 use media_contract::{
-    ContinueSearchRequest, EpisodeMappingActionDto, ExecutionSelectionDto, JobDto, JobStateDto,
-    MAX_SEARCH_RESULTS_PER_PAGE, MediaKindDto, NotifyScopeDto, ProviderDto,
-    ResolveEpisodeMappingRequest, SearchPageDto, SearchResultDto, SelectResultRequest,
-    StartSearchRequest,
+    AlternativeSearchRequest, ContinueSearchRequest, EpisodeMappingActionDto,
+    ExecutionSelectionDto, JobDto, JobStateDto, MAX_SEARCH_RESULTS_PER_PAGE, MediaKindDto,
+    NotifyScopeDto, ProviderDto, ResolveEpisodeMappingRequest, SearchPageDto, SearchResultDto,
+    SelectResultRequest, StartSearchRequest,
 };
 use media_core::{
     EpisodeDiscoveryPort, EpisodeMappingConfirmation, EpisodeSnapshot, IdentityStore, Job,
@@ -1173,7 +1173,6 @@ impl DurableSearchService {
         if request.query.trim().is_empty()
             || request.query.len() > 512
             || request.query.chars().any(char::is_control)
-            || (request.source == ProviderDto::Rezka && request.season.is_some())
             || (request.source == ProviderDto::Prowlarr
                 && !matches!(
                     (request.media_kind, request.season),
@@ -1319,6 +1318,62 @@ impl SearchService for DurableSearchService {
             return Err(SearchError::Forbidden);
         }
         self.page(session, offset).await
+    }
+
+    async fn start_alternative(
+        &self,
+        owner: UserId,
+        job_id: JobId,
+        request: AlternativeSearchRequest,
+    ) -> Result<SearchPageDto, SearchError> {
+        let job = self
+            .jobs
+            .get_job_for_owner(owner, job_id)
+            .await
+            .map_err(application_error)?;
+        let execution = self.persistence.execution_for(job.result_ref()).await?;
+        let (source, query, media_kind, season) = match execution {
+            ExecutionSelectionDto::Rezka {
+                media_kind,
+                season,
+                episodes,
+                title,
+                ..
+            } => {
+                let season = season
+                    .or_else(|| common_episode_season(&episodes))
+                    .map(|value| u16::try_from(value).map_err(|_| SearchError::InvalidRequest))
+                    .transpose()?;
+                if media_kind == MediaKindDto::Series && season.is_none() {
+                    return Err(SearchError::InvalidRequest);
+                }
+                (ProviderDto::Prowlarr, title, media_kind, season)
+            }
+            ExecutionSelectionDto::Prowlarr {
+                media_kind,
+                season,
+                title,
+                ..
+            } => (ProviderDto::Rezka, title, media_kind, season),
+            ExecutionSelectionDto::RezkaSessionRefresh { .. } => {
+                return Err(SearchError::Conflict);
+            }
+        };
+        self.start(
+            owner,
+            StartSearchRequest {
+                scope: request.scope,
+                source,
+                query,
+                media_kind: Some(media_kind),
+                season,
+                preferred_qualities: Vec::new(),
+                preferred_languages: Vec::new(),
+                preferred_codecs: Vec::new(),
+                preferred_release_groups: Vec::new(),
+            },
+        )
+        .await
     }
 
     async fn select(
@@ -1485,6 +1540,14 @@ impl SearchService for DurableSearchService {
             .map_err(application_error)?;
         Ok(job_dto(&job))
     }
+}
+
+fn common_episode_season(episodes: &[media_contract::EpisodeSnapshotDto]) -> Option<u32> {
+    let season = episodes.first()?.season;
+    episodes
+        .iter()
+        .all(|episode| episode.season == season)
+        .then_some(season)
 }
 
 fn mapping_action_dto(

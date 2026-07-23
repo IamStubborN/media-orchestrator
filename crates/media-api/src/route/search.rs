@@ -6,8 +6,8 @@ use axum::{
     routing::{get, post},
 };
 use media_contract::{
-    ContinueSearchRequest, ResolveEpisodeMappingRequest, RezkaSessionRefreshRequest,
-    SelectResultRequest, StartSearchRequest,
+    AlternativeSearchRequest, ContinueSearchRequest, ResolveEpisodeMappingRequest,
+    RezkaSessionRefreshRequest, SelectResultRequest, StartSearchRequest,
 };
 use media_core::{Actor, JobId};
 
@@ -17,12 +17,39 @@ pub(super) fn routes() -> Router<ApiState> {
     Router::new()
         .route("/v1/searches", post(start))
         .route("/v1/searches/continue", post(continue_search))
+        .route(
+            "/v1/jobs/{job_id}/alternative-search",
+            post(start_alternative),
+        )
         .route("/v1/selections", post(select))
         .route("/v1/rezka/session/refresh", post(refresh_rezka_session))
         .route(
             "/v1/jobs/{job_id}/episode-mapping-action",
             get(get_episode_mapping_action).post(resolve_episode_mapping),
         )
+}
+
+async fn start_alternative(
+    State(state): State<ApiState>,
+    Extension(actor): Extension<Actor>,
+    Extension(request_id): Extension<RequestId>,
+    Path(job_id): Path<String>,
+    Json(request): Json<AlternativeSearchRequest>,
+) -> Response {
+    let Ok(owner) = actor.require_user() else {
+        return ApiError::forbidden(&request_id, "operation is forbidden").into_response();
+    };
+    let Ok(job_id) = job_id.parse::<JobId>() else {
+        return ApiError::invalid_request(&request_id, "job ID is invalid").into_response();
+    };
+    match state
+        .search()
+        .start_alternative(owner, job_id, request)
+        .await
+    {
+        Ok(page) => Json(page).into_response(),
+        Err(error) => search_error(error, &request_id),
+    }
 }
 
 async fn get_episode_mapping_action(

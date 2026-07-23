@@ -31,6 +31,12 @@ pub struct ContinueSearchRequest {
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct AlternativeSearchRequest {
+    pub scope: SearchScopeDto,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SelectResultRequest {
     pub session_id: String,
     pub result_id: String,

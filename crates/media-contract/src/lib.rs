@@ -41,12 +41,12 @@ pub use plex::{
 };
 pub use release::*;
 pub use search::{
-    AmbiguousEpisodeDto, ContinueSearchRequest, EpisodeCoordinateDto, EpisodeCoordinateMappingDto,
-    EpisodeMappingActionDto, ExecutionSelectionDto, MAX_SEARCH_RESULTS_PER_PAGE, MediaKindDto,
-    ProwlarrRankingDto, ResolveEpisodeMappingRequest, RezkaSessionRefreshRequest,
-    RezkaTranslationDto, SearchPageDto, SearchResultDto, SearchScopeDto, SeasonAvailabilityDto,
-    SelectResultRequest, SeriesAvailabilityDto, SeriesLifecycleStatusDto, StartSearchRequest,
-    TrackingPromptDto,
+    AlternativeSearchRequest, AmbiguousEpisodeDto, ContinueSearchRequest, EpisodeCoordinateDto,
+    EpisodeCoordinateMappingDto, EpisodeMappingActionDto, ExecutionSelectionDto,
+    MAX_SEARCH_RESULTS_PER_PAGE, MediaKindDto, ProwlarrRankingDto, ResolveEpisodeMappingRequest,
+    RezkaSessionRefreshRequest, RezkaTranslationDto, SearchPageDto, SearchResultDto,
+    SearchScopeDto, SeasonAvailabilityDto, SelectResultRequest, SeriesAvailabilityDto,
+    SeriesLifecycleStatusDto, StartSearchRequest, TrackingPromptDto,
 };
 pub use tracking::{
     CreateTrackingRequest, EpisodeSnapshotDto, PatchTrackingRequest, TrackingDownloadDto,

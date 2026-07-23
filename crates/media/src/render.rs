@@ -76,6 +76,51 @@ pub fn search_page(value: &Value) -> String {
     output
 }
 
+/// Render an owner-scoped alternative-provider search without exposing the
+/// internal job, session, result, or continuation identifiers.
+#[must_use]
+pub fn alternative_search_page(value: &Value) -> String {
+    let source = get_str(value, "source").unwrap_or_else(|| "unknown".to_owned());
+    let results = array(value, "results");
+    if results.is_empty() {
+        return format!("Alternative results ({source})\nNo results.");
+    }
+    let columns = [
+        Column::always("#"),
+        Column::always("TITLE"),
+        Column::optional("YEAR"),
+        Column::optional("SIZE"),
+        Column::optional("SEEDERS"),
+        Column::optional("TRANSLATIONS"),
+    ];
+    let rows = results
+        .iter()
+        .take(5)
+        .enumerate()
+        .map(|(index, result)| {
+            vec![
+                Some((index + 1).to_string()),
+                get_str(result, "title"),
+                get_u64(result, "year").map(|year| year.to_string()),
+                get_u64(result, "size_bytes").map(format_size),
+                get_i64(result, "seeders").map(|seeders| seeders.to_string()),
+                translations_summary(result),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let mut output = format!(
+        "Alternative results ({source})\n\n{}",
+        table(&columns, &rows)
+    );
+    if value
+        .get("continuation")
+        .is_some_and(|continuation| continuation.is_string())
+    {
+        output.push_str("\n\nMore results are available.");
+    }
+    output
+}
+
 /// Render a single job as a key-value block. `action` labels a confirmation
 /// (for example `Created job`); `None` renders a plain `Job` view.
 #[must_use]
@@ -638,7 +683,10 @@ fn array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
 
 #[cfg(test)]
 mod tests {
-    use super::{job, job_list, queue_status, release, search_page, tracking, tracking_list};
+    use super::{
+        alternative_search_page, job, job_list, queue_status, release, search_page, tracking,
+        tracking_list,
+    };
     use serde_json::json;
 
     #[test]
@@ -940,6 +988,30 @@ mod tests {
             "results": []
         }));
         assert!(rendered.ends_with("No results."));
+    }
+
+    #[test]
+    fn alternative_search_page_hides_all_internal_identifiers() {
+        let rendered = alternative_search_page(&json!({
+            "api_version": "v1",
+            "session_id": "018f3f86-7b4c-7b4f-9b6a-6d62f45bb112",
+            "source": "prowlarr",
+            "expires_at": "2026-07-13T12:00:00Z",
+            "continuation": "018f3f86-7b4c-7b4f-9b6a-6d62f45bb112:5",
+            "results": [{
+                "source": "prowlarr",
+                "result_id": "018f3f86-7b4c-7b4f-9b6a-6d62f45bb113",
+                "title": "Movie",
+                "size_bytes": 2_147_483_648u64,
+                "seeders": 12
+            }]
+        }));
+
+        assert!(rendered.contains("Alternative results (prowlarr)"));
+        assert!(rendered.contains("Movie"));
+        assert!(rendered.contains("More results are available"));
+        assert!(!rendered.contains("018f3f86"));
+        assert!(!rendered.contains("RESULT"));
     }
 
     #[test]

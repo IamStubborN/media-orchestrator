@@ -6,8 +6,9 @@ use axum::{body::Body, http::Request};
 use http_body_util::BodyExt as _;
 use media_api::{SearchError, SearchService, router};
 use media_contract::{
-    ContinueSearchRequest, ExecutionSelectionDto, JobDto, JobStateDto, NotifyScopeDto, ProviderDto,
-    SearchPageDto, SearchResultDto, SelectResultRequest, StartSearchRequest,
+    AlternativeSearchRequest, ContinueSearchRequest, ExecutionSelectionDto, JobDto, JobStateDto,
+    NotifyScopeDto, ProviderDto, SearchPageDto, SearchResultDto, SelectResultRequest,
+    StartSearchRequest,
 };
 use media_core::{
     PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole, JobId, OperationKey, RUNNER_CLIENT_ID,
@@ -40,6 +41,16 @@ impl SearchService for FakeSearchService {
     ) -> Result<SearchPageDto, SearchError> {
         self.owners.lock().unwrap().push(owner);
         Ok(page(ProviderDto::Rezka, None))
+    }
+
+    async fn start_alternative(
+        &self,
+        owner: UserId,
+        _: JobId,
+        _: AlternativeSearchRequest,
+    ) -> Result<SearchPageDto, SearchError> {
+        self.owners.lock().unwrap().push(owner);
+        Ok(page(ProviderDto::Prowlarr, None))
     }
 
     async fn select(
@@ -97,6 +108,27 @@ impl SearchService for FakeSearchService {
             notify_scope: NotifyScopeDto::Initiator,
         })
     }
+}
+
+#[tokio::test]
+async fn authenticated_owner_can_start_an_alternative_provider_search() {
+    let service = Arc::new(FakeSearchService::default());
+    let response = app(service.clone())
+        .oneshot(post(
+            "/v1/jobs/018f3f86-7b4c-7b4f-9b6a-6d62f45bb111/alternative-search",
+            VALID_TOKEN,
+            serde_json::json!({
+                "scope":{"platform":"telegram","chat_id":"42"}
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["source"], "prowlarr");
+    assert_eq!(service.owners.lock().unwrap().as_slice(), &[PRIMARY_USER_ID]);
 }
 
 fn page(source: ProviderDto, continuation: Option<&str>) -> SearchPageDto {

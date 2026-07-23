@@ -678,6 +678,87 @@ async fn search_continue_and_download_use_stable_json_and_exact_selection() {
 }
 
 #[tokio::test]
+async fn jobs_alternatives_uses_owner_scope_and_hides_ids_in_human_output() {
+    const JOB_ID: &str = "018f3f86-7b4c-7b4f-9b6a-6d62f45bb111";
+    let router = Router::new().route(
+        "/v1/jobs/{job_id}/alternative-search",
+        any(|request: Request| async move {
+            let valid = request.method() == Method::POST
+                && request.headers().contains_key("authorization")
+                && request.headers().contains_key("x-request-id")
+                && !request.headers().contains_key("idempotency-key");
+            let body = to_bytes(request.into_body(), 64 * 1024).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            if valid
+                && body
+                    == serde_json::json!({
+                        "scope":{"platform":"cli","chat_id":"local"}
+                    })
+            {
+                json_response(
+                    StatusCode::OK,
+                    r#"{
+                    "api_version":"v1",
+                    "session_id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb112",
+                    "source":"prowlarr",
+                    "expires_at":"2026-07-13T12:00:00Z",
+                    "continuation":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb112:5",
+                    "results":[{
+                        "source":"prowlarr",
+                        "result_id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb113",
+                        "title":"Movie",
+                        "size_bytes":100,
+                        "seeders":2,
+                        "ranking":{
+                            "exact_title":true,
+                            "exact_season":true,
+                            "quality_preference":0,
+                            "language_preference":0,
+                            "seeders":2,
+                            "size_bytes":100,
+                            "codec_preference":0,
+                            "release_group_preference":0
+                        }
+                    }]
+                }"#,
+                )
+            } else {
+                json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#)
+            }
+        }),
+    );
+    let server = TestServer::start(router).await;
+    let token_file = SecretFile::new("cli-secret");
+
+    let json = command_output(command(
+        &server,
+        &token_file,
+        ["jobs", "alternatives", JOB_ID, "--json"],
+    ))
+    .await
+    .unwrap();
+    let human = command_output(command(
+        &server,
+        &token_file,
+        ["jobs", "alternatives", JOB_ID],
+    ))
+    .await
+    .unwrap();
+    server.stop().await;
+
+    assert!(json.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&json.stdout).unwrap()["source"],
+        "prowlarr"
+    );
+    assert!(human.status.success());
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(human.contains("Alternative results (prowlarr)"));
+    assert!(human.contains("Movie"));
+    assert!(!human.contains("018f3f86"));
+}
+
+#[tokio::test]
 async fn jobs_list_show_and_cancel_use_json_http_contracts() {
     let router = Router::new()
         .route(
