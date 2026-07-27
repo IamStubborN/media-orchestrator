@@ -255,6 +255,43 @@ fn missing_episode_remains_eligible_after_a_later_episode_is_known() {
     });
 }
 
+#[test]
+fn scheduler_does_not_backfill_seasons_older_than_the_tracked_season() {
+    block_on(async {
+        let due = NewTrackingSubscription::new(
+            TrackingId::new(),
+            PRIMARY_USER_ID,
+            NewTrackingCommand {
+                provider: Provider::Rezka,
+                title: "Long-running Show".to_owned(),
+                translation: "release-calendar".to_owned(),
+                known_episodes: vec![
+                    EpisodeSnapshot::new(1, 1).unwrap(),
+                    EpisodeSnapshot::new(9, 9).unwrap(),
+                ],
+                scope: TrackingScope::Personal,
+                series_ongoing: true,
+                download: None,
+            },
+        )
+        .unwrap()
+        .into_persisted();
+        let store = Arc::new(ScheduleStore {
+            due,
+            discovered: Mutex::new(Vec::new()),
+        });
+        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery))
+            .with_availability(Arc::new(Availability));
+
+        runtime
+            .run_once(time::OffsetDateTime::now_utc(), 10)
+            .await
+            .unwrap();
+
+        assert!(store.discovered.lock().unwrap().is_empty());
+    });
+}
+
 struct DownloadDiscovery;
 
 #[async_trait::async_trait]

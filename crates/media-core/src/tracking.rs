@@ -659,6 +659,11 @@ impl TrackingRuntime {
                     .max()
                     .copied()
             });
+            let tracked_season = tracking
+                .known_episodes()
+                .iter()
+                .map(|episode| episode.season())
+                .max();
             let mut pending_availability = false;
             for episode in discovery.episodes().iter().copied() {
                 let already_known = if tracking.download().is_some() {
@@ -666,7 +671,10 @@ impl TrackingRuntime {
                 } else {
                     tracking.known_episodes().contains(&episode)
                 };
-                if already_known || selected_season.is_some_and(|season| episode.season() != season)
+                if already_known
+                    || selected_season.is_some_and(|season| episode.season() != season)
+                    || (tracking.download().is_none()
+                        && tracked_season.is_some_and(|season| episode.season() < season))
                 {
                     continue;
                 }

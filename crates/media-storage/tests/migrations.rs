@@ -309,8 +309,8 @@ async fn a_failed_migration_explicitly_rolls_back_partial_schema() {
     );
     assert_eq!(
         names.last().map(String::as_str),
-        Some("m20260727_000030_recheck_recent_calendar_discoveries"),
-        "calendar discovery recheck must remain the latest schema change",
+        Some("m20260727_000031_remove_older_season_backfill"),
+        "older-season backfill cleanup must remain the latest schema change",
     );
     for migration in migrations {
         assert_eq!(
@@ -615,7 +615,7 @@ async fn structured_notifications_migration_preserves_legacy_rows_and_enforces_v
     )
     .await;
 
-    Migrator::down(db, Some(7)).await.unwrap();
+    Migrator::down(db, Some(8)).await.unwrap();
 
     let retained_rows = query(
         db,
@@ -905,7 +905,7 @@ async fn detailed_notifications_migration_preserves_legacy_payloads_and_validate
     )
     .await;
 
-    Migrator::down(db, Some(4)).await.unwrap();
+    Migrator::down(db, Some(5)).await.unwrap();
 
     let normalized = query(
         db,
@@ -1246,6 +1246,114 @@ async fn recent_delivered_calendar_discovery_is_rechecked_without_touching_older
         serde_json::json!([
             {"season": 3, "episode": 4},
             {"season": 3, "episode": 5}
+        ])
+    );
+}
+
+#[tokio::test]
+async fn older_season_backfill_is_removed_without_touching_existing_history() {
+    let test_db = TestDatabase::start().await;
+    let db = test_db.connection();
+    Migrator::up(db, Some(30)).await.unwrap();
+
+    execute(
+        db,
+        "INSERT INTO tracking_subscriptions
+           (id, owner_id, provider, title, translation, known_episodes, scope, created_operation_key)
+         VALUES
+           ('00000000-0000-0000-0000-000000000585',
+            '00000000-0000-0000-0000-000000000001',
+            'rezka', 'Long-running Show', 'release-calendar',
+            '[
+              {\"season\":1,\"episode\":1},
+              {\"season\":1,\"episode\":2},
+              {\"season\":9,\"episode\":9}
+            ]'::jsonb,
+            'personal', decode(repeat('58', 32), 'hex'));
+         INSERT INTO tracking_discoveries (id, tracking_id, season, episode)
+         VALUES
+           ('00000000-0000-0000-0000-000000000586',
+            '00000000-0000-0000-0000-000000000585', 1, 2);
+         INSERT INTO notification_outbox
+           (id, aggregate_type, aggregate_id, event_type, recipient, source_dedupe_key,
+            payload, delivered_at)
+         VALUES
+           ('00000000-0000-0000-0000-000000000587', 'tracking',
+            '00000000-0000-0000-0000-000000000585', 'future-episode-found', 'primary',
+            uuid_send('00000000-0000-0000-0000-000000000586'::uuid),
+            '{
+              \"event_type\":\"media.source-choice\",
+              \"schema_version\":1,
+              \"card_key\":\"tracking:00000000-0000-0000-0000-000000000585:1:2\",
+              \"tracking_id\":\"00000000-0000-0000-0000-000000000585\",
+              \"title\":\"Long-running Show\",
+              \"season\":1,
+              \"episode\":2,
+              \"actions\":[\"rezka\"]
+            }'::jsonb, now())",
+    )
+    .await
+    .unwrap();
+
+    Migrator::up(db, Some(1)).await.unwrap();
+
+    let known = query(
+        db,
+        "SELECT known_episodes FROM tracking_subscriptions
+         WHERE id = '00000000-0000-0000-0000-000000000585'",
+    )
+    .await
+    .pop()
+    .unwrap()
+    .try_get::<serde_json::Value>("", "known_episodes")
+    .unwrap();
+    assert_eq!(
+        known,
+        serde_json::json!([
+            {"season": 1, "episode": 1},
+            {"season": 9, "episode": 9}
+        ])
+    );
+    assert!(
+        query(
+            db,
+            "SELECT id FROM tracking_discoveries
+             WHERE id = '00000000-0000-0000-0000-000000000586'",
+        )
+        .await
+        .is_empty()
+    );
+    assert_eq!(
+        query(
+            db,
+            "SELECT last_error_code FROM notification_outbox
+             WHERE id = '00000000-0000-0000-0000-000000000587'",
+        )
+        .await
+        .pop()
+        .unwrap()
+        .try_get::<String>("", "last_error_code")
+        .unwrap(),
+        "superseded_older_season:1:2"
+    );
+
+    Migrator::down(db, Some(1)).await.unwrap();
+    let restored = query(
+        db,
+        "SELECT known_episodes FROM tracking_subscriptions
+         WHERE id = '00000000-0000-0000-0000-000000000585'",
+    )
+    .await
+    .pop()
+    .unwrap()
+    .try_get::<serde_json::Value>("", "known_episodes")
+    .unwrap();
+    assert_eq!(
+        restored,
+        serde_json::json!([
+            {"season": 1, "episode": 1},
+            {"season": 9, "episode": 9},
+            {"season": 1, "episode": 2}
         ])
     );
 }
