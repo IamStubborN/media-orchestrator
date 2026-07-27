@@ -17,6 +17,7 @@ const MAX_TORRENT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SOURCE_REDIRECTS: u8 = 5;
 const METADATA_ATTEMPTS: usize = 240;
 const METADATA_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const MANAGED_EPISODE_TAG: &str = "media-orchestrator-episode";
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum QbittorrentErrorCode {
@@ -254,6 +255,7 @@ pub enum TorrentState {
 pub struct TorrentSnapshot {
     pub name: String,
     pub state: TorrentState,
+    pub managed_episode: bool,
     pub progress: f64,
     pub amount_left: u64,
     pub downloaded_bytes: Option<u64>,
@@ -371,6 +373,18 @@ impl QbittorrentClient {
                 select_episode_file_ids(&files, episode)?;
                 return Ok(handle);
             }
+            Ok(snapshot) if snapshot.managed_episode => {
+                let result = async {
+                    self.stop(&handle).await?;
+                    self.configure_new_episode_torrent(&handle, episode).await
+                }
+                .await;
+                if let Err(error) = result {
+                    self.delete_new_torrent(&handle).await;
+                    return Err(error);
+                }
+                return Ok(handle);
+            }
             Ok(_) => {
                 let files = self.wait_for_torrent_files(&handle).await?;
                 let selected = select_episode_file_ids(&files, episode)?;
@@ -446,6 +460,7 @@ impl QbittorrentClient {
         };
         let form = if stopped {
             form.text("stopped", "true")
+                .text("tags", MANAGED_EPISODE_TAG)
         } else {
             form
         };
@@ -650,6 +665,10 @@ impl QbittorrentClient {
         Ok(TorrentSnapshot {
             name: torrent.name,
             state,
+            managed_episode: torrent
+                .tags
+                .split(',')
+                .any(|tag| tag.trim() == MANAGED_EPISODE_TAG),
             progress: torrent.progress,
             amount_left: torrent.amount_left,
             downloaded_bytes: non_negative(torrent.completed)
@@ -917,6 +936,8 @@ struct RawTorrent {
     hash: String,
     name: String,
     category: String,
+    #[serde(default)]
+    tags: String,
     state: String,
     progress: f64,
     amount_left: u64,

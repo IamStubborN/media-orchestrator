@@ -312,6 +312,116 @@ async fn magnet_metadata_is_fetched_before_selecting_episode_files() {
 }
 
 #[tokio::test]
+async fn managed_episode_torrent_resumes_exact_selection_after_retry() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/app/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("v5.2.3"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/categories"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "media-tv": {}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/info"))
+        .and(query_param("hashes", TORRENT_INFO_HASH))
+        .and(query_param("category", "media-tv"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "hash": TORRENT_INFO_HASH,
+                "name": "Example Show S02",
+                "category": "media-tv",
+                "tags": "media-orchestrator-episode",
+                "state": "stoppedDL",
+                "progress": 0.0,
+                "amount_left": 2_000,
+                "downloaded": 0,
+                "completed": 0,
+                "size": 2_000,
+                "content_path": "/downloads/media-tv/Example Show S02",
+                "save_path": "/downloads/media-tv/"
+            }])),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/files"))
+        .and(query_param("hash", TORRENT_INFO_HASH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {
+                "index": 0,
+                "name": "Example Show/Example.Show.S02E06.mkv",
+                "priority": 1
+            },
+            {
+                "index": 1,
+                "name": "Example Show/Example.Show.S02E07.mkv",
+                "priority": 1
+            }
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/filePrio"))
+        .and(body_string_contains("priority=0"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/filePrio"))
+        .and(body_string_contains("priority=1"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/stop"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/start"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = QbittorrentClient::connect(config(&server)).await.unwrap();
+    let selection = ExplicitTorrentSelection::new(
+        "prowlarr:3:indexer-guid-a",
+        TORRENT_INFO_HASH,
+        format!("magnet:?xt=urn:btih:{TORRENT_INFO_HASH}"),
+    )
+    .unwrap();
+
+    client
+        .submit_episode_to_category(
+            selection,
+            "media-tv",
+            EpisodeFileSelection::new(2, 7).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.url.path() != "/api/v2/torrents/add")
+    );
+}
+
+#[tokio::test]
 async fn completed_season_pack_discovers_only_the_requested_episode() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
