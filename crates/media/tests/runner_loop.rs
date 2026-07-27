@@ -486,6 +486,14 @@ async fn cancellation_after_execution_still_runs_cleanup_before_terminal_transit
         })
         .collect::<Vec<_>>();
     assert_eq!(transitions, vec![JobStateDto::Cancelled]);
+    assert!(!api.events.lock().unwrap().iter().any(|event| matches!(
+        event,
+        RunnerEventDto::StageCompleted {
+            task_ordinal: 2_000_000_000,
+            stage_name,
+            ..
+        } if stage_name == "execution"
+    )));
 }
 
 /// Builds a lease whose TTL (via `expires_at`) is `seconds` from now, so the

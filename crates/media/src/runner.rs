@@ -1941,9 +1941,11 @@ pub async fn run_single_iteration(
     let _ = heartbeat.await;
     let outcome = match outcome {
         Ok(outcome) => {
-            control
-                .stage_completed(EXECUTION_TASK_ORDINAL, "execution", EXECUTION_STAGE_ORDINAL)
-                .await?;
+            if !matches!(outcome, ExecutionOutcome::Cancelled) {
+                control
+                    .stage_completed(EXECUTION_TASK_ORDINAL, "execution", EXECUTION_STAGE_ORDINAL)
+                    .await?;
+            }
             outcome
         }
         Err(error) => {
