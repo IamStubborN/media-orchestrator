@@ -1,6 +1,8 @@
-use std::{cmp::Reverse, fmt, time::Duration};
+use std::{cmp::Reverse, collections::HashSet, fmt, io::Cursor, time::Duration};
 
 use futures_util::StreamExt;
+use futures_util::future::join_all;
+use quick_xml::{Reader, XmlVersion, events::Event};
 use reqwest::StatusCode;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
@@ -128,6 +130,40 @@ pub struct MediaQuery {
     pub preferred_languages: Vec<String>,
     pub preferred_codecs: Vec<String>,
     pub preferred_release_groups: Vec<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct EpisodeAvailabilityQuery {
+    pub titles: Vec<String>,
+    pub season: u32,
+    pub episode: u32,
+}
+
+impl EpisodeAvailabilityQuery {
+    pub fn new(titles: Vec<String>, season: u32, episode: u32) -> Result<Self, ProwlarrError> {
+        let mut seen = HashSet::new();
+        let titles = titles
+            .into_iter()
+            .filter_map(|title| {
+                let title = title.trim().to_owned();
+                if title.is_empty() {
+                    return None;
+                }
+                let normalized = title.to_lowercase();
+                seen.insert(normalized).then_some(title)
+            })
+            .collect::<Vec<_>>();
+        if titles.is_empty() || season == 0 || episode == 0 {
+            return Err(ProwlarrError::InvalidRequest {
+                message: "episode availability query is incomplete",
+            });
+        }
+        Ok(Self {
+            titles,
+            season,
+            episode,
+        })
+    }
 }
 
 impl MediaQuery {
@@ -374,6 +410,110 @@ impl ProwlarrClient {
         })
     }
 
+    pub async fn episode_available(
+        &self,
+        query: &EpisodeAvailabilityQuery,
+    ) -> Result<bool, ProwlarrError> {
+        let indexers = self.enabled_torrent_indexers().await?;
+        if indexers.is_empty() {
+            return Err(ProwlarrError::ProviderResponse {
+                status: StatusCode::OK,
+            });
+        }
+
+        let mut first_error = None;
+        for title in &query.titles {
+            let outcomes = join_all(indexers.iter().map(|indexer_id| {
+                self.search_indexer_episode(*indexer_id, title, query.season, query.episode)
+            }))
+            .await;
+            for outcome in outcomes {
+                match outcome {
+                    Ok(true) => return Ok(true),
+                    Ok(false) => {}
+                    Err(error) if first_error.is_none() => first_error = Some(error),
+                    Err(_) => {}
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(false),
+        }
+    }
+
+    async fn enabled_torrent_indexers(&self) -> Result<Vec<i32>, ProwlarrError> {
+        let endpoint = self.config.base_url.join("api/v1/indexer").map_err(|_| {
+            ProwlarrError::Configuration {
+                message: "indexer endpoint could not be constructed",
+            }
+        })?;
+        let response = self
+            .client
+            .get(endpoint)
+            .header("X-Api-Key", self.config.api_key.expose_secret())
+            .send()
+            .await
+            .map_err(|_| ProwlarrError::Transport)?;
+        let status = response.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(ProwlarrError::Unauthorized);
+        }
+        if !status.is_success() {
+            return Err(ProwlarrError::ProviderResponse { status });
+        }
+        let body = read_capped(response, MAX_SEARCH_RESPONSE_BYTES)
+            .await
+            .ok_or(ProwlarrError::ProviderResponse { status })?;
+        let indexers = serde_json::from_slice::<Vec<RawIndexer>>(&body)
+            .map_err(|_| ProwlarrError::ProviderResponse { status })?;
+        Ok(indexers
+            .into_iter()
+            .filter(|indexer| indexer.enable && indexer.protocol == "torrent")
+            .map(|indexer| indexer.id)
+            .collect())
+    }
+
+    async fn search_indexer_episode(
+        &self,
+        indexer_id: i32,
+        title: &str,
+        season: u32,
+        episode: u32,
+    ) -> Result<bool, ProwlarrError> {
+        let mut endpoint = self
+            .config
+            .base_url
+            .join(&format!("api/v1/indexer/{indexer_id}/newznab"))
+            .map_err(|_| ProwlarrError::Configuration {
+                message: "episode search endpoint could not be constructed",
+            })?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("t", "tvsearch")
+            .append_pair("q", title)
+            .append_pair("season", &season.to_string())
+            .append_pair("ep", &episode.to_string());
+        let response = self
+            .client
+            .get(endpoint)
+            .header("X-Api-Key", self.config.api_key.expose_secret())
+            .send()
+            .await
+            .map_err(|_| ProwlarrError::Transport)?;
+        let status = response.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(ProwlarrError::Unauthorized);
+        }
+        if !status.is_success() {
+            return Err(ProwlarrError::ProviderResponse { status });
+        }
+        let body = read_capped(response, MAX_SEARCH_RESPONSE_BYTES)
+            .await
+            .ok_or(ProwlarrError::ProviderResponse { status })?;
+        xml_has_usable_item(&body).ok_or(ProwlarrError::ProviderResponse { status })
+    }
+
     async fn resolve_info_hash(&self, download_url: &str) -> Option<String> {
         let url = Url::parse(download_url).ok()?;
         if !same_origin(&self.config.base_url, &url) {
@@ -391,6 +531,47 @@ impl ProwlarrClient {
         }
         let body = read_capped(response, MAX_TORRENT_BYTES).await?;
         torrent_info_hash(&body)
+    }
+}
+
+fn xml_has_usable_item(body: &[u8]) -> Option<bool> {
+    let mut reader = Reader::from_reader(Cursor::new(body));
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut in_item = false;
+    let mut in_link = false;
+    loop {
+        match reader.read_event_into(&mut buffer).ok()? {
+            Event::Start(event) if event.name().as_ref() == b"item" => in_item = true,
+            Event::End(event) if event.name().as_ref() == b"item" => {
+                in_item = false;
+                in_link = false;
+            }
+            Event::Start(event) if in_item && event.name().as_ref() == b"link" => in_link = true,
+            Event::End(event) if event.name().as_ref() == b"link" => in_link = false,
+            Event::Empty(event) if in_item && event.name().as_ref() == b"enclosure" => {
+                for attribute in event.attributes() {
+                    let attribute = attribute.ok()?;
+                    if attribute.key.as_ref() == b"url"
+                        && !attribute
+                            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+                            .ok()?
+                            .trim()
+                            .is_empty()
+                    {
+                        return Some(true);
+                    }
+                }
+            }
+            Event::Text(text) if in_item && in_link => {
+                if !text.decode().ok()?.trim().is_empty() {
+                    return Some(true);
+                }
+            }
+            Event::Eof => return Some(false),
+            _ => {}
+        }
+        buffer.clear();
     }
 }
 
@@ -528,6 +709,14 @@ struct RawRelease {
     magnet_url: Option<String>,
     download_url: Option<String>,
     sub_group: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawIndexer {
+    id: i32,
+    enable: bool,
+    protocol: String,
 }
 
 impl ProwlarrResult {

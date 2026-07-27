@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use media_integrations::prowlarr::{
-    MediaQuery, ProwlarrClient, ProwlarrConfig, ProwlarrErrorCode, SearchPageRequest, SearchSession,
+    EpisodeAvailabilityQuery, MediaQuery, ProwlarrClient, ProwlarrConfig, ProwlarrErrorCode,
+    SearchPageRequest, SearchSession,
 };
 use secrecy::SecretString;
 use url::Url;
@@ -84,6 +85,104 @@ fn releases() -> serde_json::Value {
             "protocol": "usenet"
         }
     ])
+}
+
+fn indexers(ids: &[i32]) -> serde_json::Value {
+    serde_json::Value::Array(
+        ids.iter()
+            .map(|id| {
+                serde_json::json!({
+                    "id": id,
+                    "enable": true,
+                    "protocol": "torrent"
+                })
+            })
+            .collect(),
+    )
+}
+
+const EMPTY_FEED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss><channel><title>Prowlarr</title></channel></rss>"#;
+
+const AVAILABLE_FEED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss><channel><title>Prowlarr</title><item><title>Example Show S03E05</title>
+<link>https://prowlarr.invalid/api/v1/indexer/7/download?id=one</link>
+<enclosure url="https://prowlarr.invalid/api/v1/indexer/7/download?id=one" type="application/x-bittorrent" />
+</item></channel></rss>"#;
+
+#[tokio::test]
+async fn exact_episode_probe_uses_enabled_indexers_and_accepts_any_usable_result() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/indexer"))
+        .and(header("x-api-key", "prowlarr-secret"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(indexers(&[3, 7])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/indexer/3/newznab"))
+        .and(query_param("t", "tvsearch"))
+        .and(query_param("q", "Example Show"))
+        .and(query_param("season", "3"))
+        .and(query_param("ep", "5"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/indexer/7/newznab"))
+        .and(query_param("t", "tvsearch"))
+        .and(query_param("q", "Example Show"))
+        .and(query_param("season", "3"))
+        .and(query_param("ep", "5"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(AVAILABLE_FEED))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let query = EpisodeAvailabilityQuery::new(vec!["Example Show".to_owned()], 3, 5).unwrap();
+    assert!(
+        ProwlarrClient::new(config(&server))
+            .unwrap()
+            .episode_available(&query)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn exact_episode_probe_distinguishes_empty_results_from_provider_failure() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/indexer"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(indexers(&[3])))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/indexer/3/newznab"))
+        .and(query_param("q", "Unavailable Show"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(EMPTY_FEED))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/indexer/3/newznab"))
+        .and(query_param("q", "Broken Show"))
+        .respond_with(ResponseTemplate::new(429))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = ProwlarrClient::new(config(&server)).unwrap();
+    let unavailable =
+        EpisodeAvailabilityQuery::new(vec!["Unavailable Show".to_owned()], 3, 5).unwrap();
+    assert!(!client.episode_available(&unavailable).await.unwrap());
+
+    let broken = EpisodeAvailabilityQuery::new(vec!["Broken Show".to_owned()], 3, 5).unwrap();
+    let error = client.episode_available(&broken).await.unwrap_err();
+    assert_eq!(error.code(), ProwlarrErrorCode::ProviderResponse);
 }
 
 #[tokio::test]
