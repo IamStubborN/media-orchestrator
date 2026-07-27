@@ -6,7 +6,7 @@ use media_core::{
     MediaNotificationPublication, MediaNotificationResult, MediaNotificationStage,
     MediaNotificationState, MediaNotificationSubtitles, MediaNotificationVideo,
     NotificationDelivery, NotificationEventType, NotificationId, NotificationRecipient,
-    SourceChoiceNotification, TrackingId,
+    SourceChoiceAction, SourceChoiceNotification, TrackingId,
 };
 use media_integrations::hermes::{HermesWebhookClient, HermesWebhookConfig, WebhookError};
 use secrecy::SecretString;
@@ -46,6 +46,11 @@ fn source_choice_delivery() -> NotificationDelivery {
             "Jobless Reincarnation".to_owned(),
             3,
             5,
+            vec![
+                SourceChoiceAction::All,
+                SourceChoiceAction::Rezka,
+                SourceChoiceAction::Prowlarr,
+            ],
         )
         .unwrap(),
         1,

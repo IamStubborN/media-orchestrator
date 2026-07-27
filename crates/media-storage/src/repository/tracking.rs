@@ -8,8 +8,8 @@ use media_core::{
     MediaNotificationState, MediaNotificationSubtitles, MediaNotificationVideo,
     NewTrackingSubscription, NotificationDelivery, NotificationEventType, NotificationId,
     NotificationOutboxPort, NotificationRecipient, OperationKey, PortError, Provider,
-    SourceChoiceNotification, TrackingDownload, TrackingDownloadPatch, TrackingId,
-    TrackingScheduleStore, TrackingScope, TrackingStore, TrackingSubscription, UserId,
+    SourceChoiceAction, SourceChoiceNotification, TrackingDownload, TrackingDownloadPatch,
+    TrackingId, TrackingScheduleStore, TrackingScope, TrackingStore, TrackingSubscription, UserId,
     SECONDARY_USER_ID,
 };
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
@@ -79,6 +79,11 @@ impl SeaOrmTrackingStore {
                 title,
                 episode.season(),
                 episode.episode(),
+                vec![
+                    SourceChoiceAction::All,
+                    SourceChoiceAction::Rezka,
+                    SourceChoiceAction::Prowlarr,
+                ],
             )
             .map_err(|error| sea_orm::DbErr::Type(error.to_string()))?;
             let payload = source_choice_payload(&source_choice);
@@ -585,15 +590,25 @@ fn source_choice_from_payload(
         .and_then(serde_json::Value::as_u64)
         .and_then(|value| u32::try_from(value).ok())
         .ok_or(PortError::Infrastructure)?;
-    if payload.get("actions") != Some(&serde_json::json!(["all", "rezka", "prowlarr"])) {
-        return Err(PortError::Infrastructure);
-    }
+    let actions = payload
+        .get("actions")
+        .and_then(serde_json::Value::as_array)
+        .ok_or(PortError::Infrastructure)?
+        .iter()
+        .map(|value| match value.as_str() {
+            Some("all") => Ok(SourceChoiceAction::All),
+            Some("rezka") => Ok(SourceChoiceAction::Rezka),
+            Some("prowlarr") => Ok(SourceChoiceAction::Prowlarr),
+            _ => Err(PortError::Infrastructure),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     SourceChoiceNotification::new(
         string("card_key")?.to_owned(),
         tracking_id,
         string("title")?.to_owned(),
         season,
         episode,
+        actions,
     )
     .map_err(|_| PortError::Infrastructure)
 }

@@ -27,7 +27,7 @@ pub struct SourceChoiceNotification {
     title: String,
     season: u32,
     episode: u32,
-    actions: [SourceChoiceAction; 3],
+    actions: Vec<SourceChoiceAction>,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
@@ -308,6 +308,8 @@ pub enum NotificationValidationError {
     InvalidStorageProgress,
     #[error("source choice episode is invalid")]
     InvalidSourceChoiceEpisode,
+    #[error("source choice actions are invalid")]
+    InvalidSourceChoiceActions,
 }
 
 impl SourceChoiceNotification {
@@ -317,6 +319,7 @@ impl SourceChoiceNotification {
         title: String,
         season: u32,
         episode: u32,
+        actions: Vec<SourceChoiceAction>,
     ) -> Result<Self, NotificationValidationError> {
         if !valid_card_key(&card_key) {
             return Err(NotificationValidationError::InvalidCardKey);
@@ -325,17 +328,25 @@ impl SourceChoiceNotification {
         if episode == 0 {
             return Err(NotificationValidationError::InvalidSourceChoiceEpisode);
         }
+        if !matches!(
+            actions.as_slice(),
+            [SourceChoiceAction::Rezka]
+                | [SourceChoiceAction::Prowlarr]
+                | [
+                    SourceChoiceAction::All,
+                    SourceChoiceAction::Rezka,
+                    SourceChoiceAction::Prowlarr
+                ]
+        ) {
+            return Err(NotificationValidationError::InvalidSourceChoiceActions);
+        }
         Ok(Self {
             card_key,
             tracking_id,
             title,
             season,
             episode,
-            actions: [
-                SourceChoiceAction::All,
-                SourceChoiceAction::Rezka,
-                SourceChoiceAction::Prowlarr,
-            ],
+            actions,
         })
     }
 
@@ -365,7 +376,7 @@ impl SourceChoiceNotification {
     }
 
     #[must_use]
-    pub const fn actions(&self) -> &[SourceChoiceAction; 3] {
+    pub fn actions(&self) -> &[SourceChoiceAction] {
         &self.actions
     }
 }
@@ -1158,8 +1169,9 @@ mod tests {
         MediaNotificationMedia, MediaNotificationProcessing, MediaNotificationProcessingMode,
         MediaNotificationProgress, MediaNotificationPublication, MediaNotificationResult,
         MediaNotificationState, MediaNotificationVideo, NotificationValidationError,
+        SourceChoiceAction, SourceChoiceNotification,
     };
-    use crate::JobId;
+    use crate::{JobId, TrackingId};
 
     fn media() -> MediaNotificationMedia {
         MediaNotificationMedia::new(
@@ -1197,6 +1209,50 @@ mod tests {
             vec![],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn source_choice_accepts_only_supported_provider_action_sets() {
+        for actions in [
+            vec![SourceChoiceAction::Rezka],
+            vec![SourceChoiceAction::Prowlarr],
+            vec![
+                SourceChoiceAction::All,
+                SourceChoiceAction::Rezka,
+                SourceChoiceAction::Prowlarr,
+            ],
+        ] {
+            assert!(
+                SourceChoiceNotification::new(
+                    "tracking:example:3:5".to_owned(),
+                    TrackingId::new(),
+                    "Example Show".to_owned(),
+                    3,
+                    5,
+                    actions,
+                )
+                .is_ok()
+            );
+        }
+
+        for actions in [
+            vec![],
+            vec![SourceChoiceAction::All],
+            vec![SourceChoiceAction::Rezka, SourceChoiceAction::Prowlarr],
+            vec![SourceChoiceAction::Prowlarr, SourceChoiceAction::Rezka],
+        ] {
+            assert_eq!(
+                SourceChoiceNotification::new(
+                    "tracking:example:3:5".to_owned(),
+                    TrackingId::new(),
+                    "Example Show".to_owned(),
+                    3,
+                    5,
+                    actions,
+                ),
+                Err(NotificationValidationError::InvalidSourceChoiceActions),
+            );
+        }
     }
 
     #[test]
