@@ -779,6 +779,8 @@ async fn only_explicit_selection_is_submitted_to_the_configured_category() {
         "savepath",
         "rename",
         "paused",
+        "stopped",
+        "tags",
         "autoTMM",
         "ratioLimit",
         "seedingTimeLimit",
