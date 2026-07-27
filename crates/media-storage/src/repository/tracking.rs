@@ -105,6 +105,15 @@ impl SeaOrmTrackingStore {
 }
 
 fn source_choice_payload(notification: &SourceChoiceNotification) -> serde_json::Value {
+    let actions = notification
+        .actions()
+        .iter()
+        .map(|action| match action {
+            SourceChoiceAction::All => "all",
+            SourceChoiceAction::Rezka => "rezka",
+            SourceChoiceAction::Prowlarr => "prowlarr",
+        })
+        .collect::<Vec<_>>();
     serde_json::json!({
         "event_type": "media.source-choice",
         "schema_version": 1,
@@ -113,7 +122,7 @@ fn source_choice_payload(notification: &SourceChoiceNotification) -> serde_json:
         "title": notification.title(),
         "season": notification.season(),
         "episode": notification.episode(),
-        "actions": ["all", "rezka", "prowlarr"],
+        "actions": actions,
     })
 }
 

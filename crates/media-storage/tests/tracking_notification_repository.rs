@@ -361,6 +361,42 @@ async fn future_discovery_updates_snapshot_and_atomically_fans_out_family_notifi
 }
 
 #[tokio::test]
+async fn future_discovery_persists_only_the_confirmed_source_action() {
+    let test_db = TestDatabase::start_migrated().await;
+    let store = SeaOrmTrackingStore::new(test_db.connection().clone());
+    let tracking = store
+        .add(
+            operation_key(),
+            new_tracking(TrackingId::new(), TrackingScope::Personal),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .record_future_episode(
+                tracking.id(),
+                EpisodeSnapshot::new(1, 5).unwrap(),
+                time::OffsetDateTime::now_utc() + time::Duration::hours(6),
+                vec![SourceChoiceAction::Rezka],
+            )
+            .await
+            .unwrap()
+    );
+
+    let payload = query(
+        test_db.connection(),
+        "SELECT payload FROM notification_outbox",
+    )
+    .await
+    .pop()
+    .unwrap()
+    .try_get::<serde_json::Value>("", "payload")
+    .unwrap();
+    assert_eq!(payload["actions"], serde_json::json!(["rezka"]));
+}
+
+#[tokio::test]
 async fn outbox_leases_once_retries_with_backoff_and_keeps_stable_delivery_id() {
     let test_db = TestDatabase::start_migrated().await;
     let tracking = SeaOrmTrackingStore::new(test_db.connection().clone());
