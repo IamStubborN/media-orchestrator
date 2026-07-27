@@ -271,6 +271,7 @@ fn lease() -> LeaseDto {
             uri: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567".to_owned(),
             media_kind: media_contract::MediaKindDto::Movie,
             season: None,
+            episode: None,
             title: "Movie".to_owned(),
         }),
         completed_task_ordinals: Vec::new(),

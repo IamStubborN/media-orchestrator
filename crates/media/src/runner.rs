@@ -468,6 +468,7 @@ struct TorrentExecution<'a> {
     uri: &'a str,
     media_kind: media_contract::MediaKindDto,
     season: Option<u16>,
+    episode: Option<u32>,
     title: &'a str,
 }
 
@@ -565,6 +566,7 @@ impl MediaJobExecutor {
                 uri,
                 media_kind,
                 season,
+                episode,
                 title,
             } => {
                 let request = TorrentExecution {
@@ -573,6 +575,7 @@ impl MediaJobExecutor {
                     uri,
                     media_kind: *media_kind,
                     season: *season,
+                    episode: *episode,
                     title,
                 };
                 self.execute_torrent(lease, control, request).await
@@ -973,7 +976,19 @@ impl MediaJobExecutor {
             media_contract::MediaKindDto::Movie => &self.torrent_movies_category,
             media_contract::MediaKindDto::Series => &self.torrent_tv_category,
         };
-        let handle = submit_torrent_with_retry(client, selection, category).await?;
+        let episode_selection = request
+            .episode
+            .map(|episode| {
+                let season = request.season.ok_or(RunnerError::Execution)?;
+                media_integrations::qbittorrent::EpisodeFileSelection::new(
+                    u32::from(season),
+                    episode,
+                )
+                .map_err(|_| RunnerError::Execution)
+            })
+            .transpose()?;
+        let handle =
+            submit_torrent_with_retry(client, selection, category, episode_selection).await?;
         control.stage_completed(0, "torrent_submit", 0).await?;
         control.stage_started(0, "torrent_monitor", 1).await?;
         // qBittorrent 5.2 can acknowledge an add request before the torrent is
@@ -1018,10 +1033,11 @@ impl MediaJobExecutor {
                 _ => tokio::time::sleep(Duration::from_secs(2)).await,
             }
         }
-        let content = client
-            .discover_content(&handle)
-            .await
-            .map_err(|_| RunnerError::Execution)?;
+        let content = match episode_selection {
+            Some(episode) => client.discover_episode_content(&handle, episode).await,
+            None => client.discover_content(&handle).await,
+        }
+        .map_err(|_| RunnerError::Execution)?;
         control.stage_completed(0, "torrent_monitor", 1).await?;
         let mut videos = content
             .files
@@ -1048,7 +1064,7 @@ impl MediaJobExecutor {
                 let Some(expected_season) = expected_season else {
                     return Ok(ExecutionOutcome::NeedsActionPlexMismatch);
                 };
-                let items = matching_episode_videos(videos, expected_season)
+                let items = torrent_series_work_items(videos, expected_season, request.episode)
                     .into_iter()
                     .map(|(path, coordinates)| (path, Some(coordinates)))
                     .collect::<Vec<_>>();
@@ -1381,13 +1397,23 @@ async fn submit_torrent_with_retry(
     client: &media_integrations::qbittorrent::QbittorrentClient,
     selection: media_integrations::qbittorrent::ExplicitTorrentSelection,
     category: &str,
+    episode: Option<media_integrations::qbittorrent::EpisodeFileSelection>,
 ) -> Result<media_integrations::qbittorrent::TorrentHandle, RunnerError> {
     const ATTEMPTS: usize = 12;
     for attempt in 1..=ATTEMPTS {
-        match client
-            .submit_selected_to_category(selection.clone(), category)
-            .await
-        {
+        let submission = match episode {
+            Some(episode) => {
+                client
+                    .submit_episode_to_category(selection.clone(), category, episode)
+                    .await
+            }
+            None => {
+                client
+                    .submit_selected_to_category(selection.clone(), category)
+                    .await
+            }
+        };
+        match submission {
             Ok(handle) => return Ok(handle),
             Err(error) if error.is_transient() && attempt < ATTEMPTS => {
                 tracing::warn!(attempt, "qBittorrent submit transport failed; retrying");
@@ -1648,6 +1674,25 @@ fn matching_episode_videos(
             (coordinates.0 == expected_season).then_some((path, coordinates))
         })
         .collect()
+}
+
+fn torrent_series_work_items(
+    mut videos: Vec<std::path::PathBuf>,
+    expected_season: u32,
+    expected_episode: Option<u32>,
+) -> Vec<(std::path::PathBuf, (u32, u32))> {
+    if let Some(expected_episode) = expected_episode {
+        return (videos.len() == 1)
+            .then(|| {
+                (
+                    videos.pop().expect("one video was checked"),
+                    (expected_season, expected_episode),
+                )
+            })
+            .into_iter()
+            .collect();
+    }
+    matching_episode_videos(videos, expected_season)
 }
 
 fn map_pipeline_outcome(outcome: media_runner::EpisodeOutcome) -> ExecutionOutcome {
@@ -2077,7 +2122,7 @@ mod tests {
         ExecutionOutcome, ProgressCheckpointGate, artifact_checkpoint, canonical_movie_name,
         combine_episode_outcome, expected_source_duration_seconds, highest_standard_variant,
         matching_episode_videos, parse_episode_coordinates, rezka_audio_language,
-        rezka_final_video_path,
+        rezka_final_video_path, torrent_series_work_items,
     };
 
     #[test]
@@ -2205,6 +2250,20 @@ mod tests {
                 ("Show.S02E01.mkv".to_owned(), (2, 1)),
                 ("Show.S02E02.mkv".to_owned(), (2, 2)),
             ]
+        );
+    }
+
+    #[test]
+    fn selectively_downloaded_episode_uses_the_requested_coordinates() {
+        let matched =
+            torrent_series_work_items(vec!["Example Show/Season 2/07.mkv".into()], 2, Some(7));
+
+        assert_eq!(
+            matched,
+            vec![(
+                std::path::PathBuf::from("Example Show/Season 2/07.mkv"),
+                (2, 7)
+            )]
         );
     }
 

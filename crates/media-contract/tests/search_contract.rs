@@ -192,12 +192,14 @@ fn runner_execution_payload_is_separate_from_public_search_results() {
         uri: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567".to_owned(),
         media_kind: MediaKindDto::Movie,
         season: None,
+        episode: None,
         title: "Exact Release".to_owned(),
     };
     let value = serde_json::to_value(execution).unwrap();
     assert_eq!(value["source"], "prowlarr");
     assert_eq!(value["media_kind"], "movie");
     assert!(value.get("season").is_none());
+    assert!(value.get("episode").is_none());
     assert!(value["uri"].as_str().unwrap().starts_with("magnet:"));
 }
 
@@ -217,6 +219,7 @@ fn legacy_prowlarr_execution_payloads_remain_deserializable() {
         ExecutionSelectionDto::Prowlarr {
             media_kind: MediaKindDto::Movie,
             season: None,
+            episode: None,
             ..
         }
     ));

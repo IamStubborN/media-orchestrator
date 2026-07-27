@@ -258,6 +258,8 @@ pub enum ExecutionSelectionDto {
         media_kind: MediaKindDto,
         #[serde(skip_serializing_if = "Option::is_none")]
         season: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        episode: Option<u32>,
         title: String,
     },
 }

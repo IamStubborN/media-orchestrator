@@ -884,6 +884,61 @@ async fn prowlarr_continues_after_a_partially_usable_provider_page() {
 }
 
 #[tokio::test]
+async fn prowlarr_selection_preserves_a_single_episode_target() {
+    let service = service(HashMap::from([(
+        ProviderDto::Prowlarr,
+        vec![ProviderPage {
+            results: vec![prowlarr_result(0)],
+            provider_continuation: None,
+        }],
+    )]));
+    let page = service
+        .start(
+            PRIMARY_USER_ID,
+            StartSearchRequest {
+                scope: telegram_scope("default", None),
+                source: ProviderDto::Prowlarr,
+                query: "Example Show".to_owned(),
+                media_kind: Some(MediaKindDto::Series),
+                season: Some(2),
+                preferred_qualities: vec![],
+                preferred_languages: vec![],
+                preferred_codecs: vec![],
+                preferred_release_groups: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+    let job = service
+        .select(
+            PRIMARY_USER_ID,
+            OperationKey::from_bytes([31; 32]),
+            SelectResultRequest {
+                session_id: page.session_id,
+                result_id: "torrent-0".to_owned(),
+                translation_id: None,
+                season: Some(2),
+                episode: Some(7),
+                scope: telegram_scope("default", None),
+            },
+        )
+        .await
+        .unwrap();
+    let execution = service.execution_for(&job.result_ref).await.unwrap();
+
+    assert!(matches!(
+        execution,
+        media_contract::ExecutionSelectionDto::Prowlarr {
+            media_kind: MediaKindDto::Series,
+            season: Some(2),
+            episode: Some(7),
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
 async fn search_session_rejects_the_same_owner_from_another_chat_or_thread() {
     let mut start = request(ProviderDto::Prowlarr);
     start.scope = telegram_scope("chat-a", Some("thread-a"));

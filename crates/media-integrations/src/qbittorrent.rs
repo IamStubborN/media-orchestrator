@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fmt,
-    path::{Component, PathBuf},
+    path::{Component, Path, PathBuf},
     time::Duration,
 };
 
@@ -15,6 +15,7 @@ use url::Url;
 
 const MAX_TORRENT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SOURCE_REDIRECTS: u8 = 5;
+const METADATA_ATTEMPTS: usize = 30;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum QbittorrentErrorCode {
@@ -213,6 +214,23 @@ impl fmt::Debug for ExplicitTorrentSelection {
     }
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct EpisodeFileSelection {
+    season: u32,
+    episode: u32,
+}
+
+impl EpisodeFileSelection {
+    pub fn new(season: u32, episode: u32) -> Result<Self, QbittorrentError> {
+        if season == 0 || episode == 0 {
+            return Err(QbittorrentError::InvalidSelection {
+                message: "season and episode must be positive",
+            });
+        }
+        Ok(Self { season, episode })
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct TorrentHandle {
     pub source_identity: String,
@@ -337,21 +355,73 @@ impl QbittorrentClient {
             .await
     }
 
+    pub async fn submit_episode_to_category(
+        &self,
+        selection: ExplicitTorrentSelection,
+        category: impl Into<String>,
+        episode: EpisodeFileSelection,
+    ) -> Result<TorrentHandle, QbittorrentError> {
+        let category = category.into();
+        self.ensure_category_exists(&category).await?;
+        let handle = torrent_handle(&selection, &category);
+        match self.monitor(&handle).await {
+            Ok(snapshot) if snapshot.state == TorrentState::Complete => {
+                let files = self.torrent_files(&handle).await?;
+                select_episode_file_ids(&files, episode)?;
+                return Ok(handle);
+            }
+            Ok(_) => {
+                let files = self.wait_for_torrent_files(&handle).await?;
+                let selected = select_episode_file_ids(&files, episode)?;
+                let active = files
+                    .iter()
+                    .filter(|file| file.priority > 0)
+                    .map(|file| file.index)
+                    .collect::<Vec<_>>();
+                if active.iter().any(|index| !selected.contains(index)) {
+                    return Err(QbittorrentError::InvalidSelection {
+                        message: "existing torrent has a different active file selection",
+                    });
+                }
+                self.set_file_priority(&handle, &selected, 1).await?;
+                self.start(&handle).await?;
+                return Ok(handle);
+            }
+            Err(QbittorrentError::TorrentNotFound) => {}
+            Err(error) => return Err(error),
+        }
+
+        self.add_selected(selection, &handle, true).await?;
+        let files = self.wait_for_torrent_files(&handle).await?;
+        let selected = select_episode_file_ids(&files, episode)?;
+        let all = files.iter().map(|file| file.index).collect::<Vec<_>>();
+        self.set_file_priority(&handle, &all, 0).await?;
+        self.set_file_priority(&handle, &selected, 1).await?;
+        self.start(&handle).await?;
+        Ok(handle)
+    }
+
     async fn submit_selected_with_category(
         &self,
         selection: ExplicitTorrentSelection,
         category: String,
     ) -> Result<TorrentHandle, QbittorrentError> {
-        let handle = TorrentHandle {
-            source_identity: selection.source_identity.clone(),
-            hash: selection.info_hash.clone(),
-            category: category.clone(),
-        };
+        let handle = torrent_handle(&selection, &category);
         match self.monitor(&handle).await {
             Ok(_) => return Ok(handle),
             Err(QbittorrentError::TorrentNotFound) => {}
             Err(error) => return Err(error),
         }
+        self.add_selected(selection, &handle, false).await?;
+        Ok(handle)
+    }
+
+    async fn add_selected(
+        &self,
+        selection: ExplicitTorrentSelection,
+        handle: &TorrentHandle,
+        paused: bool,
+    ) -> Result<(), QbittorrentError> {
         let source = if matches!(selection.uri.scheme(), "http" | "https") {
             self.resolve_http_source(selection.uri.clone(), &selection.info_hash)
                 .await?
@@ -369,10 +439,15 @@ impl QbittorrentClient {
                             message: "torrent MIME type is invalid",
                         })?,
                 )
-                .text("category", category.clone()),
+                .text("category", handle.category.clone()),
             ResolvedTorrentSource::Magnet(uri) => reqwest::multipart::Form::new()
                 .text("urls", uri.as_str().to_owned())
-                .text("category", category.clone()),
+                .text("category", handle.category.clone()),
+        };
+        let form = if paused {
+            form.text("paused", "true")
+        } else {
+            form
         };
         let mut request = self
             .client
@@ -395,7 +470,7 @@ impl QbittorrentClient {
         // and category next, so a stale or mismatched conflict still fails
         // within the bounded visibility grace.
         if status == StatusCode::CONFLICT {
-            return Ok(handle);
+            return Ok(());
         }
         if !status.is_success() {
             return Err(QbittorrentError::ProviderResponse { status });
@@ -407,7 +482,7 @@ impl QbittorrentClient {
         if !add_response_accepted(status, &body) {
             return Err(QbittorrentError::ProviderResponse { status });
         }
-        Ok(handle)
+        Ok(())
     }
 
     async fn resolve_http_source(
@@ -540,23 +615,16 @@ impl QbittorrentClient {
                 message: "torrent content is not complete",
             });
         }
-        let mut url = endpoint(&self.config.base_url, "api/v2/torrents/files")?;
-        url.query_pairs_mut().append_pair("hash", &handle.hash);
-        let response = self.get(url).await?;
-        let status = response.status();
-        let files: Vec<RawTorrentFile> = response
-            .json()
-            .await
-            .map_err(|_| QbittorrentError::ProviderResponse { status })?;
+        let files = self.torrent_files(handle).await?;
         let mut paths = Vec::with_capacity(files.len());
-        for file in files {
+        for file in files.into_iter().filter(|file| file.priority > 0) {
             let relative = PathBuf::from(file.name);
             if relative.is_absolute()
                 || relative
                     .components()
                     .any(|component| matches!(component, Component::ParentDir))
             {
-                return Err(QbittorrentError::ProviderResponse { status });
+                return Err(QbittorrentError::IdentityMismatch);
             }
             paths.push(snapshot.save_path.join(relative));
         }
@@ -564,6 +632,142 @@ impl QbittorrentClient {
             root: snapshot.content_path,
             files: paths,
         })
+    }
+
+    pub async fn discover_episode_content(
+        &self,
+        handle: &TorrentHandle,
+        episode: EpisodeFileSelection,
+    ) -> Result<TorrentContent, QbittorrentError> {
+        let snapshot = self.monitor(handle).await?;
+        if snapshot.state != TorrentState::Complete {
+            return Err(QbittorrentError::InvalidSelection {
+                message: "torrent content is not complete",
+            });
+        }
+        let files = self.torrent_files(handle).await?;
+        let selected = select_episode_file_ids(&files, episode)?;
+        let mut paths = Vec::with_capacity(selected.len());
+        for file in files
+            .into_iter()
+            .filter(|file| selected.contains(&file.index))
+        {
+            let relative = PathBuf::from(file.name);
+            if relative.is_absolute()
+                || relative
+                    .components()
+                    .any(|component| matches!(component, Component::ParentDir))
+            {
+                return Err(QbittorrentError::IdentityMismatch);
+            }
+            paths.push(snapshot.save_path.join(relative));
+        }
+        Ok(TorrentContent {
+            root: snapshot.content_path,
+            files: paths,
+        })
+    }
+
+    async fn wait_for_torrent_files(
+        &self,
+        handle: &TorrentHandle,
+    ) -> Result<Vec<RawTorrentFile>, QbittorrentError> {
+        for attempt in 1..=METADATA_ATTEMPTS {
+            match self.torrent_files(handle).await {
+                Ok(files) if !files.is_empty() => return Ok(files),
+                Ok(_) | Err(QbittorrentError::TorrentNotFound) if attempt < METADATA_ATTEMPTS => {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+                Err(QbittorrentError::ProviderResponse { status })
+                    if status == StatusCode::CONFLICT && attempt < METADATA_ATTEMPTS =>
+                {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+                Ok(_) => {
+                    return Err(QbittorrentError::InvalidSelection {
+                        message: "torrent metadata contains no files",
+                    });
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(QbittorrentError::TorrentNotFound)
+    }
+
+    async fn torrent_files(
+        &self,
+        handle: &TorrentHandle,
+    ) -> Result<Vec<RawTorrentFile>, QbittorrentError> {
+        self.validate_handle(handle)?;
+        let mut url = endpoint(&self.config.base_url, "api/v2/torrents/files")?;
+        url.query_pairs_mut().append_pair("hash", &handle.hash);
+        let response = self.get(url).await?;
+        let status = response.status();
+        response
+            .json()
+            .await
+            .map_err(|_| QbittorrentError::ProviderResponse { status })
+    }
+
+    async fn set_file_priority(
+        &self,
+        handle: &TorrentHandle,
+        indexes: &[u32],
+        priority: u8,
+    ) -> Result<(), QbittorrentError> {
+        if indexes.is_empty() {
+            return Err(QbittorrentError::InvalidSelection {
+                message: "torrent file selection must not be empty",
+            });
+        }
+        let ids = indexes
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join("|");
+        self.post_form(
+            endpoint(&self.config.base_url, "api/v2/torrents/filePrio")?,
+            &[
+                ("hash", handle.hash.as_str()),
+                ("id", ids.as_str()),
+                ("priority", &priority.to_string()),
+            ],
+        )
+        .await
+    }
+
+    async fn start(&self, handle: &TorrentHandle) -> Result<(), QbittorrentError> {
+        self.post_form(
+            endpoint(&self.config.base_url, "api/v2/torrents/start")?,
+            &[("hashes", handle.hash.as_str())],
+        )
+        .await
+    }
+
+    async fn post_form(&self, url: Url, form: &[(&str, &str)]) -> Result<(), QbittorrentError> {
+        let mut request = self
+            .client
+            .post(url)
+            .header(REFERER, self.config.base_url.as_str())
+            .form(form);
+        if let Some(cookie) = &self.cookie {
+            request = request.header(COOKIE, cookie.expose_secret());
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|_| QbittorrentError::Transport)?;
+        let status = response.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(QbittorrentError::Unauthorized);
+        }
+        if status == StatusCode::NOT_FOUND {
+            return Err(QbittorrentError::TorrentNotFound);
+        }
+        if !status.is_success() {
+            return Err(QbittorrentError::ProviderResponse { status });
+        }
+        Ok(())
     }
 
     async fn get(&self, url: Url) -> Result<reqwest::Response, QbittorrentError> {
@@ -678,7 +882,121 @@ fn non_negative(value: i64) -> Option<u64> {
 
 #[derive(Deserialize)]
 struct RawTorrentFile {
+    index: u32,
     name: String,
+    #[serde(default)]
+    priority: u8,
+}
+
+fn torrent_handle(selection: &ExplicitTorrentSelection, category: &str) -> TorrentHandle {
+    TorrentHandle {
+        source_identity: selection.source_identity.clone(),
+        hash: selection.info_hash.clone(),
+        category: category.to_owned(),
+    }
+}
+
+fn select_episode_file_ids(
+    files: &[RawTorrentFile],
+    target: EpisodeFileSelection,
+) -> Result<Vec<u32>, QbittorrentError> {
+    let exact_videos = files
+        .iter()
+        .filter(|file| is_video_path(Path::new(&file.name)))
+        .filter(|file| {
+            crate::prowlarr_episode::EpisodeCoverage::parse(&file.name)
+                .iter()
+                .any(|coverage| match coverage {
+                    crate::prowlarr_episode::EpisodeCoverage::Range {
+                        season,
+                        first,
+                        last,
+                    } => {
+                        *season == target.season
+                            && *first == target.episode
+                            && *last == target.episode
+                    }
+                    crate::prowlarr_episode::EpisodeCoverage::Set { .. } => false,
+                })
+        })
+        .collect::<Vec<_>>();
+    let videos = if exact_videos.is_empty() {
+        files
+            .iter()
+            .filter(|file| is_video_path(Path::new(&file.name)))
+            .filter(|file| numbered_episode_matches(Path::new(&file.name), target.episode))
+            .collect::<Vec<_>>()
+    } else {
+        exact_videos
+    };
+    let [video] = videos.as_slice() else {
+        return Err(QbittorrentError::InvalidSelection {
+            message: "torrent does not contain one exact file for the requested episode",
+        });
+    };
+    let video_path = Path::new(&video.name);
+    let video_stem = video_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let video_parent = video_path.parent();
+    let mut selected = vec![video.index];
+    selected.extend(
+        files
+            .iter()
+            .filter(|file| is_subtitle_path(Path::new(&file.name)))
+            .filter(|file| {
+                let path = Path::new(&file.name);
+                path.parent() == video_parent
+                    && path
+                        .file_stem()
+                        .and_then(|value| value.to_str())
+                        .is_some_and(|stem| {
+                            stem == video_stem
+                                || stem
+                                    .strip_prefix(video_stem)
+                                    .is_some_and(|suffix| suffix.starts_with('.'))
+                        })
+            })
+            .map(|file| file.index),
+    );
+    Ok(selected)
+}
+
+fn numbered_episode_matches(path: &Path, episode: u32) -> bool {
+    path.file_stem()
+        .and_then(|value| value.to_str())
+        .is_some_and(|stem| {
+            stem.split(|character: char| !character.is_alphanumeric())
+                .filter(|part| {
+                    !part.is_empty()
+                        && part.len() <= 3
+                        && part.chars().all(|character| character.is_ascii_digit())
+                })
+                .any(|part| part.parse::<u32>() == Ok(episode))
+        })
+}
+
+fn is_video_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "mkv" | "mp4" | "m4v" | "avi" | "webm" | "ts"
+            )
+        })
+}
+
+fn is_subtitle_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "srt" | "ass" | "ssa" | "vtt" | "sub"
+            )
+        })
 }
 
 fn classify_state(state: &str, progress: f64, amount_left: u64) -> TorrentState {
@@ -703,4 +1021,35 @@ fn endpoint(base_url: &Url, path: &str) -> Result<Url, QbittorrentError> {
         .map_err(|_| QbittorrentError::Configuration {
             message: "API endpoint could not be constructed",
         })
+}
+
+#[cfg(test)]
+mod episode_file_tests {
+    use super::{EpisodeFileSelection, RawTorrentFile, select_episode_file_ids};
+
+    #[test]
+    fn numbered_pack_files_can_select_one_episode_without_sxe_coordinates() {
+        let files = [
+            RawTorrentFile {
+                index: 0,
+                name: "Example Show/Season 2/06.mkv".to_owned(),
+                priority: 1,
+            },
+            RawTorrentFile {
+                index: 1,
+                name: "Example Show/Season 2/07.mkv".to_owned(),
+                priority: 1,
+            },
+            RawTorrentFile {
+                index: 2,
+                name: "Example Show/Season 2/07.en.srt".to_owned(),
+                priority: 1,
+            },
+        ];
+
+        assert_eq!(
+            select_episode_file_ids(&files, EpisodeFileSelection::new(2, 7).unwrap()).unwrap(),
+            vec![1, 2]
+        );
+    }
 }

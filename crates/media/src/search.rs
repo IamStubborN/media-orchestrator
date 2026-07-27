@@ -1757,18 +1757,42 @@ fn execution(
                 uri,
             },
         ) => {
-            if request.translation_id.is_some()
-                || request.season.is_some()
-                || request.episode.is_some()
-            {
+            if request.translation_id.is_some() {
                 return Err(SearchError::InvalidRequest);
             }
+            let (season, episode) = match searched_kind {
+                Some(MediaKindDto::Movie) => {
+                    if request.season.is_some() || request.episode.is_some() {
+                        return Err(SearchError::InvalidRequest);
+                    }
+                    (None, None)
+                }
+                Some(MediaKindDto::Series) => {
+                    if request.episode == Some(0) {
+                        return Err(SearchError::InvalidRequest);
+                    }
+                    let searched_season = searched_season.ok_or(SearchError::Infrastructure)?;
+                    let selected_season = request
+                        .season
+                        .map(|season| {
+                            u16::try_from(season).map_err(|_| SearchError::InvalidRequest)
+                        })
+                        .transpose()?
+                        .unwrap_or(searched_season);
+                    if selected_season != searched_season {
+                        return Err(SearchError::InvalidRequest);
+                    }
+                    (Some(selected_season), request.episode)
+                }
+                None => return Err(SearchError::Infrastructure),
+            };
             Ok(ExecutionSelectionDto::Prowlarr {
                 source_identity: source_identity.clone(),
                 info_hash: info_hash.clone(),
                 uri: uri.clone(),
                 media_kind: searched_kind.ok_or(SearchError::Infrastructure)?,
-                season: searched_season,
+                season,
+                episode,
                 title: title.clone(),
             })
         }
