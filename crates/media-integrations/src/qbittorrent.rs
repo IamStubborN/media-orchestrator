@@ -15,7 +15,8 @@ use url::Url;
 
 const MAX_TORRENT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SOURCE_REDIRECTS: u8 = 5;
-const METADATA_ATTEMPTS: usize = 30;
+const METADATA_ATTEMPTS: usize = 240;
+const METADATA_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum QbittorrentErrorCode {
@@ -392,12 +393,11 @@ impl QbittorrentClient {
         }
 
         self.add_selected(selection, &handle, true).await?;
-        let files = self.wait_for_torrent_files(&handle).await?;
-        let selected = select_episode_file_ids(&files, episode)?;
-        let all = files.iter().map(|file| file.index).collect::<Vec<_>>();
-        self.set_file_priority(&handle, &all, 0).await?;
-        self.set_file_priority(&handle, &selected, 1).await?;
-        self.start(&handle).await?;
+        let result = self.configure_new_episode_torrent(&handle, episode).await;
+        if let Err(error) = result {
+            self.delete_new_torrent(&handle).await;
+            return Err(error);
+        }
         Ok(handle)
     }
 
@@ -420,7 +420,7 @@ impl QbittorrentClient {
         &self,
         selection: ExplicitTorrentSelection,
         handle: &TorrentHandle,
-        paused: bool,
+        stopped: bool,
     ) -> Result<(), QbittorrentError> {
         let source = if matches!(selection.uri.scheme(), "http" | "https") {
             self.resolve_http_source(selection.uri.clone(), &selection.info_hash)
@@ -444,8 +444,8 @@ impl QbittorrentClient {
                 .text("urls", uri.as_str().to_owned())
                 .text("category", handle.category.clone()),
         };
-        let form = if paused {
-            form.text("paused", "true")
+        let form = if stopped {
+            form.text("stopped", "true")
         } else {
             form
         };
@@ -483,6 +483,66 @@ impl QbittorrentClient {
             return Err(QbittorrentError::ProviderResponse { status });
         }
         Ok(())
+    }
+
+    async fn configure_new_episode_torrent(
+        &self,
+        handle: &TorrentHandle,
+        episode: EpisodeFileSelection,
+    ) -> Result<(), QbittorrentError> {
+        let files = self.prepare_new_torrent_files(handle).await?;
+        let selected = select_episode_file_ids(&files, episode)?;
+        let all = files.iter().map(|file| file.index).collect::<Vec<_>>();
+        self.set_file_priority(handle, &all, 0).await?;
+        self.set_file_priority(handle, &selected, 1).await?;
+        self.start(handle).await
+    }
+
+    async fn prepare_new_torrent_files(
+        &self,
+        handle: &TorrentHandle,
+    ) -> Result<Vec<RawTorrentFile>, QbittorrentError> {
+        match self.torrent_files(handle).await {
+            Ok(files) if !files.is_empty() => return Ok(files),
+            Ok(_) | Err(QbittorrentError::TorrentNotFound) => {}
+            Err(QbittorrentError::ProviderResponse { status })
+                if status == StatusCode::CONFLICT => {}
+            Err(error) => return Err(error),
+        }
+
+        self.start_when_visible(handle).await?;
+        let files = self.wait_for_torrent_files(handle).await;
+        let stop = self.stop(handle).await;
+        match (files, stop) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(files), Ok(())) => Ok(files),
+        }
+    }
+
+    async fn start_when_visible(&self, handle: &TorrentHandle) -> Result<(), QbittorrentError> {
+        for attempt in 1..=METADATA_ATTEMPTS {
+            match self.start(handle).await {
+                Ok(()) => return Ok(()),
+                Err(QbittorrentError::TorrentNotFound) if attempt < METADATA_ATTEMPTS => {
+                    tokio::time::sleep(METADATA_POLL_INTERVAL).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(QbittorrentError::TorrentNotFound)
+    }
+
+    async fn delete_new_torrent(&self, handle: &TorrentHandle) {
+        let _ = self.stop(handle).await;
+        if let Ok(url) = endpoint(&self.config.base_url, "api/v2/torrents/delete") {
+            let _ = self
+                .post_form(
+                    url,
+                    &[("hashes", handle.hash.as_str()), ("deleteFiles", "true")],
+                )
+                .await;
+        }
     }
 
     async fn resolve_http_source(
@@ -676,12 +736,12 @@ impl QbittorrentClient {
             match self.torrent_files(handle).await {
                 Ok(files) if !files.is_empty() => return Ok(files),
                 Ok(_) | Err(QbittorrentError::TorrentNotFound) if attempt < METADATA_ATTEMPTS => {
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    tokio::time::sleep(METADATA_POLL_INTERVAL).await;
                 }
                 Err(QbittorrentError::ProviderResponse { status })
                     if status == StatusCode::CONFLICT && attempt < METADATA_ATTEMPTS =>
                 {
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    tokio::time::sleep(METADATA_POLL_INTERVAL).await;
                 }
                 Ok(_) => {
                     return Err(QbittorrentError::InvalidSelection {
@@ -739,6 +799,14 @@ impl QbittorrentClient {
     async fn start(&self, handle: &TorrentHandle) -> Result<(), QbittorrentError> {
         self.post_form(
             endpoint(&self.config.base_url, "api/v2/torrents/start")?,
+            &[("hashes", handle.hash.as_str())],
+        )
+        .await
+    }
+
+    async fn stop(&self, handle: &TorrentHandle) -> Result<(), QbittorrentError> {
+        self.post_form(
+            endpoint(&self.config.base_url, "api/v2/torrents/stop")?,
             &[("hashes", handle.hash.as_str())],
         )
         .await

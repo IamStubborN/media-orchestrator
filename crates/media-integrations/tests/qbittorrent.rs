@@ -1,4 +1,11 @@
-use std::{path::Path, time::Duration};
+use std::{
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use media_integrations::qbittorrent::{
     EpisodeFileSelection, ExplicitTorrentSelection, QbittorrentClient, QbittorrentConfig,
@@ -64,7 +71,7 @@ async fn single_episode_submission_selects_only_the_episode_and_its_subtitles() 
         .await;
     Mock::given(method("POST"))
         .and(path("/api/v2/torrents/add"))
-        .and(body_string_contains("paused"))
+        .and(body_string_contains("stopped"))
         .and(body_string_contains("true"))
         .respond_with(ResponseTemplate::new(200).set_body_string("Ok."))
         .expect(1)
@@ -137,6 +144,171 @@ async fn single_episode_submission_selects_only_the_episode_and_its_subtitles() 
         )
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn rejected_new_episode_torrent_is_deleted_with_partial_files() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/app/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("v5.2.3"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/info"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/categories"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "media-tv": {}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/add"))
+        .and(body_string_contains("stopped"))
+        .and(body_string_contains("true"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("Ok."))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/files"))
+        .and(query_param("hash", TORRENT_INFO_HASH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {
+                "index": 0,
+                "name": "Unrelated.Movie.2026.1080p.mkv",
+                "priority": 1
+            }
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/delete"))
+        .and(body_string_contains(TORRENT_INFO_HASH))
+        .and(body_string_contains("deleteFiles=true"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = QbittorrentClient::connect(config(&server)).await.unwrap();
+    let selection = ExplicitTorrentSelection::new(
+        "prowlarr:3:indexer-guid-a",
+        TORRENT_INFO_HASH,
+        format!("magnet:?xt=urn:btih:{TORRENT_INFO_HASH}"),
+    )
+    .unwrap();
+
+    let error = client
+        .submit_episode_to_category(
+            selection,
+            "media-tv",
+            EpisodeFileSelection::new(2, 7).unwrap(),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, QbittorrentError::InvalidSelection { .. }));
+}
+
+#[tokio::test]
+async fn magnet_metadata_is_fetched_before_selecting_episode_files() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/app/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("v5.2.3"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/info"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/categories"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "media-tv": {}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/add"))
+        .and(body_string_contains("stopped"))
+        .and(body_string_contains("true"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("Ok."))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let metadata_requests = Arc::new(AtomicUsize::new(0));
+    let metadata_requests_for_responder = Arc::clone(&metadata_requests);
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/files"))
+        .and(query_param("hash", TORRENT_INFO_HASH))
+        .respond_with(move |_: &wiremock::Request| {
+            if metadata_requests_for_responder.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(409)
+            } else {
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "index": 0,
+                        "name": "Example Show/Example.Show.S02E07.mkv",
+                        "priority": 1
+                    }
+                ]))
+            }
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/start"))
+        .and(body_string_contains(TORRENT_INFO_HASH))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/stop"))
+        .and(body_string_contains(TORRENT_INFO_HASH))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/filePrio"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let client = QbittorrentClient::connect(config(&server)).await.unwrap();
+    let selection = ExplicitTorrentSelection::new(
+        "prowlarr:3:indexer-guid-a",
+        TORRENT_INFO_HASH,
+        format!("magnet:?xt=urn:btih:{TORRENT_INFO_HASH}"),
+    )
+    .unwrap();
+
+    client
+        .submit_episode_to_category(
+            selection,
+            "media-tv",
+            EpisodeFileSelection::new(2, 7).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(metadata_requests.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
