@@ -513,7 +513,8 @@ impl ProwlarrClient {
         let body = read_capped(response, MAX_SEARCH_RESPONSE_BYTES)
             .await
             .ok_or(ProwlarrError::ProviderResponse { status })?;
-        xml_has_usable_item(&body).ok_or(ProwlarrError::ProviderResponse { status })
+        xml_has_matching_episode(&body, season, episode)
+            .ok_or(ProwlarrError::ProviderResponse { status })
     }
 
     async fn resolve_info_hash(&self, download_url: &str) -> Option<String> {
@@ -536,19 +537,32 @@ impl ProwlarrClient {
     }
 }
 
-fn xml_has_usable_item(body: &[u8]) -> Option<bool> {
+fn xml_has_matching_episode(body: &[u8], season: u32, episode: u32) -> Option<bool> {
     let mut reader = Reader::from_reader(Cursor::new(body));
     reader.config_mut().trim_text(true);
     let mut buffer = Vec::new();
     let mut in_item = false;
+    let mut in_title = false;
     let mut in_link = false;
+    let mut item_title = String::new();
+    let mut has_download = false;
     loop {
         match reader.read_event_into(&mut buffer).ok()? {
-            Event::Start(event) if event.name().as_ref() == b"item" => in_item = true,
+            Event::Start(event) if event.name().as_ref() == b"item" => {
+                in_item = true;
+                item_title.clear();
+                has_download = false;
+            }
             Event::End(event) if event.name().as_ref() == b"item" => {
+                if has_download && title_has_episode_coordinate(&item_title, season, episode) {
+                    return Some(true);
+                }
                 in_item = false;
+                in_title = false;
                 in_link = false;
             }
+            Event::Start(event) if in_item && event.name().as_ref() == b"title" => in_title = true,
+            Event::End(event) if event.name().as_ref() == b"title" => in_title = false,
             Event::Start(event) if in_item && event.name().as_ref() == b"link" => in_link = true,
             Event::End(event) if event.name().as_ref() == b"link" => in_link = false,
             Event::Empty(event) if in_item && event.name().as_ref() == b"enclosure" => {
@@ -561,20 +575,77 @@ fn xml_has_usable_item(body: &[u8]) -> Option<bool> {
                             .trim()
                             .is_empty()
                     {
-                        return Some(true);
+                        has_download = true;
                     }
                 }
             }
-            Event::Text(text) if in_item && in_link => {
-                if !text.decode().ok()?.trim().is_empty() {
-                    return Some(true);
+            Event::Text(text) if in_item && (in_title || in_link) => {
+                let value = text.decode().ok()?;
+                if in_title {
+                    item_title.push_str(&value);
                 }
+                if in_link && !value.trim().is_empty() {
+                    has_download = true;
+                }
+            }
+            Event::CData(text) if in_item && in_title => {
+                item_title.push_str(&text.decode().ok()?);
             }
             Event::Eof => return Some(false),
             _ => {}
         }
         buffer.clear();
     }
+}
+
+fn title_has_episode_coordinate(title: &str, season: u32, episode: u32) -> bool {
+    let normalized = title.to_ascii_uppercase();
+    let bytes = normalized.as_bytes();
+    for start in 0..bytes.len() {
+        if bytes[start] == b'S'
+            && coordinate_boundary_before(bytes, start)
+            && let Some((candidate_season, after_season)) = parse_ascii_number(bytes, start + 1)
+            && bytes.get(after_season) == Some(&b'E')
+            && let Some((candidate_episode, after_episode)) =
+                parse_ascii_number(bytes, after_season + 1)
+            && coordinate_boundary_after(bytes, after_episode)
+            && candidate_season == season
+            && candidate_episode == episode
+        {
+            return true;
+        }
+        if bytes[start].is_ascii_digit()
+            && coordinate_boundary_before(bytes, start)
+            && let Some((candidate_season, after_season)) = parse_ascii_number(bytes, start)
+            && bytes.get(after_season) == Some(&b'X')
+            && let Some((candidate_episode, after_episode)) =
+                parse_ascii_number(bytes, after_season + 1)
+            && coordinate_boundary_after(bytes, after_episode)
+            && candidate_season == season
+            && candidate_episode == episode
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn parse_ascii_number(bytes: &[u8], start: usize) -> Option<(u32, usize)> {
+    let mut cursor = start;
+    let mut value = 0_u32;
+    while let Some(byte) = bytes.get(cursor).copied().filter(u8::is_ascii_digit) {
+        value = value.checked_mul(10)?.checked_add(u32::from(byte - b'0'))?;
+        cursor += 1;
+    }
+    (cursor > start).then_some((value, cursor))
+}
+
+fn coordinate_boundary_before(bytes: &[u8], start: usize) -> bool {
+    start == 0 || !bytes[start - 1].is_ascii_alphanumeric()
+}
+
+fn coordinate_boundary_after(bytes: &[u8], end: usize) -> bool {
+    bytes.get(end).is_none_or(|byte| !byte.is_ascii_digit())
 }
 
 /// Reads a response body into memory, rejecting anything larger than `cap`. The

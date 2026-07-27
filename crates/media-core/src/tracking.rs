@@ -545,6 +545,12 @@ pub trait TrackingScheduleStore: Send + Sync {
         next_check_at: time::OffsetDateTime,
         actions: Vec<SourceChoiceAction>,
     ) -> Result<bool, PortError>;
+    async fn pending_episodes(&self, id: TrackingId) -> Result<Vec<EpisodeSnapshot>, PortError>;
+    async fn record_pending_episode(
+        &self,
+        id: TrackingId,
+        episode: EpisodeSnapshot,
+    ) -> Result<(), PortError>;
     async fn defer_check(
         &self,
         id: TrackingId,
@@ -659,6 +665,20 @@ impl TrackingRuntime {
                     .max()
                     .copied()
             });
+            let pending = if tracking.download().is_none() {
+                match self.store.pending_episodes(tracking.id()).await {
+                    Ok(pending) => pending,
+                    Err(_) => {
+                        self.store
+                            .defer_check(tracking.id(), default_next_check)
+                            .await?;
+                        result.failed += 1;
+                        continue;
+                    }
+                }
+            } else {
+                Vec::new()
+            };
             let tracked_season = tracking
                 .known_episodes()
                 .iter()
@@ -671,10 +691,20 @@ impl TrackingRuntime {
                 } else {
                     tracking.known_episodes().contains(&episode)
                 };
+                let latest_known_in_season = tracking
+                    .known_episodes()
+                    .iter()
+                    .filter(|known| known.season() == episode.season())
+                    .max()
+                    .copied();
+                let pending_candidate = pending.contains(&episode);
                 if already_known
                     || selected_season.is_some_and(|season| episode.season() != season)
                     || (tracking.download().is_none()
                         && tracked_season.is_some_and(|season| episode.season() < season))
+                    || (tracking.download().is_none()
+                        && !pending_candidate
+                        && latest_known_in_season.is_some_and(|latest| episode <= latest))
                 {
                     continue;
                 }
@@ -682,6 +712,9 @@ impl TrackingRuntime {
                     Vec::new()
                 } else {
                     let Some(availability) = self.availability.as_deref() else {
+                        self.store
+                            .record_pending_episode(tracking.id(), episode)
+                            .await?;
                         result.failed += 1;
                         pending_availability = true;
                         continue;
@@ -694,6 +727,9 @@ impl TrackingRuntime {
                     {
                         Ok(availability) => availability,
                         Err(_) => {
+                            self.store
+                                .record_pending_episode(tracking.id(), episode)
+                                .await?;
                             result.failed += 1;
                             pending_availability = true;
                             continue;
@@ -701,6 +737,9 @@ impl TrackingRuntime {
                     };
                     let actions = availability.actions();
                     if actions.is_empty() {
+                        self.store
+                            .record_pending_episode(tracking.id(), episode)
+                            .await?;
                         pending_availability = true;
                         continue;
                     }

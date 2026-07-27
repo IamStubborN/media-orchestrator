@@ -25,6 +25,7 @@ fn cancelled_notification_event_round_trips_from_wire() {
 struct ScheduleStore {
     due: TrackingSubscription,
     discovered: Mutex<Vec<(EpisodeSnapshot, Vec<SourceChoiceAction>)>>,
+    pending: Mutex<Vec<EpisodeSnapshot>>,
 }
 
 #[async_trait::async_trait]
@@ -44,8 +45,28 @@ impl TrackingScheduleStore for ScheduleStore {
         _: time::OffsetDateTime,
         actions: Vec<SourceChoiceAction>,
     ) -> Result<bool, PortError> {
+        self.pending
+            .lock()
+            .unwrap()
+            .retain(|candidate| *candidate != episode);
         self.discovered.lock().unwrap().push((episode, actions));
         Ok(true)
+    }
+
+    async fn pending_episodes(&self, _: TrackingId) -> Result<Vec<EpisodeSnapshot>, PortError> {
+        Ok(self.pending.lock().unwrap().clone())
+    }
+
+    async fn record_pending_episode(
+        &self,
+        _: TrackingId,
+        episode: EpisodeSnapshot,
+    ) -> Result<(), PortError> {
+        let mut pending = self.pending.lock().unwrap();
+        if !pending.contains(&episode) {
+            pending.push(episode);
+        }
+        Ok(())
     }
 
     async fn defer_check(&self, _: TrackingId, _: time::OffsetDateTime) -> Result<(), PortError> {
@@ -149,6 +170,7 @@ fn scheduler_records_only_episodes_missing_from_the_known_set() {
         let store = Arc::new(ScheduleStore {
             due: tracking(),
             discovered: Mutex::new(Vec::new()),
+            pending: Mutex::new(Vec::new()),
         });
         let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery))
             .with_availability(Arc::new(Availability));
@@ -191,6 +213,7 @@ fn calendar_candidate_stays_unrecorded_until_a_provider_confirms_it() {
         let store = Arc::new(ScheduleStore {
             due: tracking(),
             discovered: Mutex::new(Vec::new()),
+            pending: Mutex::new(Vec::new()),
         });
         let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery))
             .with_availability(Arc::new(UnavailableAvailability));
@@ -202,6 +225,10 @@ fn calendar_candidate_stays_unrecorded_until_a_provider_confirms_it() {
 
         assert_eq!(result.discovered, 0);
         assert!(store.discovered.lock().unwrap().is_empty());
+        assert_eq!(
+            *store.pending.lock().unwrap(),
+            vec![EpisodeSnapshot::new(1, 5).unwrap()]
+        );
     });
 }
 
@@ -230,6 +257,7 @@ fn missing_episode_remains_eligible_after_a_later_episode_is_known() {
         let store = Arc::new(ScheduleStore {
             due,
             discovered: Mutex::new(Vec::new()),
+            pending: Mutex::new(vec![EpisodeSnapshot::new(1, 3).unwrap()]),
         });
         let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery))
             .with_availability(Arc::new(Availability));
@@ -279,6 +307,7 @@ fn scheduler_does_not_backfill_seasons_older_than_the_tracked_season() {
         let store = Arc::new(ScheduleStore {
             due,
             discovered: Mutex::new(Vec::new()),
+            pending: Mutex::new(Vec::new()),
         });
         let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery))
             .with_availability(Arc::new(Availability));
@@ -289,6 +318,74 @@ fn scheduler_does_not_backfill_seasons_older_than_the_tracked_season() {
             .unwrap();
 
         assert!(store.discovered.lock().unwrap().is_empty());
+    });
+}
+
+struct HistoricalGapDiscovery;
+
+#[async_trait::async_trait]
+impl EpisodeDiscoveryPort for HistoricalGapDiscovery {
+    async fn available_episodes(
+        &self,
+        _: &TrackingSubscription,
+    ) -> Result<EpisodeDiscovery, PortError> {
+        EpisodeDiscovery::new(
+            vec![
+                EpisodeSnapshot::new(9, 1).unwrap(),
+                EpisodeSnapshot::new(9, 4).unwrap(),
+                EpisodeSnapshot::new(9, 10).unwrap(),
+            ],
+            "Long-running Show".to_owned(),
+            None,
+        )
+        .map_err(|_| PortError::Conflict)
+    }
+}
+
+#[test]
+fn scheduler_ignores_historical_gaps_but_rechecks_pending_future_episode() {
+    block_on(async {
+        let due = NewTrackingSubscription::new(
+            TrackingId::new(),
+            PRIMARY_USER_ID,
+            NewTrackingCommand {
+                provider: Provider::Rezka,
+                title: "Long-running Show".to_owned(),
+                translation: "release-calendar".to_owned(),
+                known_episodes: vec![
+                    EpisodeSnapshot::new(9, 8).unwrap(),
+                    EpisodeSnapshot::new(9, 9).unwrap(),
+                ],
+                scope: TrackingScope::Personal,
+                series_ongoing: true,
+                download: None,
+            },
+        )
+        .unwrap()
+        .into_persisted();
+        let store = Arc::new(ScheduleStore {
+            due,
+            discovered: Mutex::new(Vec::new()),
+            pending: Mutex::new(vec![EpisodeSnapshot::new(9, 10).unwrap()]),
+        });
+        let runtime = TrackingRuntime::new(store.clone(), Arc::new(HistoricalGapDiscovery))
+            .with_availability(Arc::new(Availability));
+
+        runtime
+            .run_once(time::OffsetDateTime::now_utc(), 10)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .discovered
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(episode, _)| *episode)
+                .collect::<Vec<_>>(),
+            vec![EpisodeSnapshot::new(9, 10).unwrap()]
+        );
     });
 }
 
@@ -336,6 +433,7 @@ fn scheduler_enqueues_only_new_episodes_from_the_selected_download_season() {
         let store = Arc::new(ScheduleStore {
             due: download_tracking(),
             discovered: Mutex::new(Vec::new()),
+            pending: Mutex::new(Vec::new()),
         });
         let downloads = Arc::new(Enqueuer::default());
         let runtime = TrackingRuntime::new(store.clone(), Arc::new(DownloadDiscovery))

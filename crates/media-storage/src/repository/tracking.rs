@@ -62,6 +62,15 @@ impl SeaOrmTrackingStore {
                     next_check_at.into(),
                 ],
             )).await?;
+            transaction.execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "DELETE FROM tracking_availability_candidates WHERE tracking_id = $1 AND season = $2 AND episode = $3",
+                [
+                    id.into_uuid().into(),
+                    i32::try_from(episode.season()).map_err(|_| sea_orm::DbErr::Type("season is out of range".to_owned()))?.into(),
+                    i32::try_from(episode.episode()).map_err(|_| sea_orm::DbErr::Type("episode is out of range".to_owned()))?.into(),
+                ],
+            )).await?;
             let owner = UserId::from_uuid(row.try_get("", "owner_id")?);
             let title: String = row.try_get("", "title")?;
             let scope: String = row.try_get("", "scope")?;
@@ -227,6 +236,60 @@ impl TrackingScheduleStore for SeaOrmTrackingStore {
         actions: Vec<SourceChoiceAction>,
     ) -> Result<bool, PortError> {
         SeaOrmTrackingStore::record_future_episode(self, id, episode, next_check_at, actions).await
+    }
+
+    async fn pending_episodes(&self, id: TrackingId) -> Result<Vec<EpisodeSnapshot>, PortError> {
+        self.database
+            .query_all_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "SELECT season, episode FROM tracking_availability_candidates \
+                 WHERE tracking_id = $1 ORDER BY season, episode",
+                [id.into_uuid().into()],
+            ))
+            .await
+            .map_err(map_database_error)?
+            .iter()
+            .map(|row| {
+                let season = row
+                    .try_get::<i32>("", "season")
+                    .map_err(map_database_error)?;
+                let episode = row
+                    .try_get::<i32>("", "episode")
+                    .map_err(map_database_error)?;
+                EpisodeSnapshot::new(
+                    u32::try_from(season).map_err(|_| PortError::Conflict)?,
+                    u32::try_from(episode).map_err(|_| PortError::Conflict)?,
+                )
+                .map_err(|_| PortError::Conflict)
+            })
+            .collect()
+    }
+
+    async fn record_pending_episode(
+        &self,
+        id: TrackingId,
+        episode: EpisodeSnapshot,
+    ) -> Result<(), PortError> {
+        self.database
+            .execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "INSERT INTO tracking_availability_candidates \
+                   (tracking_id, season, episode) VALUES ($1, $2, $3) \
+                 ON CONFLICT (tracking_id, season, episode) DO UPDATE \
+                   SET last_checked_at = now()",
+                [
+                    id.into_uuid().into(),
+                    i32::try_from(episode.season())
+                        .map_err(|_| PortError::Conflict)?
+                        .into(),
+                    i32::try_from(episode.episode())
+                        .map_err(|_| PortError::Conflict)?
+                        .into(),
+                ],
+            ))
+            .await
+            .map_err(map_database_error)?;
+        Ok(())
     }
 
     async fn defer_check(

@@ -9,7 +9,7 @@ use support::{TestDatabase, assert_rejected, execute, query};
 const PRIMARY_ID: &str = "00000000-0000-0000-0000-000000000001";
 const SECONDARY_ID: &str = "00000000-0000-0000-0000-000000000002";
 
-const APPLICATION_TABLES: [&str; 21] = [
+const APPLICATION_TABLES: [&str; 22] = [
     "api_clients",
     "episode_provider_mappings",
     "episodes",
@@ -28,6 +28,7 @@ const APPLICATION_TABLES: [&str; 21] = [
     "search_executions",
     "search_sessions",
     "seasons",
+    "tracking_availability_candidates",
     "tracking_discoveries",
     "tracking_subscriptions",
     "users",
@@ -105,7 +106,12 @@ async fn migrations_apply_seed_fixed_users_and_reverse_cleanly() {
         uuid_id_tables,
         APPLICATION_TABLES
             .into_iter()
-            .filter(|table| !matches!(*table, "search_executions" | "runner_lifecycle"))
+            .filter(|table| {
+                !matches!(
+                    *table,
+                    "search_executions" | "runner_lifecycle" | "tracking_availability_candidates"
+                )
+            })
             .map(str::to_owned)
             .collect()
     );
@@ -309,8 +315,8 @@ async fn a_failed_migration_explicitly_rolls_back_partial_schema() {
     );
     assert_eq!(
         names.last().map(String::as_str),
-        Some("m20260727_000031_remove_older_season_backfill"),
-        "older-season backfill cleanup must remain the latest schema change",
+        Some("m20260727_000032_tracking_availability_candidates"),
+        "availability candidate storage must remain the latest schema change",
     );
     for migration in migrations {
         assert_eq!(
@@ -615,7 +621,7 @@ async fn structured_notifications_migration_preserves_legacy_rows_and_enforces_v
     )
     .await;
 
-    Migrator::down(db, Some(8)).await.unwrap();
+    Migrator::down(db, Some(9)).await.unwrap();
 
     let retained_rows = query(
         db,
@@ -905,7 +911,7 @@ async fn detailed_notifications_migration_preserves_legacy_payloads_and_validate
     )
     .await;
 
-    Migrator::down(db, Some(5)).await.unwrap();
+    Migrator::down(db, Some(6)).await.unwrap();
 
     let normalized = query(
         db,
@@ -1355,6 +1361,162 @@ async fn older_season_backfill_is_removed_without_touching_existing_history() {
             {"season": 9, "episode": 9},
             {"season": 1, "episode": 2}
         ])
+    );
+}
+
+#[tokio::test]
+async fn inaccurate_prowlarr_matches_are_removed_and_only_future_candidates_are_retained() {
+    let test_db = TestDatabase::start().await;
+    let db = test_db.connection();
+    Migrator::up(db, Some(31)).await.unwrap();
+
+    execute(
+        db,
+        "INSERT INTO tracking_subscriptions
+           (id, owner_id, provider, title, translation, known_episodes, scope,
+            created_operation_key)
+         VALUES
+           ('00000000-0000-0000-0000-000000000595',
+            '00000000-0000-0000-0000-000000000001',
+            'rezka', 'Long-running Show', 'release-calendar',
+            '[
+              {\"season\":9,\"episode\":8},
+              {\"season\":9,\"episode\":9},
+              {\"season\":9,\"episode\":1},
+              {\"season\":9,\"episode\":4},
+              {\"season\":9,\"episode\":10}
+            ]'::jsonb,
+            'personal', decode(repeat('59', 32), 'hex'));
+         INSERT INTO tracking_discoveries (id, tracking_id, season, episode)
+         VALUES
+           ('00000000-0000-0000-0000-000000000596',
+            '00000000-0000-0000-0000-000000000595', 9, 1),
+           ('00000000-0000-0000-0000-000000000597',
+            '00000000-0000-0000-0000-000000000595', 9, 4),
+           ('00000000-0000-0000-0000-000000000598',
+            '00000000-0000-0000-0000-000000000595', 9, 10);
+         INSERT INTO notification_outbox
+           (id, aggregate_type, aggregate_id, event_type, recipient,
+            source_dedupe_key, payload, delivered_at)
+         VALUES
+           ('00000000-0000-0000-0000-000000000591', 'tracking',
+            '00000000-0000-0000-0000-000000000595', 'future-episode-found',
+            'primary', uuid_send('00000000-0000-0000-0000-000000000596'::uuid),
+            jsonb_build_object(
+              'event_type', 'media.source-choice',
+              'schema_version', 1,
+              'card_key',
+                'tracking:00000000-0000-0000-0000-000000000595:9:1',
+              'tracking_id', '00000000-0000-0000-0000-000000000595',
+              'title', 'Long-running Show',
+              'season', 9,
+              'episode', 1,
+              'actions', jsonb_build_array('prowlarr')
+            ), now()),
+           ('00000000-0000-0000-0000-000000000592', 'tracking',
+            '00000000-0000-0000-0000-000000000595', 'future-episode-found',
+            'primary', uuid_send('00000000-0000-0000-0000-000000000597'::uuid),
+            jsonb_build_object(
+              'event_type', 'media.source-choice',
+              'schema_version', 1,
+              'card_key',
+                'tracking:00000000-0000-0000-0000-000000000595:9:4',
+              'tracking_id', '00000000-0000-0000-0000-000000000595',
+              'title', 'Long-running Show',
+              'season', 9,
+              'episode', 4,
+              'actions', jsonb_build_array('prowlarr')
+            ), now()),
+           ('00000000-0000-0000-0000-000000000593', 'tracking',
+            '00000000-0000-0000-0000-000000000595', 'future-episode-found',
+            'primary', uuid_send('00000000-0000-0000-0000-000000000598'::uuid),
+            jsonb_build_object(
+              'event_type', 'media.source-choice',
+              'schema_version', 1,
+              'card_key',
+                'tracking:00000000-0000-0000-0000-000000000595:9:10',
+              'tracking_id', '00000000-0000-0000-0000-000000000595',
+              'title', 'Long-running Show',
+              'season', 9,
+              'episode', 10,
+              'actions', jsonb_build_array('prowlarr')
+            ), now())",
+    )
+    .await
+    .unwrap();
+
+    Migrator::up(db, Some(1)).await.unwrap();
+
+    let known = query(
+        db,
+        "SELECT known_episodes FROM tracking_subscriptions
+         WHERE id = '00000000-0000-0000-0000-000000000595'",
+    )
+    .await
+    .pop()
+    .unwrap()
+    .try_get::<serde_json::Value>("", "known_episodes")
+    .unwrap();
+    assert_eq!(
+        known,
+        serde_json::json!([
+            {"season": 9, "episode": 8},
+            {"season": 9, "episode": 9}
+        ])
+    );
+
+    let candidates = query(
+        db,
+        "SELECT season, episode FROM tracking_availability_candidates
+         WHERE tracking_id = '00000000-0000-0000-0000-000000000595'
+         ORDER BY season, episode",
+    )
+    .await;
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].try_get::<i32>("", "season").unwrap(), 9);
+    assert_eq!(candidates[0].try_get::<i32>("", "episode").unwrap(), 10);
+    assert!(
+        query(
+            db,
+            "SELECT id FROM tracking_discoveries
+             WHERE tracking_id = '00000000-0000-0000-0000-000000000595'",
+        )
+        .await
+        .is_empty()
+    );
+    assert_eq!(
+        query(
+            db,
+            "SELECT id FROM notification_outbox
+             WHERE aggregate_id = '00000000-0000-0000-0000-000000000595'
+               AND last_error_code ~ '^prowlarr_coordinate_unverified:'",
+        )
+        .await
+        .len(),
+        3
+    );
+
+    Migrator::down(db, Some(1)).await.unwrap();
+
+    assert!(
+        query(
+            db,
+            "SELECT table_name FROM information_schema.tables
+             WHERE table_schema = 'public'
+               AND table_name = 'tracking_availability_candidates'",
+        )
+        .await
+        .is_empty()
+    );
+    assert_eq!(
+        query(
+            db,
+            "SELECT id FROM tracking_discoveries
+             WHERE tracking_id = '00000000-0000-0000-0000-000000000595'",
+        )
+        .await
+        .len(),
+        3
     );
 }
 

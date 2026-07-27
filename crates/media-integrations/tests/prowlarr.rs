@@ -110,6 +110,14 @@ const AVAILABLE_FEED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <enclosure url="https://prowlarr.invalid/api/v1/indexer/7/download?id=one" type="application/x-bittorrent" />
 </item></channel></rss>"#;
 
+const NON_MATCHING_FEED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss><channel><title>Prowlarr</title>
+<item><title>Example Show S03 Complete</title>
+<link>https://prowlarr.invalid/api/v1/indexer/7/download?id=pack</link></item>
+<item><title>Example Show S03E04</title>
+<enclosure url="https://prowlarr.invalid/api/v1/indexer/7/download?id=wrong" type="application/x-bittorrent" />
+</item></channel></rss>"#;
+
 #[tokio::test]
 async fn exact_episode_probe_uses_enabled_indexers_and_accepts_any_usable_result() {
     let server = MockServer::start().await;
@@ -183,6 +191,35 @@ async fn exact_episode_probe_distinguishes_empty_results_from_provider_failure()
     let broken = EpisodeAvailabilityQuery::new(vec!["Broken Show".to_owned()], 3, 5).unwrap();
     let error = client.episode_available(&broken).await.unwrap_err();
     assert_eq!(error.code(), ProwlarrErrorCode::ProviderResponse);
+}
+
+#[tokio::test]
+async fn exact_episode_probe_rejects_season_packs_and_other_episode_coordinates() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/indexer"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(indexers(&[7])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/indexer/7/newznab"))
+        .and(query_param("q", "Example Show"))
+        .and(query_param("season", "3"))
+        .and(query_param("ep", "5"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(NON_MATCHING_FEED))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let query = EpisodeAvailabilityQuery::new(vec!["Example Show".to_owned()], 3, 5).unwrap();
+    assert!(
+        !ProwlarrClient::new(config(&server))
+            .unwrap()
+            .episode_available(&query)
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
