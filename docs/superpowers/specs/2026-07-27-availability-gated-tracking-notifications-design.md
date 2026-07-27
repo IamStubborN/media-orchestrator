@@ -103,9 +103,21 @@ season=<season number>
 ep=<episode number>
 ```
 
-This uses Prowlarr's Newznab/Torznab-compatible indexer route rather than
-guessing episode coverage from a release title returned by the manual-search
-API.
+This uses Prowlarr's Newznab/Torznab-compatible indexer route. Indexers do not
+consistently honor the exact episode parameters: some return cumulative packs
+such as `S3E1-6 of 8`, and some omit the structured Newznab coordinates.
+Therefore the response is verified with a hybrid matcher:
+
+1. the release title must identify the queried series;
+2. structured `season` and `episode` attributes are used when both are present;
+3. the release title is parsed into exact, multi-episode, or bounded-range
+   coverage;
+4. conflicting structured attributes and title coverage reject the item;
+5. a bare season pack or absolute anime number without an explicit mapping does
+   not confirm availability.
+
+A range confirms only episodes it actually contains. For example,
+`S3E1-6 of 8` confirms `S03E06` but not `S03E07`.
 
 The probe first uses the original title returned by the matched release
 metadata. If it is absent, it uses the matched release title. The localized
@@ -120,8 +132,8 @@ The aggregate result is:
 - `Unknown` when no result is found and at least one enabled indexer cannot be
   checked.
 
-A usable torrent must expose the source identity and either a magnet link or a
-download URL required by the existing selection flow.
+A usable torrent must expose a download link or enclosure required by the
+existing selection flow and pass the episode-coverage verification above.
 
 The normal interactive Prowlarr search remains unchanged.
 

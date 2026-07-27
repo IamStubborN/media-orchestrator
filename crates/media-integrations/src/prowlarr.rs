@@ -2,12 +2,18 @@ use std::{cmp::Reverse, collections::HashSet, fmt, io::Cursor, time::Duration};
 
 use futures_util::StreamExt;
 use futures_util::future::join_all;
-use quick_xml::{Reader, XmlVersion, events::Event};
+use quick_xml::{
+    Reader, XmlVersion,
+    encoding::Decoder,
+    events::{BytesStart, Event},
+};
 use reqwest::StatusCode;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use sha1::{Digest, Sha1};
 use url::Url;
+
+use crate::prowlarr_episode::{EpisodeCoverage, series_title_matches};
 
 pub const RESULTS_PER_PAGE: u32 = 5;
 /// Upper bound on the candidate set fetched from Prowlarr in a single request.
@@ -513,7 +519,7 @@ impl ProwlarrClient {
         let body = read_capped(response, MAX_SEARCH_RESPONSE_BYTES)
             .await
             .ok_or(ProwlarrError::ProviderResponse { status })?;
-        xml_has_matching_episode(&body, season, episode)
+        xml_has_matching_episode(&body, title, season, episode)
             .ok_or(ProwlarrError::ProviderResponse { status })
     }
 
@@ -537,7 +543,12 @@ impl ProwlarrClient {
     }
 }
 
-fn xml_has_matching_episode(body: &[u8], season: u32, episode: u32) -> Option<bool> {
+fn xml_has_matching_episode(
+    body: &[u8],
+    query_title: &str,
+    season: u32,
+    episode: u32,
+) -> Option<bool> {
     let mut reader = Reader::from_reader(Cursor::new(body));
     reader.config_mut().trim_text(true);
     let mut buffer = Vec::new();
@@ -546,15 +557,25 @@ fn xml_has_matching_episode(body: &[u8], season: u32, episode: u32) -> Option<bo
     let mut in_link = false;
     let mut item_title = String::new();
     let mut has_download = false;
+    let mut coordinates = NewznabCoordinates::default();
     loop {
         match reader.read_event_into(&mut buffer).ok()? {
             Event::Start(event) if event.name().as_ref() == b"item" => {
                 in_item = true;
                 item_title.clear();
                 has_download = false;
+                coordinates = NewznabCoordinates::default();
             }
             Event::End(event) if event.name().as_ref() == b"item" => {
-                if has_download && title_has_episode_coordinate(&item_title, season, episode) {
+                if has_download
+                    && item_confirms_episode(
+                        &item_title,
+                        query_title,
+                        &coordinates,
+                        season,
+                        episode,
+                    )
+                {
                     return Some(true);
                 }
                 in_item = false;
@@ -565,6 +586,11 @@ fn xml_has_matching_episode(body: &[u8], season: u32, episode: u32) -> Option<bo
             Event::End(event) if event.name().as_ref() == b"title" => in_title = false,
             Event::Start(event) if in_item && event.name().as_ref() == b"link" => in_link = true,
             Event::End(event) if event.name().as_ref() == b"link" => in_link = false,
+            Event::Empty(event) if in_item && is_extension_attribute(event.name().as_ref()) => {
+                if let Some((kind, value)) = coordinate_attribute(&event, reader.decoder()) {
+                    coordinates.insert(kind, value);
+                }
+            }
             Event::Empty(event) if in_item && event.name().as_ref() == b"enclosure" => {
                 for attribute in event.attributes() {
                     let attribute = attribute.ok()?;
@@ -598,54 +624,94 @@ fn xml_has_matching_episode(body: &[u8], season: u32, episode: u32) -> Option<bo
     }
 }
 
-fn title_has_episode_coordinate(title: &str, season: u32, episode: u32) -> bool {
-    let normalized = title.to_ascii_uppercase();
-    let bytes = normalized.as_bytes();
-    for start in 0..bytes.len() {
-        if bytes[start] == b'S'
-            && coordinate_boundary_before(bytes, start)
-            && let Some((candidate_season, after_season)) = parse_ascii_number(bytes, start + 1)
-            && bytes.get(after_season) == Some(&b'E')
-            && let Some((candidate_episode, after_episode)) =
-                parse_ascii_number(bytes, after_season + 1)
-            && coordinate_boundary_after(bytes, after_episode)
-            && candidate_season == season
-            && candidate_episode == episode
-        {
-            return true;
-        }
-        if bytes[start].is_ascii_digit()
-            && coordinate_boundary_before(bytes, start)
-            && let Some((candidate_season, after_season)) = parse_ascii_number(bytes, start)
-            && bytes.get(after_season) == Some(&b'X')
-            && let Some((candidate_episode, after_episode)) =
-                parse_ascii_number(bytes, after_season + 1)
-            && coordinate_boundary_after(bytes, after_episode)
-            && candidate_season == season
-            && candidate_episode == episode
-        {
-            return true;
+fn item_confirms_episode(
+    item_title: &str,
+    query_title: &str,
+    coordinates: &NewznabCoordinates,
+    season: u32,
+    episode: u32,
+) -> bool {
+    if !series_title_matches(item_title, query_title) {
+        return false;
+    }
+
+    let title_coverage = EpisodeCoverage::parse(item_title);
+    let title_has_coordinates = !title_coverage.is_empty();
+    let title_confirms = title_coverage
+        .iter()
+        .any(|coverage| coverage.contains(season, episode));
+    let attributes_complete = coordinates.is_complete();
+    let attributes_confirm = coordinates.contains(season, episode);
+
+    if title_has_coordinates && !title_confirms {
+        return false;
+    }
+    if attributes_complete && !attributes_confirm {
+        return false;
+    }
+
+    title_confirms || attributes_confirm
+}
+
+#[derive(Debug, Copy, Clone)]
+enum CoordinateAttribute {
+    Season,
+    Episode,
+}
+
+#[derive(Debug, Default)]
+struct NewznabCoordinates {
+    seasons: Vec<u32>,
+    episodes: Vec<u32>,
+}
+
+impl NewznabCoordinates {
+    fn insert(&mut self, kind: CoordinateAttribute, value: u32) {
+        let values = match kind {
+            CoordinateAttribute::Season => &mut self.seasons,
+            CoordinateAttribute::Episode => &mut self.episodes,
+        };
+        if value > 0 && !values.contains(&value) {
+            values.push(value);
         }
     }
-    false
-}
 
-fn parse_ascii_number(bytes: &[u8], start: usize) -> Option<(u32, usize)> {
-    let mut cursor = start;
-    let mut value = 0_u32;
-    while let Some(byte) = bytes.get(cursor).copied().filter(u8::is_ascii_digit) {
-        value = value.checked_mul(10)?.checked_add(u32::from(byte - b'0'))?;
-        cursor += 1;
+    fn is_complete(&self) -> bool {
+        !self.seasons.is_empty() && !self.episodes.is_empty()
     }
-    (cursor > start).then_some((value, cursor))
+
+    fn contains(&self, season: u32, episode: u32) -> bool {
+        self.is_complete() && self.seasons.contains(&season) && self.episodes.contains(&episode)
+    }
 }
 
-fn coordinate_boundary_before(bytes: &[u8], start: usize) -> bool {
-    start == 0 || !bytes[start - 1].is_ascii_alphanumeric()
+fn is_extension_attribute(name: &[u8]) -> bool {
+    name == b"attr" || name.ends_with(b":attr")
 }
 
-fn coordinate_boundary_after(bytes: &[u8], end: usize) -> bool {
-    bytes.get(end).is_none_or(|byte| !byte.is_ascii_digit())
+fn coordinate_attribute(
+    event: &BytesStart<'_>,
+    decoder: Decoder,
+) -> Option<(CoordinateAttribute, u32)> {
+    let mut name = None;
+    let mut value = None;
+    for attribute in event.attributes().flatten() {
+        let decoded = attribute
+            .decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)
+            .ok()?;
+        match attribute.key.as_ref() {
+            b"name" => name = Some(decoded.into_owned()),
+            b"value" => value = Some(decoded.into_owned()),
+            _ => {}
+        }
+    }
+    let kind = match name?.trim().to_ascii_lowercase().as_str() {
+        "season" => CoordinateAttribute::Season,
+        "episode" => CoordinateAttribute::Episode,
+        _ => return None,
+    };
+    let value = value?.trim().parse::<u32>().ok()?;
+    Some((kind, value))
 }
 
 /// Reads a response body into memory, rejecting anything larger than `cap`. The

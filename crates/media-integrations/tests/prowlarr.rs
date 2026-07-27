@@ -118,6 +118,43 @@ const NON_MATCHING_FEED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <enclosure url="https://prowlarr.invalid/api/v1/indexer/7/download?id=wrong" type="application/x-bittorrent" />
 </item></channel></rss>"#;
 
+fn episode_feed(title: &str, attributes: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/">
+<channel><title>Prowlarr</title><item><title>{title}</title>
+<link>https://prowlarr.invalid/api/v1/indexer/7/download?id=coverage</link>
+<enclosure url="https://prowlarr.invalid/api/v1/indexer/7/download?id=coverage" type="application/x-bittorrent" />
+{attributes}</item></channel></rss>"#
+    )
+}
+
+async fn probe_episode_feed(title: &str, season: u32, episode: u32, feed: String) -> bool {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/indexer"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(indexers(&[7])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/indexer/7/newznab"))
+        .and(query_param("q", title))
+        .and(query_param("season", season.to_string()))
+        .and(query_param("ep", episode.to_string()))
+        .respond_with(ResponseTemplate::new(200).set_body_string(feed))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let query = EpisodeAvailabilityQuery::new(vec![title.to_owned()], season, episode).unwrap();
+    ProwlarrClient::new(config(&server))
+        .unwrap()
+        .episode_available(&query)
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn exact_episode_probe_uses_enabled_indexers_and_accepts_any_usable_result() {
     let server = MockServer::start().await;
@@ -219,6 +256,88 @@ async fn exact_episode_probe_rejects_season_packs_and_other_episode_coordinates(
             .episode_available(&query)
             .await
             .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn episode_probe_accepts_ranges_that_contain_the_requested_episode() {
+    assert!(
+        probe_episode_feed(
+            "House of the Dragon",
+            3,
+            6,
+            episode_feed("House of the Dragon S3E1-6 of 8 (2026)", ""),
+        )
+        .await
+    );
+    assert!(
+        !probe_episode_feed(
+            "House of the Dragon",
+            3,
+            7,
+            episode_feed("House of the Dragon S3E1-6 of 8 (2026)", ""),
+        )
+        .await
+    );
+}
+
+#[tokio::test]
+async fn episode_probe_accepts_multi_episode_releases() {
+    assert!(
+        probe_episode_feed(
+            "Example Show",
+            3,
+            6,
+            episode_feed("Example Show S03E05E06 1080p", ""),
+        )
+        .await
+    );
+}
+
+#[tokio::test]
+async fn episode_probe_uses_matching_newznab_coordinates_when_title_has_none() {
+    assert!(
+        probe_episode_feed(
+            "Example Show",
+            3,
+            5,
+            episode_feed(
+                "Example Show 1080p",
+                r#"<newznab:attr name="season" value="3" />
+<newznab:attr name="episode" value="5" />"#,
+            ),
+        )
+        .await
+    );
+}
+
+#[tokio::test]
+async fn episode_probe_rejects_conflicting_newznab_coordinates() {
+    assert!(
+        !probe_episode_feed(
+            "Example Show",
+            3,
+            5,
+            episode_feed(
+                "Example Show S03E05 1080p",
+                r#"<newznab:attr name="season" value="3" />
+<newznab:attr name="episode" value="4" />"#,
+            ),
+        )
+        .await
+    );
+}
+
+#[tokio::test]
+async fn episode_probe_rejects_an_unrelated_series_title() {
+    assert!(
+        !probe_episode_feed(
+            "Example Show",
+            3,
+            5,
+            episode_feed("Different Show S03E05 1080p", ""),
+        )
+        .await
     );
 }
 
