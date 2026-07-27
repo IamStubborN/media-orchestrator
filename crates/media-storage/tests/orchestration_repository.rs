@@ -1396,6 +1396,59 @@ async fn notification_card_uses_canonical_specials_coordinates() {
 }
 
 #[tokio::test]
+async fn notification_card_sanitizes_prowlarr_release_title() {
+    let (test_db, jobs, leases) = setup().await;
+    jobs.create(operation_key(), new_job("selection:prowlarr-release-title"))
+        .await
+        .unwrap();
+    test_db
+        .connection()
+        .execute_unprepared(
+            "INSERT INTO search_executions (result_ref, payload) VALUES \
+             ('selection:prowlarr-release-title', \
+              '{\"title\":\"[S02] | Mashle: Magic and Muscles | WEBRip 1080p\",\"media_kind\":\"series\",\"season\":2,\"episodes\":[{\"season\":2,\"episode\":7}]}')",
+        )
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    leases
+        .report_event(
+            operation_key(),
+            lease.lease_id(),
+            RUNNER_CLIENT_ID,
+            JobEvent::started(JobEventId::new()),
+        )
+        .await
+        .unwrap();
+
+    let deliveries = SeaOrmNotificationOutbox::new(test_db.connection().clone())
+        .lease_pending(
+            NotificationId::new(),
+            time::OffsetDateTime::now_utc() + time::Duration::seconds(1),
+            time::Duration::seconds(30),
+            10,
+        )
+        .await
+        .expect("the Prowlarr notification must be dispatchable");
+    let NotificationContent::Media(notification) = deliveries[0].content() else {
+        panic!("expected a structured media notification");
+    };
+    assert_eq!(
+        notification.media().title(),
+        "[S02] - Mashle: Magic and Muscles - WEBRip 1080p"
+    );
+    assert_eq!(notification.progress().unwrap().current_episode(), Some(7));
+}
+
+#[tokio::test]
 async fn partial_season_card_aggregates_task_states_and_episode_coordinates() {
     let (test_db, jobs, leases) = setup().await;
     let created = jobs

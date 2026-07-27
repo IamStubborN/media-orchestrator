@@ -1145,13 +1145,49 @@ fn json_episode_coordinates(value: &serde_json::Value) -> Option<(u32, u32)> {
 
 fn safe_notification_field(value: &str) -> String {
     let normalized = value.replace("://", " / ");
-    normalized
+    let mut safe = String::with_capacity(normalized.len().min(160));
+    let mut previous_whitespace = true;
+    for character in normalized
         .chars()
         .filter(|character| !character.is_control())
-        .take(160)
-        .collect::<String>()
-        .trim()
-        .to_owned()
+    {
+        let character = if character == '|' {
+            '-'
+        } else if character.is_alphanumeric()
+            || character.is_whitespace()
+            || matches!(
+                character,
+                '.' | ','
+                    | ':'
+                    | '!'
+                    | '?'
+                    | '\''
+                    | '"'
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | '+'
+                    | '-'
+                    | '_'
+                    | '/'
+            )
+        {
+            character
+        } else {
+            ' '
+        };
+        let is_whitespace = character.is_whitespace();
+        if is_whitespace && previous_whitespace {
+            continue;
+        }
+        if safe.len() + character.len_utf8() > 160 {
+            break;
+        }
+        safe.push(character);
+        previous_whitespace = is_whitespace;
+    }
+    safe.trim().to_owned()
 }
 
 fn replayed_lease(result: OperationResult) -> Result<Option<JobLease>, sea_orm::DbErr> {
