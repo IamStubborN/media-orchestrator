@@ -3,11 +3,20 @@ mod support;
 use media_core::{
     PRIMARY_USER_ID, EpisodeSnapshot, NewTrackingCommand, NewTrackingSubscription,
     NotificationContent, NotificationEventType, NotificationId, NotificationRecipient,
-    OperationKey, Provider, TrackingId, TrackingScope, TrackingStore, SECONDARY_USER_ID,
+    OperationKey, Provider, SourceChoiceAction, TrackingId, TrackingScope, TrackingStore,
+    SECONDARY_USER_ID,
 };
 use media_storage::{SeaOrmNotificationOutbox, SeaOrmTrackingStore};
 use sea_orm::ConnectionTrait;
 use support::{TestDatabase, operation_key, query};
+
+fn all_source_actions() -> Vec<SourceChoiceAction> {
+    vec![
+        SourceChoiceAction::All,
+        SourceChoiceAction::Rezka,
+        SourceChoiceAction::Prowlarr,
+    ]
+}
 
 fn new_tracking(id: TrackingId, scope: TrackingScope) -> NewTrackingSubscription {
     NewTrackingSubscription::new(
@@ -284,13 +293,13 @@ async fn future_discovery_updates_snapshot_and_atomically_fans_out_family_notifi
 
     assert!(
         store
-            .record_future_episode(tracking.id(), episode, next_check)
+            .record_future_episode(tracking.id(), episode, next_check, all_source_actions())
             .await
             .unwrap()
     );
     assert!(
         !store
-            .record_future_episode(tracking.id(), episode, next_check)
+            .record_future_episode(tracking.id(), episode, next_check, all_source_actions())
             .await
             .unwrap()
     );
@@ -368,6 +377,7 @@ async fn outbox_leases_once_retries_with_backoff_and_keeps_stable_delivery_id() 
             value.id(),
             EpisodeSnapshot::new(1, 5).unwrap(),
             time::OffsetDateTime::now_utc() + time::Duration::hours(6),
+            all_source_actions(),
         )
         .await
         .unwrap();
@@ -455,6 +465,7 @@ async fn stale_delivery_ack_releases_the_lease_without_consuming_a_new_generatio
             value.id(),
             EpisodeSnapshot::new(1, 5).unwrap(),
             time::OffsetDateTime::now_utc() + time::Duration::hours(6),
+            all_source_actions(),
         )
         .await
         .unwrap();
@@ -594,6 +605,7 @@ async fn mark_failed_does_not_overflow_backoff_at_high_attempt_counts() {
             value.id(),
             EpisodeSnapshot::new(1, 5).unwrap(),
             time::OffsetDateTime::now_utc() + time::Duration::hours(6),
+            all_source_actions(),
         )
         .await
         .unwrap();
@@ -644,6 +656,7 @@ async fn mark_dead_buries_a_delivery_so_it_is_never_leased_again() {
             value.id(),
             EpisodeSnapshot::new(1, 5).unwrap(),
             time::OffsetDateTime::now_utc() + time::Duration::hours(6),
+            all_source_actions(),
         )
         .await
         .unwrap();

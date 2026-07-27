@@ -5,12 +5,13 @@ use std::{
 };
 
 use media_core::{
-    PRIMARY_USER_ID, EpisodeDiscoveryPort, EpisodeSnapshot, NewTrackingCommand,
+    PRIMARY_USER_ID, EpisodeAvailability, EpisodeAvailabilityPort, EpisodeAvailabilityRequest,
+    EpisodeDiscovery, EpisodeDiscoveryPort, EpisodeSnapshot, NewTrackingCommand,
     NewTrackingSubscription, NotificationDelivery, NotificationDeliveryFailure,
     NotificationDispatcher, NotificationEventType, NotificationId, NotificationOutboxPort,
     NotificationRecipient, NotificationSink, OperationKey, PortError, Provider,
-    TrackedEpisodeDownloadPort, TrackingDownload, TrackingId, TrackingRuntime,
-    TrackingScheduleStore, TrackingScope, TrackingSubscription,
+    ProviderAvailability, SourceChoiceAction, TrackedEpisodeDownloadPort, TrackingDownload,
+    TrackingId, TrackingRuntime, TrackingScheduleStore, TrackingScope, TrackingSubscription,
 };
 
 #[test]
@@ -23,7 +24,7 @@ fn cancelled_notification_event_round_trips_from_wire() {
 
 struct ScheduleStore {
     due: TrackingSubscription,
-    discovered: Mutex<Vec<EpisodeSnapshot>>,
+    discovered: Mutex<Vec<(EpisodeSnapshot, Vec<SourceChoiceAction>)>>,
 }
 
 #[async_trait::async_trait]
@@ -41,8 +42,9 @@ impl TrackingScheduleStore for ScheduleStore {
         _: TrackingId,
         episode: EpisodeSnapshot,
         _: time::OffsetDateTime,
+        actions: Vec<SourceChoiceAction>,
     ) -> Result<bool, PortError> {
-        self.discovered.lock().unwrap().push(episode);
+        self.discovered.lock().unwrap().push((episode, actions));
         Ok(true)
     }
 
@@ -58,14 +60,34 @@ impl EpisodeDiscoveryPort for Discovery {
     async fn available_episodes(
         &self,
         _: &TrackingSubscription,
-    ) -> Result<Vec<EpisodeSnapshot>, PortError> {
-        Ok(vec![
-            EpisodeSnapshot::new(1, 1).unwrap(),
-            EpisodeSnapshot::new(1, 2).unwrap(),
-            EpisodeSnapshot::new(1, 3).unwrap(),
-            EpisodeSnapshot::new(1, 4).unwrap(),
-            EpisodeSnapshot::new(1, 5).unwrap(),
-        ])
+    ) -> Result<EpisodeDiscovery, PortError> {
+        EpisodeDiscovery::new(
+            vec![
+                EpisodeSnapshot::new(1, 1).unwrap(),
+                EpisodeSnapshot::new(1, 2).unwrap(),
+                EpisodeSnapshot::new(1, 3).unwrap(),
+                EpisodeSnapshot::new(1, 4).unwrap(),
+                EpisodeSnapshot::new(1, 5).unwrap(),
+            ],
+            "Ongoing Show".to_owned(),
+            Some("Original Show".to_owned()),
+        )
+        .map_err(|_| PortError::Conflict)
+    }
+}
+
+struct Availability;
+
+#[async_trait::async_trait]
+impl EpisodeAvailabilityPort for Availability {
+    async fn probe(
+        &self,
+        _: EpisodeAvailabilityRequest<'_>,
+    ) -> Result<EpisodeAvailability, PortError> {
+        Ok(EpisodeAvailability::new(
+            ProviderAvailability::Available,
+            ProviderAvailability::Unavailable,
+        ))
     }
 }
 
@@ -77,7 +99,9 @@ fn tracking() -> TrackingSubscription {
             provider: Provider::Rezka,
             title: "Ongoing Show".to_owned(),
             translation: "Studio Dub".to_owned(),
-            known_episodes: vec![EpisodeSnapshot::new(1, 4).unwrap()],
+            known_episodes: (1..=4)
+                .map(|episode| EpisodeSnapshot::new(1, episode).unwrap())
+                .collect(),
             scope: TrackingScope::Personal,
             series_ongoing: true,
             download: None,
@@ -120,13 +144,14 @@ fn block_on<F: Future>(future: F) -> F::Output {
 }
 
 #[test]
-fn scheduler_treats_every_episode_at_or_before_the_baseline_as_known() {
+fn scheduler_records_only_episodes_missing_from_the_known_set() {
     block_on(async {
         let store = Arc::new(ScheduleStore {
             due: tracking(),
             discovered: Mutex::new(Vec::new()),
         });
-        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery));
+        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery))
+            .with_availability(Arc::new(Availability));
 
         let result = runtime
             .run_once(time::OffsetDateTime::now_utc(), 10)
@@ -137,7 +162,95 @@ fn scheduler_treats_every_episode_at_or_before_the_baseline_as_known() {
         assert_eq!(result.discovered, 1);
         assert_eq!(
             *store.discovered.lock().unwrap(),
-            vec![EpisodeSnapshot::new(1, 5).unwrap()]
+            vec![(
+                EpisodeSnapshot::new(1, 5).unwrap(),
+                vec![SourceChoiceAction::Rezka]
+            )]
+        );
+    });
+}
+
+struct UnavailableAvailability;
+
+#[async_trait::async_trait]
+impl EpisodeAvailabilityPort for UnavailableAvailability {
+    async fn probe(
+        &self,
+        _: EpisodeAvailabilityRequest<'_>,
+    ) -> Result<EpisodeAvailability, PortError> {
+        Ok(EpisodeAvailability::new(
+            ProviderAvailability::Unavailable,
+            ProviderAvailability::Unknown,
+        ))
+    }
+}
+
+#[test]
+fn calendar_candidate_stays_unrecorded_until_a_provider_confirms_it() {
+    block_on(async {
+        let store = Arc::new(ScheduleStore {
+            due: tracking(),
+            discovered: Mutex::new(Vec::new()),
+        });
+        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery))
+            .with_availability(Arc::new(UnavailableAvailability));
+
+        let result = runtime
+            .run_once(time::OffsetDateTime::now_utc(), 10)
+            .await
+            .unwrap();
+
+        assert_eq!(result.discovered, 0);
+        assert!(store.discovered.lock().unwrap().is_empty());
+    });
+}
+
+#[test]
+fn missing_episode_remains_eligible_after_a_later_episode_is_known() {
+    block_on(async {
+        let due = NewTrackingSubscription::new(
+            TrackingId::new(),
+            PRIMARY_USER_ID,
+            NewTrackingCommand {
+                provider: Provider::Rezka,
+                title: "Ongoing Show".to_owned(),
+                translation: "release-calendar".to_owned(),
+                known_episodes: vec![
+                    EpisodeSnapshot::new(1, 1).unwrap(),
+                    EpisodeSnapshot::new(1, 2).unwrap(),
+                    EpisodeSnapshot::new(1, 4).unwrap(),
+                ],
+                scope: TrackingScope::Personal,
+                series_ongoing: true,
+                download: None,
+            },
+        )
+        .unwrap()
+        .into_persisted();
+        let store = Arc::new(ScheduleStore {
+            due,
+            discovered: Mutex::new(Vec::new()),
+        });
+        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery))
+            .with_availability(Arc::new(Availability));
+
+        runtime
+            .run_once(time::OffsetDateTime::now_utc(), 10)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .discovered
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(episode, _)| *episode)
+                .collect::<Vec<_>>(),
+            vec![
+                EpisodeSnapshot::new(1, 3).unwrap(),
+                EpisodeSnapshot::new(1, 5).unwrap()
+            ]
         );
     });
 }
@@ -149,12 +262,17 @@ impl EpisodeDiscoveryPort for DownloadDiscovery {
     async fn available_episodes(
         &self,
         _: &TrackingSubscription,
-    ) -> Result<Vec<EpisodeSnapshot>, PortError> {
-        Ok(vec![
-            EpisodeSnapshot::new(2, 7).unwrap(),
-            EpisodeSnapshot::new(2, 8).unwrap(),
-            EpisodeSnapshot::new(3, 1).unwrap(),
-        ])
+    ) -> Result<EpisodeDiscovery, PortError> {
+        EpisodeDiscovery::new(
+            vec![
+                EpisodeSnapshot::new(2, 7).unwrap(),
+                EpisodeSnapshot::new(2, 8).unwrap(),
+                EpisodeSnapshot::new(3, 1).unwrap(),
+            ],
+            "Blades of the Guardians S2".to_owned(),
+            None,
+        )
+        .map_err(|_| PortError::Conflict)
     }
 }
 
@@ -199,7 +317,7 @@ fn scheduler_enqueues_only_new_episodes_from_the_selected_download_season() {
         );
         assert_eq!(
             *store.discovered.lock().unwrap(),
-            vec![EpisodeSnapshot::new(2, 8).unwrap()]
+            vec![(EpisodeSnapshot::new(2, 8).unwrap(), Vec::new())]
         );
     });
 }

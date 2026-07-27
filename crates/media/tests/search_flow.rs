@@ -79,11 +79,16 @@ async fn tracking_discovery_uses_the_selected_rezka_translation_snapshot() {
     .unwrap();
 
     assert_eq!(
-        discovery.available_episodes(&tracking).await.unwrap(),
+        discovery
+            .available_episodes(&tracking)
+            .await
+            .unwrap()
+            .episodes(),
         vec![
             media_core::EpisodeSnapshot::new(1, 1).unwrap(),
             media_core::EpisodeSnapshot::new(1, 2).unwrap(),
         ]
+        .as_slice()
     );
 }
 
@@ -155,8 +160,12 @@ async fn calendar_tracking_is_independent_of_download_providers() {
     .unwrap();
 
     assert_eq!(
-        discovery.available_episodes(&tracking).await.unwrap(),
-        vec![media_core::EpisodeSnapshot::new(1, 1).unwrap()]
+        discovery
+            .available_episodes(&tracking)
+            .await
+            .unwrap()
+            .episodes(),
+        vec![media_core::EpisodeSnapshot::new(1, 1).unwrap()].as_slice()
     );
 }
 

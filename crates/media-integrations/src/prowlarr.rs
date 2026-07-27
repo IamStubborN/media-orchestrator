@@ -57,6 +57,7 @@ impl ProwlarrError {
     }
 }
 
+#[derive(Clone)]
 pub struct ProwlarrConfig {
     base_url: Url,
     api_key: SecretString,
@@ -319,6 +320,7 @@ pub struct SearchPage {
     pub continuation: Option<SearchPageRequest>,
 }
 
+#[derive(Clone)]
 pub struct ProwlarrClient {
     client: reqwest::Client,
     config: ProwlarrConfig,

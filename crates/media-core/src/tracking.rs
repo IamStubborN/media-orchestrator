@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use crate::{
-    PRIMARY_USER_ID, Actor, OperationKey, PortError, Provider, TrackingId, UserId, SECONDARY_USER_ID,
+    PRIMARY_USER_ID, Actor, OperationKey, PortError, Provider, SourceChoiceAction, TrackingId,
+    UserId, SECONDARY_USER_ID,
 };
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
@@ -106,6 +107,121 @@ impl TrackingDownload {
 pub struct EpisodeSnapshot {
     season: u32,
     episode: u32,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct EpisodeDiscovery {
+    episodes: Vec<EpisodeSnapshot>,
+    release_title: String,
+    original_release_title: Option<String>,
+}
+
+impl EpisodeDiscovery {
+    pub fn new(
+        episodes: Vec<EpisodeSnapshot>,
+        release_title: String,
+        original_release_title: Option<String>,
+    ) -> Result<Self, TrackingValidationError> {
+        if release_title.trim().is_empty() {
+            return Err(TrackingValidationError::EmptyTitle);
+        }
+        if original_release_title
+            .as_ref()
+            .is_some_and(|title| title.trim().is_empty())
+        {
+            return Err(TrackingValidationError::EmptyTitle);
+        }
+        Ok(Self {
+            episodes,
+            release_title,
+            original_release_title,
+        })
+    }
+
+    #[must_use]
+    pub fn episodes(&self) -> &[EpisodeSnapshot] {
+        &self.episodes
+    }
+
+    #[must_use]
+    pub fn release_title(&self) -> &str {
+        &self.release_title
+    }
+
+    #[must_use]
+    pub fn original_release_title(&self) -> Option<&str> {
+        self.original_release_title.as_deref()
+    }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum ProviderAvailability {
+    Available,
+    Unavailable,
+    Unknown,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct EpisodeAvailability {
+    rezka: ProviderAvailability,
+    prowlarr: ProviderAvailability,
+}
+
+impl EpisodeAvailability {
+    #[must_use]
+    pub const fn new(rezka: ProviderAvailability, prowlarr: ProviderAvailability) -> Self {
+        Self { rezka, prowlarr }
+    }
+
+    #[must_use]
+    pub fn actions(self) -> Vec<SourceChoiceAction> {
+        match (self.rezka, self.prowlarr) {
+            (ProviderAvailability::Available, ProviderAvailability::Available) => vec![
+                SourceChoiceAction::All,
+                SourceChoiceAction::Rezka,
+                SourceChoiceAction::Prowlarr,
+            ],
+            (ProviderAvailability::Available, _) => vec![SourceChoiceAction::Rezka],
+            (_, ProviderAvailability::Available) => vec![SourceChoiceAction::Prowlarr],
+            _ => Vec::new(),
+        }
+    }
+}
+
+pub struct EpisodeAvailabilityRequest<'a> {
+    tracking: &'a TrackingSubscription,
+    discovery: &'a EpisodeDiscovery,
+    episode: EpisodeSnapshot,
+}
+
+impl<'a> EpisodeAvailabilityRequest<'a> {
+    #[must_use]
+    pub const fn new(
+        tracking: &'a TrackingSubscription,
+        discovery: &'a EpisodeDiscovery,
+        episode: EpisodeSnapshot,
+    ) -> Self {
+        Self {
+            tracking,
+            discovery,
+            episode,
+        }
+    }
+
+    #[must_use]
+    pub const fn tracking(&self) -> &TrackingSubscription {
+        self.tracking
+    }
+
+    #[must_use]
+    pub const fn discovery(&self) -> &EpisodeDiscovery {
+        self.discovery
+    }
+
+    #[must_use]
+    pub const fn episode(&self) -> EpisodeSnapshot {
+        self.episode
+    }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
@@ -427,6 +543,7 @@ pub trait TrackingScheduleStore: Send + Sync {
         id: TrackingId,
         episode: EpisodeSnapshot,
         next_check_at: time::OffsetDateTime,
+        actions: Vec<SourceChoiceAction>,
     ) -> Result<bool, PortError>;
     async fn defer_check(
         &self,
@@ -440,7 +557,15 @@ pub trait EpisodeDiscoveryPort: Send + Sync {
     async fn available_episodes(
         &self,
         tracking: &TrackingSubscription,
-    ) -> Result<Vec<EpisodeSnapshot>, PortError>;
+    ) -> Result<EpisodeDiscovery, PortError>;
+}
+
+#[async_trait::async_trait]
+pub trait EpisodeAvailabilityPort: Send + Sync {
+    async fn probe(
+        &self,
+        request: EpisodeAvailabilityRequest<'_>,
+    ) -> Result<EpisodeAvailability, PortError>;
 }
 
 #[async_trait::async_trait]
@@ -463,6 +588,7 @@ pub struct TrackingRunResult {
 pub struct TrackingRuntime {
     store: Arc<dyn TrackingScheduleStore>,
     discovery: Arc<dyn EpisodeDiscoveryPort>,
+    availability: Option<Arc<dyn EpisodeAvailabilityPort>>,
     downloads: Option<Arc<dyn TrackedEpisodeDownloadPort>>,
 }
 
@@ -475,8 +601,15 @@ impl TrackingRuntime {
         Self {
             store,
             discovery,
+            availability: None,
             downloads: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_availability(mut self, availability: Arc<dyn EpisodeAvailabilityPort>) -> Self {
+        self.availability = Some(availability);
+        self
     }
 
     #[must_use]
@@ -501,36 +634,72 @@ impl TrackingRuntime {
             queued: 0,
         };
         for tracking in due {
-            let next_check = if tracking.download().is_some() {
+            let default_next_check = if tracking.download().is_some() {
                 now + time::Duration::minutes(15)
             } else {
                 now + time::Duration::hours(6)
             };
             result.checked += 1;
             let selected_season = tracking.download().map(TrackingDownload::season);
-            let baseline = tracking
-                .known_episodes()
-                .iter()
-                .filter(|episode| selected_season.is_none_or(|season| episode.season() == season))
-                .max()
-                .copied()
-                .ok_or(PortError::Conflict)?;
-            let available = match self.discovery.available_episodes(&tracking).await {
+            let discovery = match self.discovery.available_episodes(&tracking).await {
                 Ok(available) => available,
                 Err(_) => {
-                    self.store.defer_check(tracking.id(), next_check).await?;
+                    self.store
+                        .defer_check(tracking.id(), default_next_check)
+                        .await?;
                     result.failed += 1;
                     continue;
                 }
             };
-            for episode in available {
-                if episode <= baseline
-                    || tracking
-                        .download()
-                        .is_some_and(|download| episode.season() != download.season())
+            let baseline = selected_season
+                .map(|season| {
+                    tracking
+                        .known_episodes()
+                        .iter()
+                        .filter(|episode| episode.season() == season)
+                        .max()
+                        .copied()
+                })
+                .flatten();
+            let mut pending_availability = false;
+            for episode in discovery.episodes().iter().copied() {
+                let already_known = if tracking.download().is_some() {
+                    baseline.is_some_and(|baseline| episode <= baseline)
+                } else {
+                    tracking.known_episodes().contains(&episode)
+                };
+                if already_known || selected_season.is_some_and(|season| episode.season() != season)
                 {
                     continue;
                 }
+                let actions = if tracking.download().is_some() {
+                    Vec::new()
+                } else {
+                    let Some(availability) = self.availability.as_deref() else {
+                        result.failed += 1;
+                        pending_availability = true;
+                        continue;
+                    };
+                    let availability = match availability
+                        .probe(EpisodeAvailabilityRequest::new(
+                            &tracking, &discovery, episode,
+                        ))
+                        .await
+                    {
+                        Ok(availability) => availability,
+                        Err(_) => {
+                            result.failed += 1;
+                            pending_availability = true;
+                            continue;
+                        }
+                    };
+                    let actions = availability.actions();
+                    if actions.is_empty() {
+                        pending_availability = true;
+                        continue;
+                    }
+                    actions
+                };
                 if tracking.download().is_some() {
                     let Some(downloads) = self.downloads.as_deref() else {
                         result.failed += 1;
@@ -544,12 +713,17 @@ impl TrackingRuntime {
                 }
                 if self
                     .store
-                    .record_future_episode(tracking.id(), episode, next_check)
+                    .record_future_episode(tracking.id(), episode, default_next_check, actions)
                     .await?
                 {
                     result.discovered += 1;
                 }
             }
+            let next_check = if pending_availability {
+                now + time::Duration::minutes(30)
+            } else {
+                default_next_check
+            };
             self.store.defer_check(tracking.id(), next_check).await?;
         }
         Ok(result)

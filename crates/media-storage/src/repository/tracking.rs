@@ -32,6 +32,7 @@ impl SeaOrmTrackingStore {
         id: TrackingId,
         episode: EpisodeSnapshot,
         next_check_at: time::OffsetDateTime,
+        actions: Vec<SourceChoiceAction>,
     ) -> Result<bool, PortError> {
         let transaction = self.database.begin().await.map_err(map_database_error)?;
         let result = async {
@@ -79,11 +80,7 @@ impl SeaOrmTrackingStore {
                 title,
                 episode.season(),
                 episode.episode(),
-                vec![
-                    SourceChoiceAction::All,
-                    SourceChoiceAction::Rezka,
-                    SourceChoiceAction::Prowlarr,
-                ],
+                actions,
             )
             .map_err(|error| sea_orm::DbErr::Type(error.to_string()))?;
             let payload = source_choice_payload(&source_choice);
@@ -218,8 +215,9 @@ impl TrackingScheduleStore for SeaOrmTrackingStore {
         id: TrackingId,
         episode: EpisodeSnapshot,
         next_check_at: time::OffsetDateTime,
+        actions: Vec<SourceChoiceAction>,
     ) -> Result<bool, PortError> {
-        SeaOrmTrackingStore::record_future_episode(self, id, episode, next_check_at).await
+        SeaOrmTrackingStore::record_future_episode(self, id, episode, next_check_at, actions).await
     }
 
     async fn defer_check(

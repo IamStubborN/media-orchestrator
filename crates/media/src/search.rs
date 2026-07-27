@@ -9,10 +9,12 @@ use media_contract::{
     SelectResultRequest, StartSearchRequest,
 };
 use media_core::{
+    EpisodeAvailability, EpisodeAvailabilityPort, EpisodeAvailabilityRequest, EpisodeDiscovery,
     EpisodeDiscoveryPort, EpisodeMappingConfirmation, EpisodeSnapshot, IdentityStore, Job,
     JobApplication, JobId, JobState, NeedsActionReason, NewJobCommand, NotifyScope, OperationKey,
-    PortError, Provider, ReleaseMetadataPort, ReleaseMetadataResult, ReleasePrecision,
-    ReleaseQuery, ScheduledEpisode, TrackedEpisodeDownloadPort, TrackingSubscription, UserId,
+    PortError, Provider, ProviderAvailability, ReleaseMetadataPort, ReleaseMetadataResult,
+    ReleasePrecision, ReleaseQuery, ScheduledEpisode, TrackedEpisodeDownloadPort,
+    TrackingSubscription, UserId,
 };
 use sha2::{Digest as _, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -193,7 +195,7 @@ impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
     async fn available_episodes(
         &self,
         tracking: &TrackingSubscription,
-    ) -> Result<Vec<EpisodeSnapshot>, PortError> {
+    ) -> Result<EpisodeDiscovery, PortError> {
         if tracking.translation() == "release-calendar" {
             return self.release_episodes(tracking).await;
         }
@@ -277,8 +279,162 @@ impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
             .collect::<Vec<_>>();
         episodes.sort_unstable();
         episodes.dedup();
-        Ok(episodes)
+        EpisodeDiscovery::new(episodes, tracking.title().to_owned(), None)
+            .map_err(|_| PortError::Conflict)
     }
+}
+
+pub struct ProviderEpisodeAvailability {
+    provider: Arc<dyn SearchProvider>,
+    prowlarr: Option<media_integrations::prowlarr::ProwlarrClient>,
+}
+
+impl ProviderEpisodeAvailability {
+    #[must_use]
+    pub fn new(
+        provider: Arc<dyn SearchProvider>,
+        prowlarr: Option<media_integrations::prowlarr::ProwlarrClient>,
+    ) -> Self {
+        Self { provider, prowlarr }
+    }
+
+    async fn rezka_availability(
+        &self,
+        request: &EpisodeAvailabilityRequest<'_>,
+    ) -> ProviderAvailability {
+        let titles = rezka_availability_titles(request);
+        let mut failed = false;
+        for query in &titles {
+            let page = self
+                .provider
+                .search(
+                    &StartSearchRequest {
+                        scope: media_contract::SearchScopeDto {
+                            platform: "system".to_owned(),
+                            chat_id: "tracking-availability".to_owned(),
+                            thread_id: None,
+                        },
+                        source: ProviderDto::Rezka,
+                        query: query.clone(),
+                        media_kind: Some(MediaKindDto::Series),
+                        season: None,
+                        preferred_qualities: Vec::new(),
+                        preferred_languages: Vec::new(),
+                        preferred_codecs: Vec::new(),
+                        preferred_release_groups: Vec::new(),
+                    },
+                    None,
+                )
+                .await;
+            let Ok(page) = page else {
+                failed = true;
+                continue;
+            };
+            if page.results.iter().any(|result| {
+                let (
+                    SearchResultDto::Rezka {
+                        title,
+                        original_title,
+                        ..
+                    },
+                    PrivateResult::Rezka {
+                        translation_episodes,
+                        ..
+                    },
+                ) = (&result.public, &result.private)
+                else {
+                    return false;
+                };
+                let matching_title = titles.iter().any(|candidate| {
+                    title.trim().eq_ignore_ascii_case(candidate.trim())
+                        || original_title.as_deref().is_some_and(|original| {
+                            original.trim().eq_ignore_ascii_case(candidate.trim())
+                        })
+                });
+                matching_title
+                    && translation_episodes.values().any(|seasons| {
+                        seasons.iter().any(|(season, episodes)| {
+                            *season == request.episode().season()
+                                && episodes.contains(&request.episode().episode())
+                        })
+                    })
+            }) {
+                return ProviderAvailability::Available;
+            }
+        }
+        if failed {
+            ProviderAvailability::Unknown
+        } else {
+            ProviderAvailability::Unavailable
+        }
+    }
+
+    async fn prowlarr_availability(
+        &self,
+        request: &EpisodeAvailabilityRequest<'_>,
+    ) -> ProviderAvailability {
+        let Some(client) = &self.prowlarr else {
+            return ProviderAvailability::Unknown;
+        };
+        let query = media_integrations::prowlarr::EpisodeAvailabilityQuery::new(
+            prowlarr_availability_titles(request),
+            request.episode().season(),
+            request.episode().episode(),
+        );
+        let Ok(query) = query else {
+            return ProviderAvailability::Unknown;
+        };
+        match client.episode_available(&query).await {
+            Ok(true) => ProviderAvailability::Available,
+            Ok(false) => ProviderAvailability::Unavailable,
+            Err(_) => ProviderAvailability::Unknown,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl EpisodeAvailabilityPort for ProviderEpisodeAvailability {
+    async fn probe(
+        &self,
+        request: EpisodeAvailabilityRequest<'_>,
+    ) -> Result<EpisodeAvailability, PortError> {
+        let (rezka, prowlarr) = tokio::join!(
+            self.rezka_availability(&request),
+            self.prowlarr_availability(&request)
+        );
+        Ok(EpisodeAvailability::new(rezka, prowlarr))
+    }
+}
+
+fn rezka_availability_titles(request: &EpisodeAvailabilityRequest<'_>) -> Vec<String> {
+    distinct_titles([
+        Some(request.tracking().title()),
+        Some(request.discovery().release_title()),
+        request.discovery().original_release_title(),
+    ])
+}
+
+fn prowlarr_availability_titles(request: &EpisodeAvailabilityRequest<'_>) -> Vec<String> {
+    distinct_titles([
+        request.discovery().original_release_title(),
+        Some(request.discovery().release_title()),
+        Some(request.tracking().title()),
+    ])
+}
+
+fn distinct_titles<const N: usize>(values: [Option<&str>; N]) -> Vec<String> {
+    let mut titles = Vec::new();
+    for value in values.into_iter().flatten() {
+        let value = value.trim();
+        if !value.is_empty()
+            && !titles
+                .iter()
+                .any(|existing: &String| existing.eq_ignore_ascii_case(value))
+        {
+            titles.push(value.to_owned());
+        }
+    }
+    titles
 }
 
 pub struct TrackedEpisodeDownloader {
@@ -419,7 +575,7 @@ impl ProviderEpisodeDiscovery {
     async fn release_episodes(
         &self,
         tracking: &TrackingSubscription,
-    ) -> Result<Vec<EpisodeSnapshot>, PortError> {
+    ) -> Result<EpisodeDiscovery, PortError> {
         let release = self.release.as_ref().ok_or(PortError::Infrastructure)?;
         let query =
             ReleaseQuery::new(tracking.title(), None, None).map_err(|_| PortError::Conflict)?;
@@ -427,7 +583,7 @@ impl ProviderEpisodeDiscovery {
             .query(&query)
             .await
             .map_err(|_| PortError::Infrastructure)?;
-        let ReleaseMetadataResult::Matched { schedule, .. } = result else {
+        let ReleaseMetadataResult::Matched { show, schedule, .. } = result else {
             return Err(PortError::Conflict);
         };
         let now = OffsetDateTime::now_utc();
@@ -438,7 +594,8 @@ impl ProviderEpisodeDiscovery {
             .collect::<Vec<_>>();
         episodes.sort_unstable();
         episodes.dedup();
-        Ok(episodes)
+        EpisodeDiscovery::new(episodes, show.title, show.original_title)
+            .map_err(|_| PortError::Conflict)
     }
 }
 
