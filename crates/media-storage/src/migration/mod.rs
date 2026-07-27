@@ -25,6 +25,7 @@ mod m20260720_000024_structured_notifications;
 mod m20260721_000025_notification_episode_numbers;
 mod m20260721_000026_notification_specials;
 mod m20260723_000027_detailed_notifications;
+mod m20260727_000028_source_choice_notifications;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseTransaction;
@@ -62,6 +63,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260721_000025_notification_episode_numbers::Migration),
             Box::new(m20260721_000026_notification_specials::Migration),
             Box::new(m20260723_000027_detailed_notifications::Migration),
+            Box::new(m20260727_000028_source_choice_notifications::Migration),
         ]
     }
 }

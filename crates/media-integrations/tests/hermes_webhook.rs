@@ -6,6 +6,7 @@ use media_core::{
     MediaNotificationPublication, MediaNotificationResult, MediaNotificationStage,
     MediaNotificationState, MediaNotificationSubtitles, MediaNotificationVideo,
     NotificationDelivery, NotificationEventType, NotificationId, NotificationRecipient,
+    SourceChoiceNotification, TrackingId,
 };
 use media_integrations::hermes::{HermesWebhookClient, HermesWebhookConfig, WebhookError};
 use secrecy::SecretString;
@@ -23,6 +24,30 @@ fn delivery() -> NotificationDelivery {
         NotificationEventType::Started,
         Some("media-job:00000000-0000-0000-0000-000000000999".to_owned()),
         "Media job 00000000-0000-0000-0000-000000000123 started.".to_owned(),
+        1,
+        0,
+    )
+    .unwrap()
+}
+
+fn source_choice_delivery() -> NotificationDelivery {
+    let tracking_id = TrackingId::from_uuid(
+        uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000555").unwrap(),
+    );
+    NotificationDelivery::rehydrate_source_choice(
+        NotificationId::from_uuid(
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000126").unwrap(),
+        ),
+        NotificationRecipient::Primary,
+        NotificationEventType::FutureEpisodeFound,
+        SourceChoiceNotification::new(
+            "tracking:00000000-0000-0000-0000-000000000555:3:5".to_owned(),
+            tracking_id,
+            "Jobless Reincarnation".to_owned(),
+            3,
+            5,
+        )
+        .unwrap(),
         1,
         0,
     )
@@ -205,6 +230,39 @@ async fn posts_exact_deliver_only_payload_with_generic_hmac_v2_headers() {
     HermesWebhookClient::new(config(&server))
         .unwrap()
         .deliver_at(&delivery(), 1_720_785_600)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn posts_exact_source_choice_payload_with_all_three_actions() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/webhooks/media-notify"))
+        .and(header("content-type", "application/json"))
+        .and(header("x-webhook-timestamp", "1720785600"))
+        .and(header(
+            "x-request-id",
+            "00000000-0000-0000-0000-000000000126-1",
+        ))
+        .and(body_json(serde_json::json!({
+            "event_type": "media.source-choice",
+            "schema_version": 1,
+            "card_key": "tracking:00000000-0000-0000-0000-000000000555:3:5",
+            "tracking_id": "00000000-0000-0000-0000-000000000555",
+            "title": "Jobless Reincarnation",
+            "season": 3,
+            "episode": 5,
+            "actions": ["all", "rezka", "prowlarr"]
+        })))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    HermesWebhookClient::new(config(&server))
+        .unwrap()
+        .deliver_at(&source_choice_delivery(), 1_720_785_600)
         .await
         .unwrap();
 }

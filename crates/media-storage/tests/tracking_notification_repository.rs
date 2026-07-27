@@ -321,12 +321,27 @@ async fn future_discovery_updates_snapshot_and_atomically_fans_out_family_notifi
         let payload = row.try_get::<serde_json::Value>("", "payload").unwrap();
         assert_eq!(
             payload.as_object().unwrap().keys().collect::<Vec<_>>(),
-            vec!["message"]
+            vec![
+                "actions",
+                "card_key",
+                "episode",
+                "event_type",
+                "schema_version",
+                "season",
+                "title",
+                "tracking_id",
+            ]
         );
-        let message = payload["message"].as_str().unwrap();
-        assert!(message.starts_with("📺 **Новая серия доступна**"));
-        assert!(message.contains("🔔 S01E05"));
-        assert!(message.contains("➡️ **Дальше:** выберите источник"));
+        assert_eq!(payload["event_type"], "media.source-choice");
+        assert_eq!(payload["schema_version"], 1);
+        assert_eq!(payload["tracking_id"], tracking.id().to_string());
+        assert_eq!(payload["title"], "Ongoing Show");
+        assert_eq!(payload["season"], 1);
+        assert_eq!(payload["episode"], 5);
+        assert_eq!(
+            payload["actions"],
+            serde_json::json!(["all", "rezka", "prowlarr"])
+        );
         assert!(!payload.to_string().contains("http"));
     }
     assert!(
@@ -365,7 +380,10 @@ async fn outbox_leases_once_retries_with_backoff_and_keeps_stable_delivery_id() 
 
     assert_eq!(leased.len(), 1);
     assert_eq!(leased[0].recipient(), NotificationRecipient::Primary);
-    assert_eq!(leased[0].status_key(), None);
+    assert_eq!(
+        leased[0].status_key(),
+        Some(format!("tracking:{}:1:5", value.id()).as_str())
+    );
     assert_eq!(
         leased[0].event_type(),
         NotificationEventType::FutureEpisodeFound

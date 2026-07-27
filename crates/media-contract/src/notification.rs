@@ -29,6 +29,27 @@ pub struct HermesDeliverOnlyWebhook {
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
+pub enum SourceChoiceActionDto {
+    All,
+    Rezka,
+    Prowlarr,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HermesSourceChoiceWebhook {
+    pub event_type: String,
+    pub schema_version: u16,
+    pub card_key: String,
+    pub tracking_id: crate::PublicId,
+    pub title: String,
+    pub season: u32,
+    pub episode: u32,
+    pub actions: Vec<SourceChoiceActionDto>,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum MediaNotificationDeliveryKindDto {
     Card,
     FinalPush,

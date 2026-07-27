@@ -309,8 +309,8 @@ async fn a_failed_migration_explicitly_rolls_back_partial_schema() {
     );
     assert_eq!(
         names.last().map(String::as_str),
-        Some("m20260723_000027_detailed_notifications"),
-        "detailed notification support must remain the latest schema change",
+        Some("m20260727_000028_source_choice_notifications"),
+        "source-choice notification support must remain the latest schema change",
     );
     for migration in migrations {
         assert_eq!(
@@ -615,7 +615,7 @@ async fn structured_notifications_migration_preserves_legacy_rows_and_enforces_v
     )
     .await;
 
-    Migrator::down(db, Some(4)).await.unwrap();
+    Migrator::down(db, Some(5)).await.unwrap();
 
     let retained_rows = query(
         db,
@@ -905,7 +905,7 @@ async fn detailed_notifications_migration_preserves_legacy_payloads_and_validate
     )
     .await;
 
-    Migrator::down(db, Some(1)).await.unwrap();
+    Migrator::down(db, Some(2)).await.unwrap();
 
     let normalized = query(
         db,
@@ -931,6 +931,87 @@ async fn detailed_notifications_migration_preserves_legacy_payloads_and_validate
             assert!(payload["progress"].get(key).is_none());
         }
     }
+}
+
+#[tokio::test]
+async fn source_choice_migration_converts_pending_legacy_tracking_notifications() {
+    let test_db = TestDatabase::start().await;
+    let db = test_db.connection();
+    Migrator::up(db, Some(27)).await.unwrap();
+
+    execute(
+        db,
+        "INSERT INTO tracking_subscriptions
+           (id, owner_id, provider, title, translation, known_episodes, scope, created_operation_key)
+         VALUES
+           ('00000000-0000-0000-0000-000000000555',
+            '00000000-0000-0000-0000-000000000001',
+            'rezka', 'Jobless Reincarnation', 'release-calendar',
+            '[{\"season\":3,\"episode\":5}]'::jsonb, 'personal',
+            decode(repeat('55', 32), 'hex'));
+         INSERT INTO tracking_discoveries (id, tracking_id, season, episode)
+         VALUES
+           ('00000000-0000-0000-0000-000000000556',
+            '00000000-0000-0000-0000-000000000555', 3, 5);
+         INSERT INTO notification_outbox
+           (id, aggregate_type, aggregate_id, event_type, recipient, source_dedupe_key, payload)
+         VALUES
+           ('00000000-0000-0000-0000-000000000557', 'tracking',
+            '00000000-0000-0000-0000-000000000555', 'future-episode-found', 'primary',
+            uuid_send('00000000-0000-0000-0000-000000000556'::uuid),
+            '{\"message\":\"legacy future episode\"}'::jsonb)",
+    )
+    .await
+    .unwrap();
+
+    Migrator::up(db, Some(1)).await.unwrap();
+
+    let payload = query(
+        db,
+        "SELECT payload FROM notification_outbox
+         WHERE id = '00000000-0000-0000-0000-000000000557'",
+    )
+    .await
+    .pop()
+    .unwrap()
+    .try_get::<serde_json::Value>("", "payload")
+    .unwrap();
+    assert_eq!(payload["event_type"], "media.source-choice");
+    assert_eq!(payload["schema_version"], 1);
+    assert_eq!(
+        payload["tracking_id"],
+        "00000000-0000-0000-0000-000000000555"
+    );
+    assert_eq!(payload["title"], "Jobless Reincarnation");
+    assert_eq!(payload["season"], 3);
+    assert_eq!(payload["episode"], 5);
+    assert_eq!(
+        payload["actions"],
+        serde_json::json!(["all", "rezka", "prowlarr"])
+    );
+
+    assert_rejected(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(payload, '{actions}', '[\"rezka\"]'::jsonb)
+         WHERE id = '00000000-0000-0000-0000-000000000557'",
+        "notification_payload_check",
+    )
+    .await;
+
+    Migrator::down(db, Some(1)).await.unwrap();
+    let legacy = query(
+        db,
+        "SELECT payload FROM notification_outbox
+         WHERE id = '00000000-0000-0000-0000-000000000557'",
+    )
+    .await
+    .pop()
+    .unwrap()
+    .try_get::<serde_json::Value>("", "payload")
+    .unwrap();
+    assert!(legacy.get("message").is_some());
+    assert!(legacy.get("schema_version").is_none());
 }
 
 #[tokio::test]

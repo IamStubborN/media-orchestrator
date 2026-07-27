@@ -1,9 +1,10 @@
 use media_contract::{
     CreateTrackingRequest, EpisodeSnapshotDto, HermesDeliverOnlyWebhook,
-    HermesMediaNotificationWebhook, MediaNotificationActionDto, MediaNotificationDeliveryKindDto,
-    MediaNotificationDto, MediaNotificationEpisodeDto, MediaNotificationKindDto,
-    MediaNotificationNextStepDto, MediaNotificationProgressDto, MediaNotificationStageDto,
-    MediaNotificationStateDto, NotificationEventTypeDto, PublicId, TrackingScopeDto,
+    HermesMediaNotificationWebhook, HermesSourceChoiceWebhook, MediaNotificationActionDto,
+    MediaNotificationDeliveryKindDto, MediaNotificationDto, MediaNotificationEpisodeDto,
+    MediaNotificationKindDto, MediaNotificationNextStepDto, MediaNotificationProgressDto,
+    MediaNotificationStageDto, MediaNotificationStateDto, NotificationEventTypeDto, PublicId,
+    SourceChoiceActionDto, TrackingScopeDto,
 };
 
 #[test]
@@ -94,6 +95,39 @@ fn hermes_payload_is_deliver_only_compatible_and_contains_no_routing_or_secret_f
         serde_json::json!({
             "event_type": "media.notification",
             "message": "Episode 5 is now available. Choose Rezka or Prowlarr."
+        })
+    );
+}
+
+#[test]
+fn hermes_source_choice_webhook_has_three_stable_provider_actions() {
+    let tracking_id = PublicId::parse("00000000-0000-0000-0000-000000000555").unwrap();
+    let payload = HermesSourceChoiceWebhook {
+        event_type: "media.source-choice".to_owned(),
+        schema_version: 1,
+        card_key: "tracking:00000000-0000-0000-0000-000000000555:3:5".to_owned(),
+        tracking_id,
+        title: "Jobless Reincarnation".to_owned(),
+        season: 3,
+        episode: 5,
+        actions: vec![
+            SourceChoiceActionDto::All,
+            SourceChoiceActionDto::Rezka,
+            SourceChoiceActionDto::Prowlarr,
+        ],
+    };
+
+    assert_eq!(
+        serde_json::to_value(payload).unwrap(),
+        serde_json::json!({
+            "event_type": "media.source-choice",
+            "schema_version": 1,
+            "card_key": "tracking:00000000-0000-0000-0000-000000000555:3:5",
+            "tracking_id": "00000000-0000-0000-0000-000000000555",
+            "title": "Jobless Reincarnation",
+            "season": 3,
+            "episode": 5,
+            "actions": ["all", "rezka", "prowlarr"]
         })
     );
 }

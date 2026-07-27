@@ -1,15 +1,33 @@
 use std::sync::Arc;
 
-use crate::{NotificationId, PortError};
+use crate::{NotificationId, PortError, TrackingId};
 
 const MAX_NOTIFICATION_DISPLAY_BYTES: usize = 256;
 const MAX_NOTIFICATION_CARD_KEY_BYTES: usize = 96;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum NotificationContent {
-    /// Text payloads are retained only for outbox rows created before migration 24.
+    /// Text payloads are retained only for historical outbox rows.
     LegacyMessage(String),
     Media(Box<MediaNotification>),
+    SourceChoice(SourceChoiceNotification),
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum SourceChoiceAction {
+    All,
+    Rezka,
+    Prowlarr,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SourceChoiceNotification {
+    card_key: String,
+    tracking_id: TrackingId,
+    title: String,
+    season: u32,
+    episode: u32,
+    actions: [SourceChoiceAction; 3],
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
@@ -288,6 +306,68 @@ pub enum NotificationValidationError {
     InvalidAttemptProgress,
     #[error("notification storage progress is invalid")]
     InvalidStorageProgress,
+    #[error("source choice episode is invalid")]
+    InvalidSourceChoiceEpisode,
+}
+
+impl SourceChoiceNotification {
+    pub fn new(
+        card_key: String,
+        tracking_id: TrackingId,
+        title: String,
+        season: u32,
+        episode: u32,
+    ) -> Result<Self, NotificationValidationError> {
+        if !valid_card_key(&card_key) {
+            return Err(NotificationValidationError::InvalidCardKey);
+        }
+        validate_human_label(&title)?;
+        if episode == 0 {
+            return Err(NotificationValidationError::InvalidSourceChoiceEpisode);
+        }
+        Ok(Self {
+            card_key,
+            tracking_id,
+            title,
+            season,
+            episode,
+            actions: [
+                SourceChoiceAction::All,
+                SourceChoiceAction::Rezka,
+                SourceChoiceAction::Prowlarr,
+            ],
+        })
+    }
+
+    #[must_use]
+    pub fn card_key(&self) -> &str {
+        &self.card_key
+    }
+
+    #[must_use]
+    pub const fn tracking_id(&self) -> TrackingId {
+        self.tracking_id
+    }
+
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    #[must_use]
+    pub const fn season(&self) -> u32 {
+        self.season
+    }
+
+    #[must_use]
+    pub const fn episode(&self) -> u32 {
+        self.episode
+    }
+
+    #[must_use]
+    pub const fn actions(&self) -> &[SourceChoiceAction; 3] {
+        &self.actions
+    }
 }
 
 impl MediaNotificationMedia {
@@ -1561,6 +1641,7 @@ impl NotificationDelivery {
         match &self.content {
             NotificationContent::LegacyMessage(_) => self.status_key(),
             NotificationContent::Media(notification) => Some(notification.card_key()),
+            NotificationContent::SourceChoice(notification) => Some(notification.card_key()),
         }
     }
     #[must_use]
@@ -1568,6 +1649,7 @@ impl NotificationDelivery {
         match &self.content {
             NotificationContent::LegacyMessage(_) => None,
             NotificationContent::Media(notification) => Some(notification.lifecycle_cycle()),
+            NotificationContent::SourceChoice(_) => None,
         }
     }
     pub fn rehydrate_media(
@@ -1588,6 +1670,32 @@ impl NotificationDelivery {
             status_key: Some(notification.card_key().to_owned()),
             message: String::new(),
             content: NotificationContent::Media(Box::new(notification)),
+            generation,
+            attempt_count,
+        })
+    }
+
+    pub fn rehydrate_source_choice(
+        id: NotificationId,
+        recipient: NotificationRecipient,
+        event_type: NotificationEventType,
+        notification: SourceChoiceNotification,
+        generation: u64,
+        attempt_count: u32,
+    ) -> Result<Self, NotificationValidationError> {
+        if event_type != NotificationEventType::FutureEpisodeFound {
+            return Err(NotificationValidationError::InvalidDisplayField);
+        }
+        if generation == 0 || generation > i64::MAX as u64 {
+            return Err(NotificationValidationError::InvalidGeneration);
+        }
+        Ok(Self {
+            id,
+            recipient,
+            event_type,
+            status_key: Some(notification.card_key().to_owned()),
+            message: String::new(),
+            content: NotificationContent::SourceChoice(notification),
             generation,
             attempt_count,
         })

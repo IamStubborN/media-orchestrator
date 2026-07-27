@@ -2,21 +2,22 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hmac::{Hmac, KeyInit, Mac};
 use media_contract::{
-    HermesDeliverOnlyWebhook, HermesMediaNotificationWebhook, MediaNotificationActionDto,
-    MediaNotificationAudioDto, MediaNotificationDeliveryKindDto, MediaNotificationDto,
-    MediaNotificationEpisodeDto, MediaNotificationIssueDto, MediaNotificationKindDto,
-    MediaNotificationLibraryDto, MediaNotificationNextStepDto, MediaNotificationOriginDto,
-    MediaNotificationProcessingDto, MediaNotificationProcessingModeDto,
+    HermesDeliverOnlyWebhook, HermesMediaNotificationWebhook, HermesSourceChoiceWebhook,
+    MediaNotificationActionDto, MediaNotificationAudioDto, MediaNotificationDeliveryKindDto,
+    MediaNotificationDto, MediaNotificationEpisodeDto, MediaNotificationIssueDto,
+    MediaNotificationKindDto, MediaNotificationLibraryDto, MediaNotificationNextStepDto,
+    MediaNotificationOriginDto, MediaNotificationProcessingDto, MediaNotificationProcessingModeDto,
     MediaNotificationProgressDto, MediaNotificationPublicationDto, MediaNotificationResultDto,
     MediaNotificationStageDto, MediaNotificationStateDto, MediaNotificationSubtitlesDto,
-    MediaNotificationVideoDto, PublicId,
+    MediaNotificationVideoDto, PublicId, SourceChoiceActionDto,
 };
 use media_core::{
     MediaNotification, MediaNotificationAction, MediaNotificationDeliveryKind,
     MediaNotificationKind, MediaNotificationLibrary, MediaNotificationNextStep,
     MediaNotificationOrigin, MediaNotificationProcessingMode, MediaNotificationResult,
     MediaNotificationStage, MediaNotificationState, NotificationContent, NotificationDelivery,
-    NotificationDeliveryFailure, NotificationRecipient, NotificationSink,
+    NotificationDeliveryFailure, NotificationRecipient, NotificationSink, SourceChoiceAction,
+    SourceChoiceNotification,
 };
 use secrecy::{ExposeSecret, SecretString};
 use sha2::Sha256;
@@ -100,6 +101,9 @@ impl HermesWebhookClient {
             NotificationContent::Media(notification) => {
                 serde_json::to_vec(&media_webhook(notification))
             }
+            NotificationContent::SourceChoice(notification) => {
+                serde_json::to_vec(&source_choice_webhook(notification))
+            }
         }
         .map_err(|_| WebhookError::Serialization)?;
         let (endpoint, secret) = self.route(delivery.recipient());
@@ -137,6 +141,28 @@ impl HermesWebhookClient {
                 &self.config.secondary_secret,
             ),
         }
+    }
+}
+
+fn source_choice_webhook(notification: &SourceChoiceNotification) -> HermesSourceChoiceWebhook {
+    HermesSourceChoiceWebhook {
+        event_type: "media.source-choice".to_owned(),
+        schema_version: 1,
+        card_key: notification.card_key().to_owned(),
+        tracking_id: PublicId::parse(&notification.tracking_id().to_string())
+            .expect("domain tracking IDs are valid UUIDs"),
+        title: notification.title().to_owned(),
+        season: notification.season(),
+        episode: notification.episode(),
+        actions: notification
+            .actions()
+            .iter()
+            .map(|action| match action {
+                SourceChoiceAction::All => SourceChoiceActionDto::All,
+                SourceChoiceAction::Rezka => SourceChoiceActionDto::Rezka,
+                SourceChoiceAction::Prowlarr => SourceChoiceActionDto::Prowlarr,
+            })
+            .collect(),
     }
 }
 

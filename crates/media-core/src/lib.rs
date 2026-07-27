@@ -55,7 +55,7 @@ pub use notification::{
     MediaNotificationSubtitles, MediaNotificationVideo, NotificationContent, NotificationDelivery,
     NotificationDeliveryFailure, NotificationDispatchResult, NotificationDispatcher,
     NotificationEventType, NotificationOutboxPort, NotificationRecipient, NotificationSink,
-    NotificationValidationError,
+    NotificationValidationError, SourceChoiceAction, SourceChoiceNotification,
 };
 pub use operation::OperationKey;
 pub use orchestration::{

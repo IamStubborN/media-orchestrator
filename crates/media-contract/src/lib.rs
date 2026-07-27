@@ -27,14 +27,14 @@ pub use job::{
 pub use lease::LeaseDto;
 pub use lifecycle::{RunnerLifecycleDto, RunnerLifecycleStateDto, UpdateRunnerLifecycleRequest};
 pub use notification::{
-    HermesDeliverOnlyWebhook, HermesMediaNotificationWebhook, MediaNotificationActionDto,
-    MediaNotificationAudioDto, MediaNotificationDeliveryKindDto, MediaNotificationDto,
-    MediaNotificationEpisodeDto, MediaNotificationIssueDto, MediaNotificationKindDto,
-    MediaNotificationLibraryDto, MediaNotificationNextStepDto, MediaNotificationOriginDto,
-    MediaNotificationProcessingDto, MediaNotificationProcessingModeDto,
+    HermesDeliverOnlyWebhook, HermesMediaNotificationWebhook, HermesSourceChoiceWebhook,
+    MediaNotificationActionDto, MediaNotificationAudioDto, MediaNotificationDeliveryKindDto,
+    MediaNotificationDto, MediaNotificationEpisodeDto, MediaNotificationIssueDto,
+    MediaNotificationKindDto, MediaNotificationLibraryDto, MediaNotificationNextStepDto,
+    MediaNotificationOriginDto, MediaNotificationProcessingDto, MediaNotificationProcessingModeDto,
     MediaNotificationProgressDto, MediaNotificationPublicationDto, MediaNotificationResultDto,
     MediaNotificationStageDto, MediaNotificationStateDto, MediaNotificationSubtitlesDto,
-    MediaNotificationVideoDto, NotificationEventTypeDto,
+    MediaNotificationVideoDto, NotificationEventTypeDto, SourceChoiceActionDto,
 };
 pub use plex::{
     PlexObservationDto, PlexReconcileRequest, PlexReconcileResponse, PlexReconcileStatus,

@@ -8,8 +8,9 @@ use media_core::{
     MediaNotificationState, MediaNotificationSubtitles, MediaNotificationVideo,
     NewTrackingSubscription, NotificationDelivery, NotificationEventType, NotificationId,
     NotificationOutboxPort, NotificationRecipient, OperationKey, PortError, Provider,
-    TrackingDownload, TrackingDownloadPatch, TrackingId, TrackingScheduleStore, TrackingScope,
-    TrackingStore, TrackingSubscription, UserId, SECONDARY_USER_ID,
+    SourceChoiceNotification, TrackingDownload, TrackingDownloadPatch, TrackingId,
+    TrackingScheduleStore, TrackingScope, TrackingStore, TrackingSubscription, UserId,
+    SECONDARY_USER_ID,
 };
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
 
@@ -67,10 +68,20 @@ impl SeaOrmTrackingStore {
             if auto_download.is_some() {
                 return Ok(true);
             }
-            let message = format!(
-                "📺 **Новая серия доступна**\n\n🎬 {title}\n🔔 S{:02}E{:02}\n\n➡️ **Дальше:** выберите источник — Rezka или Prowlarr",
-                episode.season(), episode.episode()
+            let card_key = format!(
+                "tracking:{id}:{}:{}",
+                episode.season(),
+                episode.episode()
             );
+            let source_choice = SourceChoiceNotification::new(
+                card_key,
+                id,
+                title,
+                episode.season(),
+                episode.episode(),
+            )
+            .map_err(|error| sea_orm::DbErr::Type(error.to_string()))?;
+            let payload = source_choice_payload(&source_choice);
             let recipients = notification_recipients(owner, &scope)?;
             for recipient in recipients {
                 transaction.execute_raw(Statement::from_sql_and_values(
@@ -81,7 +92,7 @@ impl SeaOrmTrackingStore {
                         id.into_uuid().into(),
                         recipient.into(),
                         discovery_id.as_bytes().to_vec().into(),
-                        serde_json::json!({"message": message}).into(),
+                        payload.clone().into(),
                     ],
                 )).await?;
             }
@@ -89,6 +100,19 @@ impl SeaOrmTrackingStore {
         }.await;
         finish(transaction, result).await
     }
+}
+
+fn source_choice_payload(notification: &SourceChoiceNotification) -> serde_json::Value {
+    serde_json::json!({
+        "event_type": "media.source-choice",
+        "schema_version": 1,
+        "card_key": notification.card_key(),
+        "tracking_id": notification.tracking_id().to_string(),
+        "title": notification.title(),
+        "season": notification.season(),
+        "episode": notification.episode(),
+        "actions": ["all", "rezka", "prowlarr"],
+    })
 }
 
 #[async_trait::async_trait]
@@ -495,6 +519,22 @@ fn delivery_from_row(row: &sea_orm::QueryResult) -> Result<NotificationDelivery,
         )
         .map_err(|_| PortError::Infrastructure);
     }
+    if payload.get("schema_version") == Some(&serde_json::json!(1))
+        && payload
+            .get("event_type")
+            .and_then(serde_json::Value::as_str)
+            == Some("media.source-choice")
+    {
+        return NotificationDelivery::rehydrate_source_choice(
+            id,
+            recipient,
+            event_type,
+            source_choice_from_payload(&payload)?,
+            generation,
+            attempts,
+        )
+        .map_err(|_| PortError::Infrastructure);
+    }
     let aggregate_type = row
         .try_get::<String>("", "aggregate_type")
         .map_err(|_| PortError::Infrastructure)?;
@@ -518,6 +558,42 @@ fn delivery_from_row(row: &sea_orm::QueryResult) -> Result<NotificationDelivery,
             .to_owned(),
         generation,
         attempts,
+    )
+    .map_err(|_| PortError::Infrastructure)
+}
+
+fn source_choice_from_payload(
+    payload: &serde_json::Value,
+) -> Result<SourceChoiceNotification, PortError> {
+    let string = |name: &str| {
+        payload
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .ok_or(PortError::Infrastructure)
+    };
+    let tracking_id = string("tracking_id")?
+        .parse::<uuid::Uuid>()
+        .map(TrackingId::from_uuid)
+        .map_err(|_| PortError::Infrastructure)?;
+    let season = payload
+        .get("season")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or(PortError::Infrastructure)?;
+    let episode = payload
+        .get("episode")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or(PortError::Infrastructure)?;
+    if payload.get("actions") != Some(&serde_json::json!(["all", "rezka", "prowlarr"])) {
+        return Err(PortError::Infrastructure);
+    }
+    SourceChoiceNotification::new(
+        string("card_key")?.to_owned(),
+        tracking_id,
+        string("title")?.to_owned(),
+        season,
+        episode,
     )
     .map_err(|_| PortError::Infrastructure)
 }
