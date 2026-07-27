@@ -309,8 +309,8 @@ async fn a_failed_migration_explicitly_rolls_back_partial_schema() {
     );
     assert_eq!(
         names.last().map(String::as_str),
-        Some("m20260727_000029_availability_gated_tracking"),
-        "availability-gated tracking must remain the latest schema change",
+        Some("m20260727_000030_recheck_recent_calendar_discoveries"),
+        "calendar discovery recheck must remain the latest schema change",
     );
     for migration in migrations {
         assert_eq!(
@@ -615,7 +615,7 @@ async fn structured_notifications_migration_preserves_legacy_rows_and_enforces_v
     )
     .await;
 
-    Migrator::down(db, Some(6)).await.unwrap();
+    Migrator::down(db, Some(7)).await.unwrap();
 
     let retained_rows = query(
         db,
@@ -905,7 +905,7 @@ async fn detailed_notifications_migration_preserves_legacy_payloads_and_validate
     )
     .await;
 
-    Migrator::down(db, Some(3)).await.unwrap();
+    Migrator::down(db, Some(4)).await.unwrap();
 
     let normalized = query(
         db,
@@ -1143,6 +1143,110 @@ async fn availability_gate_requeues_unverified_discoveries_and_accepts_exact_sou
         .await
         .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn recent_delivered_calendar_discovery_is_rechecked_without_touching_older_history() {
+    let test_db = TestDatabase::start().await;
+    let db = test_db.connection();
+    Migrator::up(db, Some(28)).await.unwrap();
+
+    execute(
+        db,
+        "INSERT INTO tracking_subscriptions
+           (id, owner_id, provider, title, translation, known_episodes, scope, created_operation_key)
+         VALUES
+           ('00000000-0000-0000-0000-000000000575',
+            '00000000-0000-0000-0000-000000000001',
+            'rezka', 'Future Show', 'release-calendar',
+            '[{\"season\":3,\"episode\":4},{\"season\":3,\"episode\":5}]'::jsonb,
+            'personal', decode(repeat('57', 32), 'hex'));
+         INSERT INTO tracking_discoveries (id, tracking_id, season, episode)
+         VALUES
+           ('00000000-0000-0000-0000-000000000576',
+            '00000000-0000-0000-0000-000000000575', 3, 5);
+         INSERT INTO notification_outbox
+           (id, aggregate_type, aggregate_id, event_type, recipient, source_dedupe_key,
+            payload, delivered_at)
+         VALUES
+           ('00000000-0000-0000-0000-000000000577', 'tracking',
+            '00000000-0000-0000-0000-000000000575', 'future-episode-found', 'primary',
+            uuid_send('00000000-0000-0000-0000-000000000576'::uuid),
+            '{\"message\":\"calendar-only notification\"}'::jsonb, now())",
+    )
+    .await
+    .unwrap();
+
+    Migrator::up(db, Some(2)).await.unwrap();
+
+    let tracking = query(
+        db,
+        "SELECT known_episodes, next_check_at <= now() AS due
+         FROM tracking_subscriptions
+         WHERE id = '00000000-0000-0000-0000-000000000575'",
+    )
+    .await
+    .pop()
+    .unwrap();
+    assert_eq!(
+        tracking
+            .try_get::<serde_json::Value>("", "known_episodes")
+            .unwrap(),
+        serde_json::json!([{"season": 3, "episode": 4}])
+    );
+    assert!(tracking.try_get::<bool>("", "due").unwrap());
+    assert!(
+        query(
+            db,
+            "SELECT id FROM tracking_discoveries
+             WHERE id = '00000000-0000-0000-0000-000000000576'",
+        )
+        .await
+        .is_empty()
+    );
+    assert_eq!(
+        query(
+            db,
+            "SELECT last_error_code FROM notification_outbox
+             WHERE id = '00000000-0000-0000-0000-000000000577'",
+        )
+        .await
+        .pop()
+        .unwrap()
+        .try_get::<String>("", "last_error_code")
+        .unwrap(),
+        "availability_unverified:3:5"
+    );
+
+    Migrator::down(db, Some(1)).await.unwrap();
+
+    assert_eq!(
+        query(
+            db,
+            "SELECT id FROM tracking_discoveries
+             WHERE id = '00000000-0000-0000-0000-000000000576'",
+        )
+        .await
+        .len(),
+        1
+    );
+    let restored = query(
+        db,
+        "SELECT known_episodes FROM tracking_subscriptions
+         WHERE id = '00000000-0000-0000-0000-000000000575'",
+    )
+    .await
+    .pop()
+    .unwrap()
+    .try_get::<serde_json::Value>("", "known_episodes")
+    .unwrap();
+    assert_eq!(
+        restored,
+        serde_json::json!([
+            {"season": 3, "episode": 4},
+            {"season": 3, "episode": 5}
+        ])
     );
 }
 
