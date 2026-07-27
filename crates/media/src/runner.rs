@@ -145,6 +145,10 @@ pub trait JobExecutor: Send + Sync {
         Ok(())
     }
 
+    async fn cleanup_cancelled(&self, _lease: &LeaseDto) -> Result<(), RunnerError> {
+        Ok(())
+    }
+
     async fn maintain(&self, _protected_job_ids: &[String]) -> Result<(), RunnerError> {
         Ok(())
     }
@@ -1533,6 +1537,49 @@ impl JobExecutor for MediaJobExecutor {
         result.map_err(|_| RunnerError::Execution)
     }
 
+    async fn cleanup_cancelled(&self, lease: &LeaseDto) -> Result<(), RunnerError> {
+        let Some(media_contract::ExecutionSelectionDto::Prowlarr {
+            source_identity,
+            info_hash,
+            media_kind,
+            episode,
+            ..
+        }) = lease.execution.as_ref()
+        else {
+            return Ok(());
+        };
+        let client = self
+            .qbittorrent
+            .as_ref()
+            .ok_or(RunnerError::Configuration)?;
+        let category = match media_kind {
+            media_contract::MediaKindDto::Movie => &self.torrent_movies_category,
+            media_contract::MediaKindDto::Series => &self.torrent_tv_category,
+        };
+        let handle = media_integrations::qbittorrent::TorrentHandle {
+            source_identity: source_identity.clone(),
+            hash: info_hash.to_ascii_lowercase(),
+            category: category.clone(),
+        };
+        let result = if episode.is_some() {
+            client.remove_managed_episode(&handle).await.map(|_| ())
+        } else {
+            client.stop_selected(&handle).await
+        };
+        match result {
+            Ok(()) | Err(media_integrations::qbittorrent::QbittorrentError::TorrentNotFound) => {
+                Ok(())
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error_code = ?error.code(),
+                    "failed to clean up cancelled torrent"
+                );
+                Err(RunnerError::Execution)
+            }
+        }
+    }
+
     async fn maintain(&self, protected_job_ids: &[String]) -> Result<(), RunnerError> {
         let protected = protected_job_ids
             .iter()
@@ -1809,6 +1856,7 @@ pub async fn run_single_iteration(
     let heartbeat_cancelled = cancelled.clone();
     let heartbeat_finished = finished.clone();
     let lease_ttl = lease_remaining_ttl(&lease).unwrap_or(FALLBACK_LEASE_TTL);
+    let heartbeat_attempt_timeout = (heartbeat_interval / 2).max(Duration::from_millis(1));
     let heartbeat = tokio::spawn(async move {
         // Cancel cooperatively once too much wall-time has elapsed since the last
         // successful heartbeat relative to the lease TTL, keeping a safety margin
@@ -1819,7 +1867,6 @@ pub async fn run_single_iteration(
         let cancel_after = lease_ttl.saturating_sub(lease_ttl / 4);
         // Bound every attempt well below the heartbeat cadence so a single hung
         // request cannot consume the whole budget and push cancellation late.
-        let attempt_timeout = (heartbeat_interval / 2).max(Duration::from_millis(1));
         let mut last_success = tokio::time::Instant::now();
         let mut consecutive_failures: u32 = 0;
         loop {
@@ -1827,8 +1874,11 @@ pub async fn run_single_iteration(
                 heartbeat_cancelled.store(true, Ordering::SeqCst);
                 break;
             }
-            match tokio::time::timeout(attempt_timeout, heartbeat_api.heartbeat(&heartbeat_lease))
-                .await
+            match tokio::time::timeout(
+                heartbeat_attempt_timeout,
+                heartbeat_api.heartbeat(&heartbeat_lease),
+            )
+            .await
             {
                 Ok(Ok(current)) => {
                     consecutive_failures = 0;
@@ -1869,7 +1919,23 @@ pub async fn run_single_iteration(
     control
         .stage_started(EXECUTION_TASK_ORDINAL, "execution", EXECUTION_STAGE_ORDINAL)
         .await?;
-    let outcome = executor.execute(&lease, &control).await;
+    let mut outcome = executor.execute(&lease, &control).await;
+    if !control.is_cancelled()
+        && let Ok(Ok(current)) =
+            tokio::time::timeout(heartbeat_attempt_timeout, api.heartbeat(&lease)).await
+        && matches!(
+            current.job.state,
+            JobStateDto::CancelRequested | JobStateDto::Cancelled
+        )
+    {
+        control.cancelled.store(true, Ordering::SeqCst);
+    }
+    if control.is_cancelled() {
+        if executor.cleanup_cancelled(&lease).await.is_err() {
+            tracing::warn!("failed to clean up a cancelled job");
+        }
+        outcome = Ok(ExecutionOutcome::Cancelled);
+    }
     // Wake the heartbeat task immediately instead of waiting out its sleep.
     finished.notify_one();
     let _ = heartbeat.await;

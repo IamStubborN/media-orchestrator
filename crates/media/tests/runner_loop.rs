@@ -394,6 +394,100 @@ impl JobExecutor for CancelAwareExecutor {
     }
 }
 
+struct LateCancelApi {
+    lease: Mutex<Option<LeaseDto>>,
+    events: Mutex<Vec<RunnerEventDto>>,
+    heartbeats: AtomicUsize,
+    first_heartbeat: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl RunnerApi for LateCancelApi {
+    async fn lease_next(&self) -> Result<Option<LeaseDto>, media::runner::RunnerError> {
+        Ok(self.lease.lock().unwrap().take())
+    }
+
+    async fn heartbeat(&self, lease: &LeaseDto) -> Result<LeaseDto, media::runner::RunnerError> {
+        let call = self.heartbeats.fetch_add(1, Ordering::SeqCst);
+        let mut current = lease.clone();
+        if call == 0 {
+            self.first_heartbeat.notify_one();
+        } else {
+            current.job.state = JobStateDto::Cancelled;
+        }
+        Ok(current)
+    }
+
+    async fn report(
+        &self,
+        lease: &LeaseDto,
+        event: RunnerEventDto,
+    ) -> Result<JobDto, media::runner::RunnerError> {
+        let mut job = lease.job.clone();
+        if let RunnerEventDto::JobTransition { state, .. } = &event {
+            job.state = *state;
+        }
+        self.events.lock().unwrap().push(event);
+        Ok(job)
+    }
+}
+
+struct LateCancelExecutor {
+    first_heartbeat: Arc<tokio::sync::Notify>,
+    cleanups: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl JobExecutor for LateCancelExecutor {
+    async fn execute(
+        &self,
+        _: &LeaseDto,
+        _: &RunnerControl,
+    ) -> Result<ExecutionOutcome, media::runner::RunnerError> {
+        self.first_heartbeat.notified().await;
+        Ok(ExecutionOutcome::Completed)
+    }
+
+    async fn cleanup_cancelled(&self, _: &LeaseDto) -> Result<(), media::runner::RunnerError> {
+        self.cleanups.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn cancellation_after_execution_still_runs_cleanup_before_terminal_transition() {
+    let first_heartbeat = Arc::new(tokio::sync::Notify::new());
+    let api = Arc::new(LateCancelApi {
+        lease: Mutex::new(Some(lease())),
+        events: Mutex::default(),
+        heartbeats: AtomicUsize::new(0),
+        first_heartbeat: first_heartbeat.clone(),
+    });
+    let executor = Arc::new(LateCancelExecutor {
+        first_heartbeat,
+        cleanups: AtomicUsize::new(0),
+    });
+
+    assert!(
+        run_single_iteration(api.clone(), executor.clone(), Duration::from_secs(60))
+            .await
+            .unwrap()
+    );
+
+    assert_eq!(executor.cleanups.load(Ordering::SeqCst), 1);
+    let transitions = api
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            RunnerEventDto::JobTransition { state, .. } => Some(*state),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(transitions, vec![JobStateDto::Cancelled]);
+}
+
 /// Builds a lease whose TTL (via `expires_at`) is `seconds` from now, so the
 /// runner derives a realistic deadline for heartbeat-driven cancellation.
 fn lease_expiring_in(seconds: i64) -> LeaseDto {
