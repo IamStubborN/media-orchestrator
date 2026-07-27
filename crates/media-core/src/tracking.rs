@@ -651,16 +651,14 @@ impl TrackingRuntime {
                     continue;
                 }
             };
-            let baseline = selected_season
-                .map(|season| {
-                    tracking
-                        .known_episodes()
-                        .iter()
-                        .filter(|episode| episode.season() == season)
-                        .max()
-                        .copied()
-                })
-                .flatten();
+            let baseline = selected_season.and_then(|season| {
+                tracking
+                    .known_episodes()
+                    .iter()
+                    .filter(|episode| episode.season() == season)
+                    .max()
+                    .copied()
+            });
             let mut pending_availability = false;
             for episode in discovery.episodes().iter().copied() {
                 let already_known = if tracking.download().is_some() {
