@@ -997,6 +997,17 @@ impl MediaJobExecutor {
         let mut progress_gate = ProgressCheckpointGate::default();
         loop {
             if control.is_cancelled() {
+                let cleanup = if episode_selection.is_some() {
+                    client.remove_managed_episode(&handle).await.map(|_| ())
+                } else {
+                    client.stop_selected(&handle).await
+                };
+                if let Err(error) = cleanup {
+                    tracing::warn!(
+                        error_code = ?error.code(),
+                        "failed to stop cancelled torrent"
+                    );
+                }
                 return Ok(ExecutionOutcome::Cancelled);
             }
             let snapshot = match client.monitor(&handle).await {

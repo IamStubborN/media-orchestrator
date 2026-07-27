@@ -488,6 +488,8 @@ async fn project_notification(
                 })
                 .collect::<Vec<_>>()
         })
+        .filter(|episodes| !episodes.is_empty())
+        .or_else(|| json_episode_coordinates(&payload).map(|episode| vec![episode]))
         .unwrap_or_default();
     let episode_mappings = payload
         .get("episode_mappings")

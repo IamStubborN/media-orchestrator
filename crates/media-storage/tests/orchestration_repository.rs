@@ -1406,7 +1406,7 @@ async fn notification_card_sanitizes_prowlarr_release_title() {
         .execute_unprepared(
             "INSERT INTO search_executions (result_ref, payload) VALUES \
              ('selection:prowlarr-release-title', \
-              '{\"title\":\"[S02] | Mashle: Magic and Muscles | WEBRip 1080p\",\"media_kind\":\"series\",\"season\":2,\"episodes\":[{\"season\":2,\"episode\":7}]}')",
+              '{\"title\":\"[S02] | Mashle: Magic and Muscles | WEBRip 1080p\",\"media_kind\":\"series\",\"season\":2,\"episode\":7}')",
         )
         .await
         .unwrap();

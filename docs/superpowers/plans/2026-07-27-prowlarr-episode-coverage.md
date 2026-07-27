@@ -64,4 +64,10 @@
 - [x] Run `cargo test -p media-integrations`.
 - [x] Run `cargo test --workspace`.
 - [x] Inspect the final diff for unrelated changes.
-- [ ] Exercise the deployed Prowlarr probe against known range and excluded-range releases before reporting completion.
+- [x] Exercise the deployed Prowlarr probe against known range and excluded-range releases before reporting completion.
+
+## Live Verification
+
+- An exact `S03E03` selection enabled only episode 3 in qBittorrent; episodes 1, 2, and 4 remained disabled.
+- The same release submitted as a whole season enabled all four available episodes.
+- An excluded-range `S03E07` probe stayed unconfirmed when the provider returned HTTP 429, preserving the fail-closed contract.

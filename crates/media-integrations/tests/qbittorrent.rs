@@ -422,6 +422,97 @@ async fn managed_episode_torrent_resumes_exact_selection_after_retry() {
 }
 
 #[tokio::test]
+async fn cancelled_managed_episode_torrent_is_deleted_with_partial_files() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/app/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("v5.2.3"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/info"))
+        .and(query_param("hashes", TORRENT_INFO_HASH))
+        .and(query_param("category", "media-tv"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "hash": TORRENT_INFO_HASH,
+                "name": "Example Show S02",
+                "category": "media-tv",
+                "tags": "media-orchestrator-episode",
+                "state": "downloading",
+                "progress": 0.25,
+                "amount_left": 1_500,
+                "downloaded": 500,
+                "completed": 500,
+                "size": 2_000,
+                "content_path": "/downloads/media-tv/Example Show S02",
+                "save_path": "/downloads/media-tv/"
+            }])),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/stop"))
+        .and(body_string_contains(TORRENT_INFO_HASH))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/delete"))
+        .and(body_string_contains(TORRENT_INFO_HASH))
+        .and(body_string_contains("deleteFiles=true"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = QbittorrentClient::connect(config(&server)).await.unwrap();
+    let handle = media_integrations::qbittorrent::TorrentHandle {
+        source_identity: "prowlarr:3:indexer-guid-a".to_owned(),
+        hash: TORRENT_INFO_HASH.to_owned(),
+        category: "media-tv".to_owned(),
+    };
+
+    assert!(client.remove_managed_episode(&handle).await.unwrap());
+}
+
+#[tokio::test]
+async fn cancelled_season_torrent_is_stopped_without_deleting_content() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/app/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("v5.2.3"))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/stop"))
+        .and(body_string_contains(TORRENT_INFO_HASH))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = QbittorrentClient::connect(config(&server)).await.unwrap();
+    let handle = media_integrations::qbittorrent::TorrentHandle {
+        source_identity: "prowlarr:3:indexer-guid-a".to_owned(),
+        hash: TORRENT_INFO_HASH.to_owned(),
+        category: "media-tv".to_owned(),
+    };
+
+    client.stop_selected(&handle).await.unwrap();
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.url.path() != "/api/v2/torrents/delete")
+    );
+}
+
+#[tokio::test]
 async fn completed_season_pack_discovers_only_the_requested_episode() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

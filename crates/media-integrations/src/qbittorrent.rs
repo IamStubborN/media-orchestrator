@@ -358,6 +358,32 @@ impl QbittorrentClient {
             .await
     }
 
+    pub async fn remove_managed_episode(
+        &self,
+        handle: &TorrentHandle,
+    ) -> Result<bool, QbittorrentError> {
+        let snapshot = match self.monitor(handle).await {
+            Ok(snapshot) => snapshot,
+            Err(QbittorrentError::TorrentNotFound) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if !snapshot.managed_episode {
+            return Ok(false);
+        }
+        self.stop(handle).await?;
+        let url = endpoint(&self.config.base_url, "api/v2/torrents/delete")?;
+        self.post_form(
+            url,
+            &[("hashes", handle.hash.as_str()), ("deleteFiles", "true")],
+        )
+        .await?;
+        Ok(true)
+    }
+
+    pub async fn stop_selected(&self, handle: &TorrentHandle) -> Result<(), QbittorrentError> {
+        self.stop(handle).await
+    }
+
     pub async fn submit_episode_to_category(
         &self,
         selection: ExplicitTorrentSelection,
