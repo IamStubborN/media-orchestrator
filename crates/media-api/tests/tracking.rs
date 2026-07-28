@@ -8,9 +8,9 @@ use axum::{
 };
 use media_api::router;
 use media_core::{
-    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole, NewTrackingSubscription, OperationKey,
-    PortError, TrackingDownloadPatch, TrackingId, TrackingStore, TrackingSubscription, UserId,
-    SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
+    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole, EpisodeSnapshot, NewTrackingSubscription,
+    OperationKey, PortError, TrackingDownloadPatch, TrackingId, TrackingStore,
+    TrackingSubscription, UserId, SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
 };
 use tower::ServiceExt;
 
@@ -71,6 +71,59 @@ impl TrackingStore for FakeTrackingStore {
         .map_err(|_| PortError::Conflict)?;
         values[index] = updated.clone();
         Ok(Some(updated))
+    }
+
+    async fn set_baseline_visible(
+        &self,
+        id: TrackingId,
+        user: UserId,
+        baseline: EpisodeSnapshot,
+    ) -> Result<Option<TrackingSubscription>, PortError> {
+        let mut values = self.values.lock().unwrap();
+        let Some(index) = values
+            .iter()
+            .position(|value| value.id() == id && value.is_visible_to(user))
+        else {
+            return Ok(None);
+        };
+        let value = &values[index];
+        let mut known = value
+            .known_episodes()
+            .iter()
+            .copied()
+            .filter(|episode| episode.season() != baseline.season())
+            .collect::<Vec<_>>();
+        known.extend(
+            (1..=baseline.episode())
+                .map(|episode| EpisodeSnapshot::new(baseline.season(), episode).unwrap()),
+        );
+        let updated = TrackingSubscription::rehydrate(
+            value.id(),
+            value.owner_id(),
+            value.provider(),
+            value.title().to_owned(),
+            value.translation().to_owned(),
+            known,
+            value.scope(),
+            value.download().cloned(),
+        )
+        .map_err(|_| PortError::Conflict)?;
+        values[index] = updated.clone();
+        Ok(Some(updated))
+    }
+
+    async fn request_check_visible(
+        &self,
+        id: TrackingId,
+        user: UserId,
+    ) -> Result<Option<TrackingSubscription>, PortError> {
+        Ok(self
+            .values
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|value| value.id() == id && value.is_visible_to(user))
+            .cloned())
     }
 
     async fn remove_visible(
@@ -195,6 +248,57 @@ async fn authenticated_owner_can_add_list_and_other_family_user_can_remove() {
     let removed: serde_json::Value =
         serde_json::from_slice(&to_bytes(removed.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(removed["state"], "removed");
+}
+
+#[tokio::test]
+async fn owner_can_update_baseline_and_request_an_immediate_check() {
+    let app = app();
+    let created = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tracking")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header("idempotency-key", "tracking-controls-add")
+                .header("content-type", "application/json")
+                .body(Body::from(create_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(created.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let id = value["id"].as_str().unwrap();
+
+    let baseline = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/v1/tracking/{id}/baseline"))
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header("idempotency-key", "tracking-controls-baseline")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"known_through":{"season":2,"episode":6}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(baseline.status(), StatusCode::OK);
+    let baseline: serde_json::Value =
+        serde_json::from_slice(&to_bytes(baseline.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(baseline["known_episodes"].as_array().unwrap().len(), 7);
+    assert_eq!(baseline["known_episodes"][6]["season"], 2);
+    assert_eq!(baseline["known_episodes"][6]["episode"], 6);
+
+    let check = app
+        .oneshot(
+            Request::post(format!("/v1/tracking/{id}/check"))
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header("idempotency-key", "tracking-controls-check")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(check.status(), StatusCode::OK);
 }
 
 #[tokio::test]

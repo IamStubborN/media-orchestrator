@@ -26,6 +26,7 @@ struct ScheduleStore {
     due: TrackingSubscription,
     discovered: Mutex<Vec<(EpisodeSnapshot, Vec<SourceChoiceAction>)>>,
     pending: Mutex<Vec<EpisodeSnapshot>>,
+    finished: Mutex<Vec<(time::OffsetDateTime, media_core::TrackingCheckStatus)>>,
 }
 
 #[async_trait::async_trait]
@@ -69,7 +70,13 @@ impl TrackingScheduleStore for ScheduleStore {
         Ok(())
     }
 
-    async fn defer_check(&self, _: TrackingId, _: time::OffsetDateTime) -> Result<(), PortError> {
+    async fn finish_check(
+        &self,
+        _: TrackingId,
+        next_check_at: time::OffsetDateTime,
+        status: media_core::TrackingCheckStatus,
+    ) -> Result<(), PortError> {
+        self.finished.lock().unwrap().push((next_check_at, status));
         Ok(())
     }
 }
@@ -167,18 +174,17 @@ fn block_on<F: Future>(future: F) -> F::Output {
 #[test]
 fn scheduler_records_only_episodes_missing_from_the_known_set() {
     block_on(async {
+        let now = time::OffsetDateTime::now_utc();
         let store = Arc::new(ScheduleStore {
             due: tracking(),
             discovered: Mutex::new(Vec::new()),
             pending: Mutex::new(Vec::new()),
+            finished: Mutex::new(Vec::new()),
         });
         let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery))
             .with_availability(Arc::new(Availability));
 
-        let result = runtime
-            .run_once(time::OffsetDateTime::now_utc(), 10)
-            .await
-            .unwrap();
+        let result = runtime.run_once(now, 10).await.unwrap();
 
         assert_eq!(result.checked, 1);
         assert_eq!(result.discovered, 1);
@@ -187,6 +193,13 @@ fn scheduler_records_only_episodes_missing_from_the_known_set() {
             vec![(
                 EpisodeSnapshot::new(1, 5).unwrap(),
                 vec![SourceChoiceAction::Rezka]
+            )]
+        );
+        assert_eq!(
+            *store.finished.lock().unwrap(),
+            vec![(
+                now + time::Duration::hours(1),
+                media_core::TrackingCheckStatus::EpisodeFound,
             )]
         );
     });
@@ -214,6 +227,7 @@ fn calendar_candidate_stays_unrecorded_until_a_provider_confirms_it() {
             due: tracking(),
             discovered: Mutex::new(Vec::new()),
             pending: Mutex::new(Vec::new()),
+            finished: Mutex::new(Vec::new()),
         });
         let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery))
             .with_availability(Arc::new(UnavailableAvailability));
@@ -258,6 +272,7 @@ fn missing_episode_remains_eligible_after_a_later_episode_is_known() {
             due,
             discovered: Mutex::new(Vec::new()),
             pending: Mutex::new(vec![EpisodeSnapshot::new(1, 3).unwrap()]),
+            finished: Mutex::new(Vec::new()),
         });
         let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery))
             .with_availability(Arc::new(Availability));
@@ -308,6 +323,7 @@ fn scheduler_does_not_backfill_seasons_older_than_the_tracked_season() {
             due,
             discovered: Mutex::new(Vec::new()),
             pending: Mutex::new(Vec::new()),
+            finished: Mutex::new(Vec::new()),
         });
         let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery))
             .with_availability(Arc::new(Availability));
@@ -367,6 +383,7 @@ fn scheduler_ignores_historical_gaps_but_rechecks_pending_future_episode() {
             due,
             discovered: Mutex::new(Vec::new()),
             pending: Mutex::new(vec![EpisodeSnapshot::new(9, 10).unwrap()]),
+            finished: Mutex::new(Vec::new()),
         });
         let runtime = TrackingRuntime::new(store.clone(), Arc::new(HistoricalGapDiscovery))
             .with_availability(Arc::new(Availability));
@@ -434,6 +451,7 @@ fn scheduler_enqueues_only_new_episodes_from_the_selected_download_season() {
             due: download_tracking(),
             discovered: Mutex::new(Vec::new()),
             pending: Mutex::new(Vec::new()),
+            finished: Mutex::new(Vec::new()),
         });
         let downloads = Arc::new(Enqueuer::default());
         let runtime = TrackingRuntime::new(store.clone(), Arc::new(DownloadDiscovery))

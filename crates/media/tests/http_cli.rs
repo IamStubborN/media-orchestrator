@@ -324,6 +324,45 @@ async fn tracking_add_list_and_remove_use_strict_json_contracts() {
                     json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#)
                 }
             }),
+        )
+        .route(
+            "/v1/tracking/{tracking_id}/baseline",
+            any(|request: Request| async move {
+                let method = request.method().clone();
+                let headers = request.headers().clone();
+                let body = to_bytes(request.into_body(), 64 * 1024).await.unwrap();
+                let valid = method == Method::POST
+                    && headers.contains_key("authorization")
+                    && headers.contains_key("x-request-id")
+                    && headers.contains_key("idempotency-key")
+                    && serde_json::from_slice::<serde_json::Value>(&body).ok()
+                        == Some(serde_json::json!({
+                            "known_through": {"season": 2, "episode": 6}
+                        }));
+                if valid {
+                    json_response(StatusCode::OK, r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","known_episodes":[{"season":2,"episode":6}]}"#)
+                } else {
+                    json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#)
+                }
+            }),
+        )
+        .route(
+            "/v1/tracking/{tracking_id}/check",
+            any(|request: Request| async move {
+                let headers = request.headers().clone();
+                let method = request.method().clone();
+                let body = to_bytes(request.into_body(), 64 * 1024).await.unwrap();
+                if method == Method::POST
+                    && headers.contains_key("authorization")
+                    && headers.contains_key("x-request-id")
+                    && headers.contains_key("idempotency-key")
+                    && body.is_empty()
+                {
+                    json_response(StatusCode::OK, r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","check_status":"no_new_episode"}"#)
+                } else {
+                    json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#)
+                }
+            }),
         );
     let server = TestServer::start(router).await;
     let token_file = SecretFile::new("cli-secret");
@@ -376,6 +415,32 @@ async fn tracking_add_list_and_remove_use_strict_json_contracts() {
     ))
     .await
     .unwrap();
+    let set_baseline = command_output(command(
+        &server,
+        &token_file,
+        [
+            "tracking",
+            "set-baseline",
+            "018f3f86-7b4c-7b4f-9b6a-6d62f45bb111",
+            "--known-through",
+            "2:6",
+            "--json",
+        ],
+    ))
+    .await
+    .unwrap();
+    let check_now = command_output(command(
+        &server,
+        &token_file,
+        [
+            "tracking",
+            "check-now",
+            "018f3f86-7b4c-7b4f-9b6a-6d62f45bb111",
+            "--json",
+        ],
+    ))
+    .await
+    .unwrap();
     let remove = command_output(command(
         &server,
         &token_file,
@@ -390,7 +455,14 @@ async fn tracking_add_list_and_remove_use_strict_json_contracts() {
     .unwrap();
     server.stop().await;
 
-    for output in [&add, &list, &enable_download, &remove] {
+    for output in [
+        &add,
+        &list,
+        &enable_download,
+        &set_baseline,
+        &check_now,
+        &remove,
+    ] {
         assert!(
             output.status.success(),
             "stderr: {}",

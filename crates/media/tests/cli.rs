@@ -85,3 +85,14 @@ fn tracking_help_exposes_download_conversion_inputs() {
         assert!(stdout.contains(argument), "help did not include {argument}");
     }
 }
+
+#[test]
+fn tracking_help_exposes_manual_control_commands() {
+    for command in ["set-baseline", "check-now"] {
+        let output = assert_cmd::cargo::cargo_bin_cmd!("media")
+            .args(["tracking", command, "--help"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{command} help failed");
+    }
+}

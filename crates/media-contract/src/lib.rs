@@ -49,7 +49,8 @@ pub use search::{
     SeriesLifecycleStatusDto, StartSearchRequest, TrackingPromptDto,
 };
 pub use tracking::{
-    CreateTrackingRequest, EpisodeSnapshotDto, PatchTrackingRequest, TrackingDownloadDto,
-    TrackingDto, TrackingListDto, TrackingScopeDto, TrackingStateDto,
+    CreateTrackingRequest, EpisodeSnapshotDto, PatchTrackingRequest, SetTrackingBaselineRequest,
+    TrackingCheckStatusDto, TrackingDownloadDto, TrackingDto, TrackingListDto, TrackingScopeDto,
+    TrackingStateDto,
 };
 pub use trending::{TrendingCategoryDto, TrendingItemDto, TrendingMediaTypeDto, TrendingPageDto};

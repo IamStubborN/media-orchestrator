@@ -16,6 +16,18 @@ pub enum TrackingStateDto {
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackingCheckStatusDto {
+    Never,
+    NoNewEpisode,
+    AwaitingSource,
+    EpisodeFound,
+    DownloadQueued,
+    ReleaseError,
+    SourceError,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EpisodeSnapshotDto {
     pub season: u32,
@@ -50,6 +62,12 @@ pub struct PatchTrackingRequest {
     pub download: TrackingDownloadDto,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetTrackingBaselineRequest {
+    pub known_through: EpisodeSnapshotDto,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TrackingDto {
     pub id: PublicId,
@@ -59,6 +77,10 @@ pub struct TrackingDto {
     pub known_episodes: Vec<EpisodeSnapshotDto>,
     pub scope: TrackingScopeDto,
     pub state: TrackingStateDto,
+    pub check_status: TrackingCheckStatusDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_checked_at: Option<String>,
+    pub next_check_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download: Option<TrackingDownloadDto>,
 }

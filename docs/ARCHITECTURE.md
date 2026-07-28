@@ -186,6 +186,8 @@ media jobs cancel JOB_ID [--json]
 media queue status [--json]
 media tracking add ... [--json]
 media tracking enable-download TRACKING_ID ... [--json]
+media tracking set-baseline TRACKING_ID --known-through SEASON:EPISODE [--json]
+media tracking check-now TRACKING_ID [--json]
 media tracking list [--json]
 media tracking remove TRACKING_ID [--json]
 ```

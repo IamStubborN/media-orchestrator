@@ -5,6 +5,9 @@ use crate::{
     UserId, SECONDARY_USER_ID,
 };
 
+const NOTIFY_TRACKING_INTERVAL: time::Duration = time::Duration::hours(1);
+const DOWNLOAD_TRACKING_INTERVAL: time::Duration = time::Duration::minutes(15);
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum TrackingScope {
     Personal,
@@ -15,6 +18,17 @@ pub enum TrackingScope {
 pub enum TrackingState {
     ChoiceNeeded,
     Active,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum TrackingCheckStatus {
+    Never,
+    NoNewEpisode,
+    AwaitingSource,
+    EpisodeFound,
+    DownloadQueued,
+    ReleaseError,
+    SourceError,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -293,6 +307,9 @@ pub struct TrackingSubscription {
     known_episodes: Vec<EpisodeSnapshot>,
     scope: TrackingScope,
     download: Option<TrackingDownload>,
+    last_checked_at: Option<time::OffsetDateTime>,
+    next_check_at: time::OffsetDateTime,
+    check_status: TrackingCheckStatus,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
@@ -350,6 +367,7 @@ impl NewTrackingSubscription {
 
     #[must_use]
     pub fn into_persisted(self) -> TrackingSubscription {
+        let now = time::OffsetDateTime::now_utc();
         TrackingSubscription {
             id: self.id,
             owner_id: self.owner_id,
@@ -359,6 +377,9 @@ impl NewTrackingSubscription {
             known_episodes: self.known_episodes,
             scope: self.scope,
             download: self.download,
+            last_checked_at: None,
+            next_check_at: now,
+            check_status: TrackingCheckStatus::Never,
         }
     }
 
@@ -408,6 +429,35 @@ impl TrackingSubscription {
         scope: TrackingScope,
         download: Option<TrackingDownload>,
     ) -> Result<Self, TrackingValidationError> {
+        Self::rehydrate_with_check(
+            id,
+            owner_id,
+            provider,
+            title,
+            translation,
+            known_episodes,
+            scope,
+            download,
+            None,
+            time::OffsetDateTime::now_utc(),
+            TrackingCheckStatus::Never,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn rehydrate_with_check(
+        id: TrackingId,
+        owner_id: UserId,
+        provider: Provider,
+        title: String,
+        translation: String,
+        known_episodes: Vec<EpisodeSnapshot>,
+        scope: TrackingScope,
+        download: Option<TrackingDownload>,
+        last_checked_at: Option<time::OffsetDateTime>,
+        next_check_at: time::OffsetDateTime,
+        check_status: TrackingCheckStatus,
+    ) -> Result<Self, TrackingValidationError> {
         validate(&title, &translation, &known_episodes)?;
         validate_download(provider, &translation, download.as_ref())?;
         Ok(Self {
@@ -419,6 +469,9 @@ impl TrackingSubscription {
             known_episodes,
             scope,
             download,
+            last_checked_at,
+            next_check_at,
+            check_status,
         })
     }
 
@@ -453,6 +506,18 @@ impl TrackingSubscription {
     #[must_use]
     pub const fn download(&self) -> Option<&TrackingDownload> {
         self.download.as_ref()
+    }
+    #[must_use]
+    pub const fn last_checked_at(&self) -> Option<time::OffsetDateTime> {
+        self.last_checked_at
+    }
+    #[must_use]
+    pub const fn next_check_at(&self) -> time::OffsetDateTime {
+        self.next_check_at
+    }
+    #[must_use]
+    pub const fn check_status(&self) -> TrackingCheckStatus {
+        self.check_status
     }
 
     #[must_use]
@@ -523,6 +588,21 @@ pub trait TrackingStore: Send + Sync {
         user: UserId,
         patch: TrackingDownloadPatch,
     ) -> Result<Option<TrackingSubscription>, PortError>;
+    async fn set_baseline_visible(
+        &self,
+        _id: TrackingId,
+        _user: UserId,
+        _baseline: EpisodeSnapshot,
+    ) -> Result<Option<TrackingSubscription>, PortError> {
+        Err(PortError::Conflict)
+    }
+    async fn request_check_visible(
+        &self,
+        _id: TrackingId,
+        _user: UserId,
+    ) -> Result<Option<TrackingSubscription>, PortError> {
+        Err(PortError::Conflict)
+    }
     async fn remove_visible(
         &self,
         operation: OperationKey,
@@ -551,10 +631,11 @@ pub trait TrackingScheduleStore: Send + Sync {
         id: TrackingId,
         episode: EpisodeSnapshot,
     ) -> Result<(), PortError>;
-    async fn defer_check(
+    async fn finish_check(
         &self,
         id: TrackingId,
         next_check_at: time::OffsetDateTime,
+        status: TrackingCheckStatus,
     ) -> Result<(), PortError>;
 }
 
@@ -641,9 +722,9 @@ impl TrackingRuntime {
         };
         for tracking in due {
             let default_next_check = if tracking.download().is_some() {
-                now + time::Duration::minutes(15)
+                now + DOWNLOAD_TRACKING_INTERVAL
             } else {
-                now + time::Duration::hours(6)
+                now + NOTIFY_TRACKING_INTERVAL
             };
             result.checked += 1;
             let selected_season = tracking.download().map(TrackingDownload::season);
@@ -651,7 +732,11 @@ impl TrackingRuntime {
                 Ok(available) => available,
                 Err(_) => {
                     self.store
-                        .defer_check(tracking.id(), default_next_check)
+                        .finish_check(
+                            tracking.id(),
+                            default_next_check,
+                            TrackingCheckStatus::ReleaseError,
+                        )
                         .await?;
                     result.failed += 1;
                     continue;
@@ -670,7 +755,11 @@ impl TrackingRuntime {
                     Ok(pending) => pending,
                     Err(_) => {
                         self.store
-                            .defer_check(tracking.id(), default_next_check)
+                            .finish_check(
+                                tracking.id(),
+                                default_next_check,
+                                TrackingCheckStatus::SourceError,
+                            )
                             .await?;
                         result.failed += 1;
                         continue;
@@ -685,6 +774,9 @@ impl TrackingRuntime {
                 .map(|episode| episode.season())
                 .max();
             let mut pending_availability = false;
+            let mut source_error = false;
+            let discovered_before = result.discovered;
+            let queued_before = result.queued;
             for episode in discovery.episodes().iter().copied() {
                 let already_known = if tracking.download().is_some() {
                     baseline.is_some_and(|baseline| episode <= baseline)
@@ -717,6 +809,7 @@ impl TrackingRuntime {
                             .await?;
                         result.failed += 1;
                         pending_availability = true;
+                        source_error = true;
                         continue;
                     };
                     let availability = match availability
@@ -732,6 +825,7 @@ impl TrackingRuntime {
                                 .await?;
                             result.failed += 1;
                             pending_availability = true;
+                            source_error = true;
                             continue;
                         }
                     };
@@ -748,6 +842,7 @@ impl TrackingRuntime {
                 if tracking.download().is_some() {
                     let Some(downloads) = self.downloads.as_deref() else {
                         result.failed += 1;
+                        source_error = true;
                         continue;
                     };
                     if downloads.enqueue_episode(&tracking, episode).await.is_err() {
@@ -765,11 +860,24 @@ impl TrackingRuntime {
                 }
             }
             let next_check = if pending_availability {
-                now + time::Duration::minutes(30)
+                now + NOTIFY_TRACKING_INTERVAL
             } else {
                 default_next_check
             };
-            self.store.defer_check(tracking.id(), next_check).await?;
+            let status = if result.queued > queued_before {
+                TrackingCheckStatus::DownloadQueued
+            } else if result.discovered > discovered_before {
+                TrackingCheckStatus::EpisodeFound
+            } else if source_error {
+                TrackingCheckStatus::SourceError
+            } else if pending_availability {
+                TrackingCheckStatus::AwaitingSource
+            } else {
+                TrackingCheckStatus::NoNewEpisode
+            };
+            self.store
+                .finish_check(tracking.id(), next_check, status)
+                .await?;
         }
         Ok(result)
     }
@@ -837,6 +945,37 @@ impl TrackingApplication {
             .map_err(|_| TrackingApplicationError::Forbidden)?;
         self.store
             .patch_download_visible(id, user, patch)
+            .await
+            .map_err(map_port_error)?
+            .ok_or(TrackingApplicationError::NotFound)
+    }
+
+    pub async fn set_baseline(
+        &self,
+        actor: &Actor,
+        id: TrackingId,
+        baseline: EpisodeSnapshot,
+    ) -> Result<TrackingSubscription, TrackingApplicationError> {
+        let user = actor
+            .require_user()
+            .map_err(|_| TrackingApplicationError::Forbidden)?;
+        self.store
+            .set_baseline_visible(id, user, baseline)
+            .await
+            .map_err(map_port_error)?
+            .ok_or(TrackingApplicationError::NotFound)
+    }
+
+    pub async fn check_now(
+        &self,
+        actor: &Actor,
+        id: TrackingId,
+    ) -> Result<TrackingSubscription, TrackingApplicationError> {
+        let user = actor
+            .require_user()
+            .map_err(|_| TrackingApplicationError::Forbidden)?;
+        self.store
+            .request_check_visible(id, user)
             .await
             .map_err(map_port_error)?
             .ok_or(TrackingApplicationError::NotFound)

@@ -361,6 +361,65 @@ async fn future_discovery_updates_snapshot_and_atomically_fans_out_family_notifi
 }
 
 #[tokio::test]
+async fn baseline_update_replaces_one_season_and_schedules_an_immediate_check() {
+    let test_db = TestDatabase::start_migrated().await;
+    let store = SeaOrmTrackingStore::new(test_db.connection().clone());
+    let tracking = store
+        .add(
+            operation_key(),
+            new_tracking(TrackingId::new(), TrackingScope::Personal),
+        )
+        .await
+        .unwrap();
+    test_db
+        .connection()
+        .execute_unprepared(&format!(
+            "INSERT INTO tracking_availability_candidates (tracking_id, season, episode)
+             VALUES ('{}', 2, 5), ('{}', 2, 7)",
+            tracking.id(),
+            tracking.id()
+        ))
+        .await
+        .unwrap();
+
+    let updated = store
+        .set_baseline_visible(
+            tracking.id(),
+            PRIMARY_USER_ID,
+            EpisodeSnapshot::new(2, 6).unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        updated.known_episodes(),
+        &[
+            EpisodeSnapshot::new(1, 4).unwrap(),
+            EpisodeSnapshot::new(2, 1).unwrap(),
+            EpisodeSnapshot::new(2, 2).unwrap(),
+            EpisodeSnapshot::new(2, 3).unwrap(),
+            EpisodeSnapshot::new(2, 4).unwrap(),
+            EpisodeSnapshot::new(2, 5).unwrap(),
+            EpisodeSnapshot::new(2, 6).unwrap(),
+        ]
+    );
+    let candidates = query(
+        test_db.connection(),
+        "SELECT episode FROM tracking_availability_candidates ORDER BY episode",
+    )
+    .await;
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].try_get::<i32>("", "episode").unwrap(), 7);
+
+    let checked = store
+        .request_check_visible(tracking.id(), PRIMARY_USER_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(checked.next_check_at() <= time::OffsetDateTime::now_utc());
+}
+
+#[tokio::test]
 async fn future_discovery_persists_only_the_confirmed_source_action() {
     let test_db = TestDatabase::start_migrated().await;
     let store = SeaOrmTrackingStore::new(test_db.connection().clone());

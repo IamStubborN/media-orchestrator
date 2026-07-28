@@ -3,8 +3,8 @@ use media_contract::{
     JobDto, JobStateDto, LeaseDto, NeedsActionReasonDto, NotifyScopeDto, PatchTrackingRequest,
     ProviderDto, PublicId, QueueStatusDto, ReleaseCandidateDto, ReleaseLifecycleDto,
     ReleasePrecisionDto, ReleaseQueryResponse, RunnerEventDto, RunnerEventRequest,
-    RunnerLifecycleStateDto, ScheduledEpisodeDto, TrackingDto, TrackingScopeDto, TrackingStateDto,
-    TransferKindDto, TransferProgressDto,
+    RunnerLifecycleStateDto, ScheduledEpisodeDto, TrackingCheckStatusDto, TrackingDto,
+    TrackingScopeDto, TrackingStateDto, TransferKindDto, TransferProgressDto,
 };
 use media_core::{
     CheckpointValue, EpisodeSnapshot, Job, JobDetail, JobEvent, JobEventId,
@@ -172,6 +172,23 @@ pub(crate) fn tracking(value: &TrackingSubscription) -> TrackingDto {
             TrackingScope::Family => TrackingScopeDto::Family,
         },
         state: TrackingStateDto::Active,
+        check_status: match value.check_status() {
+            media_core::TrackingCheckStatus::Never => TrackingCheckStatusDto::Never,
+            media_core::TrackingCheckStatus::NoNewEpisode => TrackingCheckStatusDto::NoNewEpisode,
+            media_core::TrackingCheckStatus::AwaitingSource => {
+                TrackingCheckStatusDto::AwaitingSource
+            }
+            media_core::TrackingCheckStatus::EpisodeFound => TrackingCheckStatusDto::EpisodeFound,
+            media_core::TrackingCheckStatus::DownloadQueued => {
+                TrackingCheckStatusDto::DownloadQueued
+            }
+            media_core::TrackingCheckStatus::ReleaseError => TrackingCheckStatusDto::ReleaseError,
+            media_core::TrackingCheckStatus::SourceError => TrackingCheckStatusDto::SourceError,
+        },
+        last_checked_at: value
+            .last_checked_at()
+            .map(|timestamp| timestamp.to_string()),
+        next_check_at: value.next_check_at().to_string(),
         download: value
             .download()
             .map(|download| media_contract::TrackingDownloadDto {

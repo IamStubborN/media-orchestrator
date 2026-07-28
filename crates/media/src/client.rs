@@ -3,7 +3,8 @@ use std::time::Duration;
 use media_contract::{
     AlternativeSearchRequest, ContinueSearchRequest, CreateJobRequest, CreateTrackingRequest,
     EpisodeSnapshotDto, NotifyScopeDto, PatchTrackingRequest, ProviderDto, ReleaseQueryRequest,
-    ResolveEpisodeMappingRequest, SelectResultRequest, StartSearchRequest, TrackingScopeDto,
+    ResolveEpisodeMappingRequest, SelectResultRequest, SetTrackingBaselineRequest,
+    StartSearchRequest, TrackingScopeDto,
 };
 use secrecy::{ExposeSecret, SecretString};
 
@@ -208,6 +209,29 @@ impl HttpClient {
         let path = format!("v1/tracking/{tracking_id}");
         self.execute(
             self.request(reqwest::Method::DELETE, &path)?
+                .header(IDEMPOTENCY_KEY_HEADER, generated_identifier()),
+        )
+        .await
+    }
+
+    pub async fn set_tracking_baseline(
+        &self,
+        tracking_id: &str,
+        known_through: EpisodeSnapshotDto,
+    ) -> Result<String, ClientError> {
+        let path = format!("v1/tracking/{tracking_id}/baseline");
+        self.execute(
+            self.request(reqwest::Method::POST, &path)?
+                .header(IDEMPOTENCY_KEY_HEADER, generated_identifier())
+                .json(&SetTrackingBaselineRequest { known_through }),
+        )
+        .await
+    }
+
+    pub async fn check_tracking_now(&self, tracking_id: &str) -> Result<String, ClientError> {
+        let path = format!("v1/tracking/{tracking_id}/check");
+        self.execute(
+            self.request(reqwest::Method::POST, &path)?
                 .header(IDEMPOTENCY_KEY_HEADER, generated_identifier()),
         )
         .await

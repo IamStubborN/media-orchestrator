@@ -150,6 +150,18 @@ enum TrackingCommand {
         #[arg(long)]
         json: bool,
     },
+    SetBaseline {
+        tracking_id: String,
+        #[arg(long, value_parser = parse_known_episode)]
+        known_through: media_contract::EpisodeSnapshotDto,
+        #[arg(long)]
+        json: bool,
+    },
+    CheckNow {
+        tracking_id: String,
+        #[arg(long)]
+        json: bool,
+    },
     List {
         #[arg(long)]
         json: bool,
@@ -541,6 +553,24 @@ async fn run_tracking(args: TrackingArgs) -> Result<(), RunError> {
                 .await?;
             emit(&output, json, |value| {
                 render::tracking(value, Some("Enabled automatic download"))
+            });
+        }
+        TrackingCommand::SetBaseline {
+            tracking_id,
+            known_through,
+            json,
+        } => {
+            let output = client
+                .set_tracking_baseline(&tracking_id, known_through)
+                .await?;
+            emit(&output, json, |value| {
+                render::tracking(value, Some("Updated tracking baseline"))
+            });
+        }
+        TrackingCommand::CheckNow { tracking_id, json } => {
+            let output = client.check_tracking_now(&tracking_id).await?;
+            emit(&output, json, |value| {
+                render::tracking(value, Some("Scheduled tracking check"))
             });
         }
         TrackingCommand::List { json } => {

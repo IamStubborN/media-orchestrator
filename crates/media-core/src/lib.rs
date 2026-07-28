@@ -72,7 +72,7 @@ pub use tracking::{
     EpisodeAvailability, EpisodeAvailabilityPort, EpisodeAvailabilityRequest, EpisodeDiscovery,
     EpisodeDiscoveryPort, EpisodeSnapshot, EpisodeSnapshotError, NewTrackingCommand,
     NewTrackingSubscription, ProviderAvailability, TrackedEpisodeDownloadPort, TrackingApplication,
-    TrackingApplicationError, TrackingDownload, TrackingDownloadPatch, TrackingRunResult,
-    TrackingRuntime, TrackingScheduleStore, TrackingScope, TrackingState, TrackingStore,
-    TrackingSubscription, TrackingValidationError,
+    TrackingApplicationError, TrackingCheckStatus, TrackingDownload, TrackingDownloadPatch,
+    TrackingRunResult, TrackingRuntime, TrackingScheduleStore, TrackingScope, TrackingState,
+    TrackingStore, TrackingSubscription, TrackingValidationError,
 };

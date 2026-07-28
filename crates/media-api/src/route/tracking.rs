@@ -5,8 +5,10 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get},
 };
-use media_contract::{CreateTrackingRequest, PatchTrackingRequest, TrackingListDto};
-use media_core::{Actor, TrackingApplicationError, TrackingId};
+use media_contract::{
+    CreateTrackingRequest, PatchTrackingRequest, SetTrackingBaselineRequest, TrackingListDto,
+};
+use media_core::{Actor, EpisodeSnapshot, TrackingApplicationError, TrackingId};
 
 use crate::{ApiError, ApiState, RequestId, convert, idempotency};
 
@@ -14,6 +16,93 @@ pub(super) fn routes() -> Router<ApiState> {
     Router::new()
         .route("/v1/tracking", get(list).post(create))
         .route("/v1/tracking/{tracking_id}", delete(remove).patch(patch))
+        .route(
+            "/v1/tracking/{tracking_id}/baseline",
+            axum::routing::post(set_baseline),
+        )
+        .route(
+            "/v1/tracking/{tracking_id}/check",
+            axum::routing::post(check_now),
+        )
+}
+
+async fn set_baseline(
+    State(state): State<ApiState>,
+    Extension(actor): Extension<Actor>,
+    Extension(request_id): Extension<RequestId>,
+    Path(tracking_id): Path<String>,
+    request: Request,
+) -> Response {
+    idempotency::execute(
+        state,
+        actor,
+        request_id,
+        request,
+        move |state, actor, request_id, _operation, body| async move {
+            let Some(tracking) = state.tracking() else {
+                return ApiError::internal(&request_id).into_response();
+            };
+            let Ok(id) = tracking_id.parse::<TrackingId>() else {
+                return ApiError::invalid_request(&request_id, "tracking ID is invalid")
+                    .into_response();
+            };
+            let request = match serde_json::from_slice::<SetTrackingBaselineRequest>(&body) {
+                Ok(request) => request,
+                Err(_) => {
+                    return ApiError::invalid_request(&request_id, "request JSON is invalid")
+                        .into_response();
+                }
+            };
+            let baseline = match EpisodeSnapshot::new(
+                request.known_through.season,
+                request.known_through.episode,
+            ) {
+                Ok(baseline) => baseline,
+                Err(_) => {
+                    return ApiError::invalid_request(&request_id, "tracking baseline is invalid")
+                        .into_response();
+                }
+            };
+            match tracking.set_baseline(&actor, id, baseline).await {
+                Ok(value) => Json(convert::tracking(&value)).into_response(),
+                Err(error) => application_error(error, &request_id),
+            }
+        },
+    )
+    .await
+}
+
+async fn check_now(
+    State(state): State<ApiState>,
+    Extension(actor): Extension<Actor>,
+    Extension(request_id): Extension<RequestId>,
+    Path(tracking_id): Path<String>,
+    request: Request,
+) -> Response {
+    idempotency::execute(
+        state,
+        actor,
+        request_id,
+        request,
+        move |state, actor, request_id, _operation, body| async move {
+            if !body.is_empty() {
+                return ApiError::invalid_request(&request_id, "request body must be empty")
+                    .into_response();
+            }
+            let Some(tracking) = state.tracking() else {
+                return ApiError::internal(&request_id).into_response();
+            };
+            let Ok(id) = tracking_id.parse::<TrackingId>() else {
+                return ApiError::invalid_request(&request_id, "tracking ID is invalid")
+                    .into_response();
+            };
+            match tracking.check_now(&actor, id).await {
+                Ok(value) => Json(convert::tracking(&value)).into_response(),
+                Err(error) => application_error(error, &request_id),
+            }
+        },
+    )
+    .await
 }
 
 async fn patch(

@@ -172,6 +172,11 @@ automatic subscription must contain `provider_media_ref`, `translation_id`,
 and `season`. When a new provider episode is discovered, `media-service`
 creates an episode job directly from the scheduler; Hermes and the LLM are not
 involved. Use `tracking enable-download` to configure an existing subscription.
+Use `tracking set-baseline` to correct the known-through episode without
+recreating a subscription, and `tracking check-now` to make it due for the next
+scheduler pass. Notification-only subscriptions run hourly; automatic-download
+subscriptions run every 15 minutes. `tracking list --json` reports the last
+check result and the next scheduled check.
 Never infer or switch the source or translation automatically.
 
 ## Stuck Runner Recovery

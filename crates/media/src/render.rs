@@ -313,6 +313,8 @@ pub fn tracking(value: &Value, action: Option<&str>) -> String {
     push_pair(&mut pairs, "Scope", get_str(value, "scope"));
     push_pair(&mut pairs, "Mode", tracking_mode(value));
     push_pair(&mut pairs, "Known episodes", known_episodes_summary(value));
+    push_pair(&mut pairs, "Last check", tracking_check_summary(value));
+    push_pair(&mut pairs, "Next check", get_str(value, "next_check_at"));
 
     key_value_block(&header, &pairs)
 }
@@ -335,6 +337,8 @@ pub fn tracking_list(value: &Value) -> String {
         Column::optional("SCOPE"),
         Column::optional("MODE"),
         Column::optional("LATEST"),
+        Column::optional("CHECK"),
+        Column::optional("NEXT"),
     ];
     let rows = items
         .iter()
@@ -350,11 +354,21 @@ pub fn tracking_list(value: &Value) -> String {
                 get_str(item, "scope"),
                 tracking_mode(item),
                 known_episodes_summary(item),
+                tracking_check_summary(item),
+                get_str(item, "next_check_at"),
             ]
         })
         .collect::<Vec<_>>();
 
     table(&columns, &rows)
+}
+
+fn tracking_check_summary(value: &Value) -> Option<String> {
+    let status = get_str(value, "check_status")?;
+    Some(match get_str(value, "last_checked_at") {
+        Some(timestamp) => format!("{status} at {timestamp}"),
+        None => status,
+    })
 }
 
 fn tracking_mode(value: &Value) -> Option<String> {
