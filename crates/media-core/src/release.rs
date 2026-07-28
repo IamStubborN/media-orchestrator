@@ -142,7 +142,16 @@ pub fn select_release_candidate(
         .collect::<Vec<_>>();
 
     if matches.len() == 1 {
-        Some(matches[0])
+        return Some(matches[0]);
+    }
+
+    let ongoing = matches
+        .into_iter()
+        .filter(|index| candidates[*index].lifecycle == ReleaseLifecycle::Ongoing)
+        .collect::<Vec<_>>();
+
+    if ongoing.len() == 1 {
+        ongoing.first().copied()
     } else {
         None
     }

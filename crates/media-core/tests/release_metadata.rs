@@ -49,6 +49,40 @@ fn title_only_does_not_auto_select_from_multiple_candidates() {
 }
 
 #[test]
+fn title_only_selects_the_only_ongoing_exact_match() {
+    let query = ReleaseQuery::new("Silo", None, None).unwrap();
+    let candidates = vec![
+        ReleaseCandidate {
+            lifecycle: ReleaseLifecycle::Ongoing,
+            ..candidate(1, "Silo", None, Some(2023))
+        },
+        ReleaseCandidate {
+            lifecycle: ReleaseLifecycle::Ended,
+            ..candidate(2, "Silo", None, Some(2017))
+        },
+    ];
+
+    assert_eq!(select_release_candidate(&query, &candidates), Some(0));
+}
+
+#[test]
+fn title_only_keeps_multiple_ongoing_exact_matches_ambiguous() {
+    let query = ReleaseQuery::new("Sugar", None, None).unwrap();
+    let candidates = vec![
+        ReleaseCandidate {
+            lifecycle: ReleaseLifecycle::Ongoing,
+            ..candidate(1, "Sugar", None, Some(2024))
+        },
+        ReleaseCandidate {
+            lifecycle: ReleaseLifecycle::Ongoing,
+            ..candidate(2, "Sugar", None, Some(2018))
+        },
+    ];
+
+    assert_eq!(select_release_candidate(&query, &candidates), None);
+}
+
+#[test]
 fn sole_fuzzy_candidate_is_not_auto_selected() {
     let query = ReleaseQuery::new("Office", None, Some(2005)).unwrap();
     let candidates = vec![candidate(1, "The Office", None, Some(2005))];
