@@ -103,8 +103,13 @@ pub struct MediaNotificationProgress {
     current_episode: Option<u32>,
     missing_episodes: Vec<MediaNotificationEpisode>,
     downloaded_bytes: Option<u64>,
+    total_bytes: Option<u64>,
     download_speed_bps: Option<u64>,
     percentage: Option<u8>,
+    eta_seconds: Option<u64>,
+    seeds: Option<u64>,
+    peers: Option<u64>,
+    source_state: Option<String>,
     connection_attempt: Option<u32>,
     connection_attempt_limit: Option<u32>,
     vpn_rotation_pending: Option<bool>,
@@ -471,8 +476,13 @@ impl MediaNotificationProgress {
             current_episode,
             missing_episodes,
             downloaded_bytes,
+            total_bytes: None,
             download_speed_bps,
             percentage,
+            eta_seconds: None,
+            seeds: None,
+            peers: None,
+            source_state: None,
             connection_attempt: None,
             connection_attempt_limit: None,
             vpn_rotation_pending: None,
@@ -502,12 +512,32 @@ impl MediaNotificationProgress {
         self.downloaded_bytes
     }
     #[must_use]
+    pub const fn total_bytes(&self) -> Option<u64> {
+        self.total_bytes
+    }
+    #[must_use]
     pub const fn download_speed_bps(&self) -> Option<u64> {
         self.download_speed_bps
     }
     #[must_use]
     pub const fn percentage(&self) -> Option<u8> {
         self.percentage
+    }
+    #[must_use]
+    pub const fn eta_seconds(&self) -> Option<u64> {
+        self.eta_seconds
+    }
+    #[must_use]
+    pub const fn seeds(&self) -> Option<u64> {
+        self.seeds
+    }
+    #[must_use]
+    pub const fn peers(&self) -> Option<u64> {
+        self.peers
+    }
+    #[must_use]
+    pub fn source_state(&self) -> Option<&str> {
+        self.source_state.as_deref()
     }
     #[must_use]
     pub const fn connection_attempt(&self) -> Option<u32> {
@@ -528,6 +558,32 @@ impl MediaNotificationProgress {
     #[must_use]
     pub const fn storage_required_bytes(&self) -> Option<u64> {
         self.storage_required_bytes
+    }
+    pub fn with_transfer_details(
+        mut self,
+        total_bytes: Option<u64>,
+        eta_seconds: Option<u64>,
+        seeds: Option<u64>,
+        peers: Option<u64>,
+        source_state: Option<String>,
+    ) -> Result<Self, NotificationValidationError> {
+        if self
+            .downloaded_bytes
+            .is_some_and(|downloaded| total_bytes.is_some_and(|total| downloaded > total))
+        {
+            return Err(NotificationValidationError::InvalidMediaResult);
+        }
+        if let Some(source_state) = &source_state {
+            validate_machine_metadata(source_state, |character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+            })?;
+        }
+        self.total_bytes = total_bytes;
+        self.eta_seconds = eta_seconds;
+        self.seeds = seeds;
+        self.peers = peers;
+        self.source_state = source_state;
+        Ok(self)
     }
     pub fn with_recovery(
         mut self,

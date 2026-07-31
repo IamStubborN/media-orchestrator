@@ -139,9 +139,19 @@ pub struct MediaNotificationProgressDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub downloaded_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub download_speed_bps: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub percentage: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eta_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seeds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peers: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_attempt: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]

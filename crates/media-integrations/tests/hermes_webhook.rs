@@ -88,6 +88,14 @@ fn media_delivery() -> NotificationDelivery {
                 Some(5_452_595),
                 None,
             )
+            .unwrap()
+            .with_transfer_details(
+                Some(688_385_900),
+                Some(91),
+                Some(3),
+                Some(1),
+                Some("downloading".to_owned()),
+            )
             .unwrap(),
         ),
         Some(MediaNotificationStage::Download),
@@ -306,7 +314,12 @@ async fn posts_exact_schema_v2_payload_with_generation_aware_identity() {
                 "current_episode": 8,
                 "missing_episodes": [{"season": 1, "episode": 9}],
                 "downloaded_bytes": 195035136,
-                "download_speed_bps": 5452595
+                "total_bytes": 688385900,
+                "download_speed_bps": 5452595,
+                "eta_seconds": 91,
+                "seeds": 3,
+                "peers": 1,
+                "source_state": "downloading"
             },
             "stage": "download",
             "next_step": "process",

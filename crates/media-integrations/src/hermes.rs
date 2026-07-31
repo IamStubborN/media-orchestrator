@@ -222,8 +222,13 @@ fn media_webhook(notification: &MediaNotification) -> HermesMediaNotificationWeb
                     })
                     .collect(),
                 downloaded_bytes: progress.downloaded_bytes(),
+                total_bytes: progress.total_bytes(),
                 download_speed_bps: progress.download_speed_bps(),
                 percentage: progress.percentage(),
+                eta_seconds: progress.eta_seconds(),
+                seeds: progress.seeds(),
+                peers: progress.peers(),
+                source_state: progress.source_state().map(ToOwned::to_owned),
                 connection_attempt: progress.connection_attempt(),
                 connection_attempt_limit: progress.connection_attempt_limit(),
                 vpn_rotation_pending: progress.vpn_rotation_pending(),

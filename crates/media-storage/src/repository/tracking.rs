@@ -921,6 +921,22 @@ fn media_notification_from_payload(
                     .and_then(|value| u8::try_from(value).ok()),
             )
             .and_then(|progress| {
+                progress.with_transfer_details(
+                    object
+                        .get("total_bytes")
+                        .and_then(serde_json::Value::as_u64),
+                    object
+                        .get("eta_seconds")
+                        .and_then(serde_json::Value::as_u64),
+                    object.get("seeds").and_then(serde_json::Value::as_u64),
+                    object.get("peers").and_then(serde_json::Value::as_u64),
+                    object
+                        .get("source_state")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned),
+                )
+            })
+            .and_then(|progress| {
                 progress.with_recovery(
                     number("connection_attempt"),
                     number("connection_attempt_limit"),

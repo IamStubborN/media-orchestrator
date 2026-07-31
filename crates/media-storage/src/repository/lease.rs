@@ -633,8 +633,23 @@ async fn project_notification(
         if let Some(value) = checkpoint_unsigned(checkpoint, "downloaded_bytes") {
             transfer["downloaded_bytes"] = serde_json::json!(value);
         }
+        if let Some(value) = checkpoint_unsigned(checkpoint, "total_bytes") {
+            transfer["total_bytes"] = serde_json::json!(value);
+        }
         if let Some(value) = checkpoint_unsigned(checkpoint, "download_speed_bps") {
             transfer["download_speed_bps"] = serde_json::json!(value);
+        }
+        if let Some(value) = checkpoint_unsigned(checkpoint, "eta_seconds") {
+            transfer["eta_seconds"] = serde_json::json!(value);
+        }
+        if let Some(value) = checkpoint_unsigned(checkpoint, "seeds") {
+            transfer["seeds"] = serde_json::json!(value);
+        }
+        if let Some(value) = checkpoint_unsigned(checkpoint, "peers") {
+            transfer["peers"] = serde_json::json!(value);
+        }
+        if let Some(CheckpointValue::String(value)) = checkpoint.get("state") {
+            transfer["source_state"] = serde_json::json!(value);
         }
         if let Some(value) =
             checkpoint_unsigned(checkpoint, "progress_percent").filter(|value| *value <= 100)

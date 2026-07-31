@@ -2813,6 +2813,8 @@ async fn job_detail_reports_the_running_stage_and_clears_it_when_idle() {
                         CheckpointValue::Unsigned(19_293_798),
                     ),
                     ("eta_seconds".to_owned(), CheckpointValue::Unsigned(85)),
+                    ("seeds".to_owned(), CheckpointValue::Unsigned(3)),
+                    ("peers".to_owned(), CheckpointValue::Unsigned(1)),
                 ]
                 .into_iter()
                 .collect(),
@@ -2849,7 +2851,12 @@ async fn job_detail_reports_the_running_stage_and_clears_it_when_idle() {
     let payload = structured_payload(&progress_notifications[0], &[]);
     assert_eq!(payload["progress"]["percentage"], 73);
     assert_eq!(payload["progress"]["downloaded_bytes"], 4_402_341_478_u64);
+    assert_eq!(payload["progress"]["total_bytes"], 6_012_954_214_u64);
     assert_eq!(payload["progress"]["download_speed_bps"], 19_293_798_u64);
+    assert_eq!(payload["progress"]["eta_seconds"], 85);
+    assert_eq!(payload["progress"]["seeds"], 3);
+    assert_eq!(payload["progress"]["peers"], 1);
+    assert_eq!(payload["progress"]["source_state"], "downloading");
 
     let detail = jobs
         .find_detail_for_owner(created.id(), PRIMARY_USER_ID)
