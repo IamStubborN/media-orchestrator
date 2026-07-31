@@ -470,7 +470,11 @@ async fn project_notification(
     let task_rows = transaction
         .query_all_raw(Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
-            "SELECT ordinal, state FROM job_tasks WHERE job_id = $1 ORDER BY ordinal",
+            "SELECT task.ordinal, task.state, EXISTS ( \
+                 SELECT 1 FROM job_stages AS stage \
+                 WHERE stage.task_id = task.id AND stage.name = 'plex_reconcile' \
+             ) AS is_plex_reconcile \
+             FROM job_tasks AS task WHERE task.job_id = $1 ORDER BY task.ordinal",
             [job.id().into_uuid().into()],
         ))
         .await?;
@@ -588,11 +592,13 @@ async fn project_notification(
     let mut completed = 0_u32;
     let mut missing = Vec::new();
     let mut task_state = std::collections::BTreeMap::new();
+    let mut plex_task_states = Vec::new();
     for row in task_rows {
-        task_state.insert(
-            row.try_get::<i32>("", "ordinal")? as usize,
-            row.try_get::<String>("", "state")?,
-        );
+        let state = row.try_get::<String>("", "state")?;
+        if row.try_get::<bool>("", "is_plex_reconcile")? {
+            plex_task_states.push(state.clone());
+        }
+        task_state.insert(row.try_get::<i32>("", "ordinal")? as usize, state);
     }
     for (ordinal, coordinates) in selected.iter().enumerate() {
         if task_state
@@ -610,10 +616,23 @@ async fn project_notification(
             missing.push(serde_json::json!({"season": coordinates.0, "episode": coordinates.1}));
         }
     }
-    let mut progress = if selected.is_empty() || task_state.is_empty() {
-        None
-    } else {
+    let mut progress = if !selected.is_empty() && !task_state.is_empty() {
         Some(serde_json::json!({"completed_episodes": completed, "total_episodes": selected.len()}))
+    } else if terminal
+        && state == "completed"
+        && kind == "series"
+        && job.provider() == Provider::Prowlarr
+        && !plex_task_states.is_empty()
+    {
+        Some(serde_json::json!({
+            "completed_episodes": plex_task_states
+                .iter()
+                .filter(|task_state| task_state.as_str() == "completed")
+                .count(),
+            "total_episodes": plex_task_states.len()
+        }))
+    } else {
+        None
     };
     if let (Some(progress), Some(ordinal)) = (&mut progress, current_ordinal)
         && let Some((_, episode)) = selected.get(ordinal)

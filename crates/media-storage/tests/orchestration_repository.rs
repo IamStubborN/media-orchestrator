@@ -1164,6 +1164,106 @@ async fn detailed_notification_prowlarr_reports_original_without_unmeasured_prob
 }
 
 #[tokio::test]
+async fn completed_prowlarr_season_counts_only_published_episode_tasks() {
+    let (test_db, jobs, leases) = setup().await;
+    let result_ref = "selection:prowlarr-completed-season";
+    let created = jobs
+        .create(
+            operation_key(),
+            new_job_for_provider(
+                result_ref,
+                PRIMARY_USER_ID,
+                NotifyScope::Initiator,
+                Provider::Prowlarr,
+            ),
+        )
+        .await
+        .unwrap();
+    test_db
+        .connection()
+        .execute_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "INSERT INTO search_executions (result_ref, payload) VALUES ($1, $2)",
+            [
+                result_ref.into(),
+                serde_json::json!({
+                    "title": "Avatar: The Last Airbender",
+                    "media_kind": "series",
+                    "season": 2
+                })
+                .into(),
+            ],
+        ))
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    leases
+        .report_event(
+            operation_key(),
+            lease.lease_id(),
+            RUNNER_CLIENT_ID,
+            JobEvent::started(JobEventId::new()),
+        )
+        .await
+        .unwrap();
+    for ordinal in 1..=7 {
+        for event in [
+            JobEvent::stage_started(JobEventId::new(), ordinal, "plex_reconcile".to_owned(), 0)
+                .unwrap(),
+            JobEvent::stage_completed(
+                JobEventId::new(),
+                ordinal,
+                "plex_reconcile".to_owned(),
+                0,
+                Default::default(),
+            )
+            .unwrap(),
+        ] {
+            leases
+                .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
+                .await
+                .unwrap();
+        }
+    }
+    for state in [
+        JobState::Publishing,
+        JobState::PlexPending,
+        JobState::Completed,
+    ] {
+        leases
+            .report_event(
+                operation_key(),
+                lease.lease_id(),
+                RUNNER_CLIENT_ID,
+                JobEvent::transition(JobEventId::new(), state, None).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let card = query(
+        test_db.connection(),
+        "SELECT payload FROM notification_outbox \
+         WHERE payload->>'delivery_kind' = 'card'",
+    )
+    .await
+    .remove(0)
+    .try_get::<serde_json::Value>("", "payload")
+    .unwrap();
+    assert_eq!(card["progress"]["completed_episodes"], 7);
+    assert_eq!(card["progress"]["total_episodes"], 7);
+    assert_eq!(card["media"]["job_id"], created.id().to_string());
+}
+
+#[tokio::test]
 async fn detailed_notification_projects_retry_recovery_and_terminal_actions() {
     let (test_db, jobs, leases) = setup().await;
     let result_ref = "selection:detailed-recovery";
