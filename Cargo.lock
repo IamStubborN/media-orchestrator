@@ -2437,6 +2437,7 @@ dependencies = [
  "clap",
  "libc",
  "media-api",
+ "media-client",
  "media-contract",
  "media-core",
  "media-integrations",
@@ -2480,6 +2481,20 @@ dependencies = [
  "time",
  "tokio",
  "tower",
+ "uuid",
+]
+
+[[package]]
+name = "media-client"
+version = "0.1.0"
+dependencies = [
+ "media-contract",
+ "reqwest",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "url",
  "uuid",
 ]
 

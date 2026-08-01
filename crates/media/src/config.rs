@@ -521,6 +521,12 @@ impl ClientConfig {
     }
 }
 
+impl media_client::IntoClientParts for ClientConfig {
+    fn into_client_parts(self) -> (reqwest::Url, SecretString) {
+        self.into_parts()
+    }
+}
+
 impl std::fmt::Debug for ClientConfig {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter

@@ -145,6 +145,14 @@ Owns the HTTP server boundary:
 
 Architecture invariant: handlers are thin. They validate transport input, call an application use case, and convert the result to a transport response.
 
+### `media-client`
+
+Owns the typed REST client used by the human CLI and deterministic integrations.
+It depends only on `media-contract` among workspace crates, deserializes every
+successful response into its declared DTO, and retains sanitized transport
+errors. It cannot reach application, storage, provider, or MCP implementation
+crates.
+
 #### Internal media-admin MCP
 
 `media-api` also exposes a protected Streamable HTTP MCP endpoint at
@@ -153,6 +161,12 @@ services, not a second media implementation:
 
 - MCP tools reuse the owner-scoped job, tracking, search, and media-admin
   applications.
+- Conversational media workflows use MCP exclusively. The `media` CLI remains
+  an independent human and operations adapter over the REST API; MCP never
+  shells out to it and the CLI does not depend on MCP.
+- The agent-facing surface covers provider search and continuation, exact
+  result selection, jobs, release schedules, trends, the complete tracking
+  lifecycle, recovery alternatives, and explicit episode mapping.
 - Bearer authentication resolves the same fixed Hermes actor as the REST API.
 - Hermes receives structured results and never receives provider credentials,
   database access, or the Docker socket.
@@ -168,6 +182,14 @@ services, not a second media implementation:
 The MCP facade stays a delivery adapter. Provider clients are composed behind
 an application-level contract; MCP handlers do not receive URLs, credentials,
 or unrestricted filesystem handles.
+
+The endpoint accepts both legacy session negotiation used by current Hermes
+clients and stateless MCP `2026-07-28` requests. Stateless requests carry their
+protocol context independently; durable application state remains explicit in
+PostgreSQL through search session, job, tracking, and confirmation identifiers.
+Every tool publishes an output schema and safety annotations. Operational
+process commands (`serve`, `runner`, `migrate`, and low-level diagnostics) are
+intentionally CLI-only.
 
 ### `media-runner`
 
@@ -243,9 +265,10 @@ express:
 ```text
 media-storage       -> media-core
 media-api            -> media-core, media-contract
+media-client         -> media-contract
 media-integrations   -> media-core, media-contract
 media-runner         -> rezka-client
-media                -> media-api, media-contract, media-core,
+media                -> media-api, media-client, media-contract, media-core,
                          media-integrations, media-runner, media-storage,
                          rezka-client
 ```

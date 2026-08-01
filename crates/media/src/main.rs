@@ -1,10 +1,10 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use media::{
-    client::{ClientError, HttpClient},
     composition::{self, ServiceError},
     config::{ClientConfig, ConfigError, DatabaseConfig, RunnerConfig, ServerConfig},
     render,
 };
+use media_client::{ClientError, JsonResponse, MediaClient as HttpClient};
 
 #[derive(Debug, Parser)]
 #[command(name = "media", version, about = "Personal media orchestration")]
@@ -479,15 +479,20 @@ async fn run_healthcheck(args: HealthcheckArgs) -> Result<(), RunError> {
 /// verbatim (the machine contract). Otherwise the response is parsed and
 /// handed to `render` for a human-readable view, falling back to the raw
 /// response if it is not valid JSON.
-fn emit(output: &str, json: bool, render: impl FnOnce(&serde_json::Value) -> String) {
+fn emit<T: JsonResponse>(
+    output: &T,
+    json: bool,
+    render: impl FnOnce(&serde_json::Value) -> String,
+) {
+    let value = output.to_json_value();
     if json {
-        println!("{output}");
+        println!(
+            "{}",
+            serde_json::to_string(&value).expect("typed API responses are serializable")
+        );
         return;
     }
-    match serde_json::from_str::<serde_json::Value>(output) {
-        Ok(value) => println!("{}", render(&value)),
-        Err(_) => println!("{output}"),
-    }
+    println!("{}", render(&value));
 }
 
 async fn run_tracking(args: TrackingArgs) -> Result<(), RunError> {

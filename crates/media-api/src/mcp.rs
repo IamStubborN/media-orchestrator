@@ -2,9 +2,15 @@ use std::sync::Arc;
 
 use axum::{Router, http::request::Parts};
 use media_contract::{
-    JobListDto, MediaKindDto, ProviderDto, SearchScopeDto, StartSearchRequest, TrackingListDto,
+    AlternativeSearchRequest, ContinueSearchRequest, CreateTrackingRequest, EpisodeSnapshotDto,
+    JobListDto, MediaKindDto, PatchTrackingRequest, ProviderDto, ReleaseQueryRequest,
+    ResolveEpisodeMappingRequest, SearchScopeDto, SelectResultRequest, StartSearchRequest,
+    TrackingDownloadDto, TrackingListDto, TrackingScopeDto, TrendingCategoryDto,
 };
-use media_core::{Actor, ApplicationError, JobId, TrackingApplicationError, TrackingId};
+use media_core::{
+    Actor, ApplicationError, EpisodeSnapshot, JobId, ReleaseQuery, ReleaseQueryError,
+    TrackingApplicationError, TrackingId,
+};
 use rmcp::schemars;
 use rmcp::{
     handler::server::{tool::Extension, wrapper::Parameters},
@@ -35,11 +41,118 @@ struct TrackingIdInput {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct SearchInput {
-    query: String,
+    query: Option<String>,
+    continuation: Option<String>,
     #[serde(default = "default_source")]
     source: String,
     media_kind: Option<String>,
     season: Option<u16>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct DownloadInput {
+    session_id: String,
+    result_id: String,
+    translation_id: Option<u64>,
+    season: Option<u32>,
+    episode: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ReleaseInput {
+    title: String,
+    original_title: Option<String>,
+    year: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct TrendingInput {
+    #[serde(default = "default_trending_category")]
+    category: String,
+    #[serde(default = "default_page")]
+    page: u32,
+}
+
+fn default_trending_category() -> String {
+    "all".to_owned()
+}
+
+const fn default_page() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+struct EpisodeInput {
+    season: u32,
+    episode: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+struct TrackingDownloadInput {
+    provider_media_ref: String,
+    translation_id: u64,
+    season: u32,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct TrackingCreateInput {
+    #[serde(default = "default_tracking_provider")]
+    provider: String,
+    title: String,
+    #[serde(default = "default_tracking_translation")]
+    translation: String,
+    known_episodes: Vec<EpisodeInput>,
+    scope: String,
+    #[serde(default = "default_true")]
+    series_ongoing: bool,
+    download: Option<TrackingDownloadInput>,
+}
+
+fn default_tracking_provider() -> String {
+    "rezka".to_owned()
+}
+
+fn default_tracking_translation() -> String {
+    "release-calendar".to_owned()
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct TrackingDownloadUpdateInput {
+    tracking_id: String,
+    translation: String,
+    provider_media_ref: String,
+    translation_id: u64,
+    season: u32,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct TrackingBaselineInput {
+    tracking_id: String,
+    known_through: EpisodeInput,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AlternativeSearchInput {
+    job_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ResolveEpisodeInput {
+    job_id: String,
+    season: u32,
+    episode: u32,
+    title: Option<String>,
+}
+
+#[derive(Debug, schemars::JsonSchema)]
+#[allow(dead_code)]
+struct ObjectOutput {
+    #[serde(flatten)]
+    fields: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 fn default_source() -> String {
@@ -114,7 +227,9 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_jobs_list",
-        description = "List the authenticated user's media jobs and their current states. Read-only."
+        description = "List the authenticated user's media jobs and their current states. Read-only.",
+        output_schema = object_output_schema(),
+        annotations(title = "List media jobs", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn list_jobs(
         &self,
@@ -134,7 +249,9 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_job_get",
-        description = "Get sanitized details and measured progress for one of the authenticated user's media jobs. Read-only."
+        description = "Get sanitized details and measured progress for one of the authenticated user's media jobs. Read-only.",
+        output_schema = object_output_schema(),
+        annotations(title = "Get media job", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn get_job(
         &self,
@@ -154,7 +271,9 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_queue_status",
-        description = "Show the authenticated user's queue and runner state. Read-only."
+        description = "Show the authenticated user's queue and runner state. Read-only.",
+        output_schema = object_output_schema(),
+        annotations(title = "Get media queue status", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn queue_status(
         &self,
@@ -172,7 +291,9 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_job_cancel",
-        description = "Cancel one of the authenticated user's media jobs. This changes state but does not delete files."
+        description = "Cancel one of the authenticated user's media jobs. This changes state but does not delete files.",
+        output_schema = object_output_schema(),
+        annotations(title = "Cancel media job", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn cancel_job(
         &self,
@@ -192,7 +313,9 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_job_retry",
-        description = "Retry one of the authenticated user's failed or partial media jobs."
+        description = "Retry one of the authenticated user's failed or partial media jobs.",
+        output_schema = object_output_schema(),
+        annotations(title = "Retry media job", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
     )]
     async fn retry_job(
         &self,
@@ -204,7 +327,7 @@ impl MediaAdminMcp {
         let job = self
             .state
             .jobs()
-            .retry_job(&actor, stable_operation_key("retry", job_id), job_id)
+            .retry_job(&actor, unique_operation_key("retry", job_id), job_id)
             .await
             .map_err(application_error)?;
         result_json(convert::job(&job))
@@ -212,7 +335,9 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_tracking_list",
-        description = "List the authenticated user's tracking subscriptions and their check state. Read-only."
+        description = "List the authenticated user's tracking subscriptions and their check state. Read-only.",
+        output_schema = object_output_schema(),
+        annotations(title = "List media tracking", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn list_tracking(
         &self,
@@ -231,7 +356,9 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_tracking_check",
-        description = "Run an immediate check for one of the authenticated user's tracking subscriptions."
+        description = "Run an immediate check for one of the authenticated user's tracking subscriptions.",
+        output_schema = object_output_schema(),
+        annotations(title = "Check media tracking", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
     )]
     async fn check_tracking(
         &self,
@@ -255,8 +382,126 @@ impl MediaAdminMcp {
     }
 
     #[tool(
+        name = "media_tracking_create",
+        description = "Create a personal or family release tracking subscription. Optionally enables the explicitly selected Rezka translation for future automatic downloads.",
+        output_schema = object_output_schema(),
+        annotations(title = "Create media tracking", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn create_tracking(
+        &self,
+        Parameters(input): Parameters<TrackingCreateInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = actor_from_parts(&parts)?;
+        let tracking = configured_tracking(&self.state)?;
+        let provider = parse_provider(&input.provider)?;
+        let scope = parse_tracking_scope(&input.scope)?;
+        let request = CreateTrackingRequest {
+            provider,
+            title: input.title,
+            translation: input.translation,
+            known_episodes: input.known_episodes.into_iter().map(episode_dto).collect(),
+            scope,
+            series_ongoing: input.series_ongoing,
+            download: input.download.map(tracking_download_dto),
+        };
+        let operation = stable_payload_operation_key("tracking-create", &request)?;
+        let command = convert::new_tracking_command(request)
+            .map_err(|_| ErrorData::invalid_params("tracking request is invalid", None))?;
+        let value = tracking
+            .add(&actor, operation, command)
+            .await
+            .map_err(tracking_error)?;
+        result_json(convert::tracking(&value))
+    }
+
+    #[tool(
+        name = "media_tracking_enable_download",
+        description = "Enable future automatic Rezka episode downloads on an existing tracking subscription using an explicitly selected translation.",
+        output_schema = object_output_schema(),
+        annotations(title = "Enable tracking downloads", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn enable_tracking_download(
+        &self,
+        Parameters(input): Parameters<TrackingDownloadUpdateInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = actor_from_parts(&parts)?;
+        let tracking = configured_tracking(&self.state)?;
+        let tracking_id = parse_tracking_id(&input.tracking_id)?;
+        let request = PatchTrackingRequest {
+            translation: input.translation,
+            download: TrackingDownloadDto {
+                provider_media_ref: input.provider_media_ref,
+                translation_id: input.translation_id,
+                season: input.season,
+            },
+        };
+        let patch = convert::tracking_download_patch(request)
+            .map_err(|_| ErrorData::invalid_params("tracking request is invalid", None))?;
+        let value = tracking
+            .patch_download(&actor, tracking_id, patch)
+            .await
+            .map_err(tracking_error)?;
+        result_json(convert::tracking(&value))
+    }
+
+    #[tool(
+        name = "media_tracking_set_baseline",
+        description = "Change the known-through episode of an existing tracking subscription without recreating it.",
+        output_schema = object_output_schema(),
+        annotations(title = "Set tracking baseline", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn set_tracking_baseline(
+        &self,
+        Parameters(input): Parameters<TrackingBaselineInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = actor_from_parts(&parts)?;
+        let tracking = configured_tracking(&self.state)?;
+        let tracking_id = parse_tracking_id(&input.tracking_id)?;
+        let baseline =
+            EpisodeSnapshot::new(input.known_through.season, input.known_through.episode)
+                .map_err(|_| ErrorData::invalid_params("tracking baseline is invalid", None))?;
+        let value = tracking
+            .set_baseline(&actor, tracking_id, baseline)
+            .await
+            .map_err(tracking_error)?;
+        result_json(convert::tracking(&value))
+    }
+
+    #[tool(
+        name = "media_tracking_remove",
+        description = "Remove one of the authenticated user's tracking subscriptions. Does not delete downloaded media.",
+        output_schema = object_output_schema(),
+        annotations(title = "Remove media tracking", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn remove_tracking(
+        &self,
+        Parameters(input): Parameters<TrackingIdInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = actor_from_parts(&parts)?;
+        let tracking = configured_tracking(&self.state)?;
+        let tracking_id = parse_tracking_id(&input.tracking_id)?;
+        let value = tracking
+            .remove(
+                &actor,
+                stable_operation_key("tracking-remove", tracking_id.to_string()),
+                tracking_id,
+            )
+            .await
+            .map_err(tracking_error)?;
+        let mut value = convert::tracking(&value);
+        value.state = media_contract::TrackingStateDto::Removed;
+        result_json(value)
+    }
+
+    #[tool(
         name = "media_search",
-        description = "Search Rezka, Prowlarr, or both. Returns separate provider results and never downloads automatically."
+        description = "Search Rezka, Prowlarr, or both, or continue one provider page with a continuation token. Returns separate provider results and never downloads automatically.",
+        output_schema = object_output_schema(),
+        annotations(title = "Search media providers", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
     )]
     async fn search(
         &self,
@@ -267,6 +512,30 @@ impl MediaAdminMcp {
         let owner = actor
             .require_user()
             .map_err(|_| ErrorData::invalid_request("operation is forbidden", None))?;
+        if input.continuation.is_some() {
+            if input.query.is_some() {
+                return Err(ErrorData::invalid_params(
+                    "query and continuation are mutually exclusive",
+                    None,
+                ));
+            }
+            let page = self
+                .state
+                .search()
+                .continue_search(
+                    owner,
+                    ContinueSearchRequest {
+                        continuation: input.continuation.unwrap_or_default(),
+                        scope: mcp_scope(owner),
+                    },
+                )
+                .await
+                .map_err(search_error)?;
+            return result_json(page);
+        }
+        let query = input
+            .query
+            .ok_or_else(|| ErrorData::invalid_params("query or continuation is required", None))?;
         let media_kind = match input.media_kind.as_deref() {
             Some("movie") => Some(MediaKindDto::Movie),
             Some("series") => Some(MediaKindDto::Series),
@@ -292,13 +561,9 @@ impl MediaAdminMcp {
         let mut results = serde_json::Map::new();
         for provider in providers {
             let request = StartSearchRequest {
-                scope: SearchScopeDto {
-                    platform: "mcp".to_owned(),
-                    chat_id: owner.to_string(),
-                    thread_id: None,
-                },
+                scope: mcp_scope(owner),
                 source: *provider,
-                query: input.query.clone(),
+                query: query.clone(),
                 media_kind,
                 season: input.season,
                 preferred_qualities: vec![],
@@ -321,8 +586,192 @@ impl MediaAdminMcp {
     }
 
     #[tool(
+        name = "media_download",
+        description = "Create a download from one exact result in a previous media_search response. Never chooses a provider, result, translation, season, or episode implicitly.",
+        output_schema = object_output_schema(),
+        annotations(title = "Download selected media", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn download(
+        &self,
+        Parameters(input): Parameters<DownloadInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = actor_from_parts(&parts)?;
+        let owner = actor
+            .require_user()
+            .map_err(|_| ErrorData::invalid_request("operation is forbidden", None))?;
+        let request = SelectResultRequest {
+            session_id: input.session_id,
+            result_id: input.result_id,
+            translation_id: input.translation_id,
+            season: input.season,
+            episode: input.episode,
+            scope: mcp_scope(owner),
+        };
+        let operation = stable_payload_operation_key("download", &request)?;
+        let value = self
+            .state
+            .search()
+            .select(owner, operation, request)
+            .await
+            .map_err(search_error)?;
+        result_json(value)
+    }
+
+    #[tool(
+        name = "media_release_schedule",
+        description = "Query the release calendar for episode counts, lifecycle, schedule, and next episode. Read-only and never starts a download.",
+        output_schema = object_output_schema(),
+        annotations(title = "Get release schedule", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn release_schedule(
+        &self,
+        Parameters(input): Parameters<ReleaseInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        actor_from_parts(&parts)?;
+        let service = self
+            .state
+            .release_metadata()
+            .ok_or_else(|| ErrorData::internal_error("release metadata is not configured", None))?;
+        let request = ReleaseQueryRequest {
+            title: input.title,
+            original_title: input.original_title,
+            year: input.year,
+        };
+        let query = ReleaseQuery::new(request.title, request.original_title, request.year)
+            .map_err(|_| ErrorData::invalid_params("release query is invalid", None))?;
+        let value = service.query(query).await.map_err(release_error)?;
+        result_json(convert::release_result(value))
+    }
+
+    #[tool(
+        name = "media_trending",
+        description = "List worldwide weekly TMDB trends for movies, series, or both. Read-only and never starts a search or download.",
+        output_schema = object_output_schema(),
+        annotations(title = "Get weekly media trends", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn trending(
+        &self,
+        Parameters(input): Parameters<TrendingInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        actor_from_parts(&parts)?;
+        if input.page == 0 {
+            return Err(ErrorData::invalid_params("page must be positive", None));
+        }
+        let category = match input.category.as_str() {
+            "all" => TrendingCategoryDto::All,
+            "movie" => TrendingCategoryDto::Movie,
+            "tv" => TrendingCategoryDto::Tv,
+            _ => {
+                return Err(ErrorData::invalid_params(
+                    "category must be all, movie, or tv",
+                    None,
+                ));
+            }
+        };
+        let value = self
+            .state
+            .trending()
+            .trending(category, input.page)
+            .await
+            .map_err(trending_error)?;
+        result_json(value)
+    }
+
+    #[tool(
+        name = "media_job_alternatives",
+        description = "Search for explicit alternative results for a failed or partial job. Never switches the source or starts a download automatically.",
+        output_schema = object_output_schema(),
+        annotations(title = "Find job alternatives", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn job_alternatives(
+        &self,
+        Parameters(input): Parameters<AlternativeSearchInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = actor_from_parts(&parts)?;
+        let owner = actor
+            .require_user()
+            .map_err(|_| ErrorData::invalid_request("operation is forbidden", None))?;
+        let job_id = parse_job_id(&input.job_id)?;
+        let value = self
+            .state
+            .search()
+            .start_alternative(
+                owner,
+                job_id,
+                AlternativeSearchRequest {
+                    scope: mcp_scope(owner),
+                },
+            )
+            .await
+            .map_err(search_error)?;
+        result_json(value)
+    }
+
+    #[tool(
+        name = "media_job_mapping_get",
+        description = "Get the unresolved provider episode coordinate for a job that needs an explicit canonical Plex mapping. Read-only.",
+        output_schema = object_output_schema(),
+        annotations(title = "Get episode mapping request", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn job_mapping_get(
+        &self,
+        Parameters(input): Parameters<JobIdInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = actor_from_parts(&parts)?;
+        let owner = actor
+            .require_user()
+            .map_err(|_| ErrorData::invalid_request("operation is forbidden", None))?;
+        let value = self
+            .state
+            .search()
+            .episode_mapping_action(owner, parse_job_id(&input.job_id)?)
+            .await
+            .map_err(search_error)?;
+        result_json(value)
+    }
+
+    #[tool(
+        name = "media_job_mapping_resolve",
+        description = "Apply an explicitly confirmed canonical Plex season and episode mapping to a job that is waiting for identity resolution.",
+        output_schema = object_output_schema(),
+        annotations(title = "Resolve episode mapping", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn job_mapping_resolve(
+        &self,
+        Parameters(input): Parameters<ResolveEpisodeInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = actor_from_parts(&parts)?;
+        let owner = actor
+            .require_user()
+            .map_err(|_| ErrorData::invalid_request("operation is forbidden", None))?;
+        let job_id = parse_job_id(&input.job_id)?;
+        let request = ResolveEpisodeMappingRequest {
+            canonical_season: input.season,
+            canonical_episode: input.episode,
+            canonical_title: input.title,
+        };
+        let operation =
+            stable_payload_operation_key(&format!("mapping-resolve:{job_id}"), &request)?;
+        let value = self
+            .state
+            .search()
+            .resolve_episode_mapping(owner, operation, job_id, request)
+            .await
+            .map_err(search_error)?;
+        result_json(value)
+    }
+
+    #[tool(
         name = "plex_search",
-        description = "Search the shared Plex library. Read-only."
+        description = "Search the shared Plex library. Read-only.",
+        output_schema = object_output_schema(),
+        annotations(title = "Search Plex", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn plex_search(
         &self,
@@ -341,7 +790,9 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "plex_recent",
-        description = "List recently added Plex media. Read-only."
+        description = "List recently added Plex media. Read-only.",
+        output_schema = object_output_schema(),
+        annotations(title = "List recent Plex media", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn plex_recent(
         &self,
@@ -360,7 +811,9 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "plex_now_playing",
-        description = "Show active Plex playback sessions. Read-only."
+        description = "Show active Plex playback sessions. Read-only.",
+        output_schema = object_output_schema(),
+        annotations(title = "Show Plex playback", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn plex_now_playing(
         &self,
@@ -378,7 +831,9 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "plex_item_get",
-        description = "Get detailed Plex metadata for a rating key. Read-only."
+        description = "Get detailed Plex metadata for a rating key. Read-only.",
+        output_schema = object_output_schema(),
+        annotations(title = "Get Plex item", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn plex_item(
         &self,
@@ -397,7 +852,9 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "plex_library_refresh",
-        description = "Ask Plex to rescan an allowlisted library section. Primary administrator only."
+        description = "Ask Plex to rescan an allowlisted library section. Primary administrator only.",
+        output_schema = object_output_schema(),
+        annotations(title = "Refresh Plex library", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn plex_refresh(
         &self,
@@ -416,7 +873,9 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "qbittorrent_list",
-        description = "List qBittorrent downloads with progress, speed, ETA, peers, and state. Read-only."
+        description = "List qBittorrent downloads with progress, speed, ETA, peers, and state. Read-only.",
+        output_schema = object_output_schema(),
+        annotations(title = "List torrents", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn torrent_list(
         &self,
@@ -435,7 +894,9 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "qbittorrent_details",
-        description = "Get qBittorrent properties and files for an exact info hash. Read-only."
+        description = "Get qBittorrent properties and files for an exact info hash. Read-only.",
+        output_schema = object_output_schema(),
+        annotations(title = "Get torrent details", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn torrent_details(
         &self,
@@ -454,7 +915,9 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "qbittorrent_control",
-        description = "Pause, resume, or recheck a torrent. Primary administrator only; action must be pause, resume, or recheck."
+        description = "Pause, resume, or recheck a torrent. Primary administrator only; action must be pause, resume, or recheck.",
+        output_schema = object_output_schema(),
+        annotations(title = "Control torrent", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn torrent_control(
         &self,
@@ -473,7 +936,9 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_file_inspect",
-        description = "Inspect a file or directory only inside configured Plex and torrent roots. Read-only."
+        description = "Inspect a file or directory only inside configured Plex and torrent roots. Read-only.",
+        output_schema = object_output_schema(),
+        annotations(title = "Inspect media file", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn file_inspect(
         &self,
@@ -492,7 +957,9 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_infrastructure_status",
-        description = "Check media-service, Plex, and qBittorrent application-level health without Docker access. Read-only."
+        description = "Check media-service, Plex, and qBittorrent application-level health without Docker access. Read-only.",
+        output_schema = object_output_schema(),
+        annotations(title = "Check media infrastructure", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn infrastructure_status(
         &self,
@@ -510,7 +977,9 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_destructive_prepare",
-        description = "Prepare and preview an administrator-only destructive action. Supported actions: plex_delete, torrent_delete, file_quarantine. Does not execute it."
+        description = "Prepare and preview an administrator-only destructive action. Supported actions: plex_delete, torrent_delete, file_quarantine. Does not execute it.",
+        output_schema = object_output_schema(),
+        annotations(title = "Preview destructive media action", read_only_hint = true, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
     async fn destructive_prepare(
         &self,
@@ -529,7 +998,9 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_destructive_confirm",
-        description = "Execute exactly one previously previewed destructive action using its short-lived one-time confirmation token. Never call without explicit user confirmation."
+        description = "Execute exactly one previously previewed destructive action using its short-lived one-time confirmation token. Never call without explicit user confirmation.",
+        output_schema = object_output_schema(),
+        annotations(title = "Confirm destructive media action", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false)
     )]
     async fn destructive_confirm(
         &self,
@@ -584,11 +1055,99 @@ fn parse_job_id(value: &str) -> Result<JobId, ErrorData> {
         .map_err(|_| ErrorData::invalid_params("job_id is invalid", None))
 }
 
-fn stable_operation_key(action: &str, job_id: JobId) -> media_core::OperationKey {
+fn stable_operation_key(
+    action: &str,
+    identity: impl std::fmt::Display,
+) -> media_core::OperationKey {
     use sha2::{Digest, Sha256};
 
-    let digest: [u8; 32] = Sha256::digest(format!("mcp:{action}:{job_id}").as_bytes()).into();
+    let digest: [u8; 32] = Sha256::digest(format!("mcp:{action}:{identity}").as_bytes()).into();
     media_core::OperationKey::from_bytes(digest)
+}
+
+fn unique_operation_key(
+    action: &str,
+    identity: impl std::fmt::Display,
+) -> media_core::OperationKey {
+    stable_operation_key(action, format!("{identity}:{}", uuid::Uuid::new_v4()))
+}
+
+fn stable_payload_operation_key<T: serde::Serialize>(
+    action: &str,
+    value: &T,
+) -> Result<media_core::OperationKey, ErrorData> {
+    let payload = serde_json::to_vec(value)
+        .map_err(|_| ErrorData::internal_error("operation could not be serialized", None))?;
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(b"mcp:");
+    digest.update(action.as_bytes());
+    digest.update(b":");
+    digest.update(payload);
+    Ok(media_core::OperationKey::from_bytes(
+        digest.finalize().into(),
+    ))
+}
+
+fn object_output_schema() -> Arc<rmcp::model::JsonObject> {
+    rmcp::handler::server::tool::schema_for_type::<ObjectOutput>()
+}
+
+fn mcp_scope(owner: media_core::UserId) -> SearchScopeDto {
+    SearchScopeDto {
+        platform: "mcp".to_owned(),
+        chat_id: owner.to_string(),
+        thread_id: None,
+    }
+}
+
+fn parse_provider(value: &str) -> Result<ProviderDto, ErrorData> {
+    match value {
+        "rezka" => Ok(ProviderDto::Rezka),
+        "prowlarr" => Ok(ProviderDto::Prowlarr),
+        _ => Err(ErrorData::invalid_params(
+            "provider must be rezka or prowlarr",
+            None,
+        )),
+    }
+}
+
+fn parse_tracking_scope(value: &str) -> Result<TrackingScopeDto, ErrorData> {
+    match value {
+        "personal" => Ok(TrackingScopeDto::Personal),
+        "family" => Ok(TrackingScopeDto::Family),
+        _ => Err(ErrorData::invalid_params(
+            "scope must be personal or family",
+            None,
+        )),
+    }
+}
+
+fn parse_tracking_id(value: &str) -> Result<TrackingId, ErrorData> {
+    value
+        .parse::<TrackingId>()
+        .map_err(|_| ErrorData::invalid_params("tracking_id is invalid", None))
+}
+
+fn configured_tracking(state: &ApiState) -> Result<&media_core::TrackingApplication, ErrorData> {
+    state
+        .tracking()
+        .ok_or_else(|| ErrorData::internal_error("tracking is not configured", None))
+}
+
+fn episode_dto(value: EpisodeInput) -> EpisodeSnapshotDto {
+    EpisodeSnapshotDto {
+        season: value.season,
+        episode: value.episode,
+    }
+}
+
+fn tracking_download_dto(value: TrackingDownloadInput) -> TrackingDownloadDto {
+    TrackingDownloadDto {
+        provider_media_ref: value.provider_media_ref,
+        translation_id: value.translation_id,
+        season: value.season,
+    }
 }
 
 fn application_error(error: ApplicationError) -> ErrorData {
@@ -664,6 +1223,47 @@ fn search_error_code(error: crate::SearchError) -> &'static str {
         crate::SearchError::Conflict => "conflict",
         crate::SearchError::Provider => "provider_failed",
         crate::SearchError::Infrastructure => "infrastructure_failed",
+    }
+}
+
+fn search_error(error: crate::SearchError) -> ErrorData {
+    match error {
+        crate::SearchError::InvalidRequest => {
+            ErrorData::invalid_params("search request is invalid", None)
+        }
+        crate::SearchError::Forbidden => ErrorData::invalid_request("operation is forbidden", None),
+        crate::SearchError::NotFound => {
+            ErrorData::invalid_params("search resource was not found", None)
+        }
+        crate::SearchError::Conflict => {
+            ErrorData::invalid_request("search operation conflicts with current state", None)
+        }
+        crate::SearchError::Provider | crate::SearchError::Infrastructure => {
+            ErrorData::internal_error("media search failed", None)
+        }
+    }
+}
+
+fn release_error(error: ReleaseQueryError) -> ErrorData {
+    match error {
+        ReleaseQueryError::EmptyTitle | ReleaseQueryError::EmptyOriginalTitle => {
+            ErrorData::invalid_params("release query is invalid", None)
+        }
+        ReleaseQueryError::Provider => ErrorData::internal_error("release provider failed", None),
+    }
+}
+
+fn trending_error(error: crate::TrendingServiceError) -> ErrorData {
+    match error {
+        crate::TrendingServiceError::InvalidRequest => {
+            ErrorData::invalid_params("trending request is invalid", None)
+        }
+        crate::TrendingServiceError::Unavailable => {
+            ErrorData::internal_error("trending integration is unavailable", None)
+        }
+        crate::TrendingServiceError::Provider => {
+            ErrorData::internal_error("trending provider failed", None)
+        }
     }
 }
 

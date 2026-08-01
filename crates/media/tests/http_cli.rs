@@ -278,7 +278,7 @@ async fn tracking_add_list_and_remove_use_strict_json_contracts() {
                                 "series_ongoing": true
                             });
                     if valid {
-                        json_response(StatusCode::CREATED, r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","provider":"rezka","title":"Ongoing Show","translation":"Studio Dub","known_episodes":[{"season":1,"episode":4}],"scope":"family","state":"active"}"#)
+                        json_response(StatusCode::CREATED, r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","provider":"rezka","title":"Ongoing Show","translation":"Studio Dub","known_episodes":[{"season":1,"episode":4}],"scope":"family","state":"active","check_status":"never","next_check_at":"2026-07-13T12:00:00Z"}"#)
                     } else {
                         json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#)
                     }
@@ -316,9 +316,9 @@ async fn tracking_add_list_and_remove_use_strict_json_contracts() {
                 let valid = valid_remove || valid_patch;
                 if valid {
                     json_response(StatusCode::OK, if valid_patch {
-                        r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","provider":"rezka","title":"Ongoing Show","translation":"DEEP","known_episodes":[{"season":1,"episode":4}],"scope":"family","state":"active","download":{"provider_media_ref":"88337","translation_id":509,"season":4}}"#
+                        r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","provider":"rezka","title":"Ongoing Show","translation":"DEEP","known_episodes":[{"season":1,"episode":4}],"scope":"family","state":"active","check_status":"never","next_check_at":"2026-07-13T12:00:00Z","download":{"provider_media_ref":"88337","translation_id":509,"season":4}}"#
                     } else {
-                        r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","provider":"rezka","title":"Ongoing Show","translation":"Studio Dub","known_episodes":[{"season":1,"episode":4}],"scope":"family","state":"active"}"#
+                        r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","provider":"rezka","title":"Ongoing Show","translation":"Studio Dub","known_episodes":[{"season":1,"episode":4}],"scope":"family","state":"active","check_status":"never","next_check_at":"2026-07-13T12:00:00Z"}"#
                     })
                 } else {
                     json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#)
@@ -340,7 +340,7 @@ async fn tracking_add_list_and_remove_use_strict_json_contracts() {
                             "known_through": {"season": 2, "episode": 6}
                         }));
                 if valid {
-                    json_response(StatusCode::OK, r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","known_episodes":[{"season":2,"episode":6}]}"#)
+                    json_response(StatusCode::OK, r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","provider":"rezka","title":"Ongoing Show","translation":"Studio Dub","known_episodes":[{"season":2,"episode":6}],"scope":"family","state":"active","check_status":"never","next_check_at":"2026-07-13T12:00:00Z"}"#)
                 } else {
                     json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#)
                 }
@@ -358,7 +358,7 @@ async fn tracking_add_list_and_remove_use_strict_json_contracts() {
                     && headers.contains_key("idempotency-key")
                     && body.is_empty()
                 {
-                    json_response(StatusCode::OK, r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","check_status":"no_new_episode"}"#)
+                    json_response(StatusCode::OK, r#"{"id":"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111","provider":"rezka","title":"Ongoing Show","translation":"Studio Dub","known_episodes":[{"season":1,"episode":4}],"scope":"family","state":"active","check_status":"no_new_episode","next_check_at":"2026-07-13T13:00:00Z"}"#)
                 } else {
                     json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#)
                 }
@@ -515,7 +515,7 @@ async fn jobs_get_and_queue_status_use_the_expected_paths() {
                     && request.headers().contains_key("x-request-id")
                     && !request.headers().contains_key("idempotency-key")
                 {
-                    json_response(StatusCode::OK, r#"{ "queued": 3, "active": false }"#)
+                    json_response(StatusCode::OK, r#"{ "queued": 3, "active": false, "runner_state": "ready" }"#)
                 } else {
                     json_response(StatusCode::BAD_REQUEST, r#"{"code":"bad_test_request"}"#)
                 }
@@ -556,7 +556,7 @@ async fn jobs_get_and_queue_status_use_the_expected_paths() {
     );
     assert_eq!(
         String::from_utf8(queue.stdout).unwrap(),
-        "{\"active\":false,\"queued\":3}\n"
+        "{\"active\":false,\"queued\":3,\"runner_state\":\"ready\"}\n"
     );
 }
 
@@ -967,7 +967,12 @@ async fn jobs_list_show_and_cancel_use_json_http_contracts() {
 async fn client_preserves_service_url_prefix_with_or_without_a_trailing_slash() {
     let router = Router::new().route(
         "/prefix/v1/queue/status",
-        any(|| async { json_response(StatusCode::OK, r#"{"queued":1,"active":false}"#) }),
+        any(|| async {
+            json_response(
+                StatusCode::OK,
+                r#"{"queued":1,"active":false,"runner_state":"ready"}"#,
+            )
+        }),
     );
     let server = TestServer::start(router).await;
     let token_file = SecretFile::new("cli-secret");
@@ -989,7 +994,7 @@ async fn client_preserves_service_url_prefix_with_or_without_a_trailing_slash() 
         );
         assert_eq!(
             String::from_utf8(output.stdout).unwrap(),
-            "{\"active\":false,\"queued\":1}\n"
+            "{\"active\":false,\"queued\":1,\"runner_state\":\"ready\"}\n"
         );
     }
 

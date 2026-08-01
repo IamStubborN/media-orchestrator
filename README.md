@@ -84,15 +84,25 @@ docker compose --profile runner up --detach runner
 `dist/` for consumption by `hermes-home`. `MEDIA_CLI_PLATFORM`,
 `MEDIA_CLI_ARCH`, and `MEDIA_CLI_OUTPUT_DIR` control the target and output.
 
-## Hermes Media Admin
+## Hermes MCP and Human CLI
 
 The authenticated Streamable HTTP MCP endpoint at `/internal/mcp` exposes
-structured tools for jobs, tracking, provider search, Plex library inspection,
-qBittorrent status and controls, allowlisted file diagnostics, and dependency
-health. Secrets stay in `media-service`; Hermes has no Docker socket or direct
-provider credentials. Plex/qBittorrent mutations are Primary-only. Deletions
-use preview and one-time confirmation, and direct file deletion is replaced by
-quarantine.
+structured tools for provider search and pagination, exact downloads, jobs,
+release schedules, trends, tracking, Plex library inspection, qBittorrent
+status and controls, allowlisted file diagnostics, and dependency health.
+Hermes uses this MCP boundary exclusively for conversational media work. The
+CLI remains available to humans and deterministic notifier callbacks through
+the REST API; neither adapter invokes the other.
+
+The MCP endpoint supports current legacy Hermes negotiation and stateless MCP
+`2026-07-28` requests. Search sessions, jobs, tracking subscriptions, and
+destructive confirmations remain explicit durable application resources rather
+than transport-session state. Tools publish structured output schemas and
+read-only/destructive/idempotency annotations.
+
+Secrets stay in `media-service`; Hermes has no Docker socket or direct provider
+credentials. Plex/qBittorrent mutations are Primary-only. Deletions use preview
+and one-time confirmation, and direct file deletion is replaced by quarantine.
 
 ## Local PostgreSQL Service
 

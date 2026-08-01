@@ -3,6 +3,7 @@
 members = [
   "crates/media-core",
   "crates/media-contract",
+  "crates/media-client",
   "crates/media-api",
   "crates/media-storage",
   "crates/rezka-client",

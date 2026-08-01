@@ -15,6 +15,7 @@ axum.workspace = true
 base64.workspace = true
 clap.workspace = true
 media-api = { path = "../media-api", version = "=0.1.0" }
+media-client = { path = "../media-client", version = "=0.1.0" }
 media-contract = { path = "../media-contract", version = "=0.1.0" }
 media-core = { path = "../media-core", version = "=0.1.0" }
 media-integrations = { path = "../media-integrations", version = "=0.1.0" }

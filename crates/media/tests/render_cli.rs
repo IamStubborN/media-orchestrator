@@ -117,7 +117,12 @@ fn stdout(output: &Output) -> String {
 async fn queue_status_renders_human_block_by_default() {
     let router = Router::new().route(
         "/v1/queue/status",
-        any(|| async { json_response(StatusCode::OK, r#"{"queued":3,"active":false}"#) }),
+        any(|| async {
+            json_response(
+                StatusCode::OK,
+                r#"{"queued":3,"active":false,"runner_state":"ready"}"#,
+            )
+        }),
     );
     let server = TestServer::start(router).await;
     let token_file = SecretFile::new("cli-secret");
@@ -126,9 +131,15 @@ async fn queue_status_renders_human_block_by_default() {
     let json = command_output(command(&server, &token_file, ["queue", "status", "--json"])).await;
     server.stop().await;
 
-    assert_eq!(stdout(&human), "Queue\n  Queued: 3\n  Active: no\n");
+    assert_eq!(
+        stdout(&human),
+        "Queue\n  Queued: 3\n  Active: no\n  Runner: ready\n"
+    );
     // `--json` remains the byte-for-byte machine contract.
-    assert_eq!(stdout(&json), "{\"active\":false,\"queued\":3}\n");
+    assert_eq!(
+        stdout(&json),
+        "{\"active\":false,\"queued\":3,\"runner_state\":\"ready\"}\n"
+    );
 }
 
 #[tokio::test]

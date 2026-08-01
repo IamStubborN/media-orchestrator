@@ -136,6 +136,27 @@ fn media_contract_cannot_reach_media_core() {
 }
 
 #[test]
+fn media_client_depends_only_on_the_wire_contract() {
+    let metadata = workspace_metadata();
+    let client = workspace_package_id(&metadata, "media-client");
+    let mut workspace_dependencies: Vec<&str> = direct_dependency_package_ids(&metadata, client)
+        .into_iter()
+        .filter(|package_id| metadata.workspace_members.contains(package_id))
+        .map(|package_id| metadata[package_id].name.as_str())
+        .collect();
+    workspace_dependencies.sort_unstable();
+
+    assert_eq!(workspace_dependencies, ["media-contract"]);
+    for forbidden_name in ["media-api", "media-core", "media-storage"] {
+        let forbidden = workspace_package_id(&metadata, forbidden_name);
+        assert!(
+            !resolved_dependency_reachable(&metadata, client, forbidden),
+            "media-client must not reach {forbidden_name}",
+        );
+    }
+}
+
+#[test]
 fn media_api_depends_only_on_core_and_contract_workspace_crates() {
     let metadata = workspace_metadata();
     let api = workspace_package_id(&metadata, "media-api");
