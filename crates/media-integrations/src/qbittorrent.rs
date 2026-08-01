@@ -11,6 +11,7 @@ use reqwest::{
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
+use serde_json::Value;
 use url::Url;
 
 const MAX_TORRENT_BYTES: usize = 8 * 1024 * 1024;
@@ -382,6 +383,76 @@ impl QbittorrentClient {
 
     pub async fn stop_selected(&self, handle: &TorrentHandle) -> Result<(), QbittorrentError> {
         self.stop(handle).await
+    }
+
+    pub async fn admin_list(&self, filter: Option<&str>) -> Result<Value, QbittorrentError> {
+        let mut url = endpoint(&self.config.base_url, "api/v2/torrents/info")?;
+        if let Some(filter) = filter {
+            let filter = filter.trim();
+            if !matches!(
+                filter,
+                "all"
+                    | "downloading"
+                    | "seeding"
+                    | "completed"
+                    | "paused"
+                    | "active"
+                    | "inactive"
+                    | "stalled"
+                    | "errored"
+            ) {
+                return Err(QbittorrentError::InvalidSelection {
+                    message: "torrent filter is invalid",
+                });
+            }
+            url.query_pairs_mut().append_pair("filter", filter);
+        }
+        self.get_json(url).await.map(sanitize_admin_value)
+    }
+
+    pub async fn admin_details(&self, hash: &str) -> Result<Value, QbittorrentError> {
+        validate_info_hash(hash)?;
+        let mut properties = endpoint(&self.config.base_url, "api/v2/torrents/properties")?;
+        properties.query_pairs_mut().append_pair("hash", hash);
+        let mut files = endpoint(&self.config.base_url, "api/v2/torrents/files")?;
+        files.query_pairs_mut().append_pair("hash", hash);
+        let (properties, files) =
+            tokio::try_join!(self.get_json(properties), self.get_json(files))?;
+        Ok(
+            serde_json::json!({ "hash": hash, "properties": sanitize_admin_value(properties), "files": sanitize_admin_value(files) }),
+        )
+    }
+
+    pub async fn admin_control(&self, hash: &str, action: &str) -> Result<(), QbittorrentError> {
+        validate_info_hash(hash)?;
+        let route = match action {
+            "pause" => "api/v2/torrents/stop",
+            "resume" => "api/v2/torrents/start",
+            "recheck" => "api/v2/torrents/recheck",
+            _ => {
+                return Err(QbittorrentError::InvalidSelection {
+                    message: "torrent action is invalid",
+                });
+            }
+        };
+        self.post_form(endpoint(&self.config.base_url, route)?, &[("hashes", hash)])
+            .await
+    }
+
+    pub async fn admin_delete(
+        &self,
+        hash: &str,
+        delete_files: bool,
+    ) -> Result<(), QbittorrentError> {
+        validate_info_hash(hash)?;
+        self.post_form(
+            endpoint(&self.config.base_url, "api/v2/torrents/delete")?,
+            &[
+                ("hashes", hash),
+                ("deleteFiles", if delete_files { "true" } else { "false" }),
+            ],
+        )
+        .await
     }
 
     pub async fn submit_episode_to_category(
@@ -773,6 +844,31 @@ impl QbittorrentClient {
         })
     }
 
+    async fn get_json(&self, url: Url) -> Result<Value, QbittorrentError> {
+        let mut request = self
+            .client
+            .get(url)
+            .header(REFERER, self.config.base_url.as_str());
+        if let Some(cookie) = &self.cookie {
+            request = request.header(COOKIE, cookie.expose_secret());
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|_| QbittorrentError::Transport)?;
+        let status = response.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(QbittorrentError::Unauthorized);
+        }
+        if !status.is_success() {
+            return Err(QbittorrentError::ProviderResponse { status });
+        }
+        response
+            .json()
+            .await
+            .map_err(|_| QbittorrentError::ProviderResponse { status })
+    }
+
     async fn wait_for_torrent_files(
         &self,
         handle: &TorrentHandle,
@@ -1138,9 +1234,40 @@ fn endpoint(base_url: &Url, path: &str) -> Result<Url, QbittorrentError> {
         })
 }
 
+fn validate_info_hash(hash: &str) -> Result<(), QbittorrentError> {
+    if hash.len() != 40 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(QbittorrentError::InvalidSelection {
+            message: "info hash must be a 40-character hexadecimal value",
+        });
+    }
+    Ok(())
+}
+
+fn sanitize_admin_value(mut value: Value) -> Value {
+    match &mut value {
+        Value::Object(object) => {
+            for key in ["magnet_uri", "tracker", "comment", "creator"] {
+                object.remove(key);
+            }
+            for child in object.values_mut() {
+                *child = sanitize_admin_value(child.take());
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                *child = sanitize_admin_value(child.take());
+            }
+        }
+        _ => {}
+    }
+    value
+}
+
 #[cfg(test)]
 mod episode_file_tests {
-    use super::{EpisodeFileSelection, RawTorrentFile, select_episode_file_ids};
+    use super::{
+        EpisodeFileSelection, RawTorrentFile, sanitize_admin_value, select_episode_file_ids,
+    };
 
     #[test]
     fn numbered_pack_files_can_select_one_episode_without_sxe_coordinates() {
@@ -1166,5 +1293,20 @@ mod episode_file_tests {
             select_episode_file_ids(&files, EpisodeFileSelection::new(2, 7).unwrap()).unwrap(),
             vec![1, 2]
         );
+    }
+
+    #[test]
+    fn admin_payloads_remove_tracker_credentials_and_magnet_links() {
+        let value = sanitize_admin_value(serde_json::json!({
+            "name": "Example",
+            "magnet_uri": "magnet:?xt=urn:btih:secret",
+            "tracker": "https://tracker.example/passkey",
+            "nested": [{"comment": "private", "progress": 0.5}]
+        }));
+        assert_eq!(value["name"], "Example");
+        assert_eq!(value["nested"][0]["progress"], 0.5);
+        assert!(value.get("magnet_uri").is_none());
+        assert!(value.get("tracker").is_none());
+        assert!(value["nested"][0].get("comment").is_none());
     }
 }

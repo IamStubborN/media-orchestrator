@@ -17,7 +17,7 @@ pub(crate) fn public_routes() -> Router<ApiState> {
     health::routes().merge(metrics::routes())
 }
 
-pub(crate) fn protected_routes() -> Router<ApiState> {
+pub(crate) fn protected_routes(state: ApiState) -> Router<ApiState> {
     jobs::routes()
         .merge(queue::routes())
         .merge(lifecycle::routes())
@@ -26,4 +26,5 @@ pub(crate) fn protected_routes() -> Router<ApiState> {
         .merge(release::routes())
         .merge(search::routes())
         .merge(trending::routes())
+        .merge(crate::mcp::routes(state))
 }

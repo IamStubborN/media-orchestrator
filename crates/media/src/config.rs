@@ -196,6 +196,9 @@ pub struct ServerConfig {
     tvmaze: TvmazeCompositionConfig,
     tmdb: Option<TmdbCompositionConfig>,
     plex: Option<PlexCompositionConfig>,
+    qbittorrent: Option<QbittorrentCompositionConfig>,
+    media_roots: Vec<PathBuf>,
+    quarantine_root: PathBuf,
 }
 
 impl ServerConfig {
@@ -237,6 +240,22 @@ impl ServerConfig {
             .var_os(PLEX_URL)
             .map(|_| load_plex_config(source))
             .transpose()?;
+        let qbittorrent = source
+            .var_os(QBITTORRENT_URL)
+            .map(|_| load_qbittorrent_config(source))
+            .transpose()?;
+        let media_roots = vec![
+            PathBuf::from(
+                optional_environment(source, TV_ROOT)?
+                    .unwrap_or_else(|| "/data/internal/media/rezka/tv".to_owned()),
+            ),
+            PathBuf::from(
+                optional_environment(source, MOVIES_ROOT)?
+                    .unwrap_or_else(|| "/data/internal/media/rezka/movies".to_owned()),
+            ),
+            PathBuf::from("/data/internal/torrents"),
+        ];
+        let quarantine_root = PathBuf::from("/data/internal/media-orchestrator/quarantine");
         let tvmaze = load_tvmaze_config(source)?;
         let tmdb = (source.var_os(TMDB_API_KEY).is_some()
             || source.var_os(TMDB_API_KEY_FILE).is_some())
@@ -266,6 +285,9 @@ impl ServerConfig {
             tvmaze,
             tmdb,
             plex,
+            qbittorrent,
+            media_roots,
+            quarantine_root,
         })
     }
 
@@ -332,6 +354,18 @@ impl ServerConfig {
     pub const fn plex(&self) -> Option<&PlexCompositionConfig> {
         self.plex.as_ref()
     }
+
+    pub const fn qbittorrent(&self) -> Option<&QbittorrentCompositionConfig> {
+        self.qbittorrent.as_ref()
+    }
+
+    pub fn media_roots(&self) -> &[PathBuf] {
+        &self.media_roots
+    }
+
+    pub fn quarantine_root(&self) -> &Path {
+        &self.quarantine_root
+    }
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -354,6 +388,12 @@ impl std::fmt::Debug for ServerConfig {
             .field("tvmaze", &self.tvmaze)
             .field("tmdb", &self.tmdb.as_ref().map(|_| "[REDACTED]"))
             .field("plex", &self.plex.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "qbittorrent",
+                &self.qbittorrent.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("media_roots", &self.media_roots)
+            .field("quarantine_root", &self.quarantine_root)
             .finish()
     }
 }

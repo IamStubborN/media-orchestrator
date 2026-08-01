@@ -1,9 +1,11 @@
 //! Private HTTP API for the media orchestrator.
 
+mod admin;
 mod auth;
 mod convert;
 mod error;
 mod idempotency;
+mod mcp;
 mod metrics;
 mod plex;
 mod request_id;
@@ -21,6 +23,7 @@ use media_core::{
 
 use crate::metrics::MetricsRecorder;
 
+pub use admin::{MediaAdminError, MediaAdminService};
 pub use error::ApiError;
 pub use idempotency::{
     IdempotencyError, IdempotencyGeneration, IdempotencyHandle, IdempotencyRequest,
@@ -57,6 +60,7 @@ pub struct ApiState {
     pub(crate) metrics: Arc<MetricsRecorder>,
     pub(crate) metrics_source: Option<Arc<dyn MetricsSource>>,
     pub(crate) trending: Arc<dyn TrendingService>,
+    pub(crate) admin: Arc<dyn MediaAdminService>,
 }
 
 impl ApiState {
@@ -84,6 +88,7 @@ impl ApiState {
             metrics: Arc::new(MetricsRecorder::default()),
             metrics_source: None,
             trending: Arc::new(trending::UnavailableTrendingService),
+            admin: Arc::new(admin::UnavailableMediaAdminService),
         }
     }
 
@@ -144,6 +149,17 @@ impl ApiState {
     }
 
     #[must_use]
+    pub fn with_admin(mut self, admin: Arc<dyn MediaAdminService>) -> Self {
+        self.admin = admin;
+        self
+    }
+
+    #[must_use]
+    pub fn admin(&self) -> &dyn MediaAdminService {
+        self.admin.as_ref()
+    }
+
+    #[must_use]
     pub fn jobs(&self) -> &JobApplication {
         &self.jobs
     }
@@ -199,7 +215,7 @@ pub fn build_router_with_request_timeout(
     protected: Router<ApiState>,
     request_timeout: Duration,
 ) -> Router {
-    let protected = route::protected_routes().merge(protected);
+    let protected = route::protected_routes(state.clone()).merge(protected);
     let protected = if protected.has_routes() {
         protected.route_layer(middleware::from_fn_with_state(
             state.clone(),

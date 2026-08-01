@@ -100,6 +100,11 @@ file.
 
 ## Local Build
 
+Manual deployment is the preferred and supported release path. The repository's
+GitHub Actions workflows are intentionally disabled and must not deploy the
+homelab. Run builds, migrations, guarded service replacement, and verification
+from a trusted operator workstation.
+
 Build immutable images directly on the Docker host without GitHub Actions:
 
 ```sh

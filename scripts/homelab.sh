@@ -128,8 +128,16 @@ REMOTE
 deploy() {
     assert_no_active_job
     revision=$(git -C "$root" rev-parse --short HEAD)
-    service_image=media-orchestrator-service:local-$revision
-    runner_image=media-orchestrator-runner:local-$revision
+    worktree_fingerprint=$(
+        {
+            git -C "$root" diff --binary HEAD
+            git -C "$root" ls-files --others --exclude-standard -z |
+                sort -z |
+                xargs -0 shasum -a 256 2>/dev/null || true
+        } | shasum -a 256 | cut -c1-12
+    )
+    service_image=media-orchestrator-service:local-$revision-$worktree_fingerprint
+    runner_image=media-orchestrator-runner:local-$revision-$worktree_fingerprint
     docker_host=${MEDIA_DOCKER_HOST:-ssh://$host}
     (
         cd "$root"
@@ -141,8 +149,8 @@ deploy() {
     prepare_hermes_cli "$service_image" "$docker_host"
     sync_homelab_compose
     remote "set -eu; umask 077; grep -E '^(MEDIA_SERVICE_IMAGE|DOWNLOAD_RUNNER_IMAGE)=' '$environment_file' >'$rollback_file'"
-    replace_hermes_agents
     replace_images "$service_image" "$runner_image"
+    replace_hermes_agents
 }
 
 deploy_hermes() {

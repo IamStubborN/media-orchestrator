@@ -525,7 +525,7 @@ pub fn prepare_tracking_scheduler(
 }
 
 pub struct PlexReconcileAdapter {
-    client: media_integrations::plex::PlexClient,
+    client: Arc<media_integrations::plex::PlexClient>,
     tv_section: u32,
     movies_section: u32,
     poll_interval: Duration,
@@ -535,12 +535,12 @@ pub struct PlexReconcileAdapter {
 impl PlexReconcileAdapter {
     #[must_use]
     pub fn new(
-        client: media_integrations::plex::PlexClient,
+        client: impl Into<Arc<media_integrations::plex::PlexClient>>,
         tv_section: u32,
         movies_section: u32,
     ) -> Self {
         Self {
-            client,
+            client: client.into(),
             tv_section,
             movies_section,
             poll_interval: Duration::from_secs(1),
@@ -924,6 +924,8 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
             DurableSearchService::new(persistence, provider, jobs).with_identity(identity),
         ));
     }
+    let mut admin_plex = None;
+    let mut plex_sections = Vec::new();
     if let Some(config) = config.plex() {
         let plex_config = media_integrations::plex::PlexConfig::new(
             config.base_url().clone(),
@@ -931,14 +933,43 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
             Duration::from_secs(30),
         )
         .map_err(|_| ServiceError::Bootstrap)?;
-        let client = media_integrations::plex::PlexClient::new(plex_config)
-            .map_err(|_| ServiceError::Bootstrap)?;
+        let client = Arc::new(
+            media_integrations::plex::PlexClient::new(plex_config)
+                .map_err(|_| ServiceError::Bootstrap)?,
+        );
+        admin_plex = Some(client.clone());
+        plex_sections.extend([config.tv_section(), config.movies_section()]);
         state = state.with_plex(Arc::new(PlexReconcileAdapter::new(
             client,
             config.tv_section(),
             config.movies_section(),
         )));
     }
+    let admin_qbittorrent = match config.qbittorrent() {
+        Some(config) => {
+            let client_config = media_integrations::qbittorrent::QbittorrentConfig::new(
+                config.base_url().clone(),
+                config.tv_category(),
+                config.username(),
+                config.password().clone(),
+                Duration::from_secs(30),
+            )
+            .map_err(|_| ServiceError::Bootstrap)?;
+            Some(Arc::new(
+                media_integrations::qbittorrent::QbittorrentClient::connect(client_config)
+                    .await
+                    .map_err(|_| ServiceError::Bootstrap)?,
+            ))
+        }
+        None => None,
+    };
+    state = state.with_admin(Arc::new(crate::admin::MediaAdminAdapter::new(
+        admin_plex,
+        admin_qbittorrent,
+        plex_sections,
+        config.media_roots().to_vec(),
+        config.quarantine_root().to_owned(),
+    )));
 
     Ok(PreparedService {
         router: media_api::router(state),

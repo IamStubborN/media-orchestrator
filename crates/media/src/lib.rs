@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod admin;
 pub mod client;
 pub mod composition;
 pub mod config;

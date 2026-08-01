@@ -21,6 +21,17 @@ This repository will contain:
 
 Hermes profiles and skills belong in the separate private `hermes-home` repository. Homelab deployment wiring belongs in the existing `homelab` repository.
 
+## Deployment Policy
+
+Prefer manual deployment from a trusted operator workstation. GitHub Actions
+workflows are retained for possible future use but must remain disabled; they
+are not an accepted build, release, or deployment path for the homelab.
+
+Use the guarded local deployment commands documented in `docs/RUNBOOK.md`.
+They verify that no media job is active, build the images directly on the
+Docker host, apply migrations, recreate services in dependency order, and run
+post-deployment health checks.
+
 ## Development
 
 The repository uses `mise` as its only supported developer entry point:
@@ -72,6 +83,16 @@ docker compose --profile runner up --detach runner
 `mise run extract-linux-cli` writes a pinned Linux binary and SHA-256 file to
 `dist/` for consumption by `hermes-home`. `MEDIA_CLI_PLATFORM`,
 `MEDIA_CLI_ARCH`, and `MEDIA_CLI_OUTPUT_DIR` control the target and output.
+
+## Hermes Media Admin
+
+The authenticated Streamable HTTP MCP endpoint at `/internal/mcp` exposes
+structured tools for jobs, tracking, provider search, Plex library inspection,
+qBittorrent status and controls, allowlisted file diagnostics, and dependency
+health. Secrets stay in `media-service`; Hermes has no Docker socket or direct
+provider credentials. Plex/qBittorrent mutations are Primary-only. Deletions
+use preview and one-time confirmation, and direct file deletion is replaced by
+quarantine.
 
 ## Local PostgreSQL Service
 

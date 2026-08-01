@@ -7,6 +7,7 @@ use std::{
 use reqwest::{StatusCode, header::ACCEPT};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
+use serde_json::Value;
 use url::Url;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -251,6 +252,120 @@ impl PlexClient {
         Ok(())
     }
 
+    pub async fn admin_search(&self, query: &str, limit: u16) -> Result<Value, PlexError> {
+        let query = query.trim();
+        if query.is_empty() || limit == 0 || limit > 50 {
+            return Err(PlexError::InvalidRequest {
+                message: "search request is invalid",
+            });
+        }
+        let mut endpoint =
+            self.config
+                .base_url
+                .join("hubs/search")
+                .map_err(|_| PlexError::Configuration {
+                    message: "search endpoint could not be constructed",
+                })?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("query", query)
+            .append_pair("limit", &limit.to_string())
+            .append_pair("includeCollections", "1");
+        self.get_json(endpoint).await
+    }
+
+    pub async fn admin_recent(&self, limit: u16) -> Result<Value, PlexError> {
+        if limit == 0 || limit > 50 {
+            return Err(PlexError::InvalidRequest {
+                message: "recent item limit is invalid",
+            });
+        }
+        let mut endpoint = self
+            .config
+            .base_url
+            .join("library/recentlyAdded")
+            .map_err(|_| PlexError::Configuration {
+                message: "recent endpoint could not be constructed",
+            })?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("X-Plex-Container-Size", &limit.to_string());
+        self.get_json(endpoint).await
+    }
+
+    pub async fn admin_now_playing(&self) -> Result<Value, PlexError> {
+        let endpoint =
+            self.config
+                .base_url
+                .join("status/sessions")
+                .map_err(|_| PlexError::Configuration {
+                    message: "sessions endpoint could not be constructed",
+                })?;
+        self.get_json(endpoint).await
+    }
+
+    pub async fn admin_item(&self, rating_key: u64) -> Result<Value, PlexError> {
+        if rating_key == 0 {
+            return Err(PlexError::InvalidRequest {
+                message: "rating key must be positive",
+            });
+        }
+        let mut endpoint = self
+            .config
+            .base_url
+            .join(&format!("library/metadata/{rating_key}"))
+            .map_err(|_| PlexError::Configuration {
+                message: "metadata endpoint could not be constructed",
+            })?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("includeGuids", "1")
+            .append_pair("includeExtras", "1");
+        self.get_json(endpoint).await
+    }
+
+    pub async fn admin_refresh(&self, section_key: u32) -> Result<(), PlexError> {
+        if section_key == 0 {
+            return Err(PlexError::InvalidRequest {
+                message: "library section key must be positive",
+            });
+        }
+        let endpoint = self
+            .config
+            .base_url
+            .join(&format!("library/sections/{section_key}/refresh"))
+            .map_err(|_| PlexError::Configuration {
+                message: "refresh endpoint could not be constructed",
+            })?;
+        self.send_get(endpoint).await?;
+        Ok(())
+    }
+
+    pub async fn admin_delete(&self, rating_key: u64) -> Result<(), PlexError> {
+        if rating_key == 0 {
+            return Err(PlexError::InvalidRequest {
+                message: "rating key must be positive",
+            });
+        }
+        let endpoint = self
+            .config
+            .base_url
+            .join(&format!("library/metadata/{rating_key}"))
+            .map_err(|_| PlexError::Configuration {
+                message: "metadata endpoint could not be constructed",
+            })?;
+        let response = self
+            .client
+            .delete(endpoint)
+            .header("X-Plex-Token", self.config.token.expose_secret())
+            .header(ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(|_| PlexError::Transport)?;
+        self.validate_response(response)?;
+        Ok(())
+    }
+
     pub async fn verify(&self, expected: &ExpectedPlexItem) -> Result<PlexVerification, PlexError> {
         let mut endpoint = self
             .config
@@ -394,6 +509,22 @@ impl PlexClient {
             .send()
             .await
             .map_err(|_| PlexError::Transport)?;
+        self.validate_response(response)
+    }
+
+    async fn get_json(&self, endpoint: Url) -> Result<Value, PlexError> {
+        let response = self.send_get(endpoint).await?;
+        let status = response.status();
+        response
+            .json()
+            .await
+            .map_err(|_| PlexError::ProviderResponse { status })
+    }
+
+    fn validate_response(
+        &self,
+        response: reqwest::Response,
+    ) -> Result<reqwest::Response, PlexError> {
         let status = response.status();
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             return Err(PlexError::Unauthorized);

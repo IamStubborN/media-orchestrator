@@ -42,7 +42,7 @@ async fn ambiguous_search_returns_choices_without_fetching_episodes() {
         .and(header("user-agent", "media-orchestrator-test/1.0"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
             show(1, "The Office", "2005-03-24", "Ended"),
-            show(2, "The Office", "2024-01-01", "Running")
+            show(2, "The Office", "2024-01-01", "Ended")
         ])))
         .expect(1)
         .mount(&server)

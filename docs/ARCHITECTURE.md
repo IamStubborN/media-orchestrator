@@ -145,6 +145,30 @@ Owns the HTTP server boundary:
 
 Architecture invariant: handlers are thin. They validate transport input, call an application use case, and convert the result to a transport response.
 
+#### Internal media-admin MCP
+
+`media-api` also exposes a protected Streamable HTTP MCP endpoint at
+`/internal/mcp`. This is a second delivery boundary over the same application
+services, not a second media implementation:
+
+- MCP tools reuse the owner-scoped job, tracking, search, and media-admin
+  applications.
+- Bearer authentication resolves the same fixed Hermes actor as the REST API.
+- Hermes receives structured results and never receives provider credentials,
+  database access, or the Docker socket.
+- Plex and qBittorrent administration is mediated by `MediaAdminService`.
+  Shared library and download visibility is read-only for both profiles;
+  mutations are restricted to Primary.
+- Filesystem reads are canonicalized and limited to configured media roots.
+  A file mutation moves the target to quarantine instead of unlinking it.
+- Destructive operations require a short-lived, owner-bound preview token and
+  revalidate the exact Plex item, torrent, or filesystem fingerprint before
+  execution.
+
+The MCP facade stays a delivery adapter. Provider clients are composed behind
+an application-level contract; MCP handlers do not receive URLs, credentials,
+or unrestricted filesystem handles.
+
 ### `media-runner`
 
 Owns runner-side execution:
