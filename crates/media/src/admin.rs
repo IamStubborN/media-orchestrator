@@ -167,6 +167,13 @@ impl MediaAdminService for MediaAdminAdapter {
         Self::user(actor)?;
         self.plex()?.admin_recent(limit).await.map_err(map_plex)
     }
+    async fn plex_library_summary(&self, actor: &Actor) -> Result<Value, MediaAdminError> {
+        Self::user(actor)?;
+        self.plex()?
+            .admin_library_summary(&self.plex_sections)
+            .await
+            .map_err(map_plex)
+    }
     async fn plex_now_playing(&self, actor: &Actor) -> Result<Value, MediaAdminError> {
         Self::user(actor)?;
         self.plex()?.admin_now_playing().await.map_err(map_plex)
@@ -270,6 +277,38 @@ impl MediaAdminService for MediaAdminAdapter {
         Ok(
             json!({ "media_service": "ready", "plex": if plex { "ready" } else { "unavailable" }, "qbittorrent": if qbittorrent { "ready" } else { "unavailable" }, "docker_socket_exposed": false }),
         )
+    }
+    async fn storage_status(&self, actor: &Actor) -> Result<Value, MediaAdminError> {
+        Self::user(actor)?;
+        let mut roots = Vec::with_capacity(self.roots.len());
+        for configured_root in &self.roots {
+            let root = tokio::fs::canonicalize(configured_root)
+                .await
+                .map_err(|_| MediaAdminError::Provider)?;
+            let measured_root = root.clone();
+            let (total_bytes, available_bytes) = tokio::task::spawn_blocking(move || {
+                Ok::<_, std::io::Error>((
+                    fs2::total_space(&measured_root)?,
+                    fs2::available_space(&measured_root)?,
+                ))
+            })
+            .await
+            .map_err(|_| MediaAdminError::Provider)?
+            .map_err(|_| MediaAdminError::Provider)?;
+            let used_bytes = total_bytes.saturating_sub(available_bytes);
+            let used_percent = used_bytes
+                .saturating_mul(100)
+                .checked_div(total_bytes)
+                .unwrap_or(0);
+            roots.push(json!({
+                "path": root,
+                "total_bytes": total_bytes,
+                "available_bytes": available_bytes,
+                "used_bytes": used_bytes,
+                "used_percent": used_percent,
+            }));
+        }
+        Ok(json!({ "roots": roots }))
     }
     async fn prepare_destructive(
         &self,
@@ -420,3 +459,35 @@ trait Pipe: Sized {
     }
 }
 impl<T> Pipe for T {}
+
+#[cfg(test)]
+mod tests {
+    use media_api::MediaAdminService;
+    use media_core::{PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole};
+
+    use super::MediaAdminAdapter;
+
+    #[tokio::test]
+    async fn storage_status_reports_bounded_capacity_for_configured_roots() {
+        let root = std::env::temp_dir().join(format!("media-admin-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let adapter = MediaAdminAdapter::new(
+            None,
+            None,
+            Vec::new(),
+            vec![root.clone()],
+            root.join("quarantine"),
+        );
+        let actor = Actor::new(PRIMARY_CLIENT_ID, Some(PRIMARY_USER_ID), ClientRole::Hermes).unwrap();
+
+        let status = adapter.storage_status(&actor).await.unwrap();
+
+        let item = &status["roots"][0];
+        let canonical_root = tokio::fs::canonicalize(&root).await.unwrap();
+        assert_eq!(item["path"], canonical_root.to_string_lossy().as_ref());
+        assert!(item["total_bytes"].as_u64().unwrap() > 0);
+        assert!(item["available_bytes"].as_u64().unwrap() <= item["total_bytes"].as_u64().unwrap());
+        assert!(item["used_percent"].as_u64().unwrap() <= 100);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+}

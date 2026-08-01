@@ -21,6 +21,7 @@ media-core = { path = "../media-core", version = "=0.1.0" }
 media-integrations = { path = "../media-integrations", version = "=0.1.0" }
 media-runner = { path = "../media-runner", version = "=0.1.0" }
 media-storage = { path = "../media-storage", version = "=0.1.0" }
+fs2.workspace = true
 reqwest.workspace = true
 rezka-client = { path = "../rezka-client", version = "=0.1.0" }
 secrecy.workspace = true

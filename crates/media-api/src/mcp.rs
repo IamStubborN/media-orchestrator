@@ -810,6 +810,26 @@ impl MediaAdminMcp {
     }
 
     #[tool(
+        name = "plex_library_summary",
+        description = "Summarize configured Plex libraries and their item counts. Read-only.",
+        output_schema = object_output_schema(),
+        annotations(title = "Summarize Plex libraries", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn plex_library_summary(
+        &self,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = actor_from_parts(&parts)?;
+        result_json(
+            self.state
+                .admin()
+                .plex_library_summary(&actor)
+                .await
+                .map_err(admin_error)?,
+        )
+    }
+
+    #[tool(
         name = "plex_now_playing",
         description = "Show active Plex playback sessions. Read-only.",
         output_schema = object_output_schema(),
@@ -970,6 +990,26 @@ impl MediaAdminMcp {
             self.state
                 .admin()
                 .infrastructure_status(&actor)
+                .await
+                .map_err(admin_error)?,
+        )
+    }
+
+    #[tool(
+        name = "media_storage_status",
+        description = "Show total, used, and available space for configured media roots. Read-only.",
+        output_schema = object_output_schema(),
+        annotations(title = "Show media storage", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn storage_status(
+        &self,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = actor_from_parts(&parts)?;
+        result_json(
+            self.state
+                .admin()
+                .storage_status(&actor)
                 .await
                 .map_err(admin_error)?,
         )

@@ -89,7 +89,8 @@ docker compose --profile runner up --detach runner
 The authenticated Streamable HTTP MCP endpoint at `/internal/mcp` exposes
 structured tools for provider search and pagination, exact downloads, jobs,
 release schedules, trends, tracking, Plex library inspection, qBittorrent
-status and controls, allowlisted file diagnostics, and dependency health.
+status and controls, allowlisted file diagnostics, dependency health, Plex
+library summaries, and media-root capacity.
 Hermes uses this MCP boundary exclusively for conversational media work. The
 CLI remains available to humans and deterministic notifier callbacks through
 the REST API; neither adapter invokes the other.

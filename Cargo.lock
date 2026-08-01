@@ -2435,6 +2435,7 @@ dependencies = [
  "base64 0.22.1",
  "cargo_metadata",
  "clap",
+ "fs2",
  "libc",
  "media-api",
  "media-client",

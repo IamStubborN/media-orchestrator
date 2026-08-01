@@ -20,6 +20,55 @@ fn config(server: &MockServer) -> PlexConfig {
 }
 
 #[tokio::test]
+async fn library_summary_returns_only_configured_sections_with_bounded_requests() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/library/sections"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "MediaContainer": {"Directory": [
+                {"key": "2", "title": "Films", "type": "movie"},
+                {"key": "7", "title": "Series", "type": "show"},
+                {"key": "9", "title": "Private", "type": "movie"}
+            ]}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/library/sections/2/all"))
+        .and(query_param("X-Plex-Container-Start", "0"))
+        .and(query_param("X-Plex-Container-Size", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "MediaContainer": {"size": 1, "totalSize": 42, "viewGroup": "movie"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/library/sections/7/all"))
+        .and(query_param("X-Plex-Container-Start", "0"))
+        .and(query_param("X-Plex-Container-Size", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "MediaContainer": {"size": 1, "totalSize": 17, "viewGroup": "show"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let summary = PlexClient::new(config(&server))
+        .unwrap()
+        .admin_library_summary(&[2, 7])
+        .await
+        .unwrap();
+
+    assert_eq!(summary["sections"][0]["title"], "Films");
+    assert_eq!(summary["sections"][0]["item_count"], 42);
+    assert_eq!(summary["sections"][1]["title"], "Series");
+    assert_eq!(summary["sections"][1]["item_count"], 17);
+    assert_eq!(summary["sections"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn targeted_scan_and_exact_episode_verification_use_read_only_requests() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

@@ -293,6 +293,72 @@ impl PlexClient {
         self.get_json(endpoint).await
     }
 
+    pub async fn admin_library_summary(&self, section_keys: &[u32]) -> Result<Value, PlexError> {
+        if section_keys.is_empty() || section_keys.contains(&0) {
+            return Err(PlexError::InvalidRequest {
+                message: "library section keys are invalid",
+            });
+        }
+        let sections_endpoint = self.config.base_url.join("library/sections").map_err(|_| {
+            PlexError::Configuration {
+                message: "library sections endpoint could not be constructed",
+            }
+        })?;
+        let catalog = self.get_json(sections_endpoint).await?;
+        let directories = catalog
+            .pointer("/MediaContainer/Directory")
+            .and_then(Value::as_array);
+        let mut sections = Vec::with_capacity(section_keys.len());
+        for section_key in section_keys {
+            let metadata = directories.and_then(|entries| {
+                entries.iter().find(|entry| {
+                    entry
+                        .get("key")
+                        .and_then(Value::as_str)
+                        .and_then(|key| key.parse::<u32>().ok())
+                        == Some(*section_key)
+                })
+            });
+            let mut endpoint = self
+                .config
+                .base_url
+                .join(&format!("library/sections/{section_key}/all"))
+                .map_err(|_| PlexError::Configuration {
+                    message: "library contents endpoint could not be constructed",
+                })?;
+            endpoint
+                .query_pairs_mut()
+                .append_pair("X-Plex-Container-Start", "0")
+                .append_pair("X-Plex-Container-Size", "1");
+            let contents = self.get_json(endpoint).await?;
+            let container = contents.get("MediaContainer").and_then(Value::as_object);
+            let item_count = container
+                .and_then(|value| value.get("totalSize").or_else(|| value.get("size")))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let title = metadata
+                .and_then(|value| value.get("title"))
+                .and_then(Value::as_str)
+                .unwrap_or("Plex");
+            let kind = metadata
+                .and_then(|value| value.get("type"))
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    container
+                        .and_then(|value| value.get("viewGroup"))
+                        .and_then(Value::as_str)
+                })
+                .unwrap_or("unknown");
+            sections.push(serde_json::json!({
+                "section_key": section_key,
+                "title": title,
+                "type": kind,
+                "item_count": item_count,
+            }));
+        }
+        Ok(serde_json::json!({ "sections": sections }))
+    }
+
     pub async fn admin_now_playing(&self) -> Result<Value, PlexError> {
         let endpoint =
             self.config
