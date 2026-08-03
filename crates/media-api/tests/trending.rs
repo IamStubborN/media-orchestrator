@@ -39,6 +39,8 @@ impl TrendingService for FakeTrendingService {
                 original_title: Some("Test Movie".to_owned()),
                 year: Some(2026),
                 rating: Some(8.1),
+                poster_url: Some("https://image.tmdb.org/t/p/w780/test.jpg".to_owned()),
+                overview: Some("Test overview".to_owned()),
             }],
         })
     }

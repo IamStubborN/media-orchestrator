@@ -20,9 +20,16 @@ pub struct TrendingItemDto {
     pub tmdb_id: u64,
     pub media_type: TrendingMediaTypeDto,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub year: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rating: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poster_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overview: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

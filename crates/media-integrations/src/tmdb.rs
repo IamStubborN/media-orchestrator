@@ -6,7 +6,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use url::Url;
 
-const MAX_RESULTS: usize = 5;
+const MAX_RESULTS: usize = 10;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum TmdbErrorCode {
@@ -200,6 +200,27 @@ struct TrendingResult {
     release_date: Option<String>,
     first_air_date: Option<String>,
     vote_average: Option<f32>,
+    poster_path: Option<String>,
+    overview: Option<String>,
+}
+
+fn poster_url(path: Option<String>) -> Option<String> {
+    let path = path?.trim().to_owned();
+    if path.is_empty()
+        || !path.starts_with('/')
+        || path.starts_with("//")
+        || path.contains(['?', '#'])
+        || path
+            .chars()
+            .any(|character| character.is_ascii_whitespace() || character.is_control())
+    {
+        return None;
+    }
+    Some(format!("https://image.tmdb.org/t/p/w780{path}"))
+}
+
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
 }
 
 fn map_item(item: TrendingResult) -> Option<TrendingItemDto> {
@@ -229,5 +250,7 @@ fn map_item(item: TrendingResult) -> Option<TrendingItemDto> {
         original_title,
         year: date.and_then(|value| value.get(..4)?.parse().ok()),
         rating: item.vote_average.map(|value| (value * 10.0).round() / 10.0),
+        poster_url: poster_url(item.poster_path),
+        overview: non_empty(item.overview),
     })
 }

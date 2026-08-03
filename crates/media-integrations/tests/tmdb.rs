@@ -20,10 +20,16 @@ fn config(server: &MockServer) -> TmdbConfig {
 }
 
 #[tokio::test]
-async fn maps_weekly_trending_and_limits_output_to_five_items() {
+async fn maps_weekly_trending_and_limits_output_to_ten_items() {
     let server = MockServer::start().await;
-    let results = (1..=6)
+    let results = (1..=12)
         .map(|id| {
+            let poster_path = match id {
+                1 => Some("/film-1.jpg"),
+                2 => Some("https://example.invalid/poster.jpg"),
+                _ => None,
+            };
+            let overview = (id == 1).then_some("Описание фильма 1");
             if id % 2 == 0 {
                 json!({
                     "id": id,
@@ -31,7 +37,9 @@ async fn maps_weekly_trending_and_limits_output_to_five_items() {
                     "name": format!("Сериал {id}"),
                     "original_name": format!("Series {id}"),
                     "first_air_date": "2026-07-01",
-                    "vote_average": 8.25
+                    "vote_average": 8.25,
+                    "poster_path": poster_path,
+                    "overview": overview
                 })
             } else {
                 json!({
@@ -40,7 +48,9 @@ async fn maps_weekly_trending_and_limits_output_to_five_items() {
                     "title": format!("Фильм {id}"),
                     "original_title": format!("Movie {id}"),
                     "release_date": "2025-12-10",
-                    "vote_average": 7.5
+                    "vote_average": 7.5,
+                    "poster_path": poster_path,
+                    "overview": overview
                 })
             }
         })
@@ -68,11 +78,22 @@ async fn maps_weekly_trending_and_limits_output_to_five_items() {
     assert_eq!(page.source, "tmdb");
     assert_eq!(page.window, "week");
     assert_eq!(page.page, 2);
-    assert_eq!(page.results.len(), 5);
+    assert_eq!(page.results.len(), 10);
     assert_eq!(page.results[0].title, "Фильм 1");
     assert_eq!(page.results[0].original_title.as_deref(), Some("Movie 1"));
     assert_eq!(page.results[0].year, Some(2025));
+    assert_eq!(
+        page.results[0].poster_url.as_deref(),
+        Some("https://image.tmdb.org/t/p/w780/film-1.jpg")
+    );
+    assert_eq!(
+        page.results[0].overview.as_deref(),
+        Some("Описание фильма 1")
+    );
     assert_eq!(page.results[1].media_type, TrendingMediaTypeDto::Tv);
+    assert_eq!(page.results[1].poster_url, None);
+    assert_eq!(page.results[1].overview, None);
+    assert_eq!(page.results[9].tmdb_id, 10);
 }
 
 #[tokio::test]
