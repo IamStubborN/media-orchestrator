@@ -212,7 +212,7 @@ async fn maps_similar_results_without_provider_media_type_and_limits_to_ten() {
         })
         .collect::<Vec<_>>();
     Mock::given(method("GET"))
-        .and(path("/3/tv/42/similar"))
+        .and(path("/3/tv/42/recommendations"))
         .and(query_param("api_key", "test-key"))
         .and(query_param("language", "ru-RU"))
         .and(query_param("page", "2"))

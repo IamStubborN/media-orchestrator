@@ -171,7 +171,12 @@ impl TmdbClient {
         if page == 0 {
             return Err(TmdbError::InvalidRequest);
         }
-        let endpoint = media_endpoint(&self.config.base_url, tmdb_id, media_type, "/similar")?;
+        let endpoint = media_endpoint(
+            &self.config.base_url,
+            tmdb_id,
+            media_type,
+            "/recommendations",
+        )?;
         let query = vec![("page", page.to_string())];
         let payload: TrendingResponse = self.get_json(endpoint, &query).await?;
         let results = payload
