@@ -701,7 +701,7 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_details",
-        description = "Get read-only localized and original TMDB metadata for one movie or series, including poster, overview, genres, countries, status, provider URLs, and TV episode counts.",
+        description = "Get read-only localized and original TMDB metadata for one movie or series, including poster, overview, genres, countries, status, provider URLs, TV episode counts, and the next scheduled episode when available.",
         output_schema = object_output_schema(),
         annotations(title = "Get media details", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
     )]

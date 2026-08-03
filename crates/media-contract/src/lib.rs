@@ -55,5 +55,5 @@ pub use tracking::{
 };
 pub use trending::{
     MediaDetailsDto, SimilarPageDto, TrendingCategoryDto, TrendingItemDto, TrendingMediaTypeDto,
-    TrendingPageDto,
+    TrendingPageDto, UpcomingEpisodeDto,
 };

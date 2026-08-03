@@ -71,11 +71,20 @@ pub struct MediaDetailsDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub episode_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_episode: Option<UpcomingEpisodeDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tmdb_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imdb_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trailer_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpcomingEpisodeDto {
+    pub season: u16,
+    pub episode: u16,
+    pub air_date: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

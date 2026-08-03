@@ -2,7 +2,7 @@ use std::{fmt, time::Duration};
 
 use media_contract::{
     MediaDetailsDto, SimilarPageDto, TrendingCategoryDto, TrendingItemDto, TrendingMediaTypeDto,
-    TrendingPageDto,
+    TrendingPageDto, UpcomingEpisodeDto,
 };
 use reqwest::StatusCode;
 use secrecy::{ExposeSecret, SecretString};
@@ -281,8 +281,16 @@ struct TmdbDetailsResponse {
     status: Option<String>,
     number_of_seasons: Option<u16>,
     number_of_episodes: Option<u32>,
+    next_episode_to_air: Option<TmdbEpisode>,
     external_ids: Option<TmdbExternalIds>,
     videos: Option<TmdbVideos>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TmdbEpisode {
+    season_number: Option<u16>,
+    episode_number: Option<u16>,
+    air_date: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -431,6 +439,10 @@ fn map_details(
     let imdb_url = item.external_ids.and_then(|ids| safe_imdb_url(ids.imdb_id));
     let trailer_url = item.videos.and_then(safe_trailer_url);
     let is_tv = media_type == TrendingMediaTypeDto::Tv;
+    let next_episode = is_tv
+        .then_some(item.next_episode_to_air)
+        .flatten()
+        .and_then(map_upcoming_episode);
     Ok(MediaDetailsDto {
         tmdb_id: item.id,
         media_type,
@@ -446,10 +458,32 @@ fn map_details(
         status: non_empty(item.status),
         season_count: is_tv.then_some(item.number_of_seasons).flatten(),
         episode_count: is_tv.then_some(item.number_of_episodes).flatten(),
+        next_episode,
         tmdb_url,
         imdb_url,
         trailer_url,
     })
+}
+
+fn map_upcoming_episode(item: TmdbEpisode) -> Option<UpcomingEpisodeDto> {
+    let season = item.season_number?;
+    let episode = item.episode_number?;
+    let air_date = non_empty(item.air_date)?;
+    if episode == 0 || !valid_iso_date(&air_date) {
+        return None;
+    }
+    Some(UpcomingEpisodeDto {
+        season,
+        episode,
+        air_date,
+    })
+}
+
+fn valid_iso_date(value: &str) -> bool {
+    let Ok(format) = time::format_description::parse_borrowed::<2>("[year]-[month]-[day]") else {
+        return false;
+    };
+    time::Date::parse(value, &format).is_ok()
 }
 
 fn year(value: &str) -> Option<u16> {

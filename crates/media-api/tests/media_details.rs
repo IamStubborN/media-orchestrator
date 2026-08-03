@@ -44,6 +44,7 @@ impl MediaDetailsService for FakeMediaDetailsService {
             status: Some("Released".to_owned()),
             season_count: None,
             episode_count: None,
+            next_episode: None,
             tmdb_url: Some("https://www.themoviedb.org/movie/7".to_owned()),
             imdb_url: Some("https://www.imdb.com/title/tt1234567/".to_owned()),
             trailer_url: None,

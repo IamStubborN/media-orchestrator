@@ -154,6 +154,11 @@ async fn maps_tv_details_with_provider_metadata_and_safe_urls() {
             "status": "Returning Series",
             "number_of_seasons": 3,
             "number_of_episodes": 24,
+            "next_episode_to_air": {
+                "season_number": 4,
+                "episode_number": 1,
+                "air_date": "2026-08-11"
+            },
             "external_ids": {"imdb_id": "tt1234567"},
             "videos": {"results": [
                 {"key": "abc_123-xyz", "site": "YouTube", "type": "Trailer", "official": true},
@@ -183,6 +188,10 @@ async fn maps_tv_details_with_provider_metadata_and_safe_urls() {
     assert_eq!(details.genres, vec!["Драма", "Фантастика"]);
     assert_eq!(details.season_count, Some(3));
     assert_eq!(details.episode_count, Some(24));
+    let next_episode = details.next_episode.as_ref().unwrap();
+    assert_eq!(next_episode.season, 4);
+    assert_eq!(next_episode.episode, 1);
+    assert_eq!(next_episode.air_date, "2026-08-11");
     assert_eq!(
         details.tmdb_url.as_deref(),
         Some("https://www.themoviedb.org/tv/42")
