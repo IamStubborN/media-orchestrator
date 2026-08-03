@@ -25,7 +25,7 @@ fn search_contract_is_versioned_paginated_and_safe() {
         session_id: "0190d8d2-a73a-7fb0-9d57-e520abfca111".to_owned(),
         source: media_contract::ProviderDto::Prowlarr,
         expires_at: "2026-07-13T12:00:00Z".to_owned(),
-        results: (0..5)
+        results: (0..10)
             .map(|index| SearchResultDto::Prowlarr {
                 result_id: format!("result-{index}"),
                 title: format!("Movie {index}"),
@@ -45,12 +45,12 @@ fn search_contract_is_versioned_paginated_and_safe() {
                 },
             })
             .collect(),
-        continuation: Some("0190d8d2-a73a-7fb0-9d57-e520abfca111:5".to_owned()),
+        continuation: Some("0190d8d2-a73a-7fb0-9d57-e520abfca111:10".to_owned()),
     };
 
     let value = serde_json::to_value(&page).unwrap();
     assert_eq!(value["api_version"], "v1");
-    assert_eq!(value["results"].as_array().unwrap().len(), 5);
+    assert_eq!(value["results"].as_array().unwrap().len(), 10);
     let rendered = serde_json::to_string(&value).unwrap();
     for forbidden in ["magnet", "download_url", "stream_url", "token=secret"] {
         assert!(

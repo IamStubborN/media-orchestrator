@@ -1,6 +1,6 @@
 use crate::ProviderDto;
 
-pub const MAX_SEARCH_RESULTS_PER_PAGE: usize = 5;
+pub const MAX_SEARCH_RESULTS_PER_PAGE: usize = 10;
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]

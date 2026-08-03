@@ -791,12 +791,12 @@ async fn rezka_accepts_media_kind_as_a_search_filter() {
 }
 
 #[tokio::test]
-async fn prowlarr_paginates_five_and_runner_gets_only_the_exact_selected_result() {
+async fn prowlarr_paginates_ten_and_runner_gets_only_the_exact_selected_result() {
     let mut pages = HashMap::new();
     pages.insert(
         ProviderDto::Prowlarr,
         vec![ProviderPage {
-            results: (0..6).map(prowlarr_result).collect(),
+            results: (0..12).map(prowlarr_result).collect(),
             provider_continuation: None,
         }],
     );
@@ -806,7 +806,7 @@ async fn prowlarr_paginates_five_and_runner_gets_only_the_exact_selected_result(
         .start(PRIMARY_USER_ID, request(ProviderDto::Prowlarr))
         .await
         .unwrap();
-    assert_eq!(first.results.len(), 5);
+    assert_eq!(first.results.len(), 10);
     let continuation = first.continuation.clone().unwrap();
     assert!(!serde_json::to_string(&first).unwrap().contains("magnet:"));
     let second = service
@@ -819,7 +819,7 @@ async fn prowlarr_paginates_five_and_runner_gets_only_the_exact_selected_result(
         )
         .await
         .unwrap();
-    assert_eq!(second.results.len(), 1);
+    assert_eq!(second.results.len(), 2);
 
     let selected = service
         .select(
@@ -945,7 +945,7 @@ async fn search_session_rejects_the_same_owner_from_another_chat_or_thread() {
     let service = service(HashMap::from([(
         ProviderDto::Prowlarr,
         vec![ProviderPage {
-            results: (0..6).map(prowlarr_result).collect(),
+            results: (0..12).map(prowlarr_result).collect(),
             provider_continuation: None,
         }],
     )]));
