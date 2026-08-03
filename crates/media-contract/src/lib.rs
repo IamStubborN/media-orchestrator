@@ -53,4 +53,7 @@ pub use tracking::{
     TrackingCheckStatusDto, TrackingDownloadDto, TrackingDto, TrackingListDto, TrackingScopeDto,
     TrackingStateDto,
 };
-pub use trending::{TrendingCategoryDto, TrendingItemDto, TrendingMediaTypeDto, TrendingPageDto};
+pub use trending::{
+    MediaDetailsDto, SimilarPageDto, TrendingCategoryDto, TrendingItemDto, TrendingMediaTypeDto,
+    TrendingPageDto,
+};

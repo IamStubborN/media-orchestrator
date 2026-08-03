@@ -77,6 +77,8 @@ async fn legacy_mcp_session_lists_the_complete_media_toolset() {
     assert!(names.contains(&"media_download"));
     assert!(names.contains(&"media_release_schedule"));
     assert!(names.contains(&"media_trending"));
+    assert!(names.contains(&"media_details"));
+    assert!(names.contains(&"media_similar"));
     assert!(names.contains(&"media_job_alternatives"));
     assert!(names.contains(&"media_job_mapping_get"));
     assert!(names.contains(&"media_job_mapping_resolve"));
@@ -90,7 +92,7 @@ async fn legacy_mcp_session_lists_the_complete_media_toolset() {
     assert!(names.contains(&"media_storage_status"));
     assert!(names.contains(&"media_destructive_prepare"));
     assert!(names.contains(&"media_destructive_confirm"));
-    assert_eq!(names.len(), 32);
+    assert_eq!(names.len(), 34);
     for tool in body["result"]["tools"].as_array().unwrap() {
         assert!(
             tool["outputSchema"].is_object(),
@@ -163,5 +165,5 @@ async fn stateless_mcp_2026_lists_tools_without_initialize_or_session() {
     assert!(response.headers().get("mcp-session-id").is_none());
     let body: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(body["result"]["tools"].as_array().unwrap().len(), 32);
+    assert_eq!(body["result"]["tools"].as_array().unwrap().len(), 34);
 }

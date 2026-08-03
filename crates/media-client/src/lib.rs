@@ -4,11 +4,12 @@ use std::time::Duration;
 
 use media_contract::{
     AlternativeSearchRequest, ContinueSearchRequest, CreateJobRequest, CreateTrackingRequest,
-    EpisodeMappingActionDto, EpisodeSnapshotDto, JobDetailDto, JobDto, JobListDto, NotifyScopeDto,
-    PatchTrackingRequest, ProviderDto, QueueStatusDto, ReleaseQueryRequest, ReleaseQueryResponse,
-    ResolveEpisodeMappingRequest, SearchPageDto, SearchScopeDto, SelectResultRequest,
-    SetTrackingBaselineRequest, StartSearchRequest, TrackingDownloadDto, TrackingDto,
-    TrackingListDto, TrackingScopeDto, TrendingCategoryDto, TrendingPageDto,
+    EpisodeMappingActionDto, EpisodeSnapshotDto, JobDetailDto, JobDto, JobListDto, MediaDetailsDto,
+    NotifyScopeDto, PatchTrackingRequest, ProviderDto, QueueStatusDto, ReleaseQueryRequest,
+    ReleaseQueryResponse, ResolveEpisodeMappingRequest, SearchPageDto, SearchScopeDto,
+    SelectResultRequest, SetTrackingBaselineRequest, SimilarPageDto, StartSearchRequest,
+    TrackingDownloadDto, TrackingDto, TrackingListDto, TrackingScopeDto, TrendingCategoryDto,
+    TrendingMediaTypeDto, TrendingPageDto,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::de::DeserializeOwned;
@@ -155,6 +156,31 @@ impl MediaClient {
         };
         self.get(&format!("v1/trending?category={category}&page={page}"))
             .await
+    }
+
+    pub async fn media_details(
+        &self,
+        tmdb_id: u64,
+        media_type: TrendingMediaTypeDto,
+    ) -> Result<MediaDetailsDto, ClientError> {
+        self.get(&format!(
+            "v1/media/details?tmdb_id={tmdb_id}&media_type={}",
+            media_type_path(media_type)
+        ))
+        .await
+    }
+
+    pub async fn media_similar(
+        &self,
+        tmdb_id: u64,
+        media_type: TrendingMediaTypeDto,
+        page: u32,
+    ) -> Result<SimilarPageDto, ClientError> {
+        self.get(&format!(
+            "v1/media/similar?tmdb_id={tmdb_id}&media_type={}&page={page}",
+            media_type_path(media_type)
+        ))
+        .await
     }
 
     pub async fn add_tracking(
@@ -386,4 +412,11 @@ fn classify_request_error(error: reqwest::Error) -> ClientError {
 
 fn generated_identifier() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+const fn media_type_path(media_type: TrendingMediaTypeDto) -> &'static str {
+    match media_type {
+        TrendingMediaTypeDto::Movie => "movie",
+        TrendingMediaTypeDto::Tv => "tv",
+    }
 }

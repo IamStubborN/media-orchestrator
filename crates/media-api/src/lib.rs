@@ -3,6 +3,7 @@
 mod admin;
 mod auth;
 mod convert;
+mod details;
 mod error;
 mod idempotency;
 mod mcp;
@@ -24,6 +25,7 @@ use media_core::{
 use crate::metrics::MetricsRecorder;
 
 pub use admin::{MediaAdminError, MediaAdminService};
+pub use details::{MediaDetailsService, MediaDetailsServiceError};
 pub use error::ApiError;
 pub use idempotency::{
     IdempotencyError, IdempotencyGeneration, IdempotencyHandle, IdempotencyRequest,
@@ -60,6 +62,7 @@ pub struct ApiState {
     pub(crate) metrics: Arc<MetricsRecorder>,
     pub(crate) metrics_source: Option<Arc<dyn MetricsSource>>,
     pub(crate) trending: Arc<dyn TrendingService>,
+    pub(crate) media_details: Arc<dyn MediaDetailsService>,
     pub(crate) admin: Arc<dyn MediaAdminService>,
 }
 
@@ -88,6 +91,7 @@ impl ApiState {
             metrics: Arc::new(MetricsRecorder::default()),
             metrics_source: None,
             trending: Arc::new(trending::UnavailableTrendingService),
+            media_details: Arc::new(details::UnavailableMediaDetailsService),
             admin: Arc::new(admin::UnavailableMediaAdminService),
         }
     }
@@ -146,6 +150,17 @@ impl ApiState {
     #[must_use]
     pub fn trending(&self) -> &dyn TrendingService {
         self.trending.as_ref()
+    }
+
+    #[must_use]
+    pub fn with_media_details(mut self, media_details: Arc<dyn MediaDetailsService>) -> Self {
+        self.media_details = media_details;
+        self
+    }
+
+    #[must_use]
+    pub fn media_details(&self) -> &dyn MediaDetailsService {
+        self.media_details.as_ref()
     }
 
     #[must_use]

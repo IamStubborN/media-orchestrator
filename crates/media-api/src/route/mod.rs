@@ -1,6 +1,7 @@
 mod health;
 mod jobs;
 mod lifecycle;
+mod media_details;
 mod metrics;
 mod queue;
 mod release;
@@ -26,5 +27,6 @@ pub(crate) fn protected_routes(state: ApiState) -> Router<ApiState> {
         .merge(release::routes())
         .merge(search::routes())
         .merge(trending::routes())
+        .merge(media_details::routes())
         .merge(crate::mcp::routes(state))
 }

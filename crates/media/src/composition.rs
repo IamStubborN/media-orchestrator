@@ -35,10 +35,10 @@ use crate::{
     search::{ConcreteSearchProvider, DurableSearchService, StorageSearchPersistence},
 };
 
-struct TmdbTrendingAdapter(media_integrations::tmdb::TmdbClient);
+struct TmdbMediaAdapter(Arc<media_integrations::tmdb::TmdbClient>);
 
 #[async_trait::async_trait]
-impl media_api::TrendingService for TmdbTrendingAdapter {
+impl media_api::TrendingService for TmdbMediaAdapter {
     async fn trending(
         &self,
         category: media_contract::TrendingCategoryDto,
@@ -60,6 +60,50 @@ impl media_api::TrendingService for TmdbTrendingAdapter {
                     media_api::TrendingServiceError::Provider
                 }
             })
+    }
+}
+
+#[async_trait::async_trait]
+impl media_api::MediaDetailsService for TmdbMediaAdapter {
+    async fn details(
+        &self,
+        tmdb_id: u64,
+        media_type: media_contract::TrendingMediaTypeDto,
+    ) -> Result<media_contract::MediaDetailsDto, media_api::MediaDetailsServiceError> {
+        self.0
+            .details(tmdb_id, media_type)
+            .await
+            .map_err(map_tmdb_media_error)
+    }
+
+    async fn similar(
+        &self,
+        tmdb_id: u64,
+        media_type: media_contract::TrendingMediaTypeDto,
+        page: u32,
+    ) -> Result<media_contract::SimilarPageDto, media_api::MediaDetailsServiceError> {
+        self.0
+            .similar(tmdb_id, media_type, page)
+            .await
+            .map_err(map_tmdb_media_error)
+    }
+}
+
+fn map_tmdb_media_error(
+    error: media_integrations::tmdb::TmdbError,
+) -> media_api::MediaDetailsServiceError {
+    match error.code() {
+        media_integrations::tmdb::TmdbErrorCode::InvalidRequest => {
+            media_api::MediaDetailsServiceError::InvalidRequest
+        }
+        media_integrations::tmdb::TmdbErrorCode::Configuration => {
+            media_api::MediaDetailsServiceError::Unavailable
+        }
+        media_integrations::tmdb::TmdbErrorCode::Transport
+        | media_integrations::tmdb::TmdbErrorCode::Unauthorized
+        | media_integrations::tmdb::TmdbErrorCode::ProviderResponse => {
+            media_api::MediaDetailsServiceError::Provider
+        }
     }
 }
 
@@ -847,7 +891,7 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
             )
             .map_err(|_| ServiceError::Bootstrap)?;
             media_integrations::tmdb::TmdbClient::new(config)
-                .map(TmdbTrendingAdapter)
+                .map(|client| TmdbMediaAdapter(Arc::new(client)))
                 .map(Arc::new)
                 .map_err(|_| ServiceError::Bootstrap)
         })
@@ -869,7 +913,9 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
     ))))
     .with_metrics_source(Arc::new(SeaOrmMetricsSource::new(database.clone())));
     if let Some(trending) = trending {
-        state = state.with_trending(trending);
+        state = state
+            .with_trending(trending.clone())
+            .with_media_details(trending);
     }
     let mut tracking_runtime = None;
     if config.rezka().is_some() || config.prowlarr().is_some() {

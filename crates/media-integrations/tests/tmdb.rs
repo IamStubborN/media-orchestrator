@@ -131,3 +131,136 @@ async fn rejects_malformed_success_response() {
 
     assert_eq!(error.code(), TmdbErrorCode::ProviderResponse);
 }
+
+#[tokio::test]
+async fn maps_tv_details_with_provider_metadata_and_safe_urls() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/3/tv/42"))
+        .and(query_param("api_key", "test-key"))
+        .and(query_param("language", "ru-RU"))
+        .and(query_param("append_to_response", "external_ids,videos"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": 42,
+            "name": "Тестовый сериал",
+            "original_name": "Test Series",
+            "first_air_date": "2026-02-03",
+            "vote_average": 8.26,
+            "poster_path": "/series.jpg",
+            "overview": "Описание сериала",
+            "production_countries": [{"name": "United States of America"}],
+            "origin_country": ["US"],
+            "genres": [{"name": "Драма"}, {"name": "Фантастика"}],
+            "status": "Returning Series",
+            "number_of_seasons": 3,
+            "number_of_episodes": 24,
+            "external_ids": {"imdb_id": "tt1234567"},
+            "videos": {"results": [
+                {"key": "abc_123-xyz", "site": "YouTube", "type": "Trailer", "official": true},
+                {"key": "ignored", "site": "Vimeo", "type": "Trailer", "official": true}
+            ]}
+        })))
+        .mount(&server)
+        .await;
+
+    let details = TmdbClient::new(config(&server))
+        .unwrap()
+        .details(42, TrendingMediaTypeDto::Tv)
+        .await
+        .unwrap();
+
+    assert_eq!(details.tmdb_id, 42);
+    assert_eq!(details.title, "Тестовый сериал");
+    assert_eq!(details.original_title.as_deref(), Some("Test Series"));
+    assert_eq!(details.release_date.as_deref(), Some("2026-02-03"));
+    assert_eq!(details.year, Some(2026));
+    assert_eq!(details.rating, Some(8.3));
+    assert_eq!(
+        details.poster_url.as_deref(),
+        Some("https://image.tmdb.org/t/p/w780/series.jpg")
+    );
+    assert_eq!(details.countries, vec!["United States of America"]);
+    assert_eq!(details.genres, vec!["Драма", "Фантастика"]);
+    assert_eq!(details.season_count, Some(3));
+    assert_eq!(details.episode_count, Some(24));
+    assert_eq!(
+        details.tmdb_url.as_deref(),
+        Some("https://www.themoviedb.org/tv/42")
+    );
+    assert_eq!(
+        details.imdb_url.as_deref(),
+        Some("https://www.imdb.com/title/tt1234567/")
+    );
+    assert_eq!(
+        details.trailer_url.as_deref(),
+        Some("https://www.youtube.com/watch?v=abc_123-xyz")
+    );
+}
+
+#[tokio::test]
+async fn maps_similar_results_without_provider_media_type_and_limits_to_ten() {
+    let server = MockServer::start().await;
+    let results = (1..=12)
+        .map(|id| {
+            json!({
+                "id": id,
+                "name": format!("Похожий сериал {id}"),
+                "original_name": format!("Similar Series {id}"),
+                "first_air_date": "2025-01-01",
+                "vote_average": 7.1
+            })
+        })
+        .collect::<Vec<_>>();
+    Mock::given(method("GET"))
+        .and(path("/3/tv/42/similar"))
+        .and(query_param("api_key", "test-key"))
+        .and(query_param("language", "ru-RU"))
+        .and(query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "page": 2,
+            "total_pages": 4,
+            "total_results": 37,
+            "results": results
+        })))
+        .mount(&server)
+        .await;
+
+    let page = TmdbClient::new(config(&server))
+        .unwrap()
+        .similar(42, TrendingMediaTypeDto::Tv, 2)
+        .await
+        .unwrap();
+
+    assert_eq!(page.tmdb_id, 42);
+    assert_eq!(page.media_type, TrendingMediaTypeDto::Tv);
+    assert_eq!(page.page, 2);
+    assert_eq!(page.total_pages, 4);
+    assert_eq!(page.total_results, 37);
+    assert_eq!(page.results.len(), 10);
+    assert_eq!(page.results[0].title, "Похожий сериал 1");
+    assert_eq!(page.results[0].media_type, TrendingMediaTypeDto::Tv);
+    assert_eq!(page.results[9].tmdb_id, 10);
+}
+
+#[tokio::test]
+async fn rejects_invalid_details_and_similar_requests() {
+    let server = MockServer::start().await;
+    let client = TmdbClient::new(config(&server)).unwrap();
+
+    assert_eq!(
+        client
+            .details(0, TrendingMediaTypeDto::Movie)
+            .await
+            .unwrap_err()
+            .code(),
+        TmdbErrorCode::InvalidRequest
+    );
+    assert_eq!(
+        client
+            .similar(42, TrendingMediaTypeDto::Movie, 0)
+            .await
+            .unwrap_err()
+            .code(),
+        TmdbErrorCode::InvalidRequest
+    );
+}

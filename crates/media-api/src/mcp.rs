@@ -6,6 +6,7 @@ use media_contract::{
     JobListDto, MediaKindDto, PatchTrackingRequest, ProviderDto, ReleaseQueryRequest,
     ResolveEpisodeMappingRequest, SearchScopeDto, SelectResultRequest, StartSearchRequest,
     TrackingDownloadDto, TrackingListDto, TrackingScopeDto, TrendingCategoryDto,
+    TrendingMediaTypeDto,
 };
 use media_core::{
     Actor, ApplicationError, EpisodeSnapshot, JobId, ReleaseQuery, ReleaseQueryError,
@@ -69,6 +70,24 @@ struct ReleaseInput {
 struct TrendingInput {
     #[serde(default = "default_trending_category")]
     category: String,
+    #[serde(default = "default_page")]
+    page: u32,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct MediaDetailsInput {
+    #[schemars(description = "TMDB media identifier")]
+    tmdb_id: u64,
+    #[schemars(description = "Media type: movie or tv")]
+    media_type: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct MediaSimilarInput {
+    #[schemars(description = "TMDB media identifier")]
+    tmdb_id: u64,
+    #[schemars(description = "Media type: movie or tv")]
+    media_type: String,
     #[serde(default = "default_page")]
     page: u32,
 }
@@ -677,6 +696,59 @@ impl MediaAdminMcp {
             .trending(category, input.page)
             .await
             .map_err(trending_error)?;
+        result_json(value)
+    }
+
+    #[tool(
+        name = "media_details",
+        description = "Get read-only localized and original TMDB metadata for one movie or series, including poster, overview, genres, countries, status, provider URLs, and TV episode counts.",
+        output_schema = object_output_schema(),
+        annotations(title = "Get media details", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn details(
+        &self,
+        Parameters(input): Parameters<MediaDetailsInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        actor_from_parts(&parts)?;
+        if input.tmdb_id == 0 {
+            return Err(ErrorData::invalid_params("tmdb_id must be positive", None));
+        }
+        let media_type = parse_media_type(&input.media_type)?;
+        let value = self
+            .state
+            .media_details()
+            .details(input.tmdb_id, media_type)
+            .await
+            .map_err(media_details_error)?;
+        result_json(value)
+    }
+
+    #[tool(
+        name = "media_similar",
+        description = "List up to 10 read-only TMDB similar or recommended movies or series for one title. Use page for pagination.",
+        output_schema = object_output_schema(),
+        annotations(title = "Find similar media", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn similar(
+        &self,
+        Parameters(input): Parameters<MediaSimilarInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        actor_from_parts(&parts)?;
+        if input.tmdb_id == 0 {
+            return Err(ErrorData::invalid_params("tmdb_id must be positive", None));
+        }
+        if input.page == 0 {
+            return Err(ErrorData::invalid_params("page must be positive", None));
+        }
+        let media_type = parse_media_type(&input.media_type)?;
+        let value = self
+            .state
+            .media_details()
+            .similar(input.tmdb_id, media_type, input.page)
+            .await
+            .map_err(media_details_error)?;
         result_json(value)
     }
 
@@ -1303,6 +1375,31 @@ fn trending_error(error: crate::TrendingServiceError) -> ErrorData {
         }
         crate::TrendingServiceError::Provider => {
             ErrorData::internal_error("trending provider failed", None)
+        }
+    }
+}
+
+fn parse_media_type(value: &str) -> Result<TrendingMediaTypeDto, ErrorData> {
+    match value {
+        "movie" => Ok(TrendingMediaTypeDto::Movie),
+        "tv" => Ok(TrendingMediaTypeDto::Tv),
+        _ => Err(ErrorData::invalid_params(
+            "media_type must be movie or tv",
+            None,
+        )),
+    }
+}
+
+fn media_details_error(error: crate::MediaDetailsServiceError) -> ErrorData {
+    match error {
+        crate::MediaDetailsServiceError::InvalidRequest => {
+            ErrorData::invalid_params("media details request is invalid", None)
+        }
+        crate::MediaDetailsServiceError::Unavailable => {
+            ErrorData::internal_error("media details integration is unavailable", None)
+        }
+        crate::MediaDetailsServiceError::Provider => {
+            ErrorData::internal_error("media details provider failed", None)
         }
     }
 }
