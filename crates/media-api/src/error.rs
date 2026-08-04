@@ -128,6 +128,15 @@ impl ApiError {
         )
     }
 
+    pub(crate) fn provider_unavailable(request_id: &RequestId) -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ApiErrorCode::ProviderUnavailable,
+            "media provider is temporarily unavailable",
+            request_id,
+        )
+    }
+
     pub(crate) fn upstream_failure(request_id: &RequestId) -> Self {
         Self::new(
             StatusCode::BAD_GATEWAY,

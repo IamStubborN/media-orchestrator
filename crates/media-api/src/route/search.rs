@@ -249,6 +249,9 @@ fn search_error(error: SearchError, request_id: &RequestId) -> Response {
         }
         SearchError::NotFound => ApiError::not_found(request_id).into_response(),
         SearchError::Conflict => ApiError::conflict(request_id).into_response(),
+        SearchError::ProviderUnavailable => {
+            ApiError::provider_unavailable(request_id).into_response()
+        }
         SearchError::Provider | SearchError::Infrastructure => {
             ApiError::internal(request_id).into_response()
         }

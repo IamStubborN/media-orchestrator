@@ -17,6 +17,8 @@ pub enum SearchError {
     Conflict,
     #[error("media provider failed")]
     Provider,
+    #[error("media provider is temporarily unavailable")]
+    ProviderUnavailable,
     #[error("search infrastructure failed")]
     Infrastructure,
 }

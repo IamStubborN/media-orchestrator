@@ -951,7 +951,13 @@ impl ConcreteSearchProvider {
             .await
             .map_err(|error| {
                 tracing::warn!(error_code = ?error.code(), "Prowlarr search failed");
-                SearchError::Provider
+                if error.code()
+                    == media_integrations::prowlarr::ProwlarrErrorCode::TemporarilyUnavailable
+                {
+                    SearchError::ProviderUnavailable
+                } else {
+                    SearchError::Provider
+                }
             })?;
         let provider_continuation = page
             .continuation

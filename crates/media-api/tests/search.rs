@@ -21,6 +21,7 @@ use support::{FakeClientStore, FakeReadiness, RUNNER_TOKEN, VALID_TOKEN, state};
 #[derive(Default)]
 struct FakeSearchService {
     owners: Mutex<Vec<UserId>>,
+    start_error: Mutex<Option<SearchError>>,
 }
 
 #[async_trait::async_trait]
@@ -31,6 +32,9 @@ impl SearchService for FakeSearchService {
         request: StartSearchRequest,
     ) -> Result<SearchPageDto, SearchError> {
         self.owners.lock().unwrap().push(owner);
+        if let Some(error) = self.start_error.lock().unwrap().take() {
+            return Err(error);
+        }
         Ok(page(request.source, Some("session:5")))
     }
 
@@ -108,6 +112,32 @@ impl SearchService for FakeSearchService {
             notify_scope: NotifyScopeDto::Initiator,
         })
     }
+}
+
+#[tokio::test]
+async fn temporarily_unavailable_provider_returns_a_stable_503_error() {
+    let service = Arc::new(FakeSearchService::default());
+    *service.start_error.lock().unwrap() = Some(SearchError::ProviderUnavailable);
+    let response = app(service)
+        .oneshot(post(
+            "/v1/searches",
+            VALID_TOKEN,
+            serde_json::json!({
+                "query": "Hacks",
+                "source": "prowlarr",
+                "media_kind": "series",
+                "season": 1,
+                "scope": {"platform": "telegram", "chat_id": "42"}
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 503);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let body: media_contract::ApiError = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body.code, media_contract::ApiErrorCode::ProviderUnavailable);
+    assert_eq!(body.message, "media provider is temporarily unavailable");
 }
 
 #[tokio::test]

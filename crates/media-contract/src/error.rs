@@ -14,6 +14,7 @@ pub enum ApiErrorCode {
     InvalidToken,
     LeaseNotFound,
     VpnRotationRequired,
+    ProviderUnavailable,
     Internal,
 }
 
@@ -70,6 +71,7 @@ mod tests {
             (ApiErrorCode::InvalidToken, "invalid_token"),
             (ApiErrorCode::LeaseNotFound, "lease_not_found"),
             (ApiErrorCode::VpnRotationRequired, "vpn_rotation_required"),
+            (ApiErrorCode::ProviderUnavailable, "provider_unavailable"),
             (ApiErrorCode::Internal, "internal"),
         ];
 

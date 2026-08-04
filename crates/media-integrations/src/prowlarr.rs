@@ -26,6 +26,9 @@ const MAX_TORRENT_BYTES: usize = 8 * 1024 * 1024;
 /// stream an unbounded payload into memory before deserialization.
 const MAX_SEARCH_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_BENCODE_DEPTH: usize = 128;
+const DEFAULT_UNAVAILABLE_RETRY_DELAY: Duration = Duration::from_secs(2);
+const ALL_INDEXERS_UNAVAILABLE_MESSAGE: &str =
+    "Search failed due to all selected indexers being unavailable";
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ProwlarrErrorCode {
@@ -33,6 +36,7 @@ pub enum ProwlarrErrorCode {
     InvalidRequest,
     Transport,
     Unauthorized,
+    TemporarilyUnavailable,
     ProviderResponse,
 }
 
@@ -46,6 +50,8 @@ pub enum ProwlarrError {
     Transport,
     #[error("Prowlarr authentication failed")]
     Unauthorized,
+    #[error("Prowlarr indexers are temporarily unavailable")]
+    TemporarilyUnavailable,
     #[error("Prowlarr returned an invalid response ({status})")]
     ProviderResponse { status: StatusCode },
 }
@@ -58,6 +64,7 @@ impl ProwlarrError {
             Self::InvalidRequest { .. } => ProwlarrErrorCode::InvalidRequest,
             Self::Transport => ProwlarrErrorCode::Transport,
             Self::Unauthorized => ProwlarrErrorCode::Unauthorized,
+            Self::TemporarilyUnavailable => ProwlarrErrorCode::TemporarilyUnavailable,
             Self::ProviderResponse { .. } => ProwlarrErrorCode::ProviderResponse,
         }
     }
@@ -68,6 +75,7 @@ pub struct ProwlarrConfig {
     base_url: Url,
     api_key: SecretString,
     timeout: Duration,
+    unavailable_retry_delay: Duration,
 }
 
 impl ProwlarrConfig {
@@ -108,7 +116,14 @@ impl ProwlarrConfig {
             base_url,
             api_key,
             timeout,
+            unavailable_retry_delay: DEFAULT_UNAVAILABLE_RETRY_DELAY,
         })
+    }
+
+    #[must_use]
+    pub fn with_unavailable_retry_delay(mut self, delay: Duration) -> Self {
+        self.unavailable_retry_delay = delay;
+        self
     }
 }
 
@@ -119,6 +134,7 @@ impl fmt::Debug for ProwlarrConfig {
             .field("base_url", &self.base_url)
             .field("api_key", &"[REDACTED]")
             .field("timeout", &self.timeout)
+            .field("unavailable_retry_delay", &self.unavailable_retry_delay)
             .finish()
     }
 }
@@ -344,47 +360,13 @@ impl ProwlarrClient {
     }
 
     pub async fn search(&self, request: SearchPageRequest) -> Result<SearchPage, ProwlarrError> {
-        let mut results = {
-            let mut endpoint = self.config.base_url.join("api/v1/search").map_err(|_| {
-                ProwlarrError::Configuration {
-                    message: "search endpoint could not be constructed",
-                }
-            })?;
-            let search_type = match request.session.query.kind {
-                MediaKind::Movie => "movie",
-                MediaKind::Series { .. } => "tvsearch",
-            };
-            endpoint
-                .query_pairs_mut()
-                .append_pair("query", &request.session.query.title)
-                .append_pair("type", search_type)
-                .append_pair("indexerIds", "-2")
-                .append_pair("limit", &CANDIDATE_LIMIT.to_string())
-                .append_pair("offset", "0");
-            let response = self
-                .client
-                .get(endpoint)
-                .header("X-Api-Key", self.config.api_key.expose_secret())
-                .send()
-                .await
-                .map_err(|_| ProwlarrError::Transport)?;
-            let status = response.status();
-            if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                return Err(ProwlarrError::Unauthorized);
+        let mut results = match self.fetch_search_results(&request).await {
+            Err(ProwlarrError::TemporarilyUnavailable) => {
+                tokio::time::sleep(self.config.unavailable_retry_delay).await;
+                self.recheck_indexers().await;
+                self.fetch_search_results(&request).await?
             }
-            if !status.is_success() {
-                return Err(ProwlarrError::ProviderResponse { status });
-            }
-            let body = read_capped(response, MAX_SEARCH_RESPONSE_BYTES)
-                .await
-                .ok_or(ProwlarrError::ProviderResponse { status })?;
-            let raw: Vec<serde_json::Value> = serde_json::from_slice(&body)
-                .map_err(|_| ProwlarrError::ProviderResponse { status })?;
-            raw.into_iter()
-                .filter_map(|release| serde_json::from_value::<RawRelease>(release).ok())
-                .filter(|release| release.protocol == "torrent")
-                .filter_map(|release| ProwlarrResult::from_raw(release, &request.session.query))
-                .collect::<Vec<_>>()
+            result => result?,
         };
 
         results.sort_by_key(ranking_key);
@@ -416,6 +398,69 @@ impl ProwlarrClient {
             results: resolved,
             continuation,
         })
+    }
+
+    async fn fetch_search_results(
+        &self,
+        request: &SearchPageRequest,
+    ) -> Result<Vec<ProwlarrResult>, ProwlarrError> {
+        let mut endpoint = self.config.base_url.join("api/v1/search").map_err(|_| {
+            ProwlarrError::Configuration {
+                message: "search endpoint could not be constructed",
+            }
+        })?;
+        let search_type = match request.session.query.kind {
+            MediaKind::Movie => "movie",
+            MediaKind::Series { .. } => "tvsearch",
+        };
+        endpoint
+            .query_pairs_mut()
+            .append_pair("query", &request.session.query.title)
+            .append_pair("type", search_type)
+            .append_pair("indexerIds", "-2")
+            .append_pair("limit", &CANDIDATE_LIMIT.to_string())
+            .append_pair("offset", "0");
+        let response = self
+            .client
+            .get(endpoint)
+            .header("X-Api-Key", self.config.api_key.expose_secret())
+            .send()
+            .await
+            .map_err(|_| ProwlarrError::Transport)?;
+        let status = response.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(ProwlarrError::Unauthorized);
+        }
+        let body = read_capped(response, MAX_SEARCH_RESPONSE_BYTES)
+            .await
+            .ok_or(ProwlarrError::ProviderResponse { status })?;
+        if !status.is_success() {
+            return if provider_reports_all_indexers_unavailable(&body) {
+                Err(ProwlarrError::TemporarilyUnavailable)
+            } else {
+                Err(ProwlarrError::ProviderResponse { status })
+            };
+        }
+        let raw: Vec<serde_json::Value> = serde_json::from_slice(&body)
+            .map_err(|_| ProwlarrError::ProviderResponse { status })?;
+        Ok(raw
+            .into_iter()
+            .filter_map(|release| serde_json::from_value::<RawRelease>(release).ok())
+            .filter(|release| release.protocol == "torrent")
+            .filter_map(|release| ProwlarrResult::from_raw(release, &request.session.query))
+            .collect())
+    }
+
+    async fn recheck_indexers(&self) {
+        let Ok(endpoint) = self.config.base_url.join("api/v1/indexer/testall") else {
+            return;
+        };
+        let _ = self
+            .client
+            .post(endpoint)
+            .header("X-Api-Key", self.config.api_key.expose_secret())
+            .send()
+            .await;
     }
 
     pub async fn episode_available(
@@ -735,6 +780,26 @@ pub(crate) async fn read_capped(response: reqwest::Response, cap: usize) -> Opti
         body.extend_from_slice(&chunk);
     }
     Some(body)
+}
+
+fn provider_reports_all_indexers_unavailable(body: &[u8]) -> bool {
+    fn contains_message(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Array(values) => values.iter().any(contains_message),
+            serde_json::Value::Object(fields) => {
+                fields
+                    .get("errorMessage")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(ALL_INDEXERS_UNAVAILABLE_MESSAGE)
+                    || fields.values().any(contains_message)
+            }
+            _ => false,
+        }
+    }
+
+    serde_json::from_slice(body)
+        .ok()
+        .is_some_and(|value| contains_message(&value))
 }
 
 fn same_origin(left: &Url, right: &Url) -> bool {

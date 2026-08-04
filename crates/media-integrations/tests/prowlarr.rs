@@ -1,4 +1,10 @@
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use media_integrations::prowlarr::{
     EpisodeAvailabilityQuery, MediaQuery, ProwlarrClient, ProwlarrConfig, ProwlarrErrorCode,
@@ -21,6 +27,18 @@ fn config(server: &MockServer) -> ProwlarrConfig {
         Duration::from_secs(2),
     )
     .unwrap()
+}
+
+fn fast_retry_config(server: &MockServer) -> ProwlarrConfig {
+    config(server).with_unavailable_retry_delay(Duration::ZERO)
+}
+
+fn unavailable_response() -> ResponseTemplate {
+    ResponseTemplate::new(400).set_body_json(serde_json::json!([{
+        "propertyName": "",
+        "errorMessage": "Search failed due to all selected indexers being unavailable",
+        "severity": "error"
+    }]))
 }
 
 fn releases() -> serde_json::Value {
@@ -228,6 +246,76 @@ async fn exact_episode_probe_distinguishes_empty_results_from_provider_failure()
     let broken = EpisodeAvailabilityQuery::new(vec!["Broken Show".to_owned()], 3, 5).unwrap();
     let error = client.episode_available(&broken).await.unwrap_err();
     assert_eq!(error.code(), ProwlarrErrorCode::ProviderResponse);
+}
+
+#[tokio::test]
+async fn search_rechecks_indexers_once_and_recovers_from_temporary_unavailability() {
+    let server = MockServer::start().await;
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let response_attempts = Arc::clone(&attempts);
+    Mock::given(method("GET"))
+        .and(path("/api/v1/search"))
+        .respond_with(move |_: &wiremock::Request| {
+            if response_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                unavailable_response()
+            } else {
+                ResponseTemplate::new(200).set_body_json(releases())
+            }
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/indexer/testall"))
+        .and(header("x-api-key", "prowlarr-secret"))
+        .respond_with(ResponseTemplate::new(202))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let request = SearchPageRequest::new(
+        SearchSession::new("retry", MediaQuery::series("Example Show", 2)).unwrap(),
+        0,
+    )
+    .unwrap();
+    let page = ProwlarrClient::new(fast_retry_config(&server))
+        .unwrap()
+        .search(request)
+        .await
+        .unwrap();
+
+    assert!(!page.results.is_empty());
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn search_reports_temporary_unavailability_after_one_retry() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/search"))
+        .respond_with(unavailable_response())
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/indexer/testall"))
+        .respond_with(ResponseTemplate::new(202))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let request = SearchPageRequest::new(
+        SearchSession::new("unavailable", MediaQuery::series("Hacks", 1)).unwrap(),
+        0,
+    )
+    .unwrap();
+    let error = ProwlarrClient::new(fast_retry_config(&server))
+        .unwrap()
+        .search(request)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), ProwlarrErrorCode::TemporarilyUnavailable);
 }
 
 #[tokio::test]

@@ -1334,6 +1334,7 @@ fn search_error_code(error: crate::SearchError) -> &'static str {
         crate::SearchError::NotFound => "not_found",
         crate::SearchError::Conflict => "conflict",
         crate::SearchError::Provider => "provider_failed",
+        crate::SearchError::ProviderUnavailable => "provider_unavailable",
         crate::SearchError::Infrastructure => "infrastructure_failed",
     }
 }
@@ -1349,6 +1350,9 @@ fn search_error(error: crate::SearchError) -> ErrorData {
         }
         crate::SearchError::Conflict => {
             ErrorData::invalid_request("search operation conflicts with current state", None)
+        }
+        crate::SearchError::ProviderUnavailable => {
+            ErrorData::internal_error("media provider is temporarily unavailable", None)
         }
         crate::SearchError::Provider | crate::SearchError::Infrastructure => {
             ErrorData::internal_error("media search failed", None)
