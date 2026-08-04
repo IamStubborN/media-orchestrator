@@ -99,6 +99,7 @@ impl fmt::Debug for TmdbConfig {
     }
 }
 
+#[derive(Clone)]
 pub struct TmdbClient {
     client: reqwest::Client,
     config: TmdbConfig,
@@ -149,6 +150,36 @@ impl TmdbClient {
             total_results: payload.total_results,
             results,
         })
+    }
+
+    pub async fn find(
+        &self,
+        query: &str,
+        media_type: TrendingMediaTypeDto,
+    ) -> Result<Option<TrendingItemDto>, TmdbError> {
+        if query.trim().is_empty() {
+            return Err(TmdbError::InvalidRequest);
+        }
+        let kind = match media_type {
+            TrendingMediaTypeDto::Movie => "movie",
+            TrendingMediaTypeDto::Tv => "tv",
+        };
+        let endpoint = self
+            .config
+            .base_url
+            .join(&format!("search/{kind}"))
+            .map_err(|_| TmdbError::Configuration)?;
+        let payload: TrendingResponse = self
+            .get_json(
+                endpoint,
+                &[("query", query.trim().to_owned()), ("page", "1".to_owned())],
+            )
+            .await?;
+        Ok(payload
+            .results
+            .into_iter()
+            .filter_map(|item| map_item_for_type(item, media_type))
+            .find(|item| tmdb_title_matches(query, item)))
     }
 
     pub async fn details(
@@ -225,6 +256,31 @@ impl TmdbClient {
             .await
             .map_err(|_| TmdbError::ProviderResponse)
     }
+}
+
+fn tmdb_title_matches(query: &str, item: &TrendingItemDto) -> bool {
+    let query = normalize_title(query);
+    normalize_title(&item.title) == query
+        || item
+            .original_title
+            .as_deref()
+            .is_some_and(|title| normalize_title(title) == query)
+}
+
+fn normalize_title(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character.to_lowercase().collect::<String>()
+            } else {
+                " ".to_owned()
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 impl fmt::Debug for TmdbClient {

@@ -615,6 +615,7 @@ fn release_episode_has_aired(episode: &ScheduledEpisode, now: OffsetDateTime) ->
 pub struct ConcreteSearchProvider {
     rezka: Option<tokio::sync::Mutex<crate::composition::PreparedRunnerSession>>,
     prowlarr: Option<media_integrations::prowlarr::ProwlarrClient>,
+    tmdb: Option<std::sync::Arc<media_integrations::tmdb::TmdbClient>>,
 }
 
 impl ConcreteSearchProvider {
@@ -626,7 +627,17 @@ impl ConcreteSearchProvider {
         Self {
             rezka: rezka.map(tokio::sync::Mutex::new),
             prowlarr,
+            tmdb: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_tmdb(
+        mut self,
+        tmdb: Option<std::sync::Arc<media_integrations::tmdb::TmdbClient>>,
+    ) -> Self {
+        self.tmdb = tmdb;
+        self
     }
 
     async fn search_rezka(
@@ -959,6 +970,19 @@ impl ConcreteSearchProvider {
                     SearchError::Provider
                 }
             })?;
+        let thumbnail_url = if let Some(tmdb) = &self.tmdb {
+            let media_type = match request.media_kind {
+                Some(MediaKindDto::Series) => media_contract::TrendingMediaTypeDto::Tv,
+                _ => media_contract::TrendingMediaTypeDto::Movie,
+            };
+            tmdb.find(&request.query, media_type)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|item| item.poster_url)
+        } else {
+            None
+        };
         let provider_continuation = page
             .continuation
             .as_ref()
@@ -980,9 +1004,14 @@ impl ConcreteSearchProvider {
                 let public = SearchResultDto::Prowlarr {
                     result_id,
                     title: result.title.clone(),
+                    thumbnail_url: thumbnail_url.clone(),
+                    website_url: result.website_url,
                     indexer: result.indexer,
                     size_bytes: result.size_bytes,
                     seeders: result.seeders,
+                    leechers: result.leechers,
+                    published_at: result.published_at,
+                    age_days: result.age_days,
                     release_group: result.release_group,
                     ranking: media_contract::ProwlarrRankingDto {
                         exact_title: result.ranking.exact_title,

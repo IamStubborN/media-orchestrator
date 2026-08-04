@@ -29,9 +29,14 @@ fn search_contract_is_versioned_paginated_and_safe() {
             .map(|index| SearchResultDto::Prowlarr {
                 result_id: format!("result-{index}"),
                 title: format!("Movie {index}"),
+                thumbnail_url: None,
+                website_url: None,
                 indexer: Some("Indexer".to_owned()),
                 size_bytes: 1_000 + index,
                 seeders: 20,
+                leechers: 0,
+                published_at: None,
+                age_days: None,
                 release_group: Some("GROUP".to_owned()),
                 ranking: ProwlarrRankingDto {
                     exact_title: true,

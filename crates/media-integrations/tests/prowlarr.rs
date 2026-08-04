@@ -51,6 +51,10 @@ fn releases() -> serde_json::Value {
             "title": "Example Show S02 1080p DUB HEVC-GROUP",
             "size": 2000,
             "seeders": 10,
+            "leechers": 3,
+            "age": 7,
+            "publishDate": "2026-07-28T12:00:00Z",
+            "infoUrl": "https://tracker.example/topic/11",
             "protocol": "torrent",
             "infoHash": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
             "magnetUrl": "magnet:?xt=urn:btih:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
@@ -463,13 +467,23 @@ async fn series_search_sends_exact_five_item_page_and_ranks_valid_results() {
     assert_eq!(page.session, session);
     assert_eq!(page.offset, 0);
     assert_eq!(page.results.len(), 4, "non-torrent results are excluded");
-    assert_eq!(page.results[0].identity.indexer_id, 3);
-    assert_eq!(page.results[0].identity.guid, "indexer-guid-a");
+    assert_eq!(page.results[0].identity.indexer_id, 7);
+    assert_eq!(page.results[0].identity.guid, "indexer-guid-b");
+    assert_eq!(page.results[0].leechers, 3);
+    assert_eq!(page.results[0].age_days, Some(7));
+    assert_eq!(
+        page.results[0].published_at.as_deref(),
+        Some("2026-07-28T12:00:00Z")
+    );
+    assert_eq!(
+        page.results[0].website_url.as_deref(),
+        Some("https://tracker.example/topic/11")
+    );
     assert_eq!(
         page.results[0].source.info_hash.as_deref(),
-        Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        Some("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
     );
-    assert_eq!(page.results[1].identity.guid, "indexer-guid-b");
+    assert_eq!(page.results[1].identity.guid, "indexer-guid-a");
     assert_eq!(page.results[3].identity.guid, "wrong-season");
     let debug = format!("{page:?}");
     assert!(!debug.contains("never-print-provider-key"));
@@ -876,7 +890,7 @@ async fn provider_over_return_is_truncated_to_five_ranked_results() {
                 "indexerId": 1,
                 "title": format!("Movie 1080p release-{id}"),
                 "size": 1000 + id,
-                "seeders": id,
+                "seeders": id + 1,
                 "protocol": "torrent",
                 "infoHash": format!("{id:040x}"),
                 "magnetUrl": format!("magnet:?xt=urn:btih:{id:040x}")
@@ -914,7 +928,7 @@ async fn later_pages_are_sliced_locally_from_the_full_ranked_result_set() {
                 "indexerId": 1,
                 "title": format!("Movie 1080p release-{id}"),
                 "size": 1000 + id,
-                "seeders": id,
+                "seeders": id + 1,
                 "protocol": "torrent",
                 "infoHash": format!("{id:040x}"),
                 "magnetUrl": format!("magnet:?xt=urn:btih:{id:040x}")
@@ -940,6 +954,78 @@ async fn later_pages_are_sliced_locally_from_the_full_ranked_result_set() {
     assert_eq!(page.results.len(), 1);
     assert_eq!(page.results[0].identity.guid, "guid-0");
     assert!(page.continuation.is_none());
+}
+
+#[tokio::test]
+async fn default_ranking_prefers_russian_1080p_web_dl_sdr_and_deduplicates() {
+    let server = MockServer::start().await;
+    let releases = serde_json::json!([
+        {
+            "id": 1,
+            "guid": "preferred",
+            "indexerId": 1,
+            "title": "Example Show S01 1080p WEB-DL RUS SDR",
+            "size": 4_000,
+            "seeders": 5,
+            "age": 2,
+            "protocol": "torrent",
+            "infoHash": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        },
+        {
+            "id": 2,
+            "guid": "duplicate",
+            "indexerId": 2,
+            "title": "Example Show S01 1080p WEB-DL RUS SDR duplicate",
+            "size": 4_000,
+            "seeders": 3,
+            "age": 3,
+            "protocol": "torrent",
+            "magnetUrl": "magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&tr=https://tracker.example/announce"
+        },
+        {
+            "id": 3,
+            "guid": "english-4k",
+            "indexerId": 1,
+            "title": "Example Show S01 2160p WEB-DL ENG HDR10",
+            "size": 8_000,
+            "seeders": 100,
+            "age": 1,
+            "protocol": "torrent",
+            "infoHash": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+        },
+        {
+            "id": 4,
+            "guid": "no-seeders",
+            "indexerId": 1,
+            "title": "Example Show S01 1080p WEB-DL RUS SDR",
+            "size": 4_000,
+            "seeders": 0,
+            "age": 0,
+            "protocol": "torrent",
+            "infoHash": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
+        }
+    ]);
+    Mock::given(method("GET"))
+        .and(path("/api/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(releases))
+        .mount(&server)
+        .await;
+
+    let session =
+        SearchSession::new("default-ranking", MediaQuery::series("Example Show", 1)).unwrap();
+    let page = ProwlarrClient::new(config(&server))
+        .unwrap()
+        .search(SearchPageRequest::new(session, 0).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        page.results
+            .iter()
+            .map(|result| result.identity.guid.as_str())
+            .collect::<Vec<_>>(),
+        vec!["preferred", "english-4k"]
+    );
 }
 
 #[tokio::test]

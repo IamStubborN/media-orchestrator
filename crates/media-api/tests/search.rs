@@ -170,9 +170,14 @@ fn page(source: ProviderDto, continuation: Option<&str>) -> SearchPageDto {
         results: vec![SearchResultDto::Prowlarr {
             result_id: "result-1".to_owned(),
             title: "Movie".to_owned(),
+            thumbnail_url: None,
+            website_url: None,
             indexer: None,
             size_bytes: 100,
             seeders: 3,
+            leechers: 0,
+            published_at: None,
+            age_days: None,
             release_group: None,
             ranking: media_contract::ProwlarrRankingDto {
                 exact_title: true,

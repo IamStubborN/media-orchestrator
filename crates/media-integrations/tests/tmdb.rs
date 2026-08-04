@@ -97,6 +97,51 @@ async fn maps_weekly_trending_and_limits_output_to_ten_items() {
 }
 
 #[tokio::test]
+async fn finds_first_matching_title_for_a_release_poster() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/3/search/tv"))
+        .and(query_param("api_key", "test-key"))
+        .and(query_param("language", "ru-RU"))
+        .and(query_param("query", "One Piece"))
+        .and(query_param("page", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "page": 1,
+            "total_pages": 1,
+            "total_results": 2,
+            "results": [{
+                "id": 999,
+                "name": "One Piece Live Event",
+                "original_name": "One Piece Live Event",
+                "first_air_date": "2026-01-01",
+                "poster_path": "/wrong.jpg"
+            }, {
+                "id": 37854,
+                "name": "Ван-Пис",
+                "original_name": "One Piece",
+                "first_air_date": "1999-10-20",
+                "poster_path": "/one-piece.jpg"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let item = TmdbClient::new(config(&server))
+        .unwrap()
+        .find("One Piece", TrendingMediaTypeDto::Tv)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(item.tmdb_id, 37854);
+    assert_eq!(item.title, "Ван-Пис");
+    assert_eq!(
+        item.poster_url.as_deref(),
+        Some("https://image.tmdb.org/t/p/w780/one-piece.jpg")
+    );
+}
+
+#[tokio::test]
 async fn classifies_tmdb_authentication_failure() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

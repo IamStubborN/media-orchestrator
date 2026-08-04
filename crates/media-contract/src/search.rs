@@ -138,9 +138,19 @@ pub enum SearchResultDto {
         result_id: String,
         title: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        thumbnail_url: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        website_url: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         indexer: Option<String>,
         size_bytes: u64,
         seeders: i32,
+        #[serde(default)]
+        leechers: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        published_at: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        age_days: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         release_group: Option<String>,
         ranking: ProwlarrRankingDto,

@@ -611,9 +611,14 @@ fn prowlarr_result(index: usize) -> ProviderResult {
         SearchResultDto::Prowlarr {
             result_id: format!("torrent-{index}"),
             title: format!("Release {index}"),
+            thumbnail_url: None,
+            website_url: None,
             indexer: Some("Mock".to_owned()),
             size_bytes: 1000 + index as u64,
             seeders: 10,
+            leechers: 0,
+            published_at: None,
+            age_days: None,
             release_group: None,
             ranking: ProwlarrRankingDto {
                 exact_title: true,

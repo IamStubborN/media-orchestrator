@@ -943,7 +943,23 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
         ));
         let identity = Arc::new(media_storage::SeaOrmIdentityStore::new(database.clone()));
         let rezka_tracking_enabled = rezka.is_some();
-        let provider = Arc::new(ConcreteSearchProvider::new(rezka, prowlarr));
+        let search_tmdb = config
+            .tmdb()
+            .map(|config| {
+                let config = media_integrations::tmdb::TmdbConfig::new(
+                    config.base_url().clone(),
+                    config.api_key().clone(),
+                    config.language(),
+                    Duration::from_secs(15),
+                )
+                .map_err(|_| ServiceError::Bootstrap)?;
+                media_integrations::tmdb::TmdbClient::new(config)
+                    .map(Arc::new)
+                    .map_err(|_| ServiceError::Bootstrap)
+            })
+            .transpose()?;
+        let provider =
+            Arc::new(ConcreteSearchProvider::new(rezka, prowlarr).with_tmdb(search_tmdb));
         if rezka_tracking_enabled {
             let downloads = Arc::new(
                 crate::search::TrackedEpisodeDownloader::new(

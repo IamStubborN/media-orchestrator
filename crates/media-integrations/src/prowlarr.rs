@@ -329,6 +329,10 @@ pub struct ProwlarrResult {
     pub title: String,
     pub size_bytes: u64,
     pub seeders: i32,
+    pub leechers: i32,
+    pub published_at: Option<String>,
+    pub age_days: Option<u32>,
+    pub website_url: Option<String>,
     pub release_group: Option<String>,
     pub source: ReleaseSource,
     pub ranking: RankingScore,
@@ -370,6 +374,10 @@ impl ProwlarrClient {
         };
 
         results.sort_by_key(ranking_key);
+        let mut seen_releases = HashSet::new();
+        results.retain(|result| {
+            release_deduplication_key(result).is_none_or(|key| seen_releases.insert(key))
+        });
         let total_results = results.len();
         let results = results
             .into_iter()
@@ -447,6 +455,7 @@ impl ProwlarrClient {
             .into_iter()
             .filter_map(|release| serde_json::from_value::<RawRelease>(release).ok())
             .filter(|release| release.protocol == "torrent")
+            .filter(|release| release.seeders.is_none_or(|seeders| seeders > 0))
             .filter_map(|release| ProwlarrResult::from_raw(release, &request.session.query))
             .collect())
     }
@@ -908,6 +917,10 @@ struct RawRelease {
     #[serde(default)]
     size: u64,
     seeders: Option<i32>,
+    leechers: Option<i32>,
+    age: Option<u32>,
+    publish_date: Option<String>,
+    info_url: Option<String>,
     protocol: String,
     info_hash: Option<String>,
     magnet_url: Option<String>,
@@ -932,6 +945,7 @@ impl ProwlarrResult {
             .unwrap_or_else(|| stable_result_id(&guid));
         let title = raw.title?;
         let seeders = raw.seeders.unwrap_or_default().max(0);
+        let leechers = raw.leechers.unwrap_or_default().max(0);
         let normalized_title = normalize(&title);
         let normalized_query = normalize(&query.title);
         let exact_title = normalized_title == normalized_query
@@ -950,8 +964,16 @@ impl ProwlarrResult {
                     })
             }
         };
-        let quality_preference = preference(&normalized_title, &query.preferred_qualities);
-        let language_preference = preference(&normalized_title, &query.preferred_languages);
+        let quality_preference = if query.preferred_qualities.is_empty() {
+            default_quality_preference(&normalized_title)
+        } else {
+            preference(&normalized_title, &query.preferred_qualities)
+        };
+        let language_preference = if query.preferred_languages.is_empty() {
+            default_language_preference(&normalized_title)
+        } else {
+            preference(&normalized_title, &query.preferred_languages)
+        };
         let codec_preference = preference(&normalized_title, &query.preferred_codecs);
         let release_group_preference = query
             .preferred_release_groups
@@ -973,6 +995,10 @@ impl ProwlarrResult {
             title,
             size_bytes: raw.size,
             seeders,
+            leechers,
+            published_at: raw.publish_date,
+            age_days: raw.age,
+            website_url: raw.info_url,
             release_group: raw.sub_group,
             source: ReleaseSource {
                 info_hash: raw.info_hash,
@@ -1003,31 +1029,150 @@ fn stable_result_id(guid: &str) -> i32 {
 struct RankingKey {
     exact_title: Reverse<bool>,
     exact_season: Reverse<bool>,
-    quality_preference: Reverse<usize>,
     language_preference: Reverse<usize>,
+    quality_preference: Reverse<usize>,
+    source_preference: Reverse<usize>,
+    hdr_preference: Reverse<usize>,
     seeders: Reverse<i32>,
-    size_bytes: Reverse<u64>,
+    age_days: u32,
     codec_preference: Reverse<usize>,
     release_group_preference: Reverse<usize>,
+    size_bytes: Reverse<u64>,
     indexer_id: i32,
     guid: String,
     result_id: i32,
 }
 
 fn ranking_key(result: &ProwlarrResult) -> RankingKey {
+    let normalized_title = normalize(&result.title);
     RankingKey {
         exact_title: Reverse(result.ranking.exact_title),
         exact_season: Reverse(result.ranking.exact_season),
-        quality_preference: Reverse(result.ranking.quality_preference),
         language_preference: Reverse(result.ranking.language_preference),
+        quality_preference: Reverse(result.ranking.quality_preference),
+        source_preference: Reverse(default_source_preference(&normalized_title)),
+        hdr_preference: Reverse(default_hdr_preference(&normalized_title)),
         seeders: Reverse(result.ranking.seeders),
-        size_bytes: Reverse(result.ranking.size_bytes),
+        age_days: result.age_days.unwrap_or(u32::MAX),
         codec_preference: Reverse(result.ranking.codec_preference),
         release_group_preference: Reverse(result.ranking.release_group_preference),
+        size_bytes: Reverse(result.ranking.size_bytes),
         indexer_id: result.identity.indexer_id,
         guid: result.identity.guid.clone(),
         result_id: result.identity.result_id,
     }
+}
+
+fn release_deduplication_key(result: &ProwlarrResult) -> Option<String> {
+    if let Some(info_hash) = result.source.info_hash.as_deref() {
+        return Some(format!("btih:{}", info_hash.to_ascii_lowercase()));
+    }
+    if let Some(magnet_url) = result.source.magnet_url.as_deref()
+        && let Some(info_hash) = magnet_info_hash(magnet_url)
+    {
+        return Some(format!("btih:{info_hash}"));
+    }
+    result
+        .source
+        .download_url
+        .as_deref()
+        .map(|url| format!("url:{url}"))
+}
+
+fn magnet_info_hash(value: &str) -> Option<String> {
+    Url::parse(value)
+        .ok()?
+        .query_pairs()
+        .find_map(|(name, value)| {
+            if !name.eq_ignore_ascii_case("xt") {
+                return None;
+            }
+            value
+                .strip_prefix("urn:btih:")
+                .or_else(|| value.strip_prefix("URN:BTIH:"))
+                .map(str::to_ascii_lowercase)
+        })
+}
+
+fn default_language_preference(title: &str) -> usize {
+    const RUSSIAN_MARKERS: [&str; 7] = [
+        "RUS",
+        "RUSSIAN",
+        "ITUNES",
+        "AMEDIA",
+        "LOSTFILM",
+        "NEWSTUDIO",
+        "JASKIER",
+    ];
+    if RUSSIAN_MARKERS
+        .iter()
+        .any(|marker| contains_token(title, marker))
+    {
+        3
+    } else if contains_token(title, "MULTI") {
+        2
+    } else if contains_token(title, "ENG") || contains_token(title, "ENGLISH") {
+        1
+    } else {
+        0
+    }
+}
+
+fn default_quality_preference(title: &str) -> usize {
+    if contains_token(title, "1080P") || contains_token(title, "1080") {
+        5
+    } else if ["4K", "2160P", "2160", "UHD"]
+        .iter()
+        .any(|value| contains_token(title, value))
+    {
+        4
+    } else if contains_token(title, "720P") || contains_token(title, "720") {
+        3
+    } else if ["480P", "480", "SD"]
+        .iter()
+        .any(|value| contains_token(title, value))
+    {
+        2
+    } else {
+        0
+    }
+}
+
+fn default_source_preference(title: &str) -> usize {
+    if contains_phrase(title, "WEB DL") || contains_token(title, "WEBDL") {
+        6
+    } else if contains_token(title, "WEBRIP") || contains_phrase(title, "WEB RIP") {
+        5
+    } else if contains_token(title, "HDTV") {
+        4
+    } else if contains_token(title, "REMUX") {
+        3
+    } else if contains_token(title, "BLURAY") || contains_phrase(title, "BLU RAY") {
+        2
+    } else if contains_token(title, "DVD") {
+        1
+    } else {
+        0
+    }
+}
+
+fn default_hdr_preference(title: &str) -> usize {
+    if contains_token(title, "DV") || contains_phrase(title, "DOLBY VISION") {
+        1
+    } else if contains_phrase(title, "HDR10 PLUS") {
+        2
+    } else if contains_token(title, "HDR") || contains_token(title, "HDR10") {
+        3
+    } else {
+        4
+    }
+}
+
+fn contains_phrase(title: &str, phrase: &str) -> bool {
+    title == phrase
+        || title.starts_with(&format!("{phrase} "))
+        || title.ends_with(&format!(" {phrase}"))
+        || title.contains(&format!(" {phrase} "))
 }
 
 fn normalize(value: &str) -> String {
@@ -1055,7 +1200,9 @@ fn preference(title: &str, preferences: &[String]) -> usize {
 
 fn contains_token(title: &str, token: &str) -> bool {
     let token = normalize(token);
-    title
-        .split_whitespace()
-        .any(|part| part == token || part.contains(&token))
+    if token.contains(' ') {
+        contains_phrase(title, &token)
+    } else {
+        title.split_whitespace().any(|part| part == token)
+    }
 }
