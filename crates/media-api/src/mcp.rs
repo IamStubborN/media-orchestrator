@@ -20,6 +20,7 @@ use rmcp::{
     transport::{StreamableHttpServerConfig, StreamableHttpService},
 };
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::{ApiState, convert};
 
@@ -182,6 +183,8 @@ fn default_source() -> String {
 struct LimitInput {
     #[serde(default = "default_limit")]
     limit: u16,
+    #[schemars(description = "Optional Plex rating key to enrich with TMDB card metadata")]
+    rating_key: Option<u64>,
 }
 fn default_limit() -> u16 {
     10
@@ -872,13 +875,14 @@ impl MediaAdminMcp {
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, ErrorData> {
         let actor = actor_from_parts(&parts)?;
-        result_json(
-            self.state
-                .admin()
-                .plex_recent(&actor, input.limit)
-                .await
-                .map_err(admin_error)?,
-        )
+        let mut value = self
+            .state
+            .admin()
+            .plex_recent(&actor, input.limit)
+            .await
+            .map_err(admin_error)?;
+        enrich_recent_card(&self.state, &actor, &mut value, input.rating_key).await;
+        result_json(value)
     }
 
     #[tool(
@@ -1305,6 +1309,102 @@ fn result_json<T: serde::Serialize>(value: T) -> Result<CallToolResult, ErrorDat
         value => serde_json::json!({ "value": value }),
     };
     Ok(CallToolResult::structured(structured))
+}
+
+async fn enrich_recent_card(
+    state: &ApiState,
+    actor: &Actor,
+    payload: &mut Value,
+    requested_rating_key: Option<u64>,
+) {
+    let Some(items) = payload
+        .pointer("/MediaContainer/Metadata")
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    let Some(index) = requested_rating_key
+        .and_then(|rating_key| {
+            items
+                .iter()
+                .position(|item| plex_rating_key(item) == Some(rating_key))
+        })
+        .or_else(|| (!items.is_empty()).then_some(0))
+    else {
+        return;
+    };
+
+    let item = items[index].clone();
+    let media_type = if item.get("type").and_then(Value::as_str) == Some("movie") {
+        TrendingMediaTypeDto::Movie
+    } else {
+        TrendingMediaTypeDto::Tv
+    };
+    let tmdb_id = match media_type {
+        TrendingMediaTypeDto::Movie => plex_tmdb_id(&item),
+        TrendingMediaTypeDto::Tv => {
+            let parent_key = item
+                .get("grandparentRatingKey")
+                .or_else(|| item.get("parentRatingKey"))
+                .and_then(parse_u64_value);
+            if let Some(parent_key) = parent_key {
+                state
+                    .admin()
+                    .plex_item(actor, parent_key)
+                    .await
+                    .ok()
+                    .and_then(|parent| plex_metadata(&parent).first().and_then(plex_tmdb_id))
+                    .or_else(|| plex_tmdb_id(&item))
+            } else {
+                plex_tmdb_id(&item)
+            }
+        }
+    };
+    let Some(tmdb_id) = tmdb_id else {
+        return;
+    };
+    let Ok(details) = state.media_details().details(tmdb_id, media_type).await else {
+        return;
+    };
+    let Ok(Value::Object(details)) = serde_json::to_value(details) else {
+        return;
+    };
+    let Some(item) = payload
+        .pointer_mut("/MediaContainer/Metadata")
+        .and_then(Value::as_array_mut)
+        .and_then(|items| items.get_mut(index))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    item.extend(details);
+}
+
+fn plex_metadata(payload: &Value) -> &[Value] {
+    payload
+        .pointer("/MediaContainer/Metadata")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+}
+
+fn plex_rating_key(item: &Value) -> Option<u64> {
+    item.get("ratingKey").and_then(parse_u64_value)
+}
+
+fn plex_tmdb_id(item: &Value) -> Option<u64> {
+    item.get("Guid")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|guid| guid.get("id").and_then(Value::as_str))
+        .find_map(|guid| guid.strip_prefix("tmdb://")?.parse().ok())
+}
+
+fn parse_u64_value(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
 }
 
 fn admin_error(error: crate::MediaAdminError) -> ErrorData {

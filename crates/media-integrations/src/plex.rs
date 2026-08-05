@@ -289,7 +289,8 @@ impl PlexClient {
             })?;
         endpoint
             .query_pairs_mut()
-            .append_pair("X-Plex-Container-Size", &limit.to_string());
+            .append_pair("X-Plex-Container-Size", &limit.to_string())
+            .append_pair("includeGuids", "1");
         self.get_json(endpoint).await
     }
 
