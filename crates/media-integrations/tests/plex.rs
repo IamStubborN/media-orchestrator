@@ -69,6 +69,36 @@ async fn library_summary_returns_only_configured_sections_with_bounded_requests(
 }
 
 #[tokio::test]
+async fn library_items_use_bounded_plex_pagination_and_include_guids() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/library/sections/7/all"))
+        .and(header("x-plex-token", "plex-secret"))
+        .and(query_param("X-Plex-Container-Start", "20"))
+        .and(query_param("X-Plex-Container-Size", "10"))
+        .and(query_param("includeGuids", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "MediaContainer": {
+                "size": 1,
+                "totalSize": 31,
+                "Metadata": [{"ratingKey": "321", "title": "Example", "type": "show"}]
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let result = PlexClient::new(config(&server))
+        .unwrap()
+        .admin_library_items(7, 20, 10)
+        .await
+        .unwrap();
+
+    assert_eq!(result["MediaContainer"]["totalSize"], 31);
+    assert_eq!(result["MediaContainer"]["Metadata"][0]["ratingKey"], "321");
+}
+
+#[tokio::test]
 async fn targeted_scan_and_exact_episode_verification_use_read_only_requests() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

@@ -27,6 +27,13 @@ pub trait MediaAdminService: Send + Sync {
     ) -> Result<Value, MediaAdminError>;
     async fn plex_recent(&self, actor: &Actor, limit: u16) -> Result<Value, MediaAdminError>;
     async fn plex_library_summary(&self, actor: &Actor) -> Result<Value, MediaAdminError>;
+    async fn plex_library_items(
+        &self,
+        actor: &Actor,
+        section_key: u32,
+        start: u32,
+        limit: u16,
+    ) -> Result<Value, MediaAdminError>;
     async fn plex_now_playing(&self, actor: &Actor) -> Result<Value, MediaAdminError>;
     async fn plex_item(&self, actor: &Actor, rating_key: u64) -> Result<Value, MediaAdminError>;
     async fn plex_refresh(&self, actor: &Actor, section_key: u32)
@@ -75,6 +82,15 @@ impl MediaAdminService for UnavailableMediaAdminService {
         Err(MediaAdminError::Unavailable)
     }
     async fn plex_library_summary(&self, _: &Actor) -> Result<Value, MediaAdminError> {
+        Err(MediaAdminError::Unavailable)
+    }
+    async fn plex_library_items(
+        &self,
+        _: &Actor,
+        _: u32,
+        _: u32,
+        _: u16,
+    ) -> Result<Value, MediaAdminError> {
         Err(MediaAdminError::Unavailable)
     }
     async fn plex_now_playing(&self, _: &Actor) -> Result<Value, MediaAdminError> {

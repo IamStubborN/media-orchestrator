@@ -198,6 +198,17 @@ struct PlexSearchInput {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct PlexLibraryInput {
+    section_key: u32,
+    #[serde(default)]
+    start: u32,
+    #[serde(default = "default_limit")]
+    limit: u16,
+    #[schemars(description = "Optional Plex rating key to enrich with TMDB card metadata")]
+    rating_key: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct RatingKeyInput {
     rating_key: u64,
 }
@@ -910,6 +921,28 @@ impl MediaAdminMcp {
                 .await
                 .map_err(admin_error)?,
         )
+    }
+
+    #[tool(
+        name = "plex_library_items",
+        description = "List one configured Plex library section. Read-only.",
+        output_schema = object_output_schema(),
+        annotations(title = "List Plex library items", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn plex_library_items(
+        &self,
+        Parameters(input): Parameters<PlexLibraryInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = actor_from_parts(&parts)?;
+        let mut value = self
+            .state
+            .admin()
+            .plex_library_items(&actor, input.section_key, input.start, input.limit)
+            .await
+            .map_err(admin_error)?;
+        enrich_recent_card(&self.state, &actor, &mut value, input.rating_key).await;
+        result_json(value)
     }
 
     #[tool(

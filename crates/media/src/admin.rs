@@ -174,6 +174,22 @@ impl MediaAdminService for MediaAdminAdapter {
             .await
             .map_err(map_plex)
     }
+    async fn plex_library_items(
+        &self,
+        actor: &Actor,
+        section_key: u32,
+        start: u32,
+        limit: u16,
+    ) -> Result<Value, MediaAdminError> {
+        Self::user(actor)?;
+        if !self.plex_sections.contains(&section_key) {
+            return Err(MediaAdminError::Forbidden);
+        }
+        self.plex()?
+            .admin_library_items(section_key, start, limit)
+            .await
+            .map_err(map_plex)
+    }
     async fn plex_now_playing(&self, actor: &Actor) -> Result<Value, MediaAdminError> {
         Self::user(actor)?;
         self.plex()?.admin_now_playing().await.map_err(map_plex)

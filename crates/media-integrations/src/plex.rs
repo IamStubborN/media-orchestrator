@@ -360,6 +360,32 @@ impl PlexClient {
         Ok(serde_json::json!({ "sections": sections }))
     }
 
+    pub async fn admin_library_items(
+        &self,
+        section_key: u32,
+        start: u32,
+        limit: u16,
+    ) -> Result<Value, PlexError> {
+        if section_key == 0 || limit == 0 || limit > 50 {
+            return Err(PlexError::InvalidRequest {
+                message: "library item request is invalid",
+            });
+        }
+        let mut endpoint = self
+            .config
+            .base_url
+            .join(&format!("library/sections/{section_key}/all"))
+            .map_err(|_| PlexError::Configuration {
+                message: "library contents endpoint could not be constructed",
+            })?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("X-Plex-Container-Start", &start.to_string())
+            .append_pair("X-Plex-Container-Size", &limit.to_string())
+            .append_pair("includeGuids", "1");
+        self.get_json(endpoint).await
+    }
+
     pub async fn admin_now_playing(&self) -> Result<Value, PlexError> {
         let endpoint =
             self.config
