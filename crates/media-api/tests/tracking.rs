@@ -160,7 +160,7 @@ fn app() -> axum::Router {
 }
 
 fn create_body() -> &'static str {
-    r#"{"provider":"rezka","title":"Ongoing Show","translation":"Studio Dub","known_episodes":[{"season":1,"episode":4}],"scope":"family","series_ongoing":true}"#
+    r#"{"provider":"rezka","title":"Ongoing Show","translation":"Studio Dub","known_episodes":[{"season":1,"episode":4}],"scope":"family","series_ongoing":true,"release_identity":{"source":"tvmaze","source_id":77}}"#
 }
 
 fn download_body() -> &'static str {
@@ -187,6 +187,8 @@ async fn authenticated_owner_can_add_list_and_other_family_user_can_remove() {
         serde_json::from_slice(&to_bytes(created.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(value["scope"], "family");
     assert_eq!(value["state"], "active");
+    assert_eq!(value["release_identity"]["source"], "tvmaze");
+    assert_eq!(value["release_identity"]["source_id"], 77);
     assert!(value.get("owner_id").is_none());
     assert!(value.get("auto_download").is_none());
     let id = value["id"].as_str().unwrap();

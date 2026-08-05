@@ -32,6 +32,7 @@ mod m20260727_000031_remove_older_season_backfill;
 mod m20260727_000032_tracking_availability_candidates;
 mod m20260729_000033_tracking_controls;
 mod m20260731_000034_notification_transfer_details;
+mod m20260805_000035_tracking_release_identity;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseTransaction;
@@ -76,6 +77,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260727_000032_tracking_availability_candidates::Migration),
             Box::new(m20260729_000033_tracking_controls::Migration),
             Box::new(m20260731_000034_notification_transfer_details::Migration),
+            Box::new(m20260805_000035_tracking_release_identity::Migration),
         ]
     }
 }

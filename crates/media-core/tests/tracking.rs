@@ -106,6 +106,7 @@ fn command(scope: TrackingScope) -> NewTrackingCommand {
         known_episodes: vec![EpisodeSnapshot::new(1, 1).unwrap()],
         scope,
         series_ongoing: true,
+        release_identity: None,
         download: None,
     }
 }

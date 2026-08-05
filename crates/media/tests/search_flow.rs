@@ -92,7 +92,9 @@ async fn tracking_discovery_uses_the_selected_rezka_translation_snapshot() {
     );
 }
 
-struct FakeReleaseProvider;
+struct FakeReleaseProvider {
+    expected_source_id: Option<u64>,
+}
 
 #[async_trait::async_trait]
 impl ReleaseMetadataPort for FakeReleaseProvider {
@@ -101,6 +103,7 @@ impl ReleaseMetadataPort for FakeReleaseProvider {
         query: &ReleaseQuery,
     ) -> Result<ReleaseMetadataResult, ReleaseQueryError> {
         assert_eq!(query.title, "Sugar");
+        assert_eq!(query.source_id, self.expected_source_id);
         Ok(ReleaseMetadataResult::Matched {
             source: "tvmaze".to_owned(),
             fetched_at: "2026-07-13T14:00:00Z".to_owned(),
@@ -145,7 +148,9 @@ async fn calendar_tracking_is_independent_of_download_providers() {
     });
     let discovery = media::search::ProviderEpisodeDiscovery::with_release(
         provider,
-        Arc::new(FakeReleaseProvider),
+        Arc::new(FakeReleaseProvider {
+            expected_source_id: None,
+        }),
     );
     let tracking = TrackingSubscription::rehydrate(
         TrackingId::new(),
@@ -167,6 +172,33 @@ async fn calendar_tracking_is_independent_of_download_providers() {
             .episodes(),
         vec![media_core::EpisodeSnapshot::new(1, 1).unwrap()].as_slice()
     );
+}
+
+#[tokio::test]
+async fn calendar_tracking_uses_persisted_release_identity() {
+    let provider = Arc::new(FakeProvider {
+        pages: Mutex::new(HashMap::new()),
+    });
+    let discovery = media::search::ProviderEpisodeDiscovery::with_release(
+        provider,
+        Arc::new(FakeReleaseProvider {
+            expected_source_id: Some(7),
+        }),
+    );
+    let tracking = TrackingSubscription::rehydrate_with_identity(
+        TrackingId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        "Sugar".to_owned(),
+        "release-calendar".to_owned(),
+        vec![media_core::EpisodeSnapshot::new(1, 1).unwrap()],
+        TrackingScope::Personal,
+        Some(media_core::ReleaseIdentity::new(media_core::ReleaseSource::Tvmaze, 7).unwrap()),
+        None,
+    )
+    .unwrap();
+
+    discovery.available_episodes(&tracking).await.unwrap();
 }
 
 #[tokio::test]

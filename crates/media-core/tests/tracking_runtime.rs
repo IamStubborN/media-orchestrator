@@ -132,6 +132,7 @@ fn tracking() -> TrackingSubscription {
                 .collect(),
             scope: TrackingScope::Personal,
             series_ongoing: true,
+            release_identity: None,
             download: None,
         },
     )
@@ -153,6 +154,7 @@ fn download_tracking() -> TrackingSubscription {
             ],
             scope: TrackingScope::Personal,
             series_ongoing: true,
+            release_identity: None,
             download: Some(TrackingDownload::new("42".to_owned(), 19, 2).unwrap()),
         },
     )
@@ -263,6 +265,7 @@ fn missing_episode_remains_eligible_after_a_later_episode_is_known() {
                 ],
                 scope: TrackingScope::Personal,
                 series_ongoing: true,
+                release_identity: None,
                 download: None,
             },
         )
@@ -314,6 +317,7 @@ fn scheduler_does_not_backfill_seasons_older_than_the_tracked_season() {
                 ],
                 scope: TrackingScope::Personal,
                 series_ongoing: true,
+                release_identity: None,
                 download: None,
             },
         )
@@ -374,6 +378,7 @@ fn scheduler_ignores_historical_gaps_but_rechecks_pending_future_episode() {
                 ],
                 scope: TrackingScope::Personal,
                 series_ongoing: true,
+                release_identity: None,
                 download: None,
             },
         )

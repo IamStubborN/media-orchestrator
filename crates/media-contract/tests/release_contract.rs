@@ -35,6 +35,17 @@ fn release_query_rejects_unknown_fields() {
 }
 
 #[test]
+fn release_query_preserves_exact_source_identity() {
+    let request: ReleaseQueryRequest = serde_json::from_value(serde_json::json!({
+        "title": "Lucky",
+        "source_id": 81228
+    }))
+    .expect("source identity should deserialize");
+
+    assert_eq!(request.source_id, Some(81228));
+}
+
+#[test]
 fn release_enums_use_stable_snake_case_values() {
     assert_eq!(
         serde_json::to_value(ReleasePrecisionDto::Date).unwrap(),

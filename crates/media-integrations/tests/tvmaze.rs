@@ -117,6 +117,47 @@ async fn matched_show_reports_counts_next_episode_and_full_schedule() {
     }
 }
 
+#[tokio::test]
+async fn source_id_fetches_exact_show_without_searching_by_title() {
+    let server = MockServer::start().await;
+    Mock::given(path("/search/shows"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/shows/77"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": 77,
+            "name": "Lucky",
+            "premiered": "2026-01-01",
+            "status": "Running"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(path("/shows/77/episodes"))
+        .and(query_param("specials", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let query = ReleaseQuery::new("Везунчик", None, None)
+        .unwrap()
+        .with_source_id(77)
+        .unwrap();
+    let result = client(&server, 0).query(&query).await.unwrap();
+
+    match result {
+        ReleaseMetadataResult::Matched { show, .. } => {
+            assert_eq!(show.source_id, 77);
+            assert_eq!(show.title, "Lucky");
+        }
+        _ => panic!("expected exact match"),
+    }
+}
+
 #[derive(Clone)]
 struct TransientThenOk(Arc<AtomicUsize>);
 

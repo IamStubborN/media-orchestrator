@@ -94,6 +94,14 @@ impl TvmazeClient {
         self.get_json(self.client.get(endpoint)).await
     }
 
+    async fn show(&self, show_id: u64) -> Result<ShowDto, TvmazeError> {
+        let endpoint = self
+            .base_url
+            .join(&format!("shows/{show_id}"))
+            .map_err(|_| TvmazeError::Configuration)?;
+        self.get_json(self.client.get(endpoint)).await
+    }
+
     async fn episodes(&self, show_id: u64) -> Result<Vec<EpisodeDto>, TvmazeError> {
         let mut endpoint = self
             .base_url
@@ -139,34 +147,41 @@ impl ReleaseMetadataPort for TvmazeClient {
         let fetched_at = fetched
             .format(&Rfc3339)
             .map_err(|_| ReleaseQueryError::Provider)?;
-        let mut results = self
-            .search(&query.title)
-            .await
-            .map_err(|_| ReleaseQueryError::Provider)?;
-        if let Some(original_title) = query.original_title.as_deref()
-            && !original_title.eq_ignore_ascii_case(&query.title)
-        {
-            results.extend(
-                self.search(original_title)
-                    .await
-                    .map_err(|_| ReleaseQueryError::Provider)?,
-            );
-        }
-        let mut seen = HashSet::new();
-        let candidates = results
-            .into_iter()
-            .filter(|result| seen.insert(result.show.id))
-            .map(|result| result.show.into_candidate(fetched.date()))
-            .collect::<Vec<_>>();
+        let show = if let Some(source_id) = query.source_id {
+            self.show(source_id)
+                .await
+                .map_err(|_| ReleaseQueryError::Provider)?
+                .into_candidate(fetched.date())
+        } else {
+            let mut results = self
+                .search(&query.title)
+                .await
+                .map_err(|_| ReleaseQueryError::Provider)?;
+            if let Some(original_title) = query.original_title.as_deref()
+                && !original_title.eq_ignore_ascii_case(&query.title)
+            {
+                results.extend(
+                    self.search(original_title)
+                        .await
+                        .map_err(|_| ReleaseQueryError::Provider)?,
+                );
+            }
+            let mut seen = HashSet::new();
+            let candidates = results
+                .into_iter()
+                .filter(|result| seen.insert(result.show.id))
+                .map(|result| result.show.into_candidate(fetched.date()))
+                .collect::<Vec<_>>();
 
-        let Some(selected) = select_release_candidate(query, &candidates) else {
-            return Ok(ReleaseMetadataResult::ChoiceNeeded {
-                source: "tvmaze".to_owned(),
-                fetched_at,
-                candidates,
-            });
+            let Some(selected) = select_release_candidate(query, &candidates) else {
+                return Ok(ReleaseMetadataResult::ChoiceNeeded {
+                    source: "tvmaze".to_owned(),
+                    fetched_at,
+                    candidates,
+                });
+            };
+            candidates[selected].clone()
         };
-        let show = candidates[selected].clone();
         let lifecycle = show.lifecycle;
         let episodes = self
             .episodes(show.source_id)

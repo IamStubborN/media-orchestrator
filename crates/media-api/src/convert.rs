@@ -4,14 +4,15 @@ use media_contract::{
     ProviderDto, PublicId, QueueStatusDto, ReleaseCandidateDto, ReleaseLifecycleDto,
     ReleasePrecisionDto, ReleaseQueryResponse, RunnerEventDto, RunnerEventRequest,
     RunnerLifecycleStateDto, ScheduledEpisodeDto, TrackingCheckStatusDto, TrackingDto,
-    TrackingScopeDto, TrackingStateDto, TransferKindDto, TransferProgressDto,
+    TrackingReleaseIdentityDto, TrackingReleaseSourceDto, TrackingScopeDto, TrackingStateDto,
+    TransferKindDto, TransferProgressDto,
 };
 use media_core::{
     CheckpointValue, EpisodeSnapshot, Job, JobDetail, JobEvent, JobEventId,
     JobEventValidationError, JobLease, JobState, NeedsActionReason, NewJobCommand,
-    NewTrackingCommand, NotifyScope, Provider, QueueStatus, ReleaseCandidate, ReleaseLifecycle,
-    ReleaseMetadataResult, ReleasePrecision, ScheduledEpisode, TrackingDownloadPatch,
-    TrackingScope, TrackingSubscription,
+    NewTrackingCommand, NotifyScope, Provider, QueueStatus, ReleaseCandidate, ReleaseIdentity,
+    ReleaseLifecycle, ReleaseMetadataResult, ReleasePrecision, ReleaseSource, ScheduledEpisode,
+    TrackingDownloadPatch, TrackingScope, TrackingSubscription,
 };
 use time::format_description::well_known::Rfc3339;
 
@@ -124,6 +125,18 @@ pub(crate) fn new_tracking_command(
             TrackingScopeDto::Family => TrackingScope::Family,
         },
         series_ongoing: request.series_ongoing,
+        release_identity: request
+            .release_identity
+            .map(|identity| {
+                ReleaseIdentity::new(
+                    match identity.source {
+                        TrackingReleaseSourceDto::Tvmaze => ReleaseSource::Tvmaze,
+                    },
+                    identity.source_id,
+                )
+                .map_err(|_| ())
+            })
+            .transpose()?,
         download: request
             .download
             .map(|download| {
@@ -189,6 +202,14 @@ pub(crate) fn tracking(value: &TrackingSubscription) -> TrackingDto {
             .last_checked_at()
             .map(|timestamp| timestamp.to_string()),
         next_check_at: value.next_check_at().to_string(),
+        release_identity: value
+            .release_identity()
+            .map(|identity| TrackingReleaseIdentityDto {
+                source: match identity.source() {
+                    ReleaseSource::Tvmaze => TrackingReleaseSourceDto::Tvmaze,
+                },
+                source_id: identity.source_id(),
+            }),
         download: value
             .download()
             .map(|download| media_contract::TrackingDownloadDto {

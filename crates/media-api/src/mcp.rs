@@ -5,8 +5,8 @@ use media_contract::{
     AlternativeSearchRequest, ContinueSearchRequest, CreateTrackingRequest, EpisodeSnapshotDto,
     ExecutionSelectionDto, MediaKindDto, PatchTrackingRequest, ProviderDto, ReleaseQueryRequest,
     ResolveEpisodeMappingRequest, SearchScopeDto, SelectResultRequest, StartSearchRequest,
-    TrackingDownloadDto, TrackingListDto, TrackingScopeDto, TrendingCategoryDto,
-    TrendingMediaTypeDto,
+    TrackingDownloadDto, TrackingListDto, TrackingReleaseIdentityDto, TrackingReleaseSourceDto,
+    TrackingScopeDto, TrendingCategoryDto, TrendingMediaTypeDto,
 };
 use media_core::{
     Actor, ApplicationError, EpisodeSnapshot, JobId, ReleaseQuery, ReleaseQueryError,
@@ -65,6 +65,7 @@ struct ReleaseInput {
     title: String,
     original_title: Option<String>,
     year: Option<i32>,
+    source_id: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -114,6 +115,18 @@ struct TrackingDownloadInput {
     season: u32,
 }
 
+#[derive(Debug, Copy, Clone, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum TrackingReleaseSourceInput {
+    Tvmaze,
+}
+
+#[derive(Debug, Copy, Clone, Deserialize, schemars::JsonSchema)]
+struct TrackingReleaseIdentityInput {
+    source: TrackingReleaseSourceInput,
+    source_id: u64,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct TrackingCreateInput {
     #[serde(default = "default_tracking_provider")]
@@ -125,6 +138,7 @@ struct TrackingCreateInput {
     scope: String,
     #[serde(default = "default_true")]
     series_ongoing: bool,
+    release_identity: Option<TrackingReleaseIdentityInput>,
     download: Option<TrackingDownloadInput>,
 }
 
@@ -443,6 +457,14 @@ impl MediaAdminMcp {
             known_episodes: input.known_episodes.into_iter().map(episode_dto).collect(),
             scope,
             series_ongoing: input.series_ongoing,
+            release_identity: input
+                .release_identity
+                .map(|identity| TrackingReleaseIdentityDto {
+                    source: match identity.source {
+                        TrackingReleaseSourceInput::Tvmaze => TrackingReleaseSourceDto::Tvmaze,
+                    },
+                    source_id: identity.source_id,
+                }),
             download: input.download.map(tracking_download_dto),
         };
         let operation = stable_payload_operation_key("tracking-create", &request)?;
@@ -678,9 +700,15 @@ impl MediaAdminMcp {
             title: input.title,
             original_title: input.original_title,
             year: input.year,
+            source_id: input.source_id,
         };
-        let query = ReleaseQuery::new(request.title, request.original_title, request.year)
+        let mut query = ReleaseQuery::new(request.title, request.original_title, request.year)
             .map_err(|_| ErrorData::invalid_params("release query is invalid", None))?;
+        if let Some(source_id) = request.source_id {
+            query = query
+                .with_source_id(source_id)
+                .map_err(|_| ErrorData::invalid_params("release query is invalid", None))?;
+        }
         let value = service.query(query).await.map_err(release_error)?;
         result_json(convert::release_result(value))
     }
@@ -1578,7 +1606,9 @@ fn search_error(error: crate::SearchError) -> ErrorData {
 
 fn release_error(error: ReleaseQueryError) -> ErrorData {
     match error {
-        ReleaseQueryError::EmptyTitle | ReleaseQueryError::EmptyOriginalTitle => {
+        ReleaseQueryError::EmptyTitle
+        | ReleaseQueryError::EmptyOriginalTitle
+        | ReleaseQueryError::ZeroSourceId => {
             ErrorData::invalid_params("release query is invalid", None)
         }
         ReleaseQueryError::Provider => ErrorData::internal_error("release provider failed", None),

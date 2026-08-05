@@ -50,8 +50,8 @@ pub use search::{
 };
 pub use tracking::{
     CreateTrackingRequest, EpisodeSnapshotDto, PatchTrackingRequest, SetTrackingBaselineRequest,
-    TrackingCheckStatusDto, TrackingDownloadDto, TrackingDto, TrackingListDto, TrackingScopeDto,
-    TrackingStateDto,
+    TrackingCheckStatusDto, TrackingDownloadDto, TrackingDto, TrackingListDto,
+    TrackingReleaseIdentityDto, TrackingReleaseSourceDto, TrackingScopeDto, TrackingStateDto,
 };
 pub use trending::{
     MediaDetailsDto, SimilarPageDto, TrendingCategoryDto, TrendingItemDto, TrendingMediaTypeDto,

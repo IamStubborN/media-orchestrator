@@ -42,6 +42,19 @@ pub struct TrackingDownloadDto {
     pub season: u32,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackingReleaseSourceDto {
+    Tvmaze,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackingReleaseIdentityDto {
+    pub source: TrackingReleaseSourceDto,
+    pub source_id: u64,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateTrackingRequest {
@@ -51,6 +64,8 @@ pub struct CreateTrackingRequest {
     pub known_episodes: Vec<EpisodeSnapshotDto>,
     pub scope: TrackingScopeDto,
     pub series_ongoing: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_identity: Option<TrackingReleaseIdentityDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download: Option<TrackingDownloadDto>,
 }
@@ -81,6 +96,8 @@ pub struct TrackingDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_checked_at: Option<String>,
     pub next_check_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_identity: Option<TrackingReleaseIdentityDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download: Option<TrackingDownloadDto>,
 }

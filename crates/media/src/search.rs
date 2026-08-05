@@ -577,8 +577,17 @@ impl ProviderEpisodeDiscovery {
         tracking: &TrackingSubscription,
     ) -> Result<EpisodeDiscovery, PortError> {
         let release = self.release.as_ref().ok_or(PortError::Infrastructure)?;
-        let query =
+        let mut query =
             ReleaseQuery::new(tracking.title(), None, None).map_err(|_| PortError::Conflict)?;
+        if let Some(identity) = tracking.release_identity() {
+            match identity.source() {
+                media_core::ReleaseSource::Tvmaze => {
+                    query = query
+                        .with_source_id(identity.source_id())
+                        .map_err(|_| PortError::Conflict)?;
+                }
+            }
+        }
         let result = release
             .query(&query)
             .await

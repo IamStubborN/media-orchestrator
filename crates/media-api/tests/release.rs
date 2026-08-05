@@ -62,7 +62,7 @@ async fn query_returns_explicit_choice_without_idempotency_or_job_creation() {
                 .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    r#"{"title":"Офис","original_title":"The Office","year":2005}"#,
+                    r#"{"title":"Офис","original_title":"The Office","year":2005,"source_id":42}"#,
                 ))
                 .unwrap(),
         )
@@ -77,5 +77,9 @@ async fn query_returns_explicit_choice_without_idempotency_or_job_creation() {
     assert_eq!(
         provider.query.lock().unwrap().as_ref().unwrap().year,
         Some(2005)
+    );
+    assert_eq!(
+        provider.query.lock().unwrap().as_ref().unwrap().source_id,
+        Some(42)
     );
 }

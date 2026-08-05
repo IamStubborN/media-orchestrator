@@ -8,8 +8,7 @@ use media_contract::{
     NotifyScopeDto, PatchTrackingRequest, ProviderDto, QueueStatusDto, ReleaseQueryRequest,
     ReleaseQueryResponse, ResolveEpisodeMappingRequest, SearchPageDto, SearchScopeDto,
     SelectResultRequest, SetTrackingBaselineRequest, SimilarPageDto, StartSearchRequest,
-    TrackingDownloadDto, TrackingDto, TrackingListDto, TrackingScopeDto, TrendingCategoryDto,
-    TrendingMediaTypeDto, TrendingPageDto,
+    TrackingDto, TrackingListDto, TrendingCategoryDto, TrendingMediaTypeDto, TrendingPageDto,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::de::DeserializeOwned;
@@ -185,26 +184,9 @@ impl MediaClient {
 
     pub async fn add_tracking(
         &self,
-        provider: ProviderDto,
-        title: String,
-        translation: String,
-        known_episodes: Vec<EpisodeSnapshotDto>,
-        scope: TrackingScopeDto,
-        download: Option<TrackingDownloadDto>,
+        request: CreateTrackingRequest,
     ) -> Result<TrackingDto, ClientError> {
-        self.post_idempotent(
-            "v1/tracking",
-            &CreateTrackingRequest {
-                provider,
-                title,
-                translation,
-                known_episodes,
-                scope,
-                series_ongoing: true,
-                download,
-            },
-        )
-        .await
+        self.post_idempotent("v1/tracking", &request).await
     }
 
     pub async fn search(&self, request: StartSearchRequest) -> Result<SearchPageDto, ClientError> {

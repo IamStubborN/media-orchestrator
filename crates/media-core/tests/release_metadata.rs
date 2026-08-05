@@ -89,3 +89,11 @@ fn sole_fuzzy_candidate_is_not_auto_selected() {
 
     assert_eq!(select_release_candidate(&query, &candidates), None);
 }
+
+#[test]
+fn source_id_builder_is_optional_and_rejects_zero() {
+    let query = ReleaseQuery::new("Lucky", None, None).unwrap();
+    assert_eq!(query.source_id, None);
+    assert!(query.clone().with_source_id(0).is_err());
+    assert_eq!(query.with_source_id(77).unwrap().source_id, Some(77));
+}

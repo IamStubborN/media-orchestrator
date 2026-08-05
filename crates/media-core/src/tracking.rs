@@ -271,6 +271,7 @@ pub struct NewTrackingCommand {
     pub known_episodes: Vec<EpisodeSnapshot>,
     pub scope: TrackingScope,
     pub series_ongoing: bool,
+    pub release_identity: Option<crate::ReleaseIdentity>,
     pub download: Option<TrackingDownload>,
 }
 
@@ -294,6 +295,7 @@ pub struct NewTrackingSubscription {
     translation: String,
     known_episodes: Vec<EpisodeSnapshot>,
     scope: TrackingScope,
+    release_identity: Option<crate::ReleaseIdentity>,
     download: Option<TrackingDownload>,
 }
 
@@ -306,6 +308,7 @@ pub struct TrackingSubscription {
     translation: String,
     known_episodes: Vec<EpisodeSnapshot>,
     scope: TrackingScope,
+    release_identity: Option<crate::ReleaseIdentity>,
     download: Option<TrackingDownload>,
     last_checked_at: Option<time::OffsetDateTime>,
     next_check_at: time::OffsetDateTime,
@@ -361,6 +364,7 @@ impl NewTrackingSubscription {
             translation: command.translation,
             known_episodes: command.known_episodes,
             scope: command.scope,
+            release_identity: command.release_identity,
             download: command.download,
         })
     }
@@ -376,6 +380,7 @@ impl NewTrackingSubscription {
             translation: self.translation,
             known_episodes: self.known_episodes,
             scope: self.scope,
+            release_identity: self.release_identity,
             download: self.download,
             last_checked_at: None,
             next_check_at: now,
@@ -412,6 +417,10 @@ impl NewTrackingSubscription {
         self.scope
     }
     #[must_use]
+    pub const fn release_identity(&self) -> Option<crate::ReleaseIdentity> {
+        self.release_identity
+    }
+    #[must_use]
     pub const fn download(&self) -> Option<&TrackingDownload> {
         self.download.as_ref()
     }
@@ -429,7 +438,7 @@ impl TrackingSubscription {
         scope: TrackingScope,
         download: Option<TrackingDownload>,
     ) -> Result<Self, TrackingValidationError> {
-        Self::rehydrate_with_check(
+        Self::rehydrate_with_identity(
             id,
             owner_id,
             provider,
@@ -437,6 +446,32 @@ impl TrackingSubscription {
             translation,
             known_episodes,
             scope,
+            None,
+            download,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn rehydrate_with_identity(
+        id: TrackingId,
+        owner_id: UserId,
+        provider: Provider,
+        title: String,
+        translation: String,
+        known_episodes: Vec<EpisodeSnapshot>,
+        scope: TrackingScope,
+        release_identity: Option<crate::ReleaseIdentity>,
+        download: Option<TrackingDownload>,
+    ) -> Result<Self, TrackingValidationError> {
+        Self::rehydrate_with_check_and_identity(
+            id,
+            owner_id,
+            provider,
+            title,
+            translation,
+            known_episodes,
+            scope,
+            release_identity,
             download,
             None,
             time::OffsetDateTime::now_utc(),
@@ -458,6 +493,37 @@ impl TrackingSubscription {
         next_check_at: time::OffsetDateTime,
         check_status: TrackingCheckStatus,
     ) -> Result<Self, TrackingValidationError> {
+        Self::rehydrate_with_check_and_identity(
+            id,
+            owner_id,
+            provider,
+            title,
+            translation,
+            known_episodes,
+            scope,
+            None,
+            download,
+            last_checked_at,
+            next_check_at,
+            check_status,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn rehydrate_with_check_and_identity(
+        id: TrackingId,
+        owner_id: UserId,
+        provider: Provider,
+        title: String,
+        translation: String,
+        known_episodes: Vec<EpisodeSnapshot>,
+        scope: TrackingScope,
+        release_identity: Option<crate::ReleaseIdentity>,
+        download: Option<TrackingDownload>,
+        last_checked_at: Option<time::OffsetDateTime>,
+        next_check_at: time::OffsetDateTime,
+        check_status: TrackingCheckStatus,
+    ) -> Result<Self, TrackingValidationError> {
         validate(&title, &translation, &known_episodes)?;
         validate_download(provider, &translation, download.as_ref())?;
         Ok(Self {
@@ -468,6 +534,7 @@ impl TrackingSubscription {
             translation,
             known_episodes,
             scope,
+            release_identity,
             download,
             last_checked_at,
             next_check_at,
@@ -502,6 +569,10 @@ impl TrackingSubscription {
     #[must_use]
     pub const fn scope(&self) -> TrackingScope {
         self.scope
+    }
+    #[must_use]
+    pub const fn release_identity(&self) -> Option<crate::ReleaseIdentity> {
+        self.release_identity
     }
     #[must_use]
     pub const fn download(&self) -> Option<&TrackingDownload> {

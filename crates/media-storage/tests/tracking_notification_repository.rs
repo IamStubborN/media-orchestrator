@@ -3,8 +3,8 @@ mod support;
 use media_core::{
     PRIMARY_USER_ID, EpisodeSnapshot, NewTrackingCommand, NewTrackingSubscription,
     NotificationContent, NotificationEventType, NotificationId, NotificationRecipient,
-    OperationKey, Provider, SourceChoiceAction, TrackingId, TrackingScope, TrackingStore,
-    SECONDARY_USER_ID,
+    OperationKey, Provider, ReleaseIdentity, ReleaseSource, SourceChoiceAction, TrackingId,
+    TrackingScope, TrackingStore, SECONDARY_USER_ID,
 };
 use media_storage::{SeaOrmNotificationOutbox, SeaOrmTrackingStore};
 use sea_orm::ConnectionTrait;
@@ -29,10 +29,47 @@ fn new_tracking(id: TrackingId, scope: TrackingScope) -> NewTrackingSubscription
             known_episodes: vec![EpisodeSnapshot::new(1, 4).unwrap()],
             scope,
             series_ongoing: true,
+            release_identity: None,
             download: None,
         },
     )
     .unwrap()
+}
+
+fn new_tracking_with_release_identity(id: TrackingId) -> NewTrackingSubscription {
+    NewTrackingSubscription::new(
+        id,
+        PRIMARY_USER_ID,
+        NewTrackingCommand {
+            provider: Provider::Rezka,
+            title: "Lucky".to_owned(),
+            translation: "release-calendar".to_owned(),
+            known_episodes: vec![EpisodeSnapshot::new(1, 4).unwrap()],
+            scope: TrackingScope::Personal,
+            series_ongoing: true,
+            release_identity: Some(ReleaseIdentity::new(ReleaseSource::Tvmaze, 77).unwrap()),
+            download: None,
+        },
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn tracking_release_identity_round_trips_through_repository() {
+    let test_db = TestDatabase::start_migrated().await;
+    let store = SeaOrmTrackingStore::new(test_db.connection().clone());
+    let created = store
+        .add(
+            operation_key(),
+            new_tracking_with_release_identity(TrackingId::new()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(created.release_identity().unwrap().source_id(), 77);
+    let listed = store.list_visible(PRIMARY_USER_ID).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].release_identity(), created.release_identity());
 }
 
 #[tokio::test]

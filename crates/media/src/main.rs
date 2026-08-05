@@ -101,6 +101,8 @@ struct ReleaseArgs {
     original_title: Option<String>,
     #[arg(long)]
     year: Option<i32>,
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    source_id: Option<u64>,
     #[arg(long)]
     json: bool,
 }
@@ -128,6 +130,10 @@ enum TrackingCommand {
         known_episodes: Vec<media_contract::EpisodeSnapshotDto>,
         #[arg(long, value_enum)]
         scope: TrackingScope,
+        #[arg(long, value_enum, requires = "release_source_id")]
+        release_source: Option<TrackingReleaseSource>,
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..), requires = "release_source")]
+        release_source_id: Option<u64>,
         #[arg(long, requires_all = ["translation", "translation_id", "season"])]
         provider_media_ref: Option<String>,
         #[arg(long, requires_all = ["provider_media_ref", "season"])]
@@ -288,6 +294,11 @@ impl From<MediaKind> for media_contract::MediaKindDto {
 enum TrackingScope {
     Personal,
     Family,
+}
+
+#[derive(Debug, Copy, Clone, ValueEnum)]
+enum TrackingReleaseSource {
+    Tvmaze,
 }
 
 impl From<TrackingScope> for media_contract::TrackingScopeDto {
@@ -504,6 +515,8 @@ async fn run_tracking(args: TrackingArgs) -> Result<(), RunError> {
             translation,
             known_episodes,
             scope,
+            release_source,
+            release_source_id,
             provider_media_ref,
             translation_id,
             season,
@@ -521,15 +534,27 @@ async fn run_tracking(args: TrackingArgs) -> Result<(), RunError> {
                 _ => return Err(ClientError::Configuration.into()),
             };
             let translation = translation.unwrap_or_else(|| "release-calendar".to_owned());
+            let release_identity = match (release_source, release_source_id) {
+                (Some(TrackingReleaseSource::Tvmaze), Some(source_id)) => {
+                    Some(media_contract::TrackingReleaseIdentityDto {
+                        source: media_contract::TrackingReleaseSourceDto::Tvmaze,
+                        source_id,
+                    })
+                }
+                (None, None) => None,
+                _ => return Err(ClientError::Configuration.into()),
+            };
             let output = client
-                .add_tracking(
-                    provider.into(),
+                .add_tracking(media_contract::CreateTrackingRequest {
+                    provider: provider.into(),
                     title,
                     translation,
                     known_episodes,
-                    scope.into(),
+                    scope: scope.into(),
+                    series_ongoing: true,
+                    release_identity,
                     download,
-                )
+                })
                 .await?;
             emit(&output, json, |value| {
                 render::tracking(value, Some("Added tracking"))
@@ -599,6 +624,7 @@ async fn run_release(args: ReleaseArgs) -> Result<(), RunError> {
             title: args.title,
             original_title: args.original_title,
             year: args.year,
+            source_id: args.source_id,
         })
         .await?;
     emit(&output, args.json, render::release);

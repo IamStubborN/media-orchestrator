@@ -33,18 +33,29 @@ async fn query(
                 .into_response();
         }
     };
-    let query = match ReleaseQuery::new(request.title, request.original_title, request.year) {
+    let mut query = match ReleaseQuery::new(request.title, request.original_title, request.year) {
         Ok(query) => query,
         Err(_) => {
             return ApiError::invalid_request(&request_id, "release query is invalid")
                 .into_response();
         }
     };
+    if let Some(source_id) = request.source_id {
+        query = match query.with_source_id(source_id) {
+            Ok(query) => query,
+            Err(_) => {
+                return ApiError::invalid_request(&request_id, "release query is invalid")
+                    .into_response();
+            }
+        };
+    }
     match service.query(query).await {
         Ok(result) => Json(convert::release_result(result)).into_response(),
-        Err(ReleaseQueryError::EmptyTitle | ReleaseQueryError::EmptyOriginalTitle) => {
-            ApiError::invalid_request(&request_id, "release query is invalid").into_response()
-        }
+        Err(
+            ReleaseQueryError::EmptyTitle
+            | ReleaseQueryError::EmptyOriginalTitle
+            | ReleaseQueryError::ZeroSourceId,
+        ) => ApiError::invalid_request(&request_id, "release query is invalid").into_response(),
         Err(ReleaseQueryError::Provider) => ApiError::internal(&request_id).into_response(),
     }
 }

@@ -15,11 +15,57 @@ pub enum ReleaseLifecycle {
     Unknown,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum ReleaseSource {
+    Tvmaze,
+}
+
+impl ReleaseSource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tvmaze => "tvmaze",
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct ReleaseIdentity {
+    source: ReleaseSource,
+    source_id: u64,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
+pub enum ReleaseIdentityError {
+    #[error("release source id must be greater than zero")]
+    ZeroSourceId,
+}
+
+impl ReleaseIdentity {
+    pub const fn new(source: ReleaseSource, source_id: u64) -> Result<Self, ReleaseIdentityError> {
+        if source_id == 0 {
+            return Err(ReleaseIdentityError::ZeroSourceId);
+        }
+        Ok(Self { source, source_id })
+    }
+
+    #[must_use]
+    pub const fn source(self) -> ReleaseSource {
+        self.source
+    }
+
+    #[must_use]
+    pub const fn source_id(self) -> u64 {
+        self.source_id
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ReleaseQuery {
     pub title: String,
     pub original_title: Option<String>,
     pub year: Option<i32>,
+    pub source_id: Option<u64>,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
@@ -28,6 +74,8 @@ pub enum ReleaseQueryError {
     EmptyTitle,
     #[error("original release title cannot be empty")]
     EmptyOriginalTitle,
+    #[error("release source id must be greater than zero")]
+    ZeroSourceId,
     #[error("release metadata provider failed")]
     Provider,
 }
@@ -52,7 +100,16 @@ impl ReleaseQuery {
             title,
             original_title,
             year,
+            source_id: None,
         })
+    }
+
+    pub fn with_source_id(mut self, source_id: u64) -> Result<Self, ReleaseQueryError> {
+        if source_id == 0 {
+            return Err(ReleaseQueryError::ZeroSourceId);
+        }
+        self.source_id = Some(source_id);
+        Ok(self)
     }
 }
 

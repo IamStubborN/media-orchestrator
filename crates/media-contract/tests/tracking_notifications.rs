@@ -15,10 +15,12 @@ fn tracking_create_request_has_strict_stable_shape_without_owner_or_download_fla
         "translation": "Studio Dub",
         "known_episodes": [{"season": 1, "episode": 4}],
         "scope": "family",
-        "series_ongoing": true
+        "series_ongoing": true,
+        "release_identity": {"source": "tvmaze", "source_id": 77}
     });
     let request: CreateTrackingRequest = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(request.scope, TrackingScopeDto::Family);
+    assert_eq!(request.release_identity.as_ref().unwrap().source_id, 77);
     assert_eq!(
         request.known_episodes,
         vec![EpisodeSnapshotDto {
@@ -35,6 +37,26 @@ fn tracking_create_request_has_strict_stable_shape_without_owner_or_download_fla
             .unwrap()
             .insert(forbidden.to_owned(), serde_json::json!(true));
         assert!(serde_json::from_value::<CreateTrackingRequest>(invalid).is_err());
+    }
+}
+
+#[test]
+fn tracking_release_identity_rejects_unknown_sources_and_fields() {
+    let base = serde_json::json!({
+        "provider": "rezka",
+        "title": "Ongoing Show",
+        "translation": "release-calendar",
+        "known_episodes": [{"season": 1, "episode": 4}],
+        "scope": "personal",
+        "series_ongoing": true
+    });
+    for identity in [
+        serde_json::json!({"source": "tmdb", "source_id": 77}),
+        serde_json::json!({"source": "tvmaze", "source_id": 77, "extra": true}),
+    ] {
+        let mut value = base.clone();
+        value["release_identity"] = identity;
+        assert!(serde_json::from_value::<CreateTrackingRequest>(value).is_err());
     }
 }
 
