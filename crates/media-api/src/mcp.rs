@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::{Router, http::request::Parts};
 use media_contract::{
     AlternativeSearchRequest, ContinueSearchRequest, CreateTrackingRequest, EpisodeSnapshotDto,
-    JobListDto, MediaKindDto, PatchTrackingRequest, ProviderDto, ReleaseQueryRequest,
+    ExecutionSelectionDto, MediaKindDto, PatchTrackingRequest, ProviderDto, ReleaseQueryRequest,
     ResolveEpisodeMappingRequest, SearchScopeDto, SelectResultRequest, StartSearchRequest,
     TrackingDownloadDto, TrackingListDto, TrackingScopeDto, TrendingCategoryDto,
     TrendingMediaTypeDto,
@@ -264,9 +264,13 @@ impl MediaAdminMcp {
             .list_jobs(&actor)
             .await
             .map_err(application_error)?;
-        result_json(JobListDto {
-            jobs: jobs.iter().map(convert::job).collect(),
-        })
+        let jobs = futures_util::future::join_all(jobs.iter().map(|job| async {
+            let value =
+                serde_json::to_value(convert::job(job)).expect("job DTOs serialize to JSON");
+            enrich_job_value(&self.state, job.result_ref(), value).await
+        }))
+        .await;
+        result_json(serde_json::json!({"jobs": jobs}))
     }
 
     #[tool(
@@ -288,7 +292,10 @@ impl MediaAdminMcp {
             .get_job_detail(&actor, job_id)
             .await
             .map_err(application_error)?;
-        result_json(convert::job_detail(&detail))
+        let result_ref = detail.job.result_ref().to_owned();
+        let value = serde_json::to_value(convert::job_detail(&detail))
+            .map_err(|_| ErrorData::internal_error("failed to serialize media job", None))?;
+        result_json(enrich_job_value(&self.state, &result_ref, value).await)
     }
 
     #[tool(
@@ -1405,6 +1412,78 @@ fn parse_u64_value(value: &Value) -> Option<u64> {
     value
         .as_u64()
         .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
+async fn enrich_job_value(state: &ApiState, result_ref: &str, mut value: Value) -> Value {
+    let Ok(selection) = state.search().execution_for(result_ref).await else {
+        return value;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return value;
+    };
+
+    match selection {
+        ExecutionSelectionDto::RezkaSessionRefresh { .. } => {}
+        ExecutionSelectionDto::Rezka {
+            media_kind,
+            translation,
+            season,
+            episode,
+            episodes,
+            release_year,
+            library_title,
+            title,
+            ..
+        } => {
+            object.insert("title".to_owned(), Value::String(title));
+            object.insert("media_kind".to_owned(), serde_json::json!(media_kind));
+            if let Some(translation) = translation {
+                object.insert("translation".to_owned(), Value::String(translation));
+            }
+            if let Some(release_year) = release_year {
+                object.insert("release_year".to_owned(), serde_json::json!(release_year));
+            }
+            if let Some(library_title) = library_title {
+                object.insert("library_title".to_owned(), Value::String(library_title));
+            }
+            let derived_season = season.or_else(|| {
+                let first = episodes.first()?.season;
+                episodes
+                    .iter()
+                    .all(|item| item.season == first)
+                    .then_some(first)
+            });
+            if let Some(season) = derived_season {
+                object.insert("season".to_owned(), serde_json::json!(season));
+            }
+            if let Some(episode) = episode {
+                object.insert("episode".to_owned(), serde_json::json!(episode));
+            }
+            if !episodes.is_empty() {
+                object.insert(
+                    "episode_count".to_owned(),
+                    serde_json::json!(episodes.len()),
+                );
+            }
+        }
+        ExecutionSelectionDto::Prowlarr {
+            media_kind,
+            season,
+            episode,
+            title,
+            ..
+        } => {
+            object.insert("title".to_owned(), Value::String(title));
+            object.insert("media_kind".to_owned(), serde_json::json!(media_kind));
+            if let Some(season) = season {
+                object.insert("season".to_owned(), serde_json::json!(season));
+            }
+            if let Some(episode) = episode {
+                object.insert("episode".to_owned(), serde_json::json!(episode));
+            }
+        }
+    }
+    value
 }
 
 fn admin_error(error: crate::MediaAdminError) -> ErrorData {

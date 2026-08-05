@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 async-trait.workspace = true
 axum.workspace = true
+futures-util.workspace = true
 http-body-util.workspace = true
 media-contract = { path = "../media-contract", version = "=0.1.0" }
 media-core = { path = "../media-core", version = "=0.1.0" }
@@ -21,7 +22,6 @@ tokio = { workspace = true, features = ["time"] }
 uuid.workspace = true
 
 [dev-dependencies]
-futures-util.workspace = true
 tokio.workspace = true
 tower.workspace = true
 
