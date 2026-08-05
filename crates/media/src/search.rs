@@ -1828,6 +1828,7 @@ fn execution(
                 media_kind: searched_kind.ok_or(SearchError::Infrastructure)?,
                 season,
                 episode,
+                library_title: series_title_hint.map(str::to_owned),
                 title: title.clone(),
             })
         }

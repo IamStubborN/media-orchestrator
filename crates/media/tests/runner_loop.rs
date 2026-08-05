@@ -272,6 +272,7 @@ fn lease() -> LeaseDto {
             media_kind: media_contract::MediaKindDto::Movie,
             season: None,
             episode: None,
+            library_title: Some("Movie".to_owned()),
             title: "Movie".to_owned(),
         }),
         completed_task_ordinals: Vec::new(),

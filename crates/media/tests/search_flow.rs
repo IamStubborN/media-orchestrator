@@ -938,8 +938,9 @@ async fn prowlarr_selection_preserves_a_single_episode_target() {
             media_kind: MediaKindDto::Series,
             season: Some(2),
             episode: Some(7),
+            library_title: Some(library_title),
             ..
-        }
+        } if library_title == "Example Show"
     ));
 }
 

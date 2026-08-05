@@ -270,6 +270,8 @@ pub enum ExecutionSelectionDto {
         season: Option<u16>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         episode: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library_title: Option<String>,
         title: String,
     },
 }

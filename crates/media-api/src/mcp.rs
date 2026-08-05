@@ -1470,11 +1470,15 @@ async fn enrich_job_value(state: &ApiState, result_ref: &str, mut value: Value) 
             media_kind,
             season,
             episode,
+            library_title,
             title,
             ..
         } => {
             object.insert("title".to_owned(), Value::String(title));
             object.insert("media_kind".to_owned(), serde_json::json!(media_kind));
+            if let Some(library_title) = library_title {
+                object.insert("library_title".to_owned(), Value::String(library_title));
+            }
             if let Some(season) = season {
                 object.insert("season".to_owned(), serde_json::json!(season));
             }

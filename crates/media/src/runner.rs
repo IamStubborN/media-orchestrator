@@ -572,6 +572,7 @@ impl MediaJobExecutor {
                 season,
                 episode,
                 title,
+                ..
             } => {
                 let request = TorrentExecution {
                     source_identity,

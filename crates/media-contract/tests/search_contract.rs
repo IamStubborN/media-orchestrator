@@ -198,6 +198,7 @@ fn runner_execution_payload_is_separate_from_public_search_results() {
         media_kind: MediaKindDto::Movie,
         season: None,
         episode: None,
+        library_title: Some("Example movie".to_owned()),
         title: "Exact Release".to_owned(),
     };
     let value = serde_json::to_value(execution).unwrap();
@@ -205,6 +206,7 @@ fn runner_execution_payload_is_separate_from_public_search_results() {
     assert_eq!(value["media_kind"], "movie");
     assert!(value.get("season").is_none());
     assert!(value.get("episode").is_none());
+    assert_eq!(value["library_title"], "Example movie");
     assert!(value["uri"].as_str().unwrap().starts_with("magnet:"));
 }
 
