@@ -31,6 +31,8 @@ pub enum RunnerError {
     SourceTransferTransient,
     #[error("source transfer was rejected")]
     SourceTransferRejected,
+    #[error("Rezka translation requires premium access")]
+    RezkaPremiumRequired,
     #[error("runner task stage failed")]
     TaskStage {
         task_ordinal: u32,
@@ -46,6 +48,7 @@ pub enum RunnerFailureKind {
     SourceExpired,
     SourceTransferTransient,
     SourceTransferRejected,
+    RezkaPremiumRequired,
 }
 
 impl RunnerError {
@@ -58,6 +61,7 @@ impl RunnerError {
             Self::SourceExpired => (true, "stream_expired"),
             Self::SourceTransferTransient => (true, "source_transfer_transient"),
             Self::SourceTransferRejected => (false, "source_transfer_rejected"),
+            Self::RezkaPremiumRequired => (false, "rezka_premium_required"),
             Self::TaskStage { failure, .. } => failure.stage_failure(),
         }
     }
@@ -73,6 +77,7 @@ impl RunnerError {
             Self::SourceExpired => RunnerFailureKind::SourceExpired,
             Self::SourceTransferTransient => RunnerFailureKind::SourceTransferTransient,
             Self::SourceTransferRejected => RunnerFailureKind::SourceTransferRejected,
+            Self::RezkaPremiumRequired => RunnerFailureKind::RezkaPremiumRequired,
             _ => RunnerFailureKind::Execution,
         };
         Self::TaskStage {
@@ -103,6 +108,7 @@ impl RunnerFailureKind {
             Self::SourceExpired => (true, "stream_expired"),
             Self::SourceTransferTransient => (true, "source_transfer_transient"),
             Self::SourceTransferRejected => (false, "source_transfer_rejected"),
+            Self::RezkaPremiumRequired => (false, "rezka_premium_required"),
         }
     }
 }
@@ -694,7 +700,7 @@ impl MediaJobExecutor {
                 translation_id = translation_id.get(),
                 "refusing premium Rezka translation for a non-premium account"
             );
-            return Err(RunnerError::Execution);
+            return Err(RunnerError::RezkaPremiumRequired);
         }
         let translation = selection.translation().name().to_owned();
         let requests = match media_kind {
