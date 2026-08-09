@@ -73,6 +73,8 @@ pub struct RezkaTranslationDto {
     pub director: bool,
     pub camrip: bool,
     pub has_ads: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seasons: Vec<SeasonAvailabilityDto>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

@@ -165,6 +165,10 @@ fn rezka_series_exposes_translation_and_tracking_prompt_without_urls() {
             director: false,
             camrip: false,
             has_ads: false,
+            seasons: vec![media_contract::SeasonAvailabilityDto {
+                season: 1,
+                episodes: vec![1, 2],
+            }],
         }],
         availability: Some(media_contract::SeriesAvailabilityDto {
             lifecycle_status: media_contract::SeriesLifecycleStatusDto::Ongoing,
@@ -183,6 +187,10 @@ fn rezka_series_exposes_translation_and_tracking_prompt_without_urls() {
 
     let value = serde_json::to_value(result).unwrap();
     assert_eq!(value["translations"][0]["id"], 37);
+    assert_eq!(
+        value["translations"][0]["seasons"][0]["episodes"],
+        serde_json::json!([1, 2])
+    );
     assert_eq!(value["availability"]["incomplete"], true);
     assert_eq!(value["availability"]["lifecycle_status"], "ongoing");
     assert!(value["availability"]["tracking_prompt"].is_object());

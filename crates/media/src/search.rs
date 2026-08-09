@@ -66,11 +66,14 @@ impl ProviderResult {
                 .map(|translation| {
                     (
                         translation.id,
-                        availability
-                            .seasons
-                            .iter()
-                            .map(|season| (season.season, season.episodes.clone()))
-                            .collect(),
+                        (if translation.seasons.is_empty() {
+                            &availability.seasons
+                        } else {
+                            &translation.seasons
+                        })
+                        .iter()
+                        .map(|season| (season.season, season.episodes.clone()))
+                        .collect(),
                     )
                 })
                 .collect(),
@@ -763,7 +766,7 @@ impl ConcreteSearchProvider {
             {
                 continue;
             }
-            let translations = details
+            let mut translations = details
                 .translations()
                 .iter()
                 .filter(|translation| rezka_translation_available(translation.is_premium()))
@@ -774,6 +777,7 @@ impl ConcreteSearchProvider {
                     director: translation.is_director(),
                     camrip: translation.is_camrip(),
                     has_ads: translation.has_ads(),
+                    seasons: Vec::new(),
                 })
                 .collect::<Vec<_>>();
             let mut by_translation = BTreeMap::new();
@@ -820,7 +824,7 @@ impl ConcreteSearchProvider {
                                         .episodes()
                                         .iter()
                                         .map(|episode| episode.number())
-                                        .collect(),
+                                        .collect::<Vec<_>>(),
                                 )
                             })
                             .collect::<Vec<_>>(),
@@ -853,6 +857,22 @@ impl ConcreteSearchProvider {
                     );
                     continue 'entries;
                 }
+                translations.retain_mut(|translation| {
+                    let Some(seasons) = by_translation.get(&translation.id) else {
+                        return false;
+                    };
+                    translation.seasons = seasons
+                        .iter()
+                        .map(|(season, episodes)| media_contract::SeasonAvailabilityDto {
+                            season: *season,
+                            episodes: episodes.clone(),
+                        })
+                        .collect();
+                    translation
+                        .seasons
+                        .iter()
+                        .any(|season| !season.episodes.is_empty())
+                });
             }
             let union = union_availability(&by_translation);
             let availability = (media_kind == MediaKindDto::Series).then(|| {

@@ -45,6 +45,7 @@ async fn tracking_discovery_uses_the_selected_rezka_translation_snapshot() {
             director: false,
             camrip: false,
             has_ads: false,
+            seasons: vec![],
         }],
         availability: Some(SeriesAvailabilityDto {
             lifecycle_status: media_contract::SeriesLifecycleStatusDto::Ongoing,
@@ -218,6 +219,7 @@ async fn tracked_episode_download_creates_one_exact_rezka_episode_execution_for_
             director: false,
             camrip: false,
             has_ads: false,
+            seasons: vec![],
         }],
         availability: Some(SeriesAvailabilityDto {
             lifecycle_status: media_contract::SeriesLifecycleStatusDto::Ongoing,
@@ -1045,6 +1047,10 @@ async fn rezka_requires_explicit_translation_and_available_episode_without_fallb
                 director: false,
                 camrip: false,
                 has_ads: false,
+                seasons: vec![SeasonAvailabilityDto {
+                    season: 1,
+                    episodes: vec![1, 2],
+                }],
             },
             RezkaTranslationDto {
                 id: 38,
@@ -1053,6 +1059,7 @@ async fn rezka_requires_explicit_translation_and_available_episode_without_fallb
                 director: false,
                 camrip: false,
                 has_ads: false,
+                seasons: vec![],
             },
         ],
         availability: Some(SeriesAvailabilityDto {
