@@ -200,6 +200,7 @@ fn runner_execution_payload_is_separate_from_public_search_results() {
         episode: None,
         library_title: Some("Example movie".to_owned()),
         title: "Exact Release".to_owned(),
+        thumbnail_url: None,
     };
     let value = serde_json::to_value(execution).unwrap();
     assert_eq!(value["source"], "prowlarr");

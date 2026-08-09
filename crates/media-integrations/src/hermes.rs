@@ -207,6 +207,7 @@ fn media_webhook(notification: &MediaNotification) -> HermesMediaNotificationWeb
                     MediaNotificationOriginDto::TrackedEpisode
                 }
             }),
+            poster_url: media.poster_url().map(ToOwned::to_owned),
         },
         progress: notification
             .progress()

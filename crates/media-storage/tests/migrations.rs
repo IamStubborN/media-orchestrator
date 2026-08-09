@@ -315,8 +315,8 @@ async fn a_failed_migration_explicitly_rolls_back_partial_schema() {
     );
     assert_eq!(
         names.last().map(String::as_str),
-        Some("m20260727_000032_tracking_availability_candidates"),
-        "availability candidate storage must remain the latest schema change",
+        Some("m20260809_000036_notification_posters"),
+        "notification poster validation must remain the latest schema change",
     );
     for migration in migrations {
         assert_eq!(
@@ -510,6 +510,27 @@ async fn structured_notifications_migration_preserves_legacy_rows_and_enforces_v
     .await
     .expect("an absolute episode number may exceed the number of tasks in the job");
 
+    execute(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(
+             payload,
+             '{media,poster_url}',
+             '\"https://image.tmdb.org/t/p/w780/example.jpg\"'::jsonb
+         )
+         WHERE id = '00000000-0000-0000-0000-000000000997'",
+    )
+    .await
+    .expect("schema-v2 media notifications accept an HTTPS poster");
+    assert_rejected(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(payload, '{media,poster_url}', '\"http://example.test/poster.jpg\"'::jsonb)
+         WHERE id = '00000000-0000-0000-0000-000000000997'",
+        "notification_payload_check",
+    )
+    .await;
+
     assert_rejected(
         db,
         "UPDATE notification_outbox
@@ -621,7 +642,7 @@ async fn structured_notifications_migration_preserves_legacy_rows_and_enforces_v
     )
     .await;
 
-    Migrator::down(db, Some(9)).await.unwrap();
+    Migrator::down(db, Some(13)).await.unwrap();
 
     let retained_rows = query(
         db,
@@ -911,7 +932,7 @@ async fn detailed_notifications_migration_preserves_legacy_payloads_and_validate
     )
     .await;
 
-    Migrator::down(db, Some(6)).await.unwrap();
+    Migrator::down(db, Some(10)).await.unwrap();
 
     let normalized = query(
         db,

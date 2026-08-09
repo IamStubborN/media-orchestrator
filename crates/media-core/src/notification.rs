@@ -95,6 +95,7 @@ pub struct MediaNotificationMedia {
     season: Option<u32>,
     translation: Option<String>,
     origin: Option<MediaNotificationOrigin>,
+    poster_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -423,6 +424,7 @@ impl MediaNotificationMedia {
             season,
             translation,
             origin: None,
+            poster_url: None,
         })
     }
 
@@ -458,6 +460,15 @@ impl MediaNotificationMedia {
     pub fn with_origin(mut self, origin: MediaNotificationOrigin) -> Self {
         self.origin = Some(origin);
         self
+    }
+    #[must_use]
+    pub fn with_poster_url(mut self, poster_url: Option<String>) -> Self {
+        self.poster_url = poster_url;
+        self
+    }
+    #[must_use]
+    pub fn poster_url(&self) -> Option<&str> {
+        self.poster_url.as_deref()
     }
 }
 

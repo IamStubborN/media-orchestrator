@@ -125,6 +125,8 @@ pub struct MediaNotificationDto {
     pub translation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<MediaNotificationOriginDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poster_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

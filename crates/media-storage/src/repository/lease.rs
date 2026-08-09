@@ -728,6 +728,13 @@ async fn project_notification(
     if job.result_ref().starts_with("selection:tracking:") {
         media["origin"] = serde_json::json!("tracked-episode");
     }
+    if let Some(poster_url) = payload
+        .get("thumbnail_url")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| valid_poster_url(value))
+    {
+        media["poster_url"] = serde_json::json!(poster_url);
+    }
     let task_artifacts = load_task_artifacts(transaction, job.id(), &selected).await?;
     let result = aggregate_result(
         job.provider(),
@@ -752,6 +759,13 @@ async fn project_notification(
         result,
         actions,
     }))
+}
+
+fn valid_poster_url(value: &str) -> bool {
+    value.len() <= 2048
+        && value.strip_prefix("https://").is_some_and(|rest| {
+            !rest.is_empty() && !rest.starts_with('/') && !rest.contains(char::is_whitespace)
+        })
 }
 
 async fn insert_projected_notification(

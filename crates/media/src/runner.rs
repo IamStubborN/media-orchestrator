@@ -541,6 +541,7 @@ impl MediaJobExecutor {
                 title,
                 translation: _,
                 release_year: _,
+                thumbnail_url: _,
             } => {
                 if !ambiguous_episodes.is_empty() {
                     return Ok(ExecutionOutcome::NeedsActionIdentityAmbiguous);

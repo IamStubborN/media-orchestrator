@@ -176,6 +176,7 @@ fn hermes_media_notification_webhook_has_schema_version_two_shape() {
             season: Some(1),
             translation: Some("AniLibria".to_owned()),
             origin: None,
+            poster_url: None,
         },
         progress: Some(MediaNotificationProgressDto {
             completed_episodes: Some(7),

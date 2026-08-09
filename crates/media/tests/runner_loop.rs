@@ -274,6 +274,7 @@ fn lease() -> LeaseDto {
             episode: None,
             library_title: Some("Movie".to_owned()),
             title: "Movie".to_owned(),
+            thumbnail_url: None,
         }),
         completed_task_ordinals: Vec::new(),
         expires_at: "2026-07-13T12:00:00Z".to_owned(),

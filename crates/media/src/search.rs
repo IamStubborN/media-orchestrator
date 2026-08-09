@@ -1796,7 +1796,11 @@ fn execution(
 ) -> Result<ExecutionSelectionDto, SearchError> {
     match (&result.public, &result.private) {
         (
-            SearchResultDto::Prowlarr { title, .. },
+            SearchResultDto::Prowlarr {
+                title,
+                thumbnail_url,
+                ..
+            },
             PrivateResult::Prowlarr {
                 source_identity,
                 info_hash,
@@ -1840,6 +1844,7 @@ fn execution(
                 season,
                 episode,
                 library_title: series_title_hint.map(str::to_owned),
+                thumbnail_url: thumbnail_url.clone(),
                 title: title.clone(),
             })
         }
@@ -1849,6 +1854,7 @@ fn execution(
                 year,
                 media_kind,
                 translations,
+                thumbnail_url,
                 ..
             },
             PrivateResult::Rezka {
@@ -1957,6 +1963,7 @@ fn execution(
                     })
                     .flatten()
                     .map(str::to_owned),
+                thumbnail_url: thumbnail_url.clone(),
                 title: title.clone(),
             })
         }

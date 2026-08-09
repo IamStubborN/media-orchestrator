@@ -78,7 +78,10 @@ fn media_delivery() -> NotificationDelivery {
             Some(1),
             Some("AniLibria".to_owned()),
         )
-        .unwrap(),
+        .unwrap()
+        .with_poster_url(Some(
+            "https://image.tmdb.org/t/p/w780/example.jpg".to_owned(),
+        )),
         Some(
             MediaNotificationProgress::new(
                 Some(7),
@@ -308,7 +311,8 @@ async fn posts_exact_schema_v2_payload_with_generation_aware_identity() {
                 "kind": "series",
                 "provider": "rezka",
                 "season": 1,
-                "translation": "AniLibria"
+                "translation": "AniLibria",
+                "poster_url": "https://image.tmdb.org/t/p/w780/example.jpg"
             },
             "progress": {
                 "completed_episodes": 7,

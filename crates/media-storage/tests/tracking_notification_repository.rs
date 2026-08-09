@@ -167,7 +167,8 @@ async fn detailed_notification_payload_can_be_leased_without_losing_result_state
                         "provider":"rezka",
                         "season":2,
                         "translation":"AniLibria",
-                        "origin":"tracked-episode"
+                        "origin":"tracked-episode",
+                        "poster_url":"https://image.tmdb.org/t/p/w780/blades.jpg"
                     },
                     "progress":{
                         "completed_episodes":1,
@@ -228,6 +229,10 @@ async fn detailed_notification_payload_can_be_leased_without_losing_result_state
     assert_eq!(
         notification.media().origin(),
         Some(media_core::MediaNotificationOrigin::TrackedEpisode)
+    );
+    assert_eq!(
+        notification.media().poster_url(),
+        Some("https://image.tmdb.org/t/p/w780/blades.jpg")
     );
     let progress = notification.progress().unwrap();
     assert_eq!(progress.current_episode(), Some(8));

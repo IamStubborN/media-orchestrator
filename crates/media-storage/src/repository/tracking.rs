@@ -901,6 +901,10 @@ fn media_notification_from_payload(
         Some("tracked-episode") => Some(MediaNotificationOrigin::TrackedEpisode),
         _ => return Err(PortError::Infrastructure),
     };
+    let poster_url = media
+        .get("poster_url")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
     let mut media = MediaNotificationMedia::new(
         JobId::from_uuid(job_id),
         media_value("title")?.to_owned(),
@@ -919,6 +923,7 @@ fn media_notification_from_payload(
     if let Some(origin) = origin {
         media = media.with_origin(origin);
     }
+    media = media.with_poster_url(poster_url);
     let progress = payload
         .get("progress")
         .map(|progress| {

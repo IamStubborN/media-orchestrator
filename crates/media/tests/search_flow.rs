@@ -210,7 +210,7 @@ async fn tracked_episode_download_creates_one_exact_rezka_episode_execution_for_
         original_title: None,
         year: Some(2026),
         media_kind: MediaKindDto::Series,
-        thumbnail_url: None,
+        thumbnail_url: Some("https://image.tmdb.org/t/p/w780/blades.jpg".to_owned()),
         translations: vec![RezkaTranslationDto {
             id: 19,
             name: "Studio Dub".to_owned(),
@@ -282,8 +282,10 @@ async fn tracked_episode_download_creates_one_exact_rezka_episode_execution_for_
             season: Some(2),
             episode: Some(8),
             library_title: Some(library_title),
+            thumbnail_url: Some(thumbnail_url),
             ..
         } if library_title == "Blades of the Guardians S2"
+            && thumbnail_url == "https://image.tmdb.org/t/p/w780/blades.jpg"
     ));
 }
 
@@ -568,6 +570,7 @@ async fn ambiguous_episode_is_resolved_persisted_in_execution_and_requeued() {
                 }],
                 release_year: Some(2016),
                 library_title: None,
+                thumbnail_url: None,
                 title: "Separate OVA title".to_owned(),
             },
         )
@@ -720,6 +723,7 @@ async fn alternative_search_is_owner_scoped_and_uses_the_opposite_provider() {
                 ambiguous_episodes: Vec::new(),
                 release_year: Some(2026),
                 library_title: None,
+                thumbnail_url: None,
                 title: "Blades of the Guardians".to_owned(),
             },
         )
