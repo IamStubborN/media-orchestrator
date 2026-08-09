@@ -4,9 +4,9 @@ use axum::{Router, http::request::Parts};
 use media_contract::{
     AlternativeSearchRequest, ContinueSearchRequest, CreateTrackingRequest, EpisodeSnapshotDto,
     ExecutionSelectionDto, MediaKindDto, PatchTrackingRequest, ProviderDto, ReleaseQueryRequest,
-    ResolveEpisodeMappingRequest, SearchScopeDto, SelectResultRequest, StartSearchRequest,
-    TrackingDownloadDto, TrackingListDto, TrackingReleaseIdentityDto, TrackingReleaseSourceDto,
-    TrackingScopeDto, TrendingCategoryDto, TrendingMediaTypeDto,
+    ResolveEpisodeMappingRequest, RezkaSessionRefreshRequest, SearchScopeDto, SelectResultRequest,
+    StartSearchRequest, TrackingDownloadDto, TrackingListDto, TrackingReleaseIdentityDto,
+    TrackingReleaseSourceDto, TrackingScopeDto, TrendingCategoryDto, TrendingMediaTypeDto,
 };
 use media_core::{
     Actor, ApplicationError, EpisodeSnapshot, JobId, ReleaseQuery, ReleaseQueryError,
@@ -58,6 +58,12 @@ struct DownloadInput {
     translation_id: Option<u64>,
     season: Option<u32>,
     episode: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct RezkaSessionRefreshInput {
+    #[schemars(description = "One-time approved Vaultwarden credential request ID")]
+    credential_request_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -681,6 +687,34 @@ impl MediaAdminMcp {
     }
 
     #[tool(
+        name = "media_rezka_session_refresh",
+        description = "Queue a Rezka session refresh from one approved credential request. The credential is resolved and consumed only by download-runner and is never returned to the caller.",
+        output_schema = object_output_schema(),
+        annotations(title = "Refresh Rezka session", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn refresh_rezka_session(
+        &self,
+        Parameters(input): Parameters<RezkaSessionRefreshInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = actor_from_parts(&parts)?;
+        let owner = actor
+            .require_user()
+            .map_err(|_| ErrorData::invalid_request("operation is forbidden", None))?;
+        let request = RezkaSessionRefreshRequest {
+            credential_request_id: input.credential_request_id,
+        };
+        let operation = stable_payload_operation_key("rezka-session-refresh", &request)?;
+        let value = self
+            .state
+            .search()
+            .refresh_rezka_session(owner, operation, request)
+            .await
+            .map_err(search_error)?;
+        result_json(value)
+    }
+
+    #[tool(
         name = "media_release_schedule",
         description = "Query the release calendar for episode counts, lifecycle, schedule, and next episode. Read-only and never starts a download.",
         output_schema = object_output_schema(),
@@ -1016,7 +1050,7 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "plex_library_refresh",
-        description = "Ask Plex to rescan an allowlisted library section. Primary administrator only.",
+        description = "Ask Plex to rescan a configured library section.",
         output_schema = object_output_schema(),
         annotations(title = "Refresh Plex library", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
@@ -1079,7 +1113,7 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "qbittorrent_control",
-        description = "Pause, resume, or recheck a torrent. Primary administrator only; action must be pause, resume, or recheck.",
+        description = "Pause, resume, or recheck a torrent. Action must be pause, resume, or recheck.",
         output_schema = object_output_schema(),
         annotations(title = "Control torrent", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
@@ -1161,7 +1195,7 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_destructive_prepare",
-        description = "Prepare and preview an administrator-only destructive action. Supported actions: plex_delete, torrent_delete, file_quarantine. Does not execute it.",
+        description = "Prepare and preview a destructive action. Supported actions: plex_delete, torrent_delete, file_quarantine. Does not execute it.",
         output_schema = object_output_schema(),
         annotations(title = "Preview destructive media action", read_only_hint = true, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]

@@ -43,7 +43,7 @@ oxc_span = "=0.139.0"
 rand = "=0.8.6"
 quick-xml = "=0.41.0"
 reqwest = { version = "=0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
-rmcp = { version = "=3.1.0", default-features = false, features = ["macros", "server", "transport-streamable-http-server"] }
+rmcp = { version = "=3.1.2", default-features = false, features = ["macros", "server", "transport-streamable-http-server"] }
 scraper = { version = "=0.27.0", default-features = false }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
@@ -65,3 +65,11 @@ wiremock = "=0.6.5"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+# Keep workspace crates debuggable while avoiding full debug information for
+# the much larger third-party dependency graph during local builds and tests.
+[profile.dev.package."*"]
+debug = 0
+
+[profile.test.package."*"]
+debug = 0

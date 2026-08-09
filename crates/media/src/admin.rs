@@ -6,7 +6,7 @@ use std::{
 };
 
 use media_api::{MediaAdminError, MediaAdminService};
-use media_core::{PRIMARY_USER_ID, Actor, UserId};
+use media_core::{Actor, UserId};
 use media_integrations::{plex::PlexClient, qbittorrent::QbittorrentClient};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -57,14 +57,6 @@ impl MediaAdminAdapter {
 
     fn user(actor: &Actor) -> Result<UserId, MediaAdminError> {
         actor.require_user().map_err(|_| MediaAdminError::Forbidden)
-    }
-
-    fn administrator(actor: &Actor) -> Result<UserId, MediaAdminError> {
-        let user = Self::user(actor)?;
-        if user != PRIMARY_USER_ID {
-            return Err(MediaAdminError::Forbidden);
-        }
-        Ok(user)
     }
 
     fn plex(&self) -> Result<&PlexClient, MediaAdminError> {
@@ -203,7 +195,7 @@ impl MediaAdminService for MediaAdminAdapter {
         actor: &Actor,
         section_key: u32,
     ) -> Result<Value, MediaAdminError> {
-        Self::administrator(actor)?;
+        Self::user(actor)?;
         if !self.plex_sections.contains(&section_key) {
             return Err(MediaAdminError::Forbidden);
         }
@@ -242,7 +234,7 @@ impl MediaAdminService for MediaAdminAdapter {
         hash: &str,
         action: &str,
     ) -> Result<Value, MediaAdminError> {
-        Self::administrator(actor)?;
+        Self::user(actor)?;
         self.qbittorrent()?
             .admin_control(hash, action)
             .await
@@ -333,7 +325,7 @@ impl MediaAdminService for MediaAdminAdapter {
         target: &str,
         delete_files: bool,
     ) -> Result<Value, MediaAdminError> {
-        let owner = Self::administrator(actor)?;
+        let owner = Self::user(actor)?;
         match action {
             "plex_delete" => {
                 let rating_key = target
@@ -376,7 +368,7 @@ impl MediaAdminService for MediaAdminAdapter {
         actor: &Actor,
         confirmation_token: &str,
     ) -> Result<Value, MediaAdminError> {
-        let owner = Self::administrator(actor)?;
+        let owner = Self::user(actor)?;
         let confirmation = self
             .confirmations
             .lock()
@@ -479,7 +471,9 @@ impl<T> Pipe for T {}
 #[cfg(test)]
 mod tests {
     use media_api::MediaAdminService;
-    use media_core::{PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole};
+    use media_core::{
+        PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole, SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
+    };
 
     use super::MediaAdminAdapter;
 
@@ -504,6 +498,51 @@ mod tests {
         assert!(item["total_bytes"].as_u64().unwrap() > 0);
         assert!(item["available_bytes"].as_u64().unwrap() <= item["total_bytes"].as_u64().unwrap());
         assert!(item["used_percent"].as_u64().unwrap() <= 100);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn every_hermes_owner_can_prepare_and_confirm_destructive_actions() {
+        let root = std::env::temp_dir().join(format!("media-admin-{}", uuid::Uuid::new_v4()));
+        let quarantine = root.join("quarantine");
+        let media_file = root.join("episode.mkv");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        tokio::fs::write(&media_file, b"media").await.unwrap();
+        let adapter = MediaAdminAdapter::new(
+            None,
+            None,
+            Vec::new(),
+            vec![root.clone()],
+            quarantine.clone(),
+        );
+        let actor = Actor::new(
+            SECONDARY_CLIENT_ID,
+            Some(SECONDARY_USER_ID),
+            ClientRole::Hermes,
+        )
+        .unwrap();
+
+        let prepared = adapter
+            .prepare_destructive(
+                &actor,
+                "file_quarantine",
+                media_file.to_str().unwrap(),
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(prepared["requires_confirmation"], true);
+
+        let confirmed = adapter
+            .confirm_destructive(&actor, prepared["confirmation_token"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(confirmed["completed"], true);
+        assert!(!media_file.exists());
+        assert!(
+            std::path::Path::new(confirmed["destination"].as_str().unwrap()).exists(),
+            "confirmed destination must exist"
+        );
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 }

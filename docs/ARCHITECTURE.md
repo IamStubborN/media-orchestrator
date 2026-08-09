@@ -171,8 +171,9 @@ services, not a second media implementation:
 - Hermes receives structured results and never receives provider credentials,
   database access, or the Docker socket.
 - Plex and qBittorrent administration is mediated by `MediaAdminService`.
-  Shared library and download visibility is read-only for both profiles;
-  mutations are restricted to Primary.
+  Both Hermes profiles discover the complete published tool surface and may
+  request mutations; user ownership and explicit destructive confirmation are
+  enforced by the service.
 - Filesystem reads are canonicalized and limited to configured media roots.
   A file mutation moves the target to quarantine instead of unlinking it.
 - Destructive operations require a short-lived, owner-bound preview token and

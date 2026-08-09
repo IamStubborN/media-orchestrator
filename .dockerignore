@@ -5,5 +5,10 @@
 target
 dist
 docs
+deploy
+scripts
+.mise.toml
+compose.yaml
+README.md
 *.env
 .DS_Store

@@ -1,5 +1,6 @@
 [tools]
 rust = "1.97.0"
+sccache = "0.17.0"
 "cargo:cargo-nextest" = "0.9.140"
 "cargo:cargo-deny" = "0.20.2"
 "cargo:cargo-audit" = "0.22.2"
@@ -8,6 +9,7 @@ rust = "1.97.0"
 
 [env]
 RUST_BACKTRACE = "1"
+RUSTC_WRAPPER = "sccache"
 
 [tasks.format]
 run = "cargo fmt --all --check"
@@ -15,11 +17,39 @@ run = "cargo fmt --all --check"
 [tasks.check]
 run = "cargo check --workspace --all-targets --all-features --locked"
 
+[tasks."check:fast"]
+description = "Check the composed media binary and its dependency graph"
+run = "cargo check --package media --locked"
+
+[tasks."check:core"]
+description = "Check the lightweight domain and contract crates"
+run = "cargo check --package media-core --package media-contract --package media-client --all-targets --locked"
+
+[tasks."check:providers"]
+description = "Check provider clients and integrations"
+run = "cargo check --package rezka-client --package media-integrations --all-targets --locked"
+
+[tasks."check:runner"]
+description = "Check the download runner and its direct dependencies"
+run = "cargo check --package media-runner --all-targets --locked"
+
 [tasks.lint]
 run = "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings"
 
 [tasks.test]
 run = "cargo nextest run --workspace --locked"
+
+[tasks."test:core"]
+description = "Run fast domain, contract, and client tests"
+run = "cargo nextest run --package media-core --package media-contract --package media-client --locked"
+
+[tasks."test:providers"]
+description = "Run provider client and integration tests"
+run = "cargo nextest run --package rezka-client --package media-integrations --locked"
+
+[tasks."test:runner"]
+description = "Run download runner tests"
+run = "cargo nextest run --package media-runner --locked"
 
 [tasks.test-integration]
 run = '''
@@ -40,6 +70,17 @@ run = "cargo deny check && cargo audit"
 
 [tasks.build]
 run = "cargo build --workspace --all-targets --all-features --locked"
+
+[tasks."cache:status"]
+description = "Show compiler-cache statistics and local Cargo target usage"
+run = '''
+sccache --show-stats
+if [ -d target ]; then
+  du -sh target
+else
+  echo "target: not created"
+fi
+'''
 
 [tasks.docker-build]
 run = "./scripts/docker-build.sh"

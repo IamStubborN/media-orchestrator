@@ -52,6 +52,32 @@ mise run docker-smoke
 mise run extract-linux-cli
 ```
 
+For the normal edit-check-test loop, use the targeted tasks instead of paying
+for every target and feature on each change:
+
+```bash
+mise run check:fast       # composed media binary and its dependency graph
+mise run check:core       # domain, contracts, and client
+mise run check:providers  # Rezka and other provider integrations
+mise run check:runner     # download pipeline
+mise run test:core
+mise run test:providers
+mise run test:runner
+mise run cache:status
+```
+
+`mise install` provides a pinned prebuilt `sccache`, and commands run through
+`mise` use it automatically. The cache is shared outside the repository, while
+Cargo's incremental artifacts remain in `target/`. Third-party dependencies
+omit debug information in local dev and test profiles to reduce compile time
+and disk usage; workspace crates retain Cargo's normal debug information.
+
+Use the targeted task matching the changed boundary while iterating, then run
+the existing full `format`, `check`, `lint`, and `test` gates before deployment.
+`mise run cache:status` reports both cache effectiveness and `target/` size.
+When disk reclamation is actually needed, stop local Cargo processes and run
+`mise exec -- cargo clean` explicitly; cleanup is intentionally never automatic.
+
 `mise run test` uses default Cargo features and is Docker-independent.
 `mise run test-integration` requires a running Docker daemon and enables only
 the opt-in `integration-tests` features. It runs the full
@@ -89,11 +115,15 @@ docker compose --profile runner up --detach runner
 The authenticated Streamable HTTP MCP endpoint at `/internal/mcp` exposes
 structured tools for provider search and pagination, exact downloads, jobs,
 release schedules, trends, tracking, Plex library inspection, qBittorrent
-status and controls, allowlisted file diagnostics, dependency health, Plex
-library summaries, and media-root capacity.
-Hermes uses this MCP boundary exclusively for conversational media work. The
-CLI remains available to humans and deterministic notifier callbacks through
-the REST API; neither adapter invokes the other.
+status and controls, diagnostics within configured media roots, dependency
+health, Plex library summaries, and media-root capacity.
+The complete published toolset is recorded in
+`config/media-capabilities.json`. Both Hermes profiles discover the surface
+dynamically without a client-side tool allowlist. Owner identity, audit records,
+and explicit confirmation for destructive actions remain enforced by the
+service. Hermes uses this MCP boundary exclusively for conversational media
+work. The CLI remains available to humans and deterministic notifier callbacks
+through the REST API; neither adapter invokes the other.
 
 The MCP endpoint supports current legacy Hermes negotiation and stateless MCP
 `2026-07-28` requests. Search sessions, jobs, tracking subscriptions, and
@@ -102,8 +132,9 @@ than transport-session state. Tools publish structured output schemas and
 read-only/destructive/idempotency annotations.
 
 Secrets stay in `media-service`; Hermes has no Docker socket or direct provider
-credentials. Plex/qBittorrent mutations are Primary-only. Deletions use preview
-and one-time confirmation, and direct file deletion is replaced by quarantine.
+credentials. Both Hermes profiles can request Plex/qBittorrent mutations.
+Deletions use preview and one-time confirmation, and direct file deletion is
+replaced by quarantine.
 
 ## Local PostgreSQL Service
 
