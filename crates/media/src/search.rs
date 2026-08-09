@@ -239,7 +239,12 @@ impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
                     _ => false,
                 });
         let Some(ProviderResult {
-            public: SearchResultDto::Rezka { translations, .. },
+            public:
+                SearchResultDto::Rezka {
+                    translations,
+                    thumbnail_url,
+                    ..
+                },
             private:
                 PrivateResult::Rezka {
                     translation_episodes,
@@ -283,6 +288,7 @@ impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
         episodes.sort_unstable();
         episodes.dedup();
         EpisodeDiscovery::new(episodes, tracking.title().to_owned(), None)
+            .map(|discovery| discovery.with_poster_url(thumbnail_url))
             .map_err(|_| PortError::Conflict)
     }
 }

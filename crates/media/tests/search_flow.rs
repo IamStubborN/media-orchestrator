@@ -29,15 +29,16 @@ struct MemorySearchPersistence {
     executions: Mutex<HashMap<String, media_contract::ExecutionSelectionDto>>,
 }
 
-#[tokio::test]
-async fn tracking_discovery_uses_the_selected_rezka_translation_snapshot() {
+async fn discover_selected_rezka_translation(
+    thumbnail_url: Option<&str>,
+) -> media_core::EpisodeDiscovery {
     let public = SearchResultDto::Rezka {
         result_id: "rezka-show".to_owned(),
         title: "Show".to_owned(),
         original_title: None,
         year: Some(2026),
         media_kind: MediaKindDto::Series,
-        thumbnail_url: None,
+        thumbnail_url: thumbnail_url.map(str::to_owned),
         translations: vec![RezkaTranslationDto {
             id: 37,
             name: "Original".to_owned(),
@@ -79,18 +80,35 @@ async fn tracking_discovery_uses_the_selected_rezka_translation_snapshot() {
     )
     .unwrap();
 
+    discovery.available_episodes(&tracking).await.unwrap()
+}
+
+#[tokio::test]
+async fn tracking_discovery_uses_the_selected_rezka_translation_snapshot() {
+    let discovery = discover_selected_rezka_translation(Some(
+        "https://static.tvmaze.com/uploads/images/original_untouched/show.jpg",
+    ))
+    .await;
+
     assert_eq!(
-        discovery
-            .available_episodes(&tracking)
-            .await
-            .unwrap()
-            .episodes(),
+        discovery.episodes(),
         vec![
             media_core::EpisodeSnapshot::new(1, 1).unwrap(),
             media_core::EpisodeSnapshot::new(1, 2).unwrap(),
         ]
         .as_slice()
     );
+    assert_eq!(
+        discovery.poster_url(),
+        Some("https://static.tvmaze.com/uploads/images/original_untouched/show.jpg")
+    );
+}
+
+#[tokio::test]
+async fn tracking_discovery_keeps_missing_rezka_thumbnail_as_none() {
+    let discovery = discover_selected_rezka_translation(None).await;
+
+    assert_eq!(discovery.poster_url(), None);
 }
 
 struct FakeReleaseProvider {
