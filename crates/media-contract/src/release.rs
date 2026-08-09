@@ -34,6 +34,8 @@ pub struct ReleaseCandidateDto {
     pub title: String,
     pub original_title: Option<String>,
     pub year: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poster_url: Option<String>,
     pub lifecycle: ReleaseLifecycleDto,
 }
 

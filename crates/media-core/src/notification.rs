@@ -28,6 +28,7 @@ pub struct SourceChoiceNotification {
     season: u32,
     episode: u32,
     actions: Vec<SourceChoiceAction>,
+    poster_url: Option<String>,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
@@ -352,7 +353,14 @@ impl SourceChoiceNotification {
             season,
             episode,
             actions,
+            poster_url: None,
         })
+    }
+
+    #[must_use]
+    pub fn with_poster_url(mut self, poster_url: Option<String>) -> Self {
+        self.poster_url = poster_url;
+        self
     }
 
     #[must_use]
@@ -383,6 +391,11 @@ impl SourceChoiceNotification {
     #[must_use]
     pub fn actions(&self) -> &[SourceChoiceAction] {
         &self.actions
+    }
+
+    #[must_use]
+    pub fn poster_url(&self) -> Option<&str> {
+        self.poster_url.as_deref()
     }
 }
 

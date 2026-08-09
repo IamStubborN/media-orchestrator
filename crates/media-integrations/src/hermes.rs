@@ -163,6 +163,7 @@ fn source_choice_webhook(notification: &SourceChoiceNotification) -> HermesSourc
                 SourceChoiceAction::Prowlarr => SourceChoiceActionDto::Prowlarr,
             })
             .collect(),
+        poster_url: notification.poster_url().map(str::to_owned),
     }
 }
 

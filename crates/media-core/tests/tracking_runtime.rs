@@ -45,6 +45,7 @@ impl TrackingScheduleStore for ScheduleStore {
         episode: EpisodeSnapshot,
         _: time::OffsetDateTime,
         actions: Vec<SourceChoiceAction>,
+        _: Option<String>,
     ) -> Result<bool, PortError> {
         self.pending
             .lock()

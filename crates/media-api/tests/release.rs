@@ -34,6 +34,7 @@ impl ReleaseMetadataPort for FakeReleaseProvider {
                 title: "The Office".to_owned(),
                 original_title: None,
                 year: Some(2005),
+                poster_url: None,
                 lifecycle: ReleaseLifecycle::Ended,
             }],
         })

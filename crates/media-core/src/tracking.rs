@@ -128,6 +128,7 @@ pub struct EpisodeDiscovery {
     episodes: Vec<EpisodeSnapshot>,
     release_title: String,
     original_release_title: Option<String>,
+    poster_url: Option<String>,
 }
 
 impl EpisodeDiscovery {
@@ -149,7 +150,14 @@ impl EpisodeDiscovery {
             episodes,
             release_title,
             original_release_title,
+            poster_url: None,
         })
+    }
+
+    #[must_use]
+    pub fn with_poster_url(mut self, poster_url: Option<String>) -> Self {
+        self.poster_url = poster_url;
+        self
     }
 
     #[must_use]
@@ -165,6 +173,11 @@ impl EpisodeDiscovery {
     #[must_use]
     pub fn original_release_title(&self) -> Option<&str> {
         self.original_release_title.as_deref()
+    }
+
+    #[must_use]
+    pub fn poster_url(&self) -> Option<&str> {
+        self.poster_url.as_deref()
     }
 }
 
@@ -695,6 +708,7 @@ pub trait TrackingScheduleStore: Send + Sync {
         episode: EpisodeSnapshot,
         next_check_at: time::OffsetDateTime,
         actions: Vec<SourceChoiceAction>,
+        poster_url: Option<String>,
     ) -> Result<bool, PortError>;
     async fn pending_episodes(&self, id: TrackingId) -> Result<Vec<EpisodeSnapshot>, PortError>;
     async fn record_pending_episode(
@@ -924,7 +938,13 @@ impl TrackingRuntime {
                 }
                 if self
                     .store
-                    .record_future_episode(tracking.id(), episode, default_next_check, actions)
+                    .record_future_episode(
+                        tracking.id(),
+                        episode,
+                        default_next_check,
+                        actions,
+                        discovery.poster_url().map(str::to_owned),
+                    )
                     .await?
                 {
                     result.discovered += 1;

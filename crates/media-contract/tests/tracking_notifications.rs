@@ -137,6 +137,7 @@ fn hermes_source_choice_webhook_has_three_stable_provider_actions() {
             SourceChoiceActionDto::Rezka,
             SourceChoiceActionDto::Prowlarr,
         ],
+        poster_url: Some("https://static.tvmaze.com/poster.jpg".to_owned()),
     };
 
     assert_eq!(
@@ -149,7 +150,8 @@ fn hermes_source_choice_webhook_has_three_stable_provider_actions() {
             "title": "Jobless Reincarnation",
             "season": 3,
             "episode": 5,
-            "actions": ["all", "rezka", "prowlarr"]
+            "actions": ["all", "rezka", "prowlarr"],
+            "poster_url": "https://static.tvmaze.com/poster.jpg"
         })
     );
 }

@@ -330,13 +330,25 @@ async fn future_discovery_updates_snapshot_and_atomically_fans_out_family_notifi
 
     assert!(
         store
-            .record_future_episode(tracking.id(), episode, next_check, all_source_actions())
+            .record_future_episode(
+                tracking.id(),
+                episode,
+                next_check,
+                all_source_actions(),
+                Some("https://static.tvmaze.com/poster.jpg".to_owned()),
+            )
             .await
             .unwrap()
     );
     assert!(
         !store
-            .record_future_episode(tracking.id(), episode, next_check, all_source_actions())
+            .record_future_episode(
+                tracking.id(),
+                episode,
+                next_check,
+                all_source_actions(),
+                Some("https://static.tvmaze.com/poster.jpg".to_owned()),
+            )
             .await
             .unwrap()
     );
@@ -372,6 +384,7 @@ async fn future_discovery_updates_snapshot_and_atomically_fans_out_family_notifi
                 "card_key",
                 "episode",
                 "event_type",
+                "poster_url",
                 "schema_version",
                 "season",
                 "title",
@@ -385,10 +398,13 @@ async fn future_discovery_updates_snapshot_and_atomically_fans_out_family_notifi
         assert_eq!(payload["season"], 1);
         assert_eq!(payload["episode"], 5);
         assert_eq!(
+            payload["poster_url"],
+            "https://static.tvmaze.com/poster.jpg"
+        );
+        assert_eq!(
             payload["actions"],
             serde_json::json!(["all", "rezka", "prowlarr"])
         );
-        assert!(!payload.to_string().contains("http"));
     }
     assert!(
         query(test_db.connection(), "SELECT id FROM jobs")
@@ -475,6 +491,7 @@ async fn future_discovery_persists_only_the_confirmed_source_action() {
                 EpisodeSnapshot::new(1, 5).unwrap(),
                 time::OffsetDateTime::now_utc() + time::Duration::hours(6),
                 vec![SourceChoiceAction::Rezka],
+                None,
             )
             .await
             .unwrap()
@@ -510,6 +527,7 @@ async fn outbox_leases_once_retries_with_backoff_and_keeps_stable_delivery_id() 
             EpisodeSnapshot::new(1, 5).unwrap(),
             time::OffsetDateTime::now_utc() + time::Duration::hours(6),
             all_source_actions(),
+            None,
         )
         .await
         .unwrap();
@@ -598,6 +616,7 @@ async fn stale_delivery_ack_releases_the_lease_without_consuming_a_new_generatio
             EpisodeSnapshot::new(1, 5).unwrap(),
             time::OffsetDateTime::now_utc() + time::Duration::hours(6),
             all_source_actions(),
+            None,
         )
         .await
         .unwrap();
@@ -738,6 +757,7 @@ async fn mark_failed_does_not_overflow_backoff_at_high_attempt_counts() {
             EpisodeSnapshot::new(1, 5).unwrap(),
             time::OffsetDateTime::now_utc() + time::Duration::hours(6),
             all_source_actions(),
+            None,
         )
         .await
         .unwrap();
@@ -789,6 +809,7 @@ async fn mark_dead_buries_a_delivery_so_it_is_never_leased_again() {
             EpisodeSnapshot::new(1, 5).unwrap(),
             time::OffsetDateTime::now_utc() + time::Duration::hours(6),
             all_source_actions(),
+            None,
         )
         .await
         .unwrap();

@@ -52,7 +52,8 @@ fn source_choice_delivery() -> NotificationDelivery {
                 SourceChoiceAction::Prowlarr,
             ],
         )
-        .unwrap(),
+        .unwrap()
+        .with_poster_url(Some("https://static.tvmaze.com/poster.jpg".to_owned())),
         1,
         0,
     )
@@ -266,7 +267,8 @@ async fn posts_exact_source_choice_payload_with_all_three_actions() {
             "title": "Jobless Reincarnation",
             "season": 3,
             "episode": 5,
-            "actions": ["all", "rezka", "prowlarr"]
+            "actions": ["all", "rezka", "prowlarr"],
+            "poster_url": "https://static.tvmaze.com/poster.jpg"
         })))
         .respond_with(ResponseTemplate::new(200))
         .expect(1)

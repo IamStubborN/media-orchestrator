@@ -119,6 +119,7 @@ pub struct ReleaseCandidate {
     pub title: String,
     pub original_title: Option<String>,
     pub year: Option<i32>,
+    pub poster_url: Option<String>,
     pub lifecycle: ReleaseLifecycle,
 }
 

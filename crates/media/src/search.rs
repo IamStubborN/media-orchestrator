@@ -603,7 +603,9 @@ impl ProviderEpisodeDiscovery {
             .collect::<Vec<_>>();
         episodes.sort_unstable();
         episodes.dedup();
+        let poster_url = show.poster_url.clone();
         EpisodeDiscovery::new(episodes, show.title, show.original_title)
+            .map(|discovery| discovery.with_poster_url(poster_url))
             .map_err(|_| PortError::Conflict)
     }
 }

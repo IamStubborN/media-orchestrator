@@ -112,6 +112,7 @@ impl ReleaseMetadataPort for FakeReleaseProvider {
                 title: "Sugar".to_owned(),
                 original_title: None,
                 year: Some(2024),
+                poster_url: Some("https://static.tvmaze.com/poster.jpg".to_owned()),
                 lifecycle: ReleaseLifecycle::Ongoing,
             },
             precision: ReleasePrecision::DateTime,

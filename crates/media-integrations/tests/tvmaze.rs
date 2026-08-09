@@ -131,7 +131,11 @@ async fn source_id_fetches_exact_show_without_searching_by_title() {
             "id": 77,
             "name": "Lucky",
             "premiered": "2026-01-01",
-            "status": "Running"
+            "status": "Running",
+            "image": {
+                "medium": "https://static.tvmaze.com/lucky-medium.jpg",
+                "original": "https://static.tvmaze.com/lucky-original.jpg"
+            }
         })))
         .expect(1)
         .mount(&server)
@@ -153,6 +157,10 @@ async fn source_id_fetches_exact_show_without_searching_by_title() {
         ReleaseMetadataResult::Matched { show, .. } => {
             assert_eq!(show.source_id, 77);
             assert_eq!(show.title, "Lucky");
+            assert_eq!(
+                show.poster_url.as_deref(),
+                Some("https://static.tvmaze.com/lucky-original.jpg")
+            );
         }
         _ => panic!("expected exact match"),
     }

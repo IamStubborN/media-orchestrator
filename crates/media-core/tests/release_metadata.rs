@@ -11,6 +11,7 @@ fn candidate(
         title: title.to_owned(),
         original_title: original_title.map(str::to_owned),
         year,
+        poster_url: None,
         lifecycle: ReleaseLifecycle::Unknown,
     }
 }

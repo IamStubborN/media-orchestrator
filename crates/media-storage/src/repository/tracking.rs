@@ -34,6 +34,7 @@ impl SeaOrmTrackingStore {
         episode: EpisodeSnapshot,
         next_check_at: time::OffsetDateTime,
         actions: Vec<SourceChoiceAction>,
+        poster_url: Option<String>,
     ) -> Result<bool, PortError> {
         let transaction = self.database.begin().await.map_err(map_database_error)?;
         let result = async {
@@ -92,7 +93,8 @@ impl SeaOrmTrackingStore {
                 episode.episode(),
                 actions,
             )
-            .map_err(|error| sea_orm::DbErr::Type(error.to_string()))?;
+            .map_err(|error| sea_orm::DbErr::Type(error.to_string()))?
+            .with_poster_url(poster_url);
             let payload = source_choice_payload(&source_choice);
             let recipients = notification_recipients(owner, &scope)?;
             for recipient in recipients {
@@ -124,7 +126,7 @@ fn source_choice_payload(notification: &SourceChoiceNotification) -> serde_json:
             SourceChoiceAction::Prowlarr => "prowlarr",
         })
         .collect::<Vec<_>>();
-    serde_json::json!({
+    let mut payload = serde_json::json!({
         "event_type": "media.source-choice",
         "schema_version": 1,
         "card_key": notification.card_key(),
@@ -133,7 +135,11 @@ fn source_choice_payload(notification: &SourceChoiceNotification) -> serde_json:
         "season": notification.season(),
         "episode": notification.episode(),
         "actions": actions,
-    })
+    });
+    if let Some(poster_url) = notification.poster_url() {
+        payload["poster_url"] = serde_json::Value::String(poster_url.to_owned());
+    }
+    payload
 }
 
 #[async_trait::async_trait]
@@ -335,8 +341,17 @@ impl TrackingScheduleStore for SeaOrmTrackingStore {
         episode: EpisodeSnapshot,
         next_check_at: time::OffsetDateTime,
         actions: Vec<SourceChoiceAction>,
+        poster_url: Option<String>,
     ) -> Result<bool, PortError> {
-        SeaOrmTrackingStore::record_future_episode(self, id, episode, next_check_at, actions).await
+        SeaOrmTrackingStore::record_future_episode(
+            self,
+            id,
+            episode,
+            next_check_at,
+            actions,
+            poster_url,
+        )
+        .await
     }
 
     async fn pending_episodes(&self, id: TrackingId) -> Result<Vec<EpisodeSnapshot>, PortError> {
@@ -843,6 +858,14 @@ fn source_choice_from_payload(
         episode,
         actions,
     )
+    .map(|notification| {
+        notification.with_poster_url(
+            payload
+                .get("poster_url")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        )
+    })
     .map_err(|_| PortError::Infrastructure)
 }
 

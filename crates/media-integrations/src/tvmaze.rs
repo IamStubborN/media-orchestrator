@@ -280,6 +280,13 @@ struct ShowDto {
     name: String,
     premiered: Option<String>,
     status: Option<String>,
+    image: Option<ShowImageDto>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ShowImageDto {
+    medium: Option<String>,
+    original: Option<String>,
 }
 
 impl ShowDto {
@@ -307,6 +314,7 @@ impl ShowDto {
             title: self.name,
             original_title: None,
             year,
+            poster_url: self.image.and_then(|image| image.original.or(image.medium)),
             lifecycle,
         }
     }

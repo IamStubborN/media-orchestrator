@@ -57,6 +57,7 @@ fn release_candidate(value: ReleaseCandidate) -> ReleaseCandidateDto {
         title: value.title,
         original_title: value.original_title,
         year: value.year,
+        poster_url: value.poster_url,
         lifecycle: release_lifecycle(value.lifecycle),
     }
 }
