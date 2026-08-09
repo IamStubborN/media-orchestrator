@@ -1058,10 +1058,16 @@ async fn rezka_requires_explicit_translation_and_available_episode_without_fallb
         availability: Some(SeriesAvailabilityDto {
             lifecycle_status: media_contract::SeriesLifecycleStatusDto::Ongoing,
             incomplete: true,
-            seasons: vec![SeasonAvailabilityDto {
-                season: 1,
-                episodes: vec![1, 2],
-            }],
+            seasons: vec![
+                SeasonAvailabilityDto {
+                    season: 1,
+                    episodes: vec![1, 2],
+                },
+                SeasonAvailabilityDto {
+                    season: 2,
+                    episodes: vec![],
+                },
+            ],
             tracking_prompt: Some(TrackingPromptDto {
                 title: "Show".to_owned(),
                 latest_season: 1,
@@ -1162,6 +1168,63 @@ async fn rezka_requires_explicit_translation_and_available_episode_without_fallb
             media_contract::EpisodeSnapshotDto { season: 1, episode: 2 },
         ]
     ));
+
+    let whole_season = service
+        .select(
+            PRIMARY_USER_ID,
+            OperationKey::from_bytes([11; 32]),
+            SelectResultRequest {
+                session_id: page.session_id.clone(),
+                result_id: "rezka-show".to_owned(),
+                translation_id: Some(37),
+                season: Some(1),
+                episode: None,
+                scope: telegram_scope("default", None),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        service
+            .execution_for(&whole_season.result_ref)
+            .await
+            .unwrap(),
+        media_contract::ExecutionSelectionDto::Rezka {
+            translation_id: 37,
+            season: Some(1),
+            episode: None,
+            episodes,
+            ..
+        } if episodes == vec![
+            media_contract::EpisodeSnapshotDto { season: 1, episode: 1 },
+            media_contract::EpisodeSnapshotDto { season: 1, episode: 2 },
+        ]
+    ));
+
+    for (operation, season, episode) in [
+        ([12; 32], Some(2), None),
+        ([13; 32], Some(3), None),
+        ([14; 32], None, Some(1)),
+    ] {
+        assert_eq!(
+            service
+                .select(
+                    PRIMARY_USER_ID,
+                    OperationKey::from_bytes(operation),
+                    SelectResultRequest {
+                        session_id: page.session_id.clone(),
+                        result_id: "rezka-show".to_owned(),
+                        translation_id: Some(37),
+                        season,
+                        episode,
+                        scope: telegram_scope("default", None),
+                    },
+                )
+                .await
+                .unwrap_err(),
+            SearchError::InvalidRequest
+        );
+    }
 
     let job = service
         .select(

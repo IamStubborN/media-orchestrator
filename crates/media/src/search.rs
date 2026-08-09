@@ -1892,6 +1892,18 @@ fn execution(
                             return Err(SearchError::InvalidRequest);
                         }
                     }
+                    (Some(season), None) => {
+                        if !translation_episodes
+                            .get(&translation_id)
+                            .is_some_and(|seasons| {
+                                seasons.iter().any(|(candidate, episodes)| {
+                                    *candidate == season && !episodes.is_empty()
+                                })
+                            })
+                        {
+                            return Err(SearchError::InvalidRequest);
+                        }
+                    }
                     (None, None) => {
                         if !translation_episodes
                             .get(&translation_id)
@@ -1912,6 +1924,20 @@ fn execution(
                     (Some(season), Some(episode)) => {
                         vec![media_contract::EpisodeSnapshotDto { season, episode }]
                     }
+                    (Some(selected_season), None) => translation_episodes
+                        .get(&translation_id)
+                        .into_iter()
+                        .flatten()
+                        .filter(|(season, _)| *season == selected_season)
+                        .flat_map(|(season, episodes)| {
+                            episodes
+                                .iter()
+                                .map(|episode| media_contract::EpisodeSnapshotDto {
+                                    season: *season,
+                                    episode: *episode,
+                                })
+                        })
+                        .collect(),
                     (None, None) => translation_episodes
                         .get(&translation_id)
                         .into_iter()
