@@ -48,6 +48,14 @@ pub struct HermesSourceChoiceWebhook {
     pub actions: Vec<SourceChoiceActionDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poster_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice_set_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice_set_expires_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rezka_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prowlarr_count: Option<u32>,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

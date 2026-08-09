@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use media_api::{SearchError, SearchService};
+use media_api::{ChoiceSetSelection, SearchError, SearchService};
 use media_contract::{
     AlternativeSearchRequest, ContinueSearchRequest, EpisodeMappingActionDto,
     ExecutionSelectionDto, JobDto, JobStateDto, MAX_SEARCH_RESULTS_PER_PAGE, MediaKindDto,
@@ -134,6 +134,10 @@ pub struct StoredSearchSession {
     pub expires_at: OffsetDateTime,
     pub results: Vec<ProviderResult>,
     pub provider_continuation: Option<String>,
+    /// All title aliases used by a tracked-episode availability probe. Plain
+    /// user searches leave this empty; choice-set refreshes replay every alias
+    /// instead of only the localized display title.
+    pub query_aliases: Vec<String>,
 }
 
 #[async_trait::async_trait]
@@ -144,7 +148,27 @@ pub trait SearchPersistence: Send + Sync {
         id: &str,
         owner: UserId,
     ) -> Result<StoredSearchSession, SearchError>;
+    /// Resolve a tracked-episode session for a visible user. Generic search
+    /// sessions remain owner-only; storage may authorize this narrow path for
+    /// family tracking subscriptions.
+    async fn session_for_user(
+        &self,
+        id: &str,
+        user: UserId,
+    ) -> Result<StoredSearchSession, SearchError> {
+        self.session_for_owner(id, user).await
+    }
     async fn update_session(&self, session: StoredSearchSession) -> Result<(), SearchError>;
+    async fn update_session_for_user(
+        &self,
+        session: StoredSearchSession,
+        user: UserId,
+    ) -> Result<(), SearchError> {
+        if session.owner != user {
+            return Err(SearchError::Forbidden);
+        }
+        self.update_session(session).await
+    }
     async fn insert_execution(
         &self,
         result_ref: String,
@@ -296,6 +320,7 @@ impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
 pub struct ProviderEpisodeAvailability {
     provider: Arc<dyn SearchProvider>,
     prowlarr: Option<media_integrations::prowlarr::ProwlarrClient>,
+    persistence: Arc<dyn SearchPersistence>,
 }
 
 impl ProviderEpisodeAvailability {
@@ -303,16 +328,89 @@ impl ProviderEpisodeAvailability {
     pub fn new(
         provider: Arc<dyn SearchProvider>,
         prowlarr: Option<media_integrations::prowlarr::ProwlarrClient>,
+        persistence: Arc<dyn SearchPersistence>,
     ) -> Self {
-        Self { provider, prowlarr }
+        Self {
+            provider,
+            prowlarr,
+            persistence,
+        }
+    }
+
+    async fn persist_choice_session(
+        &self,
+        request: StartSearchRequest,
+        query_aliases: Vec<String>,
+        owner: UserId,
+        choice_set_id: &str,
+        source: ProviderDto,
+        results: Vec<ProviderResult>,
+    ) -> Result<usize, PortError> {
+        let source_name = match source {
+            ProviderDto::Rezka => "rezka",
+            ProviderDto::Prowlarr => "prowlarr",
+        };
+        let result_count = results.len();
+        let id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_URL,
+            format!("choice:{choice_set_id}:{source_name}").as_bytes(),
+        );
+        let session = StoredSearchSession {
+            id: id.to_string(),
+            owner,
+            request,
+            expires_at: OffsetDateTime::now_utc() + time::Duration::hours(24),
+            results,
+            provider_continuation: None,
+            query_aliases,
+        };
+        match self.persistence.insert_session(session.clone()).await {
+            Ok(()) => {}
+            Err(SearchError::Conflict) => self
+                .persistence
+                .update_session(session)
+                .await
+                .map_err(|_| PortError::Infrastructure)?,
+            Err(_) => return Err(PortError::Infrastructure),
+        }
+        Ok(result_count)
+    }
+
+    async fn persist_empty_choice_session(
+        &self,
+        request: &EpisodeAvailabilityRequest<'_>,
+        source: ProviderDto,
+    ) -> Result<(), PortError> {
+        self.persist_choice_session(
+            choice_session_request(request, source)?,
+            match source {
+                ProviderDto::Rezka => rezka_availability_titles(request),
+                ProviderDto::Prowlarr => prowlarr_availability_titles(request),
+            },
+            request.tracking().owner_id(),
+            &Self::choice_set_id(request),
+            source,
+            Vec::new(),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    fn choice_set_id(request: &EpisodeAvailabilityRequest<'_>) -> String {
+        media_core::episode_choice_set_id(
+            request.tracking().id(),
+            request.episode().season(),
+            request.episode().episode(),
+        )
     }
 
     async fn rezka_availability(
         &self,
         request: &EpisodeAvailabilityRequest<'_>,
-    ) -> ProviderAvailability {
+    ) -> Result<(ProviderAvailability, usize), PortError> {
         let titles = rezka_availability_titles(request);
         let mut failed = false;
+        let mut candidates = Vec::new();
         for query in &titles {
             let page = self
                 .provider
@@ -320,8 +418,12 @@ impl ProviderEpisodeAvailability {
                     &StartSearchRequest {
                         scope: media_contract::SearchScopeDto {
                             platform: "system".to_owned(),
-                            chat_id: "tracking-availability".to_owned(),
-                            thread_id: None,
+                            chat_id: format!("tracking:{}", request.tracking().id()),
+                            thread_id: Some(format!(
+                                "episode:{}:{}",
+                                request.episode().season(),
+                                request.episode().episode()
+                            )),
                         },
                         source: ProviderDto::Rezka,
                         query: query.clone(),
@@ -339,7 +441,7 @@ impl ProviderEpisodeAvailability {
                 failed = true;
                 continue;
             };
-            if page.results.iter().any(|result| {
+            for result in page.results.iter() {
                 let (
                     SearchResultDto::Rezka {
                         title,
@@ -352,7 +454,7 @@ impl ProviderEpisodeAvailability {
                     },
                 ) = (&result.public, &result.private)
                 else {
-                    return false;
+                    continue;
                 };
                 let matching_title = titles.iter().any(|candidate| {
                     title.trim().eq_ignore_ascii_case(candidate.trim())
@@ -360,30 +462,69 @@ impl ProviderEpisodeAvailability {
                             original.trim().eq_ignore_ascii_case(candidate.trim())
                         })
                 });
-                matching_title
+                if matching_title
                     && translation_episodes.values().any(|seasons| {
                         seasons.iter().any(|(season, episodes)| {
                             *season == request.episode().season()
                                 && episodes.contains(&request.episode().episode())
                         })
                     })
-            }) {
-                return ProviderAvailability::Available;
+                {
+                    candidates.push(result.clone());
+                }
             }
         }
-        if failed {
-            ProviderAvailability::Unknown
+        candidates.sort_by(|left, right| left.public.result_id().cmp(right.public.result_id()));
+        candidates.dedup_by(|left, right| left.public.result_id() == right.public.result_id());
+        if !candidates.is_empty() {
+            let count = self
+                .persist_choice_session(
+                    StartSearchRequest {
+                        scope: media_contract::SearchScopeDto {
+                            platform: "system".to_owned(),
+                            chat_id: format!("tracking:{}", request.tracking().id()),
+                            thread_id: Some(format!(
+                                "episode:{}:{}",
+                                request.episode().season(),
+                                request.episode().episode()
+                            )),
+                        },
+                        source: ProviderDto::Rezka,
+                        query: request.tracking().title().to_owned(),
+                        media_kind: Some(MediaKindDto::Series),
+                        season: None,
+                        preferred_qualities: Vec::new(),
+                        preferred_languages: Vec::new(),
+                        preferred_codecs: Vec::new(),
+                        preferred_release_groups: Vec::new(),
+                    },
+                    titles.clone(),
+                    request.tracking().owner_id(),
+                    &Self::choice_set_id(request),
+                    ProviderDto::Rezka,
+                    candidates,
+                )
+                .await?;
+            Ok((ProviderAvailability::Available, count))
+        } else if failed {
+            self.persist_empty_choice_session(request, ProviderDto::Rezka)
+                .await?;
+            Ok((ProviderAvailability::Unknown, 0))
         } else {
-            ProviderAvailability::Unavailable
+            self.persist_empty_choice_session(request, ProviderDto::Rezka)
+                .await?;
+            Ok((ProviderAvailability::Unavailable, 0))
         }
     }
 
     async fn prowlarr_availability(
         &self,
         request: &EpisodeAvailabilityRequest<'_>,
-    ) -> ProviderAvailability {
+    ) -> Result<(ProviderAvailability, usize), PortError> {
         let Some(client) = &self.prowlarr else {
-            return ProviderAvailability::Unknown;
+            self.persist_empty_choice_session(request, ProviderDto::Prowlarr)
+                .await?;
+            return Ok((ProviderAvailability::Unknown, 0));
         };
         let query = media_integrations::prowlarr::EpisodeAvailabilityQuery::new(
             prowlarr_availability_titles(request),
@@ -391,12 +532,112 @@ impl ProviderEpisodeAvailability {
             request.episode().episode(),
         );
         let Ok(query) = query else {
-            return ProviderAvailability::Unknown;
+            self.persist_empty_choice_session(request, ProviderDto::Prowlarr)
+                .await?;
+            return Ok((ProviderAvailability::Unknown, 0));
         };
+        // Keep the dedicated indexer endpoint as a cheap availability probe,
+        // then hydrate a durable search session for the exact matching releases.
         match client.episode_available(&query).await {
-            Ok(true) => ProviderAvailability::Available,
-            Ok(false) => ProviderAvailability::Unavailable,
-            Err(_) => ProviderAvailability::Unknown,
+            Ok(false) => {
+                self.persist_empty_choice_session(request, ProviderDto::Prowlarr)
+                    .await?;
+                Ok((ProviderAvailability::Unavailable, 0))
+            }
+            Err(_) => {
+                self.persist_empty_choice_session(request, ProviderDto::Prowlarr)
+                    .await?;
+                Ok((ProviderAvailability::Unknown, 0))
+            }
+            Ok(true) => {
+                let mut candidates = Vec::new();
+                for title in prowlarr_availability_titles(request) {
+                    let page = self
+                        .provider
+                        .search(
+                            &StartSearchRequest {
+                                scope: media_contract::SearchScopeDto {
+                                    platform: "system".to_owned(),
+                                    chat_id: format!("tracking:{}", request.tracking().id()),
+                                    thread_id: Some(format!(
+                                        "episode:{}:{}",
+                                        request.episode().season(),
+                                        request.episode().episode()
+                                    )),
+                                },
+                                source: ProviderDto::Prowlarr,
+                                query: title.clone(),
+                                media_kind: Some(MediaKindDto::Series),
+                                season: Some(
+                                    u16::try_from(request.episode().season())
+                                        .map_err(|_| PortError::Conflict)?,
+                                ),
+                                preferred_qualities: Vec::new(),
+                                preferred_languages: Vec::new(),
+                                preferred_codecs: Vec::new(),
+                                preferred_release_groups: Vec::new(),
+                            },
+                            None,
+                        )
+                        .await;
+                    let Ok(page) = page else {
+                        continue;
+                    };
+                    candidates.extend(page.results.into_iter().filter(|result| {
+                        let SearchResultDto::Prowlarr { title: release, .. } = &result.public
+                        else {
+                            return false;
+                        };
+                        media_integrations::series_title_matches(release, &title)
+                            && media_integrations::title_contains_episode(
+                                release,
+                                request.episode().season(),
+                                request.episode().episode(),
+                            )
+                    }));
+                }
+                candidates
+                    .sort_by(|left, right| left.public.result_id().cmp(right.public.result_id()));
+                candidates
+                    .dedup_by(|left, right| left.public.result_id() == right.public.result_id());
+                if candidates.is_empty() {
+                    self.persist_empty_choice_session(request, ProviderDto::Prowlarr)
+                        .await?;
+                    return Ok((ProviderAvailability::Unavailable, 0));
+                }
+                let count = self
+                    .persist_choice_session(
+                        StartSearchRequest {
+                            scope: media_contract::SearchScopeDto {
+                                platform: "system".to_owned(),
+                                chat_id: format!("tracking:{}", request.tracking().id()),
+                                thread_id: Some(format!(
+                                    "episode:{}:{}",
+                                    request.episode().season(),
+                                    request.episode().episode()
+                                )),
+                            },
+                            source: ProviderDto::Prowlarr,
+                            query: request.tracking().title().to_owned(),
+                            media_kind: Some(MediaKindDto::Series),
+                            season: Some(
+                                u16::try_from(request.episode().season())
+                                    .map_err(|_| PortError::Conflict)?,
+                            ),
+                            preferred_qualities: Vec::new(),
+                            preferred_languages: Vec::new(),
+                            preferred_codecs: Vec::new(),
+                            preferred_release_groups: Vec::new(),
+                        },
+                        prowlarr_availability_titles(request),
+                        request.tracking().owner_id(),
+                        &Self::choice_set_id(request),
+                        ProviderDto::Prowlarr,
+                        candidates,
+                    )
+                    .await?;
+                Ok((ProviderAvailability::Available, count))
+            }
         }
     }
 }
@@ -411,8 +652,41 @@ impl EpisodeAvailabilityPort for ProviderEpisodeAvailability {
             self.rezka_availability(&request),
             self.prowlarr_availability(&request)
         );
-        Ok(EpisodeAvailability::new(rezka, prowlarr))
+        let (rezka, rezka_count) = rezka?;
+        let (prowlarr, prowlarr_count) = prowlarr?;
+        Ok(EpisodeAvailability::new(rezka, prowlarr)
+            .with_counts(rezka_count as u32, prowlarr_count as u32))
     }
+}
+
+fn choice_session_request(
+    request: &EpisodeAvailabilityRequest<'_>,
+    source: ProviderDto,
+) -> Result<StartSearchRequest, PortError> {
+    Ok(StartSearchRequest {
+        scope: media_contract::SearchScopeDto {
+            platform: "system".to_owned(),
+            chat_id: format!("tracking:{}", request.tracking().id()),
+            thread_id: Some(format!(
+                "episode:{}:{}",
+                request.episode().season(),
+                request.episode().episode()
+            )),
+        },
+        source,
+        query: request.tracking().title().to_owned(),
+        media_kind: Some(MediaKindDto::Series),
+        season: match source {
+            ProviderDto::Rezka => None,
+            ProviderDto::Prowlarr => {
+                Some(u16::try_from(request.episode().season()).map_err(|_| PortError::Conflict)?)
+            }
+        },
+        preferred_qualities: Vec::new(),
+        preferred_languages: Vec::new(),
+        preferred_codecs: Vec::new(),
+        preferred_release_groups: Vec::new(),
+    })
 }
 
 fn rezka_availability_titles(request: &EpisodeAvailabilityRequest<'_>) -> Vec<String> {
@@ -1184,7 +1458,8 @@ impl SearchPersistence for StorageSearchPersistence {
             .await
             .map_err(storage_error)?
             .ok_or(SearchError::NotFound)?;
-        let (request, results, provider_continuation) = decode_session_payload(record.payload)?;
+        let (request, results, provider_continuation, query_aliases) =
+            decode_session_payload(record.payload)?;
         Ok(StoredSearchSession {
             id: record.id.to_string(),
             owner: record.owner,
@@ -1192,6 +1467,32 @@ impl SearchPersistence for StorageSearchPersistence {
             expires_at: record.expires_at,
             results,
             provider_continuation,
+            query_aliases,
+        })
+    }
+
+    async fn session_for_user(
+        &self,
+        id: &str,
+        user: UserId,
+    ) -> Result<StoredSearchSession, SearchError> {
+        let id = uuid::Uuid::parse_str(id).map_err(|_| SearchError::InvalidRequest)?;
+        let record = self
+            .repository
+            .session_for_user(id, user)
+            .await
+            .map_err(storage_error)?
+            .ok_or(SearchError::NotFound)?;
+        let (request, results, provider_continuation, query_aliases) =
+            decode_session_payload(record.payload)?;
+        Ok(StoredSearchSession {
+            id: record.id.to_string(),
+            owner: record.owner,
+            request,
+            expires_at: record.expires_at,
+            results,
+            provider_continuation,
+            query_aliases,
         })
     }
 
@@ -1207,6 +1508,30 @@ impl SearchPersistence for StorageSearchPersistence {
             })
             .await
             .map_err(storage_error)
+    }
+
+    async fn update_session_for_user(
+        &self,
+        session: StoredSearchSession,
+        user: UserId,
+    ) -> Result<(), SearchError> {
+        let id = uuid::Uuid::parse_str(&session.id).map_err(|_| SearchError::Infrastructure)?;
+        let payload = encode_session_payload(&session)?;
+        self.repository
+            .update_session_for_user(
+                media_storage::SearchSessionRecord {
+                    id,
+                    owner: session.owner,
+                    payload,
+                    expires_at: session.expires_at,
+                },
+                user,
+            )
+            .await
+            .map_err(|error| match error {
+                PortError::Conflict => SearchError::Forbidden,
+                PortError::Infrastructure => SearchError::Infrastructure,
+            })
     }
 
     async fn insert_execution(
@@ -1285,12 +1610,18 @@ fn encode_session_payload(session: &StoredSearchSession) -> Result<serde_json::V
             .map_err(|_| SearchError::Infrastructure)?,
         "results": results,
         "provider_continuation": session.provider_continuation,
+        "query_aliases": session.query_aliases,
     }))
 }
 
-fn decode_session_payload(
-    value: serde_json::Value,
-) -> Result<(StartSearchRequest, Vec<ProviderResult>, Option<String>), SearchError> {
+type DecodedSearchSession = (
+    StartSearchRequest,
+    Vec<ProviderResult>,
+    Option<String>,
+    Vec<String>,
+);
+
+fn decode_session_payload(value: serde_json::Value) -> Result<DecodedSearchSession, SearchError> {
     let object = value.as_object().ok_or(SearchError::Infrastructure)?;
     let request = serde_json::from_value(
         object
@@ -1306,6 +1637,13 @@ fn decode_session_payload(
         .transpose()
         .map_err(|_| SearchError::Infrastructure)?
         .flatten();
+    let query_aliases = object
+        .get("query_aliases")
+        .cloned()
+        .map(serde_json::from_value::<Vec<String>>)
+        .transpose()
+        .map_err(|_| SearchError::Infrastructure)?
+        .unwrap_or_default();
     let values = object
         .get("results")
         .and_then(serde_json::Value::as_array)
@@ -1362,7 +1700,7 @@ fn decode_session_payload(
         };
         results.push(ProviderResult { public, private });
     }
-    Ok((request, results, provider_continuation))
+    Ok((request, results, provider_continuation, query_aliases))
 }
 
 fn storage_error(error: media_core::PortError) -> SearchError {
@@ -1380,6 +1718,14 @@ pub struct DurableSearchService {
 }
 
 impl DurableSearchService {
+    fn choice_selection_ref(choice_set: uuid::Uuid, source: &str) -> String {
+        uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_URL,
+            format!("selection:{choice_set}:{source}").as_bytes(),
+        )
+        .to_string()
+    }
+
     #[must_use]
     pub fn new(
         persistence: Arc<dyn SearchPersistence>,
@@ -1460,6 +1806,326 @@ impl DurableSearchService {
             continuation,
         })
     }
+
+    /// Load the two durable sessions that form a tracked-episode choice set.
+    /// `session_for_owner` is deliberately used for every lookup: the stable
+    /// choice-set UUID is only an opaque locator and never an authorization
+    /// credential by itself.
+    pub async fn choice_set(
+        &self,
+        owner: UserId,
+        choice_set_id: &str,
+    ) -> Result<serde_json::Value, SearchError> {
+        let choice_set =
+            uuid::Uuid::parse_str(choice_set_id).map_err(|_| SearchError::InvalidRequest)?;
+        if choice_set.to_string() != choice_set_id.to_ascii_lowercase() {
+            return Err(SearchError::InvalidRequest);
+        }
+
+        let mut sources = serde_json::Map::new();
+        let mut expires_at = None::<OffsetDateTime>;
+        let mut query = None::<String>;
+        let mut season = None::<u16>;
+        let mut media_kind = None::<MediaKindDto>;
+        let mut expired_sources = Vec::new();
+        let mut missing_sources = Vec::new();
+        let mut found_session = false;
+        for (source_name, source) in [
+            ("rezka", ProviderDto::Rezka),
+            ("prowlarr", ProviderDto::Prowlarr),
+        ] {
+            let session_id = uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_URL,
+                format!("choice:{choice_set}:{source_name}").as_bytes(),
+            )
+            .to_string();
+            let session = match self.persistence.session_for_user(&session_id, owner).await {
+                Ok(session) => {
+                    found_session = true;
+                    session
+                }
+                Err(SearchError::NotFound) => {
+                    missing_sources.push(source_name);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            expires_at = Some(expires_at.map_or(session.expires_at, |existing| {
+                existing.min(session.expires_at)
+            }));
+            query.get_or_insert_with(|| session.request.query.clone());
+            season.get_or_insert(session.request.season.unwrap_or_default());
+            media_kind.get_or_insert(session.request.media_kind.unwrap_or(MediaKindDto::Series));
+            if session.results.is_empty() {
+                missing_sources.push(source_name);
+                continue;
+            }
+            if session.expires_at <= OffsetDateTime::now_utc() {
+                expired_sources.push(source_name);
+                continue;
+            }
+            let session_expiry = session
+                .expires_at
+                .format(&Rfc3339)
+                .map_err(|_| SearchError::Infrastructure)?;
+            let results = session
+                .results
+                .iter()
+                .map(|result| {
+                    serde_json::to_value(&result.public).map_err(|_| SearchError::Infrastructure)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            sources.insert(
+                source_name.to_owned(),
+                serde_json::json!({
+                    "selection_ref": Self::choice_selection_ref(choice_set, source_name),
+                    "source": source,
+                    "expires_at": session_expiry,
+                    "results": results,
+                }),
+            );
+        }
+        if !found_session {
+            return Err(SearchError::NotFound);
+        }
+        let expires_at = expires_at
+            .ok_or(SearchError::NotFound)?
+            .format(&Rfc3339)
+            .map_err(|_| SearchError::Infrastructure)?;
+        let rezka_count = sources
+            .get("rezka")
+            .and_then(|value| value.get("results"))
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len);
+        let prowlarr_count = sources
+            .get("prowlarr")
+            .and_then(|value| value.get("results"))
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len);
+        Ok(serde_json::json!({
+            "choice_set_id": choice_set_id,
+            "expires_at": expires_at,
+            "query": query,
+            "media_kind": media_kind,
+            "season": season,
+            "rezka_count": rezka_count,
+            "prowlarr_count": prowlarr_count,
+            "status": if expired_sources.is_empty() && missing_sources.is_empty() {
+                "ready"
+            } else {
+                "refresh_required"
+            },
+            "expired_sources": expired_sources,
+            "missing_sources": missing_sources,
+            "sources": sources,
+        }))
+    }
+
+    /// Refresh expired provider sessions for a tracked episode. This is the
+    /// only path allowed to search providers from the Telegram choice flow;
+    /// fresh sessions are always served by [`Self::choice_set`] without a
+    /// provider call.
+    pub async fn refresh_choice_set(
+        &self,
+        owner: UserId,
+        choice_set_id: &str,
+    ) -> Result<serde_json::Value, SearchError> {
+        let choice_set =
+            uuid::Uuid::parse_str(choice_set_id).map_err(|_| SearchError::InvalidRequest)?;
+        if choice_set.to_string() != choice_set_id.to_ascii_lowercase() {
+            return Err(SearchError::InvalidRequest);
+        }
+        let now = OffsetDateTime::now_utc();
+        for source_name in ["rezka", "prowlarr"] {
+            let session_id = uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_URL,
+                format!("choice:{choice_set}:{source_name}").as_bytes(),
+            )
+            .to_string();
+            let Ok(mut session) = self.persistence.session_for_user(&session_id, owner).await
+            else {
+                continue;
+            };
+            // Empty sessions are durable placeholders for a source which was
+            // unavailable during the notification probe. They must be
+            // refreshable even while their metadata TTL is still current.
+            if session.expires_at > now && !session.results.is_empty() {
+                continue;
+            }
+            let Some(thread_id) = session.request.scope.thread_id.as_deref() else {
+                continue;
+            };
+            let Some((season, episode)) = thread_id
+                .strip_prefix("episode:")
+                .and_then(|value| value.split_once(':'))
+                .and_then(|(season, episode)| {
+                    Some((season.parse::<u32>().ok()?, episode.parse::<u32>().ok()?))
+                })
+            else {
+                continue;
+            };
+            // A refresh repeats the canonical title and aliases retained in
+            // the previous public results. Search every provider page and
+            // apply the exact episode filter to each candidate; stale release
+            // ranges such as S03E01-02 must never satisfy S03E03.
+            let mut queries = session.query_aliases.clone();
+            queries.push(session.request.query.clone());
+            for result in &session.results {
+                match &result.public {
+                    SearchResultDto::Rezka {
+                        title,
+                        original_title,
+                        ..
+                    } => {
+                        queries.push(title.clone());
+                        if let Some(original_title) = original_title {
+                            queries.push(original_title.clone());
+                        }
+                    }
+                    SearchResultDto::Prowlarr { title, .. } => queries.push(title.clone()),
+                }
+            }
+            queries.retain(|query| !query.trim().is_empty());
+            queries.sort_by_key(|query| query.to_ascii_lowercase());
+            queries.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+
+            let mut results = Vec::new();
+            let mut successful_query = false;
+            for query in &queries {
+                let mut continuation = None;
+                for _ in 0..8 {
+                    let mut request = session.request.clone();
+                    request.query = query.clone();
+                    let page = match self
+                        .provider
+                        .search(&request, continuation.as_deref())
+                        .await
+                    {
+                        Ok(page) => {
+                            successful_query = true;
+                            page
+                        }
+                        Err(_) => {
+                            // One failed alias/page must not prevent the
+                            // other aliases or provider from refreshing.
+                            break;
+                        }
+                    };
+                    results.extend(page.results.into_iter().filter(|result| {
+                        if source_name == "rezka" {
+                            let (
+                                SearchResultDto::Rezka {
+                                    title,
+                                    original_title,
+                                    ..
+                                },
+                                PrivateResult::Rezka {
+                                    translation_episodes,
+                                    ..
+                                },
+                            ) = (&result.public, &result.private)
+                            else {
+                                return false;
+                            };
+                            let title_match = queries.iter().any(|candidate| {
+                                title.eq_ignore_ascii_case(candidate)
+                                    || original_title
+                                        .as_deref()
+                                        .is_some_and(|value| value.eq_ignore_ascii_case(candidate))
+                            });
+                            title_match
+                                && translation_episodes.values().any(|seasons| {
+                                    seasons.iter().any(|(candidate_season, episodes)| {
+                                        *candidate_season == season && episodes.contains(&episode)
+                                    })
+                                })
+                        } else {
+                            let SearchResultDto::Prowlarr { title, .. } = &result.public else {
+                                return false;
+                            };
+                            queries.iter().any(|candidate| {
+                                media_integrations::series_title_matches(title, candidate)
+                            }) && media_integrations::title_contains_episode(title, season, episode)
+                        }
+                    }));
+                    continuation = page.provider_continuation;
+                    if continuation.is_none() {
+                        break;
+                    }
+                }
+            }
+            if !successful_query {
+                // Keep the previous private snapshot and its expiry. The
+                // caller receives refresh_required and can retry later,
+                // while a healthy source still remains usable.
+                continue;
+            }
+            results.sort_by(|left, right| left.public.result_id().cmp(right.public.result_id()));
+            results.dedup_by(|left, right| left.public.result_id() == right.public.result_id());
+            session.results = results;
+            session.provider_continuation = None;
+            session.expires_at = now + SEARCH_TTL;
+            self.persistence
+                .update_session_for_user(session, owner)
+                .await?;
+        }
+        self.choice_set(owner, choice_set_id).await
+    }
+
+    async fn select_from_session(
+        &self,
+        owner: UserId,
+        operation: OperationKey,
+        request: SelectResultRequest,
+        session: StoredSearchSession,
+    ) -> Result<JobDto, SearchError> {
+        if session.expires_at <= OffsetDateTime::now_utc() {
+            return Err(SearchError::NotFound);
+        }
+        let result = session
+            .results
+            .iter()
+            .find(|result| result.public.result_id() == request.result_id)
+            .ok_or(SearchError::NotFound)?;
+        let mut execution = execution(
+            result,
+            &request,
+            session.request.media_kind,
+            session.request.season,
+            Some(&session.request.query),
+        )?;
+        if let Some(identity) = self.identity.as_deref() {
+            apply_persisted_episode_mappings(identity, &mut execution).await?;
+        }
+        let result_ref = format!("selection:{}", uuid::Uuid::new_v4());
+        self.persistence
+            .insert_execution(result_ref.clone(), execution)
+            .await?;
+        let provider = match session.request.source {
+            ProviderDto::Rezka => Provider::Rezka,
+            ProviderDto::Prowlarr => Provider::Prowlarr,
+        };
+        let job = self
+            .jobs
+            .create_job_for_owner(
+                owner,
+                operation,
+                NewJobCommand {
+                    provider,
+                    result_ref,
+                    notify_scope: NotifyScope::Initiator,
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                media_core::ApplicationError::Conflict => SearchError::Conflict,
+                media_core::ApplicationError::InvalidInput(_) => SearchError::InvalidRequest,
+                media_core::ApplicationError::Forbidden => SearchError::Forbidden,
+                media_core::ApplicationError::NotFound => SearchError::NotFound,
+                media_core::ApplicationError::Infrastructure => SearchError::Infrastructure,
+            })?;
+        Ok(job_dto(&job))
+    }
 }
 
 #[async_trait::async_trait]
@@ -1521,6 +2187,7 @@ impl SearchService for DurableSearchService {
             expires_at: OffsetDateTime::now_utc() + SEARCH_TTL,
             results: provider_page.results,
             provider_continuation: provider_page.provider_continuation,
+            query_aliases: Vec::new(),
         };
         self.persistence.insert_session(session.clone()).await?;
         self.page(session, 0).await
@@ -1549,6 +2216,22 @@ impl SearchService for DurableSearchService {
             return Err(SearchError::Forbidden);
         }
         self.page(session, offset).await
+    }
+
+    async fn choice_set(
+        &self,
+        owner: UserId,
+        choice_set_id: &str,
+    ) -> Result<serde_json::Value, SearchError> {
+        self.choice_set(owner, choice_set_id).await
+    }
+
+    async fn refresh_choice_set(
+        &self,
+        owner: UserId,
+        choice_set_id: &str,
+    ) -> Result<serde_json::Value, SearchError> {
+        self.refresh_choice_set(owner, choice_set_id).await
     }
 
     async fn start_alternative(
@@ -1620,52 +2303,77 @@ impl SearchService for DurableSearchService {
         if session.request.scope != request.scope {
             return Err(SearchError::Forbidden);
         }
-        if session.expires_at <= OffsetDateTime::now_utc() {
-            return Err(SearchError::NotFound);
-        }
-        let result = session
-            .results
-            .iter()
-            .find(|result| result.public.result_id() == request.result_id)
-            .ok_or(SearchError::NotFound)?;
-        let mut execution = execution(
-            result,
-            &request,
-            session.request.media_kind,
-            session.request.season,
-            Some(&session.request.query),
-        )?;
-        if let Some(identity) = self.identity.as_deref() {
-            apply_persisted_episode_mappings(identity, &mut execution).await?;
-        }
-        let result_ref = format!("selection:{}", uuid::Uuid::new_v4());
-        self.persistence
-            .insert_execution(result_ref.clone(), execution)
-            .await?;
-        let provider = match session.request.source {
-            ProviderDto::Rezka => Provider::Rezka,
-            ProviderDto::Prowlarr => Provider::Prowlarr,
-        };
-        let job = self
-            .jobs
-            .create_job_for_owner(
-                owner,
-                operation,
-                NewJobCommand {
-                    provider,
-                    result_ref,
-                    notify_scope: NotifyScope::Initiator,
-                },
-            )
+        self.select_from_session(owner, operation, request, session)
             .await
-            .map_err(|error| match error {
-                media_core::ApplicationError::Conflict => SearchError::Conflict,
-                media_core::ApplicationError::InvalidInput(_) => SearchError::InvalidRequest,
-                media_core::ApplicationError::Forbidden => SearchError::Forbidden,
-                media_core::ApplicationError::NotFound => SearchError::NotFound,
-                media_core::ApplicationError::Infrastructure => SearchError::Infrastructure,
-            })?;
-        Ok(job_dto(&job))
+    }
+
+    async fn select_choice_set(
+        &self,
+        owner: UserId,
+        request: ChoiceSetSelection,
+    ) -> Result<JobDto, SearchError> {
+        let ChoiceSetSelection {
+            operation,
+            choice_set_id,
+            source,
+            result_id,
+            translation_id,
+            season,
+            episode,
+        } = request;
+        let choice_set =
+            uuid::Uuid::parse_str(&choice_set_id).map_err(|_| SearchError::InvalidRequest)?;
+        if choice_set.to_string() != choice_set_id.to_ascii_lowercase() {
+            return Err(SearchError::InvalidRequest);
+        }
+        let source_name = match source {
+            ProviderDto::Rezka => "rezka",
+            ProviderDto::Prowlarr => "prowlarr",
+        };
+        let session_id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_URL,
+            format!("choice:{choice_set}:{source_name}").as_bytes(),
+        )
+        .to_string();
+        let session = self
+            .persistence
+            .session_for_user(&session_id, owner)
+            .await?;
+        if session.request.source != source {
+            return Err(SearchError::Forbidden);
+        }
+        let (expected_season, expected_episode) = session
+            .request
+            .scope
+            .thread_id
+            .as_deref()
+            .and_then(|thread_id| thread_id.strip_prefix("episode:"))
+            .and_then(|coordinates| coordinates.split_once(':'))
+            .and_then(|(season, episode)| {
+                Some((season.parse::<u32>().ok()?, episode.parse::<u32>().ok()?))
+            })
+            .filter(|(_, episode)| *episode > 0)
+            .ok_or(SearchError::InvalidRequest)?;
+        if season.is_some_and(|value| value != expected_season)
+            || episode.is_some_and(|value| value != expected_episode)
+        {
+            return Err(SearchError::InvalidRequest);
+        }
+        let request = SelectResultRequest {
+            session_id,
+            result_id,
+            translation_id,
+            // Coordinates always come from the persisted tracked-episode
+            // session. Caller omission is safe, while mismatches are rejected
+            // instead of silently widening this into a season download.
+            season: Some(expected_season),
+            episode: Some(expected_episode),
+            // This scope is private to the durable tracked-episode session;
+            // the dedicated method intentionally does not accept caller scope.
+            scope: session.request.scope.clone(),
+        };
+        self.select_from_session(owner, operation, request, session)
+            .await
     }
 
     async fn execution_for(&self, result_ref: &str) -> Result<ExecutionSelectionDto, SearchError> {

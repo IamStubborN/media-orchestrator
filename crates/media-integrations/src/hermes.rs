@@ -164,6 +164,10 @@ fn source_choice_webhook(notification: &SourceChoiceNotification) -> HermesSourc
             })
             .collect(),
         poster_url: notification.poster_url().map(str::to_owned),
+        choice_set_id: notification.choice_set_id().map(str::to_owned),
+        choice_set_expires_at: notification.choice_set_expires_at().map(str::to_owned),
+        rezka_count: notification.rezka_count(),
+        prowlarr_count: notification.prowlarr_count(),
     }
 }
 

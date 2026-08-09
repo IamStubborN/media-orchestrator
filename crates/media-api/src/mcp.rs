@@ -22,7 +22,7 @@ use rmcp::{
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{ApiState, convert};
+use crate::{ApiState, ChoiceSetSelection, convert};
 
 #[derive(Clone)]
 struct MediaAdminMcp {
@@ -42,6 +42,12 @@ struct TrackingIdInput {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ChoiceSetInput {
+    #[schemars(description = "Opaque tracked-episode choice set identifier")]
+    choice_set_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct SearchInput {
     query: Option<String>,
     continuation: Option<String>,
@@ -54,6 +60,18 @@ struct SearchInput {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct DownloadInput {
     session_id: String,
+    result_id: String,
+    translation_id: Option<u64>,
+    season: Option<u32>,
+    episode: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ChoiceSetDownloadInput {
+    #[schemars(description = "Opaque tracked-episode choice set identifier")]
+    choice_set_id: String,
+    #[schemars(description = "Explicit provider: rezka or prowlarr")]
+    source: String,
     result_id: String,
     translation_id: Option<u64>,
     season: Option<u32>,
@@ -651,6 +669,116 @@ impl MediaAdminMcp {
             results.insert(key.to_owned(), value);
         }
         result_json(serde_json::Value::Object(results))
+    }
+
+    #[tool(
+        name = "media_episode_choice_set",
+        description = "Read the cached, owner-authorized provider choices for one tracked episode. Returns only public result metadata; it never searches providers or exposes private locators.",
+        output_schema = object_output_schema(),
+        annotations(title = "Get episode choices", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn episode_choice_set(
+        &self,
+        Parameters(input): Parameters<ChoiceSetInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = actor_from_parts(&parts)?;
+        let owner = actor
+            .require_user()
+            .map_err(|_| ErrorData::invalid_request("operation is forbidden", None))?;
+        if input.choice_set_id.trim().is_empty() || input.choice_set_id.len() > 64 {
+            return Err(ErrorData::invalid_params("choice_set_id is invalid", None));
+        }
+        let value = self
+            .state
+            .search()
+            .choice_set(owner, &input.choice_set_id)
+            .await
+            .map_err(search_error)?;
+        result_json(value)
+    }
+
+    #[tool(
+        name = "media_episode_choice_set_refresh",
+        description = "Refresh an expired tracked-episode choice set server-side and return its public provider choices. Provider searches happen only when the cached set is expired.",
+        output_schema = object_output_schema(),
+        annotations(title = "Refresh episode choices", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn episode_choice_set_refresh(
+        &self,
+        Parameters(input): Parameters<ChoiceSetInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = actor_from_parts(&parts)?;
+        let owner = actor
+            .require_user()
+            .map_err(|_| ErrorData::invalid_request("operation is forbidden", None))?;
+        if input.choice_set_id.trim().is_empty() || input.choice_set_id.len() > 64 {
+            return Err(ErrorData::invalid_params("choice_set_id is invalid", None));
+        }
+        let value = self
+            .state
+            .search()
+            .refresh_choice_set(owner, &input.choice_set_id)
+            .await
+            .map_err(search_error)?;
+        result_json(value)
+    }
+
+    #[tool(
+        name = "media_episode_choice_set_download",
+        description = "Create a download from one exact provider result in a tracked-episode choice set. The source and result are explicit; no provider fallback or implicit selection is performed.",
+        output_schema = object_output_schema(),
+        annotations(title = "Download tracked episode choice", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn episode_choice_set_download(
+        &self,
+        Parameters(input): Parameters<ChoiceSetDownloadInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = actor_from_parts(&parts)?;
+        let owner = actor
+            .require_user()
+            .map_err(|_| ErrorData::invalid_request("operation is forbidden", None))?;
+        if input.choice_set_id.trim().is_empty()
+            || input.choice_set_id.len() > 64
+            || input.result_id.trim().is_empty()
+            || input.result_id.len() > 512
+            || input.result_id.chars().any(char::is_control)
+        {
+            return Err(ErrorData::invalid_params(
+                "choice-set download identifiers are invalid",
+                None,
+            ));
+        }
+        let source = parse_provider(&input.source)?;
+        let operation_payload = serde_json::json!({
+            "choice_set_id": input.choice_set_id,
+            "source": input.source,
+            "result_id": input.result_id,
+            "translation_id": input.translation_id,
+            "season": input.season,
+            "episode": input.episode,
+        });
+        let operation = stable_payload_operation_key("choice-set-download", &operation_payload)?;
+        let value = self
+            .state
+            .search()
+            .select_choice_set(
+                owner,
+                ChoiceSetSelection {
+                    operation,
+                    choice_set_id: input.choice_set_id,
+                    source,
+                    result_id: input.result_id,
+                    translation_id: input.translation_id,
+                    season: input.season,
+                    episode: input.episode,
+                },
+            )
+            .await
+            .map_err(search_error)?;
+        result_json(value)
     }
 
     #[tool(

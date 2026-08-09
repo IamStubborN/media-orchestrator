@@ -33,7 +33,7 @@ pub use idempotency::{
 };
 pub use plex::{PlexReconcileService, PlexServiceError};
 pub use request_id::RequestId;
-pub use search::{SearchError, SearchService};
+pub use search::{ChoiceSetSelection, SearchError, SearchService};
 pub use trending::{TrendingService, TrendingServiceError};
 
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;

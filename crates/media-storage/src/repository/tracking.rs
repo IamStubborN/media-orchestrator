@@ -1,17 +1,17 @@
 use media_core::{
-    PRIMARY_USER_ID, EpisodeSnapshot, JobId, MediaNotification, MediaNotificationAction,
-    MediaNotificationAudio, MediaNotificationDeliveryKind, MediaNotificationEpisode,
-    MediaNotificationIssue, MediaNotificationKind, MediaNotificationLibrary,
-    MediaNotificationMedia, MediaNotificationNextStep, MediaNotificationOrigin,
-    MediaNotificationProcessing, MediaNotificationProcessingMode, MediaNotificationProgress,
-    MediaNotificationPublication, MediaNotificationResult, MediaNotificationStage,
-    MediaNotificationState, MediaNotificationSubtitles, MediaNotificationVideo,
-    NewTrackingSubscription, NotificationDelivery, NotificationEventType, NotificationId,
-    NotificationOutboxPort, NotificationRecipient, OperationKey, PortError, Provider,
-    ReleaseIdentity, ReleaseSource, SourceChoiceAction, SourceChoiceNotification,
+    PRIMARY_USER_ID, EpisodeSnapshot, FutureEpisodeRecord, JobId, MediaNotification,
+    MediaNotificationAction, MediaNotificationAudio, MediaNotificationDeliveryKind,
+    MediaNotificationEpisode, MediaNotificationIssue, MediaNotificationKind,
+    MediaNotificationLibrary, MediaNotificationMedia, MediaNotificationNextStep,
+    MediaNotificationOrigin, MediaNotificationProcessing, MediaNotificationProcessingMode,
+    MediaNotificationProgress, MediaNotificationPublication, MediaNotificationResult,
+    MediaNotificationStage, MediaNotificationState, MediaNotificationSubtitles,
+    MediaNotificationVideo, NewTrackingSubscription, NotificationDelivery, NotificationEventType,
+    NotificationId, NotificationOutboxPort, NotificationRecipient, OperationKey, PortError,
+    Provider, ReleaseIdentity, ReleaseSource, SourceChoiceAction, SourceChoiceNotification,
     TrackingCheckStatus, TrackingDownload, TrackingDownloadPatch, TrackingId,
     TrackingScheduleStore, TrackingScope, TrackingStore, TrackingSubscription, UserId,
-    SECONDARY_USER_ID,
+    SECONDARY_USER_ID, episode_choice_set_id,
 };
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
 
@@ -36,6 +36,31 @@ impl SeaOrmTrackingStore {
         actions: Vec<SourceChoiceAction>,
         poster_url: Option<String>,
     ) -> Result<bool, PortError> {
+        self.record_future_episode_with_counts(FutureEpisodeRecord {
+            id,
+            episode,
+            next_check_at,
+            actions,
+            poster_url,
+            rezka_count: 0,
+            prowlarr_count: 0,
+        })
+        .await
+    }
+
+    pub async fn record_future_episode_with_counts(
+        &self,
+        record: FutureEpisodeRecord,
+    ) -> Result<bool, PortError> {
+        let FutureEpisodeRecord {
+            id,
+            episode,
+            next_check_at,
+            actions,
+            poster_url,
+            rezka_count,
+            prowlarr_count,
+        } = record;
         let transaction = self
             .database
             .begin()
@@ -98,7 +123,15 @@ impl SeaOrmTrackingStore {
                 actions,
             )
             .map_err(|error| sea_orm::DbErr::Type(error.to_string()))?
-            .with_poster_url(poster_url);
+            .with_poster_url(poster_url)
+            .with_choice_set(
+                episode_choice_set_id(id, episode.season(), episode.episode()),
+                (time::OffsetDateTime::now_utc() + time::Duration::hours(24))
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .map_err(|error| sea_orm::DbErr::Type(error.to_string()))?,
+                rezka_count,
+                prowlarr_count,
+            );
             let payload = source_choice_payload(&source_choice);
             let recipients = notification_recipients(owner, &scope)?;
             for recipient in recipients {
@@ -142,6 +175,18 @@ fn source_choice_payload(notification: &SourceChoiceNotification) -> serde_json:
     });
     if let Some(poster_url) = notification.poster_url() {
         payload["poster_url"] = serde_json::Value::String(poster_url.to_owned());
+    }
+    if let Some(choice_set_id) = notification.choice_set_id() {
+        payload["choice_set_id"] = serde_json::Value::String(choice_set_id.to_owned());
+    }
+    if let Some(expires_at) = notification.choice_set_expires_at() {
+        payload["choice_set_expires_at"] = serde_json::Value::String(expires_at.to_owned());
+    }
+    if let Some(count) = notification.rezka_count() {
+        payload["rezka_count"] = serde_json::Value::Number(count.into());
+    }
+    if let Some(count) = notification.prowlarr_count() {
+        payload["prowlarr_count"] = serde_json::Value::Number(count.into());
     }
     payload
 }
@@ -360,6 +405,13 @@ impl TrackingScheduleStore for SeaOrmTrackingStore {
             poster_url,
         )
         .await
+    }
+
+    async fn record_future_episode_with_counts(
+        &self,
+        record: FutureEpisodeRecord,
+    ) -> Result<bool, PortError> {
+        SeaOrmTrackingStore::record_future_episode_with_counts(self, record).await
     }
 
     async fn pending_episodes(&self, id: TrackingId) -> Result<Vec<EpisodeSnapshot>, PortError> {
@@ -858,7 +910,29 @@ fn source_choice_from_payload(
             _ => Err(PortError::Infrastructure),
         })
         .collect::<Result<Vec<_>, _>>()?;
-    SourceChoiceNotification::new(
+    let choice_set = match (
+        payload
+            .get("choice_set_id")
+            .and_then(serde_json::Value::as_str),
+        payload
+            .get("choice_set_expires_at")
+            .and_then(serde_json::Value::as_str),
+        payload
+            .get("rezka_count")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok()),
+        payload
+            .get("prowlarr_count")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok()),
+    ) {
+        (None, None, None, None) => None,
+        (Some(id), Some(expires_at), Some(rezka), Some(prowlarr)) => {
+            Some((id.to_owned(), expires_at.to_owned(), rezka, prowlarr))
+        }
+        _ => return Err(PortError::Infrastructure),
+    };
+    let notification = SourceChoiceNotification::new(
         string("card_key")?.to_owned(),
         tracking_id,
         string("title")?.to_owned(),
@@ -866,15 +940,19 @@ fn source_choice_from_payload(
         episode,
         actions,
     )
-    .map(|notification| {
-        notification.with_poster_url(
-            payload
-                .get("poster_url")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned),
-        )
+    .map_err(|_| PortError::Infrastructure)?
+    .with_poster_url(
+        payload
+            .get("poster_url")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+    );
+    Ok(match choice_set {
+        Some((id, expires_at, rezka, prowlarr)) => {
+            notification.with_choice_set(id, expires_at, rezka, prowlarr)
+        }
+        None => notification,
     })
-    .map_err(|_| PortError::Infrastructure)
 }
 
 fn media_notification_from_payload(

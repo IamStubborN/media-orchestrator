@@ -5,6 +5,14 @@ use crate::{
     UserId, SECONDARY_USER_ID,
 };
 
+/// Stable opaque identifier for the provider choices discovered for one tracked
+/// episode. The identifier is not sufficient for authorization on its own;
+/// callers must still load the underlying session for the authenticated owner.
+pub fn episode_choice_set_id(id: TrackingId, season: u32, episode: u32) -> String {
+    let value = format!("tracking:{}:{}:{}", id, season, episode);
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, value.as_bytes()).to_string()
+}
+
 const NOTIFY_TRACKING_INTERVAL: time::Duration = time::Duration::hours(1);
 const DOWNLOAD_TRACKING_INTERVAL: time::Duration = time::Duration::minutes(15);
 
@@ -192,12 +200,26 @@ pub enum ProviderAvailability {
 pub struct EpisodeAvailability {
     rezka: ProviderAvailability,
     prowlarr: ProviderAvailability,
+    rezka_count: u32,
+    prowlarr_count: u32,
 }
 
 impl EpisodeAvailability {
     #[must_use]
     pub const fn new(rezka: ProviderAvailability, prowlarr: ProviderAvailability) -> Self {
-        Self { rezka, prowlarr }
+        Self {
+            rezka,
+            prowlarr,
+            rezka_count: 0,
+            prowlarr_count: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_counts(mut self, rezka_count: u32, prowlarr_count: u32) -> Self {
+        self.rezka_count = rezka_count;
+        self.prowlarr_count = prowlarr_count;
+        self
     }
 
     #[must_use]
@@ -212,6 +234,16 @@ impl EpisodeAvailability {
             (_, ProviderAvailability::Available) => vec![SourceChoiceAction::Prowlarr],
             _ => Vec::new(),
         }
+    }
+
+    #[must_use]
+    pub const fn rezka_count(self) -> u32 {
+        self.rezka_count
+    }
+
+    #[must_use]
+    pub const fn prowlarr_count(self) -> u32 {
+        self.prowlarr_count
     }
 }
 
@@ -695,6 +727,22 @@ pub trait TrackingStore: Send + Sync {
     ) -> Result<Option<TrackingSubscription>, PortError>;
 }
 
+/// The complete immutable input for recording one discovered episode.
+///
+/// Keeping this as a value object avoids widening the scheduling port every
+/// time discovery metadata is added while making the provider counts explicit
+/// at the call site.
+#[derive(Debug, Clone)]
+pub struct FutureEpisodeRecord {
+    pub id: TrackingId,
+    pub episode: EpisodeSnapshot,
+    pub next_check_at: time::OffsetDateTime,
+    pub actions: Vec<SourceChoiceAction>,
+    pub poster_url: Option<String>,
+    pub rezka_count: u32,
+    pub prowlarr_count: u32,
+}
+
 #[async_trait::async_trait]
 pub trait TrackingScheduleStore: Send + Sync {
     async fn list_due(
@@ -710,6 +758,23 @@ pub trait TrackingScheduleStore: Send + Sync {
         actions: Vec<SourceChoiceAction>,
         poster_url: Option<String>,
     ) -> Result<bool, PortError>;
+
+    /// Records a discovery and carries provider candidate counts into the
+    /// compact source-choice notification. Existing adapters can keep the
+    /// legacy method and receive zero counts until upgraded.
+    async fn record_future_episode_with_counts(
+        &self,
+        record: FutureEpisodeRecord,
+    ) -> Result<bool, PortError> {
+        self.record_future_episode(
+            record.id,
+            record.episode,
+            record.next_check_at,
+            record.actions,
+            record.poster_url,
+        )
+        .await
+    }
     async fn pending_episodes(&self, id: TrackingId) -> Result<Vec<EpisodeSnapshot>, PortError>;
     async fn record_pending_episode(
         &self,
@@ -885,8 +950,8 @@ impl TrackingRuntime {
                 {
                     continue;
                 }
-                let actions = if tracking.download().is_some() {
-                    Vec::new()
+                let (actions, (rezka_count, prowlarr_count)) = if tracking.download().is_some() {
+                    (Vec::new(), (0, 0))
                 } else {
                     let Some(availability) = self.availability.as_deref() else {
                         self.store
@@ -914,6 +979,7 @@ impl TrackingRuntime {
                             continue;
                         }
                     };
+                    let counts = (availability.rezka_count(), availability.prowlarr_count());
                     let actions = availability.actions();
                     if actions.is_empty() {
                         self.store
@@ -922,7 +988,7 @@ impl TrackingRuntime {
                         pending_availability = true;
                         continue;
                     }
-                    actions
+                    (actions, counts)
                 };
                 if tracking.download().is_some() {
                     let Some(downloads) = self.downloads.as_deref() else {
@@ -938,13 +1004,15 @@ impl TrackingRuntime {
                 }
                 if self
                     .store
-                    .record_future_episode(
-                        tracking.id(),
+                    .record_future_episode_with_counts(FutureEpisodeRecord {
+                        id: tracking.id(),
                         episode,
-                        default_next_check,
+                        next_check_at: default_next_check,
                         actions,
-                        discovery.poster_url().map(str::to_owned),
-                    )
+                        poster_url: discovery.poster_url().map(str::to_owned),
+                        rezka_count,
+                        prowlarr_count,
+                    })
                     .await?
                 {
                     result.discovered += 1;

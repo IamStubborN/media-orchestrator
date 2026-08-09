@@ -55,6 +55,42 @@ impl SeaOrmSearchRepository {
         }
     }
 
+    pub async fn update_session_for_user(
+        &self,
+        record: SearchSessionRecord,
+        user: UserId,
+    ) -> Result<(), PortError> {
+        let result = self
+            .database
+            .execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "UPDATE search_sessions AS sessions
+                    SET payload = $3, expires_at = $4, updated_at = now()
+                   FROM tracking_subscriptions AS tracking
+                  WHERE sessions.id = $1
+                    AND (sessions.owner_id = $2
+                         OR (tracking.id::text = substr(sessions.payload #>> '{request,scope,chat_id}', 10)
+                             AND tracking.deleted_at IS NULL
+                             AND tracking.scope = 'family'
+                             AND $2 IN ($5, $6)))",
+                [
+                    record.id.into(),
+                    (*user.as_uuid()).into(),
+                    record.payload.into(),
+                    record.expires_at.into(),
+                    (*media_core::PRIMARY_USER_ID.as_uuid()).into(),
+                    (*media_core::SECONDARY_USER_ID.as_uuid()).into(),
+                ],
+            ))
+            .await
+            .map_err(map_database_error)?;
+        if result.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(PortError::Conflict)
+        }
+    }
+
     pub async fn session_for_owner(
         &self,
         id: uuid::Uuid,
@@ -65,6 +101,46 @@ impl SeaOrmSearchRepository {
             "SELECT id, owner_id, payload, expires_at FROM search_sessions WHERE id = $1 AND owner_id = $2",
             [id.into(), (*owner.as_uuid()).into()],
         )).await.map_err(map_database_error)?;
+        row.map(|row| {
+            let owner_id: uuid::Uuid = row.try_get("", "owner_id").map_err(map_database_error)?;
+            Ok(SearchSessionRecord {
+                id: row.try_get("", "id").map_err(map_database_error)?,
+                owner: UserId::from_uuid(owner_id),
+                payload: row.try_get("", "payload").map_err(map_database_error)?,
+                expires_at: row.try_get("", "expires_at").map_err(map_database_error)?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Resolve a tracked-episode session for either its owner or a fixed
+    /// family participant. Generic search sessions remain owner-only.
+    pub async fn session_for_user(
+        &self,
+        id: uuid::Uuid,
+        user: UserId,
+    ) -> Result<Option<SearchSessionRecord>, PortError> {
+        let row = self
+            .database
+            .query_one_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "SELECT sessions.id, sessions.owner_id, sessions.payload, sessions.expires_at
+                   FROM search_sessions AS sessions
+                   LEFT JOIN tracking_subscriptions AS tracking
+                     ON tracking.id::text = substr(sessions.payload #>> '{request,scope,chat_id}', 10)
+                    AND tracking.deleted_at IS NULL
+                  WHERE sessions.id = $1
+                    AND (sessions.owner_id = $2
+                         OR (tracking.scope = 'family' AND $2 IN ($3, $4)))",
+                [
+                    id.into(),
+                    (*user.as_uuid()).into(),
+                    (*media_core::PRIMARY_USER_ID.as_uuid()).into(),
+                    (*media_core::SECONDARY_USER_ID.as_uuid()).into(),
+                ],
+            ))
+            .await
+            .map_err(map_database_error)?;
         row.map(|row| {
             let owner_id: uuid::Uuid = row.try_get("", "owner_id").map_err(map_database_error)?;
             Ok(SearchSessionRecord {

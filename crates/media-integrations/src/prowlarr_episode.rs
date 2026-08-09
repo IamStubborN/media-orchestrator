@@ -4,6 +4,15 @@ pub(crate) enum EpisodeCoverage {
     Set { season: u32, episodes: Vec<u32> },
 }
 
+/// Returns whether a release title explicitly covers the requested episode.
+/// Packs and adjacent seasons are rejected unless the parsed range contains
+/// the exact season/episode coordinate.
+pub fn title_contains_episode(title: &str, season: u32, episode: u32) -> bool {
+    EpisodeCoverage::parse(title)
+        .iter()
+        .any(|coverage| coverage.contains(season, episode))
+}
+
 impl EpisodeCoverage {
     pub(crate) fn parse(title: &str) -> Vec<Self> {
         let normalized = title
@@ -58,7 +67,7 @@ impl EpisodeCoverage {
     }
 }
 
-pub(crate) fn series_title_matches(release_title: &str, query_title: &str) -> bool {
+pub fn series_title_matches(release_title: &str, query_title: &str) -> bool {
     let release = identity_words(release_title);
     let query = strip_query_metadata(identity_words(query_title));
     !query.is_empty()

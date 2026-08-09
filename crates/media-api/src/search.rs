@@ -1,9 +1,10 @@
 use media_contract::{
     AlternativeSearchRequest, ContinueSearchRequest, EpisodeMappingActionDto,
-    ExecutionSelectionDto, JobDto, ResolveEpisodeMappingRequest, RezkaSessionRefreshRequest,
-    SearchPageDto, SelectResultRequest, StartSearchRequest,
+    ExecutionSelectionDto, JobDto, ProviderDto, ResolveEpisodeMappingRequest,
+    RezkaSessionRefreshRequest, SearchPageDto, SelectResultRequest, StartSearchRequest,
 };
 use media_core::{JobId, OperationKey, UserId};
+use serde_json::Value;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
 pub enum SearchError {
@@ -21,6 +22,22 @@ pub enum SearchError {
     ProviderUnavailable,
     #[error("search infrastructure failed")]
     Infrastructure,
+}
+
+/// Exact selection request for a durable tracked-episode choice set.
+///
+/// The choice-set route deliberately carries the opaque set identifier and
+/// explicit provider/result coordinates together, avoiding generic session
+/// scope checks and accidental provider fallback.
+#[derive(Debug, Clone)]
+pub struct ChoiceSetSelection {
+    pub operation: OperationKey,
+    pub choice_set_id: String,
+    pub source: ProviderDto,
+    pub result_id: String,
+    pub translation_id: Option<u64>,
+    pub season: Option<u32>,
+    pub episode: Option<u32>,
 }
 
 #[async_trait::async_trait]
@@ -44,6 +61,21 @@ pub trait SearchService: Send + Sync {
         request: ContinueSearchRequest,
     ) -> Result<SearchPageDto, SearchError>;
 
+    /// Return an owner-authorized, read-only snapshot of a tracked episode's
+    /// provider choices. The service must never expose private provider
+    /// locators or credentials through this method.
+    async fn choice_set(&self, _owner: UserId, _choice_set_id: &str) -> Result<Value, SearchError> {
+        Err(SearchError::NotFound)
+    }
+
+    async fn refresh_choice_set(
+        &self,
+        _owner: UserId,
+        _choice_set_id: &str,
+    ) -> Result<Value, SearchError> {
+        Err(SearchError::NotFound)
+    }
+
     async fn start_alternative(
         &self,
         _owner: UserId,
@@ -59,6 +91,16 @@ pub trait SearchService: Send + Sync {
         operation: OperationKey,
         request: SelectResultRequest,
     ) -> Result<JobDto, SearchError>;
+
+    /// Select one result from an owner/family-authorized tracked-episode
+    /// choice set. This keeps generic search-session scope checks unchanged.
+    async fn select_choice_set(
+        &self,
+        _owner: UserId,
+        _request: ChoiceSetSelection,
+    ) -> Result<JobDto, SearchError> {
+        Err(SearchError::NotFound)
+    }
 
     async fn execution_for(&self, result_ref: &str) -> Result<ExecutionSelectionDto, SearchError>;
 

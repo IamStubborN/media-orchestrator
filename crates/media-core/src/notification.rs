@@ -36,6 +36,10 @@ pub struct SourceChoiceNotification {
     episode: u32,
     actions: Vec<SourceChoiceAction>,
     poster_url: Option<String>,
+    choice_set_id: Option<String>,
+    choice_set_expires_at: Option<String>,
+    rezka_count: Option<u32>,
+    prowlarr_count: Option<u32>,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
@@ -362,12 +366,31 @@ impl SourceChoiceNotification {
             episode,
             actions,
             poster_url: None,
+            choice_set_id: None,
+            choice_set_expires_at: None,
+            rezka_count: None,
+            prowlarr_count: None,
         })
     }
 
     #[must_use]
     pub fn with_poster_url(mut self, poster_url: Option<String>) -> Self {
         self.poster_url = poster_url;
+        self
+    }
+
+    #[must_use]
+    pub fn with_choice_set(
+        mut self,
+        choice_set_id: String,
+        expires_at: String,
+        rezka_count: u32,
+        prowlarr_count: u32,
+    ) -> Self {
+        self.choice_set_id = Some(choice_set_id);
+        self.choice_set_expires_at = Some(expires_at);
+        self.rezka_count = Some(rezka_count);
+        self.prowlarr_count = Some(prowlarr_count);
         self
     }
 
@@ -404,6 +427,26 @@ impl SourceChoiceNotification {
     #[must_use]
     pub fn poster_url(&self) -> Option<&str> {
         self.poster_url.as_deref()
+    }
+
+    #[must_use]
+    pub fn choice_set_id(&self) -> Option<&str> {
+        self.choice_set_id.as_deref()
+    }
+
+    #[must_use]
+    pub fn choice_set_expires_at(&self) -> Option<&str> {
+        self.choice_set_expires_at.as_deref()
+    }
+
+    #[must_use]
+    pub const fn rezka_count(&self) -> Option<u32> {
+        self.rezka_count
+    }
+
+    #[must_use]
+    pub const fn prowlarr_count(&self) -> Option<u32> {
+        self.prowlarr_count
     }
 }
 

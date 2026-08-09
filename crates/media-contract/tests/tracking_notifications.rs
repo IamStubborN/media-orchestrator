@@ -138,6 +138,10 @@ fn hermes_source_choice_webhook_has_three_stable_provider_actions() {
             SourceChoiceActionDto::Prowlarr,
         ],
         poster_url: Some("https://static.tvmaze.com/poster.jpg".to_owned()),
+        choice_set_id: None,
+        choice_set_expires_at: None,
+        rezka_count: None,
+        prowlarr_count: None,
     };
 
     assert_eq!(

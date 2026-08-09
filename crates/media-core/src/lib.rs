@@ -70,9 +70,10 @@ pub use port::{
 pub use release::*;
 pub use tracking::{
     EpisodeAvailability, EpisodeAvailabilityPort, EpisodeAvailabilityRequest, EpisodeDiscovery,
-    EpisodeDiscoveryPort, EpisodeSnapshot, EpisodeSnapshotError, NewTrackingCommand,
-    NewTrackingSubscription, ProviderAvailability, TrackedEpisodeDownloadPort, TrackingApplication,
-    TrackingApplicationError, TrackingCheckStatus, TrackingDownload, TrackingDownloadPatch,
-    TrackingRunResult, TrackingRuntime, TrackingScheduleStore, TrackingScope, TrackingState,
-    TrackingStore, TrackingSubscription, TrackingValidationError,
+    EpisodeDiscoveryPort, EpisodeSnapshot, EpisodeSnapshotError, FutureEpisodeRecord,
+    NewTrackingCommand, NewTrackingSubscription, ProviderAvailability, TrackedEpisodeDownloadPort,
+    TrackingApplication, TrackingApplicationError, TrackingCheckStatus, TrackingDownload,
+    TrackingDownloadPatch, TrackingRunResult, TrackingRuntime, TrackingScheduleStore,
+    TrackingScope, TrackingState, TrackingStore, TrackingSubscription, TrackingValidationError,
+    episode_choice_set_id,
 };

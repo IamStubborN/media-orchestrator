@@ -9,7 +9,7 @@ publish.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 time.workspace = true
-uuid = { version = "=1.23.4", default-features = false, features = ["std", "v4"] }
+uuid = { version = "=1.23.4", default-features = false, features = ["std", "v4", "v5"] }
 
 [lints]
 workspace = true

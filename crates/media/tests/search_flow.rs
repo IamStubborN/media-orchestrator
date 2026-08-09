@@ -2,12 +2,13 @@ use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
+use time::OffsetDateTime;
 
 use media::search::{
     DurableSearchService, ProviderPage, ProviderResult, SearchPersistence, SearchProvider,
     StoredSearchSession, TrackedEpisodeDownloader,
 };
-use media_api::{SearchError, SearchService};
+use media_api::{ChoiceSetSelection, SearchError, SearchService};
 use media_contract::{
     AlternativeSearchRequest, ContinueSearchRequest, MediaKindDto, ProviderDto, ProwlarrRankingDto,
     RezkaTranslationDto, SearchResultDto, SearchScopeDto, SeasonAvailabilityDto,
@@ -309,6 +310,260 @@ async fn tracked_episode_download_creates_one_exact_rezka_episode_execution_for_
     ));
 }
 
+#[tokio::test]
+async fn choice_set_download_selects_the_exact_cached_result_without_generic_scope() {
+    let choice_set = uuid::Uuid::new_v4();
+    let session_id = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_URL,
+        format!("choice:{choice_set}:rezka").as_bytes(),
+    )
+    .to_string();
+    let public = SearchResultDto::Rezka {
+        result_id: "rezka:cached".to_owned(),
+        title: "Cached Show".to_owned(),
+        original_title: None,
+        year: Some(2026),
+        media_kind: MediaKindDto::Series,
+        thumbnail_url: None,
+        translations: vec![RezkaTranslationDto {
+            id: 7,
+            name: "Dub".to_owned(),
+            premium: false,
+            director: false,
+            camrip: false,
+            has_ads: false,
+            seasons: vec![],
+        }],
+        availability: Some(SeriesAvailabilityDto {
+            lifecycle_status: media_contract::SeriesLifecycleStatusDto::Ongoing,
+            incomplete: true,
+            seasons: vec![SeasonAvailabilityDto {
+                season: 3,
+                episodes: vec![5],
+            }],
+            tracking_prompt: None,
+        }),
+    };
+    let persistence = Arc::new(MemorySearchPersistence::default());
+    persistence.sessions.lock().unwrap().insert(
+        session_id.clone(),
+        StoredSearchSession {
+            id: session_id,
+            owner: PRIMARY_USER_ID,
+            request: StartSearchRequest {
+                scope: SearchScopeDto {
+                    platform: "system".to_owned(),
+                    chat_id: "tracking:cached".to_owned(),
+                    thread_id: Some("episode:3:5".to_owned()),
+                },
+                source: ProviderDto::Rezka,
+                query: "Cached Show".to_owned(),
+                media_kind: Some(MediaKindDto::Series),
+                season: None,
+                preferred_qualities: vec![],
+                preferred_languages: vec![],
+                preferred_codecs: vec![],
+                preferred_release_groups: vec![],
+            },
+            expires_at: OffsetDateTime::now_utc() + time::Duration::hours(1),
+            results: vec![ProviderResult::rezka(public, "/cached.html".to_owned(), 99)],
+            provider_continuation: None,
+            query_aliases: vec![],
+        },
+    );
+    let jobs = Arc::new(MemoryJobStore::default());
+    let provider = Arc::new(FakeProvider {
+        pages: Mutex::new(HashMap::new()),
+    });
+    let service = DurableSearchService::new(
+        persistence.clone(),
+        provider,
+        Arc::new(JobApplication::new(jobs.clone())),
+    );
+
+    let job = service
+        .select_choice_set(
+            PRIMARY_USER_ID,
+            ChoiceSetSelection {
+                operation: OperationKey::from_bytes([7; 32]),
+                choice_set_id: choice_set.to_string(),
+                source: ProviderDto::Rezka,
+                result_id: "rezka:cached".to_owned(),
+                translation_id: Some(7),
+                season: Some(3),
+                episode: Some(5),
+            },
+        )
+        .await
+        .unwrap();
+
+    let execution = persistence
+        .executions
+        .lock()
+        .unwrap()
+        .get(&job.result_ref)
+        .cloned()
+        .unwrap();
+    assert!(matches!(
+        execution,
+        media_contract::ExecutionSelectionDto::Rezka {
+            title_id: 99,
+            translation_id: 7,
+            season: Some(3),
+            episode: Some(5),
+            ..
+        }
+    ));
+
+    let omitted = service
+        .select_choice_set(
+            PRIMARY_USER_ID,
+            ChoiceSetSelection {
+                operation: OperationKey::from_bytes([17; 32]),
+                choice_set_id: choice_set.to_string(),
+                source: ProviderDto::Rezka,
+                result_id: "rezka:cached".to_owned(),
+                translation_id: Some(7),
+                season: None,
+                episode: None,
+            },
+        )
+        .await
+        .unwrap();
+    let omitted_execution = persistence
+        .executions
+        .lock()
+        .unwrap()
+        .get(&omitted.result_ref)
+        .cloned()
+        .unwrap();
+    assert!(matches!(
+        omitted_execution,
+        media_contract::ExecutionSelectionDto::Rezka {
+            season: Some(3),
+            episode: Some(5),
+            ..
+        }
+    ));
+
+    let mismatch = service
+        .select_choice_set(
+            PRIMARY_USER_ID,
+            ChoiceSetSelection {
+                operation: OperationKey::from_bytes([18; 32]),
+                choice_set_id: choice_set.to_string(),
+                source: ProviderDto::Rezka,
+                result_id: "rezka:cached".to_owned(),
+                translation_id: Some(7),
+                season: Some(2),
+                episode: Some(8),
+            },
+        )
+        .await;
+    assert!(matches!(mismatch, Err(SearchError::InvalidRequest)));
+
+    let family = service
+        .choice_set(SECONDARY_USER_ID, &choice_set.to_string())
+        .await
+        .unwrap();
+    assert_eq!(family["status"], "refresh_required");
+    service
+        .select_choice_set(
+            SECONDARY_USER_ID,
+            ChoiceSetSelection {
+                operation: OperationKey::from_bytes([8; 32]),
+                choice_set_id: choice_set.to_string(),
+                source: ProviderDto::Rezka,
+                result_id: "rezka:cached".to_owned(),
+                translation_id: Some(7),
+                season: Some(3),
+                episode: Some(5),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        jobs.jobs.lock().unwrap().last().map(Job::owner_id),
+        Some(SECONDARY_USER_ID)
+    );
+}
+
+#[tokio::test]
+async fn choice_set_refreshes_empty_source_and_keeps_healthy_provider_after_failure() {
+    let choice_set = uuid::Uuid::new_v4();
+    let persistence = Arc::new(MemorySearchPersistence::default());
+    let expired = OffsetDateTime::now_utc() - time::Duration::minutes(1);
+    for source in [ProviderDto::Rezka, ProviderDto::Prowlarr] {
+        let source_name = match source {
+            ProviderDto::Rezka => "rezka",
+            ProviderDto::Prowlarr => "prowlarr",
+        };
+        let id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_URL,
+            format!("choice:{choice_set}:{source_name}").as_bytes(),
+        )
+        .to_string();
+        persistence.sessions.lock().unwrap().insert(
+            id.clone(),
+            StoredSearchSession {
+                id,
+                owner: PRIMARY_USER_ID,
+                request: StartSearchRequest {
+                    scope: SearchScopeDto {
+                        platform: "system".to_owned(),
+                        chat_id: "tracking:cached".to_owned(),
+                        thread_id: Some("episode:3:5".to_owned()),
+                    },
+                    source,
+                    query: "Tracked Show".to_owned(),
+                    media_kind: Some(MediaKindDto::Series),
+                    season: Some(3),
+                    preferred_qualities: vec![],
+                    preferred_languages: vec![],
+                    preferred_codecs: vec![],
+                    preferred_release_groups: vec![],
+                },
+                expires_at: expired,
+                results: vec![],
+                provider_continuation: None,
+                query_aliases: vec!["Tracked Show".to_owned()],
+            },
+        );
+    }
+    let mut exact = prowlarr_result(1);
+    if let SearchResultDto::Prowlarr { title, .. } = &mut exact.public {
+        *title = "Tracked Show [S03E05]".to_owned();
+    }
+    let provider = Arc::new(FakeProvider {
+        // Rezka deliberately has no page and fails; Prowlarr remains healthy.
+        pages: Mutex::new(HashMap::from([(
+            ProviderDto::Prowlarr,
+            vec![ProviderPage {
+                results: vec![exact],
+                provider_continuation: None,
+            }],
+        )])),
+    });
+    let service = DurableSearchService::new(
+        persistence,
+        provider,
+        Arc::new(JobApplication::new(Arc::new(MemoryJobStore::default()))),
+    );
+
+    let refreshed = service
+        .refresh_choice_set(PRIMARY_USER_ID, &choice_set.to_string())
+        .await
+        .unwrap();
+    assert_eq!(refreshed["status"], "refresh_required");
+    assert_eq!(refreshed["prowlarr_count"], 1);
+    assert_eq!(refreshed["rezka_count"], 0);
+    assert!(
+        refreshed["sources"]["prowlarr"]["results"]
+            .as_array()
+            .is_some_and(|results| results.len() == 1)
+    );
+}
+
 #[async_trait::async_trait]
 impl SearchPersistence for MemorySearchPersistence {
     async fn insert_session(&self, session: StoredSearchSession) -> Result<(), SearchError> {
@@ -329,6 +584,24 @@ impl SearchPersistence for MemorySearchPersistence {
             .unwrap()
             .get(id)
             .filter(|session| session.owner == owner)
+            .cloned()
+            .ok_or(SearchError::NotFound)
+    }
+
+    async fn session_for_user(
+        &self,
+        id: &str,
+        user: UserId,
+    ) -> Result<StoredSearchSession, SearchError> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(id)
+            .filter(|session| {
+                session.owner == user
+                    || (session.owner == PRIMARY_USER_ID && user == SECONDARY_USER_ID)
+                    || (session.owner == SECONDARY_USER_ID && user == PRIMARY_USER_ID)
+            })
             .cloned()
             .ok_or(SearchError::NotFound)
     }

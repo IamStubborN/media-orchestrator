@@ -975,6 +975,7 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
                 Arc::new(crate::search::ProviderEpisodeAvailability::new(
                     provider.clone(),
                     availability_prowlarr,
+                    persistence.clone(),
                 )),
                 downloads,
             ));

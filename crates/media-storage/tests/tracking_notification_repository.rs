@@ -382,26 +382,34 @@ async fn future_discovery_updates_snapshot_and_atomically_fans_out_family_notifi
             "future-episode-found"
         );
         let payload = row.try_get::<serde_json::Value>("", "payload").unwrap();
-        assert_eq!(
-            payload.as_object().unwrap().keys().collect::<Vec<_>>(),
-            vec![
-                "actions",
-                "card_key",
-                "episode",
-                "event_type",
-                "poster_url",
-                "schema_version",
-                "season",
-                "title",
-                "tracking_id",
-            ]
-        );
+        let payload_keys = payload.as_object().unwrap();
+        for key in [
+            "actions",
+            "card_key",
+            "episode",
+            "event_type",
+            "poster_url",
+            "schema_version",
+            "season",
+            "title",
+            "tracking_id",
+            "choice_set_id",
+            "choice_set_expires_at",
+            "rezka_count",
+            "prowlarr_count",
+        ] {
+            assert!(payload_keys.contains_key(key), "missing payload key: {key}");
+        }
         assert_eq!(payload["event_type"], "media.source-choice");
         assert_eq!(payload["schema_version"], 1);
         assert_eq!(payload["tracking_id"], tracking.id().to_string());
         assert_eq!(payload["title"], "Ongoing Show");
         assert_eq!(payload["season"], 1);
         assert_eq!(payload["episode"], 5);
+        assert!(payload["choice_set_id"].as_str().is_some());
+        assert!(payload["choice_set_expires_at"].as_str().is_some());
+        assert_eq!(payload["rezka_count"], 0);
+        assert_eq!(payload["prowlarr_count"], 0);
         assert_eq!(
             payload["poster_url"],
             "https://static.tvmaze.com/poster.jpg"
