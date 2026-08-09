@@ -1037,14 +1037,24 @@ async fn rezka_requires_explicit_translation_and_available_episode_without_fallb
         year: Some(2026),
         media_kind: MediaKindDto::Series,
         thumbnail_url: None,
-        translations: vec![RezkaTranslationDto {
-            id: 37,
-            name: "Original".to_owned(),
-            premium: false,
-            director: false,
-            camrip: false,
-            has_ads: false,
-        }],
+        translations: vec![
+            RezkaTranslationDto {
+                id: 37,
+                name: "Original".to_owned(),
+                premium: false,
+                director: false,
+                camrip: false,
+                has_ads: false,
+            },
+            RezkaTranslationDto {
+                id: 38,
+                name: "Premium Dub".to_owned(),
+                premium: true,
+                director: false,
+                camrip: false,
+                has_ads: false,
+            },
+        ],
         availability: Some(SeriesAvailabilityDto {
             lifecycle_status: media_contract::SeriesLifecycleStatusDto::Ongoing,
             incomplete: true,
@@ -1088,6 +1098,14 @@ async fn rezka_requires_explicit_translation_and_available_episode_without_fallb
             translation_id: Some(37),
             season: Some(1),
             episode: Some(9),
+            scope: telegram_scope("default", None),
+        },
+        SelectResultRequest {
+            session_id: page.session_id.clone(),
+            result_id: "rezka-show".to_owned(),
+            translation_id: Some(38),
+            season: Some(1),
+            episode: Some(1),
             scope: telegram_scope("default", None),
         },
     ] {

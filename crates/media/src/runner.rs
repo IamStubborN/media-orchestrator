@@ -687,6 +687,15 @@ impl MediaJobExecutor {
         let selection = details
             .select_translation(&key)
             .map_err(|_| RunnerError::Execution)?;
+        if selection.translation().is_premium()
+            && premium_status != rezka_client::PremiumStatus::Active
+        {
+            tracing::warn!(
+                translation_id = translation_id.get(),
+                "refusing premium Rezka translation for a non-premium account"
+            );
+            return Err(RunnerError::Execution);
+        }
         let translation = selection.translation().name().to_owned();
         let requests = match media_kind {
             media_contract::MediaKindDto::Movie => vec![(

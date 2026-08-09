@@ -766,6 +766,7 @@ impl ConcreteSearchProvider {
             let translations = details
                 .translations()
                 .iter()
+                .filter(|translation| rezka_translation_available(translation.is_premium()))
                 .map(|translation| media_contract::RezkaTranslationDto {
                     id: translation.id().get(),
                     name: translation.name().to_owned(),
@@ -781,6 +782,7 @@ impl ConcreteSearchProvider {
                 let selections = details
                     .translations()
                     .iter()
+                    .filter(|translation| rezka_translation_available(translation.is_premium()))
                     .map(|translation| {
                         (
                             translation.id().get(),
@@ -1869,6 +1871,9 @@ fn execution(
                 .iter()
                 .find(|item| item.id == translation_id)
                 .ok_or(SearchError::InvalidRequest)?;
+            if translation.premium {
+                return Err(SearchError::InvalidRequest);
+            }
             match media_kind {
                 MediaKindDto::Movie if request.season.is_some() || request.episode.is_some() => {
                     return Err(SearchError::InvalidRequest);
@@ -1988,6 +1993,10 @@ fn ambiguous_episode_label(label: &str) -> bool {
         .any(|marker| normalized.contains(marker))
 }
 
+fn rezka_translation_available(translation_is_premium: bool) -> bool {
+    !translation_is_premium
+}
+
 async fn apply_persisted_episode_mappings(
     identity: &dyn IdentityStore,
     execution: &mut ExecutionSelectionDto,
@@ -2067,7 +2076,7 @@ fn job_dto(job: &Job) -> JobDto {
 mod tests {
     use super::{
         ambiguous_episode_label, canonical_series_library_title, retryable_rezka_auth_error,
-        skippable_title_error,
+        rezka_translation_available, skippable_title_error,
     };
 
     #[test]
@@ -2132,5 +2141,11 @@ mod tests {
         ] {
             assert!(!retryable_rezka_auth_error(terminal));
         }
+    }
+
+    #[test]
+    fn premium_translations_are_hidden_for_non_premium_accounts() {
+        assert!(rezka_translation_available(false));
+        assert!(!rezka_translation_available(true));
     }
 }
