@@ -315,8 +315,8 @@ async fn a_failed_migration_explicitly_rolls_back_partial_schema() {
     );
     assert_eq!(
         names.last().map(String::as_str),
-        Some("m20260809_000036_notification_posters"),
-        "notification poster validation must remain the latest schema change",
+        Some("m20260809_000037_source_choice_posters"),
+        "source-choice poster validation must remain the latest schema change",
     );
     for migration in migrations {
         assert_eq!(
@@ -642,7 +642,7 @@ async fn structured_notifications_migration_preserves_legacy_rows_and_enforces_v
     )
     .await;
 
-    Migrator::down(db, Some(13)).await.unwrap();
+    Migrator::down(db, Some(14)).await.unwrap();
 
     let retained_rows = query(
         db,
@@ -932,7 +932,7 @@ async fn detailed_notifications_migration_preserves_legacy_payloads_and_validate
     )
     .await;
 
-    Migrator::down(db, Some(10)).await.unwrap();
+    Migrator::down(db, Some(11)).await.unwrap();
 
     let normalized = query(
         db,
@@ -1539,6 +1539,117 @@ async fn inaccurate_prowlarr_matches_are_removed_and_only_future_candidates_are_
         .len(),
         3
     );
+}
+
+#[tokio::test]
+async fn source_choice_posters_accept_only_bounded_https_urls_and_reverse_cleanly() {
+    let test_db = TestDatabase::start().await;
+    let db = test_db.connection();
+    Migrator::up(db, Some(36)).await.unwrap();
+
+    execute(
+        db,
+        "INSERT INTO notification_outbox
+           (id, aggregate_type, aggregate_id, event_type, recipient, source_dedupe_key, payload)
+         VALUES
+           ('00000000-0000-0000-0000-000000000637', 'tracking',
+            '00000000-0000-0000-0000-000000000635', 'future-episode-found', 'primary',
+            decode(repeat('63', 32), 'hex'),
+            '{
+              \"event_type\":\"media.source-choice\",
+              \"schema_version\":1,
+              \"card_key\":\"tracking:00000000-0000-0000-0000-000000000635:3:7\",
+              \"tracking_id\":\"00000000-0000-0000-0000-000000000635\",
+              \"title\":\"Jobless Reincarnation\",
+              \"season\":3,
+              \"episode\":7,
+              \"actions\":[\"rezka\"]
+            }'::jsonb)",
+    )
+    .await
+    .unwrap();
+
+    Migrator::up(db, Some(1)).await.unwrap();
+
+    execute(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(
+             payload,
+             '{poster_url}',
+             '\"https://static.tvmaze.com/uploads/images/original_untouched/1/2.jpg\"'::jsonb
+         )
+         WHERE id = '00000000-0000-0000-0000-000000000637'",
+    )
+    .await
+    .expect("source-choice payloads accept an HTTPS poster");
+
+    for value in [
+        r#""""#,
+        r#""http://static.tvmaze.com/poster.jpg""#,
+        r#""https://user@example.test/poster.jpg""#,
+        "null",
+    ] {
+        assert_rejected(
+            db,
+            &format!(
+                "UPDATE notification_outbox
+                 SET payload = jsonb_set(payload, '{{poster_url}}', $value${value}$value$::jsonb)
+                 WHERE id = '00000000-0000-0000-0000-000000000637'"
+            ),
+            "notification_payload_check",
+        )
+        .await;
+    }
+
+    assert_rejected(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(
+             payload,
+             '{poster_url}',
+             to_jsonb('https://example.test/' || repeat('a', 2049))
+         )
+         WHERE id = '00000000-0000-0000-0000-000000000637'",
+        "notification_payload_check",
+    )
+    .await;
+    assert_rejected(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(payload, '{unexpected}', 'true'::jsonb)
+         WHERE id = '00000000-0000-0000-0000-000000000637'",
+        "notification_payload_check",
+    )
+    .await;
+
+    Migrator::down(db, Some(1)).await.unwrap();
+
+    let payload = query(
+        db,
+        "SELECT payload FROM notification_outbox
+         WHERE id = '00000000-0000-0000-0000-000000000637'",
+    )
+    .await
+    .pop()
+    .unwrap()
+    .try_get::<serde_json::Value>("", "payload")
+    .unwrap();
+    assert!(payload.get("poster_url").is_none());
+    assert_eq!(payload["actions"], serde_json::json!(["rezka"]));
+
+    assert_rejected(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(
+             payload,
+             '{poster_url}',
+             '\"https://static.tvmaze.com/poster.jpg\"'::jsonb
+         )
+         WHERE id = '00000000-0000-0000-0000-000000000637'",
+        "notification_payload_check",
+    )
+    .await;
 }
 
 #[tokio::test]

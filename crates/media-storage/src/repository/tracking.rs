@@ -15,7 +15,7 @@ use media_core::{
 };
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
 
-use crate::repository::map_database_error;
+use crate::repository::map_tracking_database_error;
 
 #[derive(Clone)]
 pub struct SeaOrmTrackingStore {
@@ -36,7 +36,11 @@ impl SeaOrmTrackingStore {
         actions: Vec<SourceChoiceAction>,
         poster_url: Option<String>,
     ) -> Result<bool, PortError> {
-        let transaction = self.database.begin().await.map_err(map_database_error)?;
+        let transaction = self
+            .database
+            .begin()
+            .await
+            .map_err(map_tracking_database_error)?;
         let result = async {
             let row = transaction.query_one_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
@@ -167,7 +171,7 @@ impl TrackingStore for SeaOrmTrackingStore {
                 value.download().and_then(|download| i32::try_from(download.season()).ok()).into(),
                 operation.as_bytes().to_vec().into(),
             ],
-        )).await.map_err(map_database_error)?.ok_or(PortError::Infrastructure)?;
+        )).await.map_err(map_tracking_database_error)?.ok_or(PortError::Infrastructure)?;
         tracking_from_row(&row)
     }
 
@@ -176,7 +180,7 @@ impl TrackingStore for SeaOrmTrackingStore {
             DatabaseBackend::Postgres,
             "SELECT id, owner_id, provider, title, translation, known_episodes, scope, release_source, release_source_id, download_provider_media_ref, download_translation_id, download_season, last_checked_at, next_check_at, check_status FROM tracking_subscriptions WHERE deleted_at IS NULL AND (owner_id = $1 OR (scope = 'family' AND $1 IN ($2, $3))) ORDER BY created_at, id",
             [user.into_uuid().into(), PRIMARY_USER_ID.into_uuid().into(), SECONDARY_USER_ID.into_uuid().into()],
-        )).await.map_err(map_database_error)?.iter().map(tracking_from_row).collect()
+        )).await.map_err(map_tracking_database_error)?.iter().map(tracking_from_row).collect()
     }
 
     async fn patch_download_visible(
@@ -197,7 +201,7 @@ impl TrackingStore for SeaOrmTrackingStore {
                 download.provider_media_ref().into(), translation_id.into(), season.into(),
                 PRIMARY_USER_ID.into_uuid().into(), SECONDARY_USER_ID.into_uuid().into(),
             ],
-        )).await.map_err(map_database_error)?;
+        )).await.map_err(map_tracking_database_error)?;
         row.as_ref().map(tracking_from_row).transpose()
     }
 
@@ -209,7 +213,11 @@ impl TrackingStore for SeaOrmTrackingStore {
     ) -> Result<Option<TrackingSubscription>, PortError> {
         let season = i32::try_from(baseline.season()).map_err(|_| PortError::Conflict)?;
         let episode = i32::try_from(baseline.episode()).map_err(|_| PortError::Conflict)?;
-        let transaction = self.database.begin().await.map_err(map_database_error)?;
+        let transaction = self
+            .database
+            .begin()
+            .await
+            .map_err(map_tracking_database_error)?;
         let result = async {
             let row = transaction.query_one_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
@@ -291,7 +299,7 @@ impl TrackingStore for SeaOrmTrackingStore {
                 ],
             ))
             .await
-            .map_err(map_database_error)?;
+            .map_err(map_tracking_database_error)?;
         row.as_ref().map(tracking_from_row).transpose()
     }
 
@@ -305,7 +313,7 @@ impl TrackingStore for SeaOrmTrackingStore {
             DatabaseBackend::Postgres,
             "UPDATE tracking_subscriptions SET deleted_at = COALESCE(deleted_at, now()), remove_operation_key = COALESCE(remove_operation_key, $3), updated_at = now() WHERE id = $1 AND (remove_operation_key = $3 OR (deleted_at IS NULL AND (owner_id = $2 OR (scope = 'family' AND $2 IN ($4, $5))))) RETURNING id, owner_id, provider, title, translation, known_episodes, scope, release_source, release_source_id, download_provider_media_ref, download_translation_id, download_season, last_checked_at, next_check_at, check_status",
             [id.into_uuid().into(), user.into_uuid().into(), operation.as_bytes().to_vec().into(), PRIMARY_USER_ID.into_uuid().into(), SECONDARY_USER_ID.into_uuid().into()],
-        )).await.map_err(map_database_error)?;
+        )).await.map_err(map_tracking_database_error)?;
         row.as_ref().map(tracking_from_row).transpose()
     }
 }
@@ -329,7 +337,7 @@ impl TrackingScheduleStore for SeaOrmTrackingStore {
                 [now.into(), i64::from(limit).into()],
             ))
             .await
-            .map_err(map_database_error)?
+            .map_err(map_tracking_database_error)?
             .iter()
             .map(tracking_from_row)
             .collect()
@@ -363,15 +371,15 @@ impl TrackingScheduleStore for SeaOrmTrackingStore {
                 [id.into_uuid().into()],
             ))
             .await
-            .map_err(map_database_error)?
+            .map_err(map_tracking_database_error)?
             .iter()
             .map(|row| {
                 let season = row
                     .try_get::<i32>("", "season")
-                    .map_err(map_database_error)?;
+                    .map_err(map_tracking_database_error)?;
                 let episode = row
                     .try_get::<i32>("", "episode")
-                    .map_err(map_database_error)?;
+                    .map_err(map_tracking_database_error)?;
                 EpisodeSnapshot::new(
                     u32::try_from(season).map_err(|_| PortError::Conflict)?,
                     u32::try_from(episode).map_err(|_| PortError::Conflict)?,
@@ -404,7 +412,7 @@ impl TrackingScheduleStore for SeaOrmTrackingStore {
                 ],
             ))
             .await
-            .map_err(map_database_error)?;
+            .map_err(map_tracking_database_error)?;
         Ok(())
     }
 
@@ -428,7 +436,7 @@ impl TrackingScheduleStore for SeaOrmTrackingStore {
                 ],
             ))
             .await
-            .map_err(map_database_error)?;
+            .map_err(map_tracking_database_error)?;
         if changed.rows_affected() == 1 {
             Ok(())
         } else {
@@ -463,7 +471,7 @@ impl SeaOrmNotificationOutbox {
             DatabaseBackend::Postgres,
             "WITH pending AS (SELECT id FROM notification_outbox WHERE delivered_at IS NULL AND dead_at IS NULL AND next_attempt_at <= $1 AND (lease_expires_at IS NULL OR lease_expires_at <= $1) ORDER BY next_attempt_at, created_at FOR UPDATE SKIP LOCKED LIMIT $2) UPDATE notification_outbox n SET lease_owner = $3, lease_expires_at = $1 + make_interval(secs => $4) FROM pending WHERE n.id = pending.id RETURNING n.id, n.aggregate_type, n.aggregate_id, n.recipient, n.event_type, n.payload, n.generation, n.attempt_count",
             [now.into(), i64::from(limit).into(), worker.into_uuid().into(), ttl_seconds.into()],
-        )).await.map_err(map_database_error)?.iter().map(delivery_from_row).collect()
+        )).await.map_err(map_tracking_database_error)?.iter().map(delivery_from_row).collect()
     }
 
     pub async fn mark_delivered(
@@ -490,7 +498,7 @@ impl SeaOrmNotificationOutbox {
                 ],
             ))
             .await
-            .map_err(map_database_error)?;
+            .map_err(map_tracking_database_error)?;
         if changed.rows_affected() == 1 {
             Ok(())
         } else {
@@ -521,7 +529,7 @@ impl SeaOrmNotificationOutbox {
              last_error_code = CASE WHEN generation = $4 THEN $5 ELSE last_error_code END \
              WHERE id = $1 AND lease_owner = $2 AND delivered_at IS NULL AND dead_at IS NULL",
             [id.into_uuid().into(), worker.into_uuid().into(), now.into(), generation.into(), error_code.into()],
-        )).await.map_err(map_database_error)?;
+        )).await.map_err(map_tracking_database_error)?;
         if changed.rows_affected() == 1 {
             Ok(())
         } else {
@@ -551,7 +559,7 @@ impl SeaOrmNotificationOutbox {
              last_error_code = CASE WHEN generation = $4 THEN $5 ELSE last_error_code END \
              WHERE id = $1 AND lease_owner = $2 AND delivered_at IS NULL AND dead_at IS NULL",
             [id.into_uuid().into(), worker.into_uuid().into(), now.into(), generation.into(), error_code.into()],
-        )).await.map_err(map_database_error)?;
+        )).await.map_err(map_tracking_database_error)?;
         if changed.rows_affected() == 1 {
             Ok(())
         } else {
@@ -1301,12 +1309,15 @@ async fn finish<T>(
 ) -> Result<T, PortError> {
     match result {
         Ok(value) => {
-            transaction.commit().await.map_err(map_database_error)?;
+            transaction
+                .commit()
+                .await
+                .map_err(map_tracking_database_error)?;
             Ok(value)
         }
         Err(error) => {
             let _ = transaction.rollback().await;
-            Err(map_database_error(error))
+            Err(map_tracking_database_error(error))
         }
     }
 }

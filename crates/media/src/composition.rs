@@ -776,12 +776,9 @@ impl PreparedService {
         let tracking_task = tracking.map(|runtime| {
             tokio::spawn(async move {
                 loop {
-                    if runtime
-                        .run_once(time::OffsetDateTime::now_utc(), 25)
-                        .await
-                        .is_err()
+                    if let Err(error) = runtime.run_once(time::OffsetDateTime::now_utc(), 25).await
                     {
-                        tracing::warn!("tracking discovery pass failed");
+                        tracing::warn!(error = %error, "tracking discovery pass failed");
                     }
                     tokio::time::sleep(Duration::from_secs(60)).await;
                 }
