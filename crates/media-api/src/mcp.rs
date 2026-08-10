@@ -5,8 +5,8 @@ use media_contract::{
     AlternativeSearchRequest, ContinueSearchRequest, CreateTrackingRequest, EpisodeSnapshotDto,
     ExecutionSelectionDto, MediaKindDto, PatchTrackingRequest, ProviderDto, ReleaseQueryRequest,
     ResolveEpisodeMappingRequest, RezkaSessionRefreshRequest, SearchScopeDto, SelectResultRequest,
-    StartSearchRequest, TrackingDownloadDto, TrackingListDto, TrackingReleaseIdentityDto,
-    TrackingReleaseSourceDto, TrackingScopeDto, TrendingCategoryDto, TrendingMediaTypeDto,
+    StartSearchRequest, TrackingDownloadDto, TrackingReleaseIdentityDto, TrackingReleaseSourceDto,
+    TrackingScopeDto, TrendingCategoryDto, TrendingMediaTypeDto,
 };
 use media_core::{
     Actor, ApplicationError, EpisodeSnapshot, JobId, ReleaseQuery, ReleaseQueryError,
@@ -19,7 +19,7 @@ use rmcp::{
     tool, tool_router,
     transport::{StreamableHttpServerConfig, StreamableHttpService},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{ApiState, ChoiceSetSelection, convert};
@@ -220,12 +220,228 @@ fn default_source() -> String {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct LimitInput {
     #[serde(default = "default_limit")]
+    #[schemars(range(min = 1, max = 50))]
     limit: u16,
     #[schemars(description = "Optional Plex rating key to enrich with TMDB card metadata")]
     rating_key: Option<u64>,
 }
 fn default_limit() -> u16 {
     10
+}
+
+const MAX_PAGE_LIMIT: u16 = 50;
+const TOOL_SCHEMA_TTL_MS: u64 = 300_000;
+
+#[derive(Debug, Copy, Clone, Default, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum ReadView {
+    #[default]
+    Summary,
+    Card,
+    Diagnostic,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct PageInput {
+    #[serde(default = "default_limit")]
+    #[schemars(range(min = 1, max = 50), description = "Page size; default 10")]
+    limit: u16,
+    #[schemars(description = "Opaque cursor returned by the previous page")]
+    cursor: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Response detail: summary, card, or diagnostic")]
+    view: ReadView,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct PageMeta {
+    returned: usize,
+    total: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct JobListItemOutput {
+    id: String,
+    provider: String,
+    state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    media_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    season: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    episode: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    episode_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    translation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    library_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    release_year: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    notify_scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    needs_action_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    result_ref: Option<String>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct JobListOutput {
+    jobs: Vec<JobListItemOutput>,
+    #[serde(flatten)]
+    page: PageMeta,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+struct EpisodeOutput {
+    season: u32,
+    episode: u32,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct TrackingReleaseIdentityOutput {
+    source: String,
+    source_id: u64,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct TrackingDownloadOutput {
+    provider_media_ref: String,
+    translation_id: u64,
+    season: u32,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct TrackingListItemOutput {
+    id: String,
+    title: String,
+    provider: String,
+    scope: String,
+    state: String,
+    check_status: String,
+    known_episodes: Vec<EpisodeOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    translation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    last_checked_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    next_check_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    release_identity: Option<TrackingReleaseIdentityOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    download: Option<TrackingDownloadOutput>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct TrackingListOutput {
+    tracking: Vec<TrackingListItemOutput>,
+    #[serde(flatten)]
+    page: PageMeta,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct PlexRecentItemOutput {
+    #[serde(rename = "ratingKey")]
+    rating_key: String,
+    #[serde(rename = "type")]
+    media_type: String,
+    title: String,
+    #[serde(rename = "grandparentTitle", skip_serializing_if = "Option::is_none")]
+    grandparent_title: Option<String>,
+    #[serde(rename = "parentTitle", skip_serializing_if = "Option::is_none")]
+    parent_title: Option<String>,
+    #[serde(rename = "parentIndex", skip_serializing_if = "Option::is_none")]
+    parent_index: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    index: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    year: Option<u64>,
+    #[serde(rename = "addedAt", skip_serializing_if = "Option::is_none")]
+    added_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    thumb: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    tmdb_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    original_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    release_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    rating: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    poster_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    overview: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(skip)]
+    countries: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(skip)]
+    genres: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    season_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    episode_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    tmdb_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    imdb_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    trailer_url: Option<String>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct PlexRecentOutput {
+    items: Vec<PlexRecentItemOutput>,
+    returned: usize,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct StorageRootOutput {
+    path: String,
+    total_bytes: u64,
+    available_bytes: u64,
+    used_bytes: u64,
+    used_percent: u64,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct StorageStatusOutput {
+    roots: Vec<StorageRootOutput>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -290,7 +506,7 @@ struct DestructiveConfirmInput {
     confirmation_token: String,
 }
 
-#[tool_router(server_handler)]
+#[tool_router]
 impl MediaAdminMcp {
     fn new(state: ApiState) -> Self {
         Self { state }
@@ -299,11 +515,12 @@ impl MediaAdminMcp {
     #[tool(
         name = "media_jobs_list",
         description = "List the authenticated user's media jobs and their current states. Read-only.",
-        output_schema = object_output_schema(),
+        output_schema = output_schema::<JobListOutput>(),
         annotations(title = "List media jobs", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn list_jobs(
         &self,
+        Parameters(input): Parameters<PageInput>,
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, ErrorData> {
         let actor = actor_from_parts(&parts)?;
@@ -313,13 +530,29 @@ impl MediaAdminMcp {
             .list_jobs(&actor)
             .await
             .map_err(application_error)?;
-        let jobs = futures_util::future::join_all(jobs.iter().map(|job| async {
+        let total = jobs.len();
+        let (start, end, next_cursor) = page_bounds(total, &input)?;
+        let jobs = futures_util::future::join_all(jobs[start..end].iter().map(|job| async {
             let value =
                 serde_json::to_value(convert::job(job)).expect("job DTOs serialize to JSON");
             enrich_job_value(&self.state, job.result_ref(), value).await
         }))
         .await;
-        result_json(serde_json::json!({"jobs": jobs}))
+        let jobs = jobs
+            .into_iter()
+            .map(|value| job_list_item(value, input.view))
+            .collect();
+        result_json_for(
+            &parts,
+            JobListOutput {
+                jobs,
+                page: PageMeta {
+                    returned: end.saturating_sub(start),
+                    total,
+                    next_cursor,
+                },
+            },
+        )
     }
 
     #[tool(
@@ -344,7 +577,10 @@ impl MediaAdminMcp {
         let result_ref = detail.job.result_ref().to_owned();
         let value = serde_json::to_value(convert::job_detail(&detail))
             .map_err(|_| ErrorData::internal_error("failed to serialize media job", None))?;
-        result_json(enrich_job_value(&self.state, &result_ref, value).await)
+        result_json_for(
+            &parts,
+            enrich_job_value(&self.state, &result_ref, value).await,
+        )
     }
 
     #[tool(
@@ -364,7 +600,7 @@ impl MediaAdminMcp {
             .queue_status(&actor)
             .await
             .map_err(application_error)?;
-        result_json(convert::queue_status(status))
+        result_json_for(&parts, convert::queue_status(status))
     }
 
     #[tool(
@@ -386,7 +622,7 @@ impl MediaAdminMcp {
             .cancel_job(&actor, stable_operation_key("cancel", job_id), job_id)
             .await
             .map_err(application_error)?;
-        result_json(convert::job(&job))
+        result_json_for(&parts, convert::job(&job))
     }
 
     #[tool(
@@ -408,17 +644,18 @@ impl MediaAdminMcp {
             .retry_job(&actor, unique_operation_key("retry", job_id), job_id)
             .await
             .map_err(application_error)?;
-        result_json(convert::job(&job))
+        result_json_for(&parts, convert::job(&job))
     }
 
     #[tool(
         name = "media_tracking_list",
         description = "List the authenticated user's tracking subscriptions and their check state. Read-only.",
-        output_schema = object_output_schema(),
+        output_schema = output_schema::<TrackingListOutput>(),
         annotations(title = "List media tracking", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn list_tracking(
         &self,
+        Parameters(input): Parameters<PageInput>,
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, ErrorData> {
         let actor = actor_from_parts(&parts)?;
@@ -427,9 +664,24 @@ impl MediaAdminMcp {
             .tracking()
             .ok_or_else(|| ErrorData::internal_error("tracking is not configured", None))?;
         let values = tracking.list(&actor).await.map_err(tracking_error)?;
-        result_json(TrackingListDto {
-            tracking: values.iter().map(convert::tracking).collect(),
-        })
+        let total = values.len();
+        let (start, end, next_cursor) = page_bounds(total, &input)?;
+        let tracking = values[start..end]
+            .iter()
+            .map(convert::tracking)
+            .map(|value| tracking_list_item(value, input.view))
+            .collect();
+        result_json_for(
+            &parts,
+            TrackingListOutput {
+                tracking,
+                page: PageMeta {
+                    returned: end.saturating_sub(start),
+                    total,
+                    next_cursor,
+                },
+            },
+        )
     }
 
     #[tool(
@@ -456,7 +708,7 @@ impl MediaAdminMcp {
             .check_now(&actor, tracking_id)
             .await
             .map_err(tracking_error)?;
-        result_json(convert::tracking(&value))
+        result_json_for(&parts, convert::tracking(&value))
     }
 
     #[tool(
@@ -498,7 +750,7 @@ impl MediaAdminMcp {
             .add(&actor, operation, command)
             .await
             .map_err(tracking_error)?;
-        result_json(convert::tracking(&value))
+        result_json_for(&parts, convert::tracking(&value))
     }
 
     #[tool(
@@ -529,7 +781,7 @@ impl MediaAdminMcp {
             .patch_download(&actor, tracking_id, patch)
             .await
             .map_err(tracking_error)?;
-        result_json(convert::tracking(&value))
+        result_json_for(&parts, convert::tracking(&value))
     }
 
     #[tool(
@@ -553,7 +805,7 @@ impl MediaAdminMcp {
             .set_baseline(&actor, tracking_id, baseline)
             .await
             .map_err(tracking_error)?;
-        result_json(convert::tracking(&value))
+        result_json_for(&parts, convert::tracking(&value))
     }
 
     #[tool(
@@ -580,7 +832,7 @@ impl MediaAdminMcp {
             .map_err(tracking_error)?;
         let mut value = convert::tracking(&value);
         value.state = media_contract::TrackingStateDto::Removed;
-        result_json(value)
+        result_json_for(&parts, value)
     }
 
     #[tool(
@@ -617,7 +869,7 @@ impl MediaAdminMcp {
                 )
                 .await
                 .map_err(search_error)?;
-            return result_json(page);
+            return result_json_for(&parts, page);
         }
         let query = input
             .query
@@ -668,7 +920,7 @@ impl MediaAdminMcp {
             };
             results.insert(key.to_owned(), value);
         }
-        result_json(serde_json::Value::Object(results))
+        result_json_for(&parts, serde_json::Value::Object(results))
     }
 
     #[tool(
@@ -695,7 +947,7 @@ impl MediaAdminMcp {
             .choice_set(owner, &input.choice_set_id)
             .await
             .map_err(search_error)?;
-        result_json(value)
+        result_json_for(&parts, value)
     }
 
     #[tool(
@@ -722,7 +974,7 @@ impl MediaAdminMcp {
             .refresh_choice_set(owner, &input.choice_set_id)
             .await
             .map_err(search_error)?;
-        result_json(value)
+        result_json_for(&parts, value)
     }
 
     #[tool(
@@ -778,7 +1030,7 @@ impl MediaAdminMcp {
             )
             .await
             .map_err(search_error)?;
-        result_json(value)
+        result_json_for(&parts, value)
     }
 
     #[tool(
@@ -811,7 +1063,7 @@ impl MediaAdminMcp {
             .select(owner, operation, request)
             .await
             .map_err(search_error)?;
-        result_json(value)
+        result_json_for(&parts, value)
     }
 
     #[tool(
@@ -839,7 +1091,7 @@ impl MediaAdminMcp {
             .refresh_rezka_session(owner, operation, request)
             .await
             .map_err(search_error)?;
-        result_json(value)
+        result_json_for(&parts, value)
     }
 
     #[tool(
@@ -872,7 +1124,7 @@ impl MediaAdminMcp {
                 .map_err(|_| ErrorData::invalid_params("release query is invalid", None))?;
         }
         let value = service.query(query).await.map_err(release_error)?;
-        result_json(convert::release_result(value))
+        result_json_for(&parts, convert::release_result(value))
     }
 
     #[tool(
@@ -907,7 +1159,7 @@ impl MediaAdminMcp {
             .trending(category, input.page)
             .await
             .map_err(trending_error)?;
-        result_json(value)
+        result_json_for(&parts, value)
     }
 
     #[tool(
@@ -932,7 +1184,7 @@ impl MediaAdminMcp {
             .details(input.tmdb_id, media_type)
             .await
             .map_err(media_details_error)?;
-        result_json(value)
+        result_json_for(&parts, value)
     }
 
     #[tool(
@@ -960,7 +1212,7 @@ impl MediaAdminMcp {
             .similar(input.tmdb_id, media_type, input.page)
             .await
             .map_err(media_details_error)?;
-        result_json(value)
+        result_json_for(&parts, value)
     }
 
     #[tool(
@@ -991,7 +1243,7 @@ impl MediaAdminMcp {
             )
             .await
             .map_err(search_error)?;
-        result_json(value)
+        result_json_for(&parts, value)
     }
 
     #[tool(
@@ -1015,7 +1267,7 @@ impl MediaAdminMcp {
             .episode_mapping_action(owner, parse_job_id(&input.job_id)?)
             .await
             .map_err(search_error)?;
-        result_json(value)
+        result_json_for(&parts, value)
     }
 
     #[tool(
@@ -1047,7 +1299,7 @@ impl MediaAdminMcp {
             .resolve_episode_mapping(owner, operation, job_id, request)
             .await
             .map_err(search_error)?;
-        result_json(value)
+        result_json_for(&parts, value)
     }
 
     #[tool(
@@ -1062,7 +1314,8 @@ impl MediaAdminMcp {
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, ErrorData> {
         let actor = actor_from_parts(&parts)?;
-        result_json(
+        result_json_for(
+            &parts,
             self.state
                 .admin()
                 .plex_search(&actor, &input.query, input.limit)
@@ -1074,7 +1327,7 @@ impl MediaAdminMcp {
     #[tool(
         name = "plex_recent",
         description = "List recently added Plex media. Read-only.",
-        output_schema = object_output_schema(),
+        output_schema = output_schema::<PlexRecentOutput>(),
         annotations(title = "List recent Plex media", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn plex_recent(
@@ -1083,14 +1336,26 @@ impl MediaAdminMcp {
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, ErrorData> {
         let actor = actor_from_parts(&parts)?;
+        let limit = validate_limit(input.limit)?;
         let mut value = self
             .state
             .admin()
-            .plex_recent(&actor, input.limit)
+            .plex_recent(&actor, limit)
             .await
             .map_err(admin_error)?;
         enrich_recent_card(&self.state, &actor, &mut value, input.rating_key).await;
-        result_json(value)
+        let items = plex_metadata(&value)
+            .iter()
+            .take(usize::from(limit))
+            .filter_map(plex_recent_item)
+            .collect::<Vec<_>>();
+        result_json_for(
+            &parts,
+            PlexRecentOutput {
+                returned: items.len(),
+                items,
+            },
+        )
     }
 
     #[tool(
@@ -1104,7 +1369,8 @@ impl MediaAdminMcp {
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, ErrorData> {
         let actor = actor_from_parts(&parts)?;
-        result_json(
+        result_json_for(
+            &parts,
             self.state
                 .admin()
                 .plex_library_summary(&actor)
@@ -1132,7 +1398,7 @@ impl MediaAdminMcp {
             .await
             .map_err(admin_error)?;
         enrich_recent_card(&self.state, &actor, &mut value, input.rating_key).await;
-        result_json(value)
+        result_json_for(&parts, value)
     }
 
     #[tool(
@@ -1146,7 +1412,8 @@ impl MediaAdminMcp {
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, ErrorData> {
         let actor = actor_from_parts(&parts)?;
-        result_json(
+        result_json_for(
+            &parts,
             self.state
                 .admin()
                 .plex_now_playing(&actor)
@@ -1167,7 +1434,8 @@ impl MediaAdminMcp {
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, ErrorData> {
         let actor = actor_from_parts(&parts)?;
-        result_json(
+        result_json_for(
+            &parts,
             self.state
                 .admin()
                 .plex_item(&actor, input.rating_key)
@@ -1188,7 +1456,8 @@ impl MediaAdminMcp {
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, ErrorData> {
         let actor = actor_from_parts(&parts)?;
-        result_json(
+        result_json_for(
+            &parts,
             self.state
                 .admin()
                 .plex_refresh(&actor, input.section_key)
@@ -1209,7 +1478,8 @@ impl MediaAdminMcp {
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, ErrorData> {
         let actor = actor_from_parts(&parts)?;
-        result_json(
+        result_json_for(
+            &parts,
             self.state
                 .admin()
                 .qbittorrent_list(&actor, input.filter.as_deref())
@@ -1230,7 +1500,8 @@ impl MediaAdminMcp {
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, ErrorData> {
         let actor = actor_from_parts(&parts)?;
-        result_json(
+        result_json_for(
+            &parts,
             self.state
                 .admin()
                 .qbittorrent_details(&actor, &input.hash)
@@ -1251,7 +1522,8 @@ impl MediaAdminMcp {
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, ErrorData> {
         let actor = actor_from_parts(&parts)?;
-        result_json(
+        result_json_for(
+            &parts,
             self.state
                 .admin()
                 .qbittorrent_control(&actor, &input.hash, &input.action)
@@ -1272,7 +1544,8 @@ impl MediaAdminMcp {
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, ErrorData> {
         let actor = actor_from_parts(&parts)?;
-        result_json(
+        result_json_for(
+            &parts,
             self.state
                 .admin()
                 .file_inspect(&actor, &input.path)
@@ -1292,7 +1565,8 @@ impl MediaAdminMcp {
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, ErrorData> {
         let actor = actor_from_parts(&parts)?;
-        result_json(
+        result_json_for(
+            &parts,
             self.state
                 .admin()
                 .infrastructure_status(&actor)
@@ -1304,7 +1578,7 @@ impl MediaAdminMcp {
     #[tool(
         name = "media_storage_status",
         description = "Show total, used, and available space for configured media roots. Read-only.",
-        output_schema = object_output_schema(),
+        output_schema = output_schema::<StorageStatusOutput>(),
         annotations(title = "Show media storage", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn storage_status(
@@ -1312,13 +1586,13 @@ impl MediaAdminMcp {
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, ErrorData> {
         let actor = actor_from_parts(&parts)?;
-        result_json(
-            self.state
-                .admin()
-                .storage_status(&actor)
-                .await
-                .map_err(admin_error)?,
-        )
+        let value = self
+            .state
+            .admin()
+            .storage_status(&actor)
+            .await
+            .map_err(admin_error)?;
+        result_json_for(&parts, storage_status(value))
     }
 
     #[tool(
@@ -1333,7 +1607,8 @@ impl MediaAdminMcp {
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, ErrorData> {
         let actor = actor_from_parts(&parts)?;
-        result_json(
+        result_json_for(
+            &parts,
             self.state
                 .admin()
                 .prepare_destructive(&actor, &input.action, &input.target, input.delete_files)
@@ -1354,7 +1629,8 @@ impl MediaAdminMcp {
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, ErrorData> {
         let actor = actor_from_parts(&parts)?;
-        result_json(
+        result_json_for(
+            &parts,
             self.state
                 .admin()
                 .confirm_destructive(&actor, &input.confirmation_token)
@@ -1437,6 +1713,31 @@ fn stable_payload_operation_key<T: serde::Serialize>(
 
 fn object_output_schema() -> Arc<rmcp::model::JsonObject> {
     rmcp::handler::server::tool::schema_for_type::<ObjectOutput>()
+}
+
+fn output_schema<T: schemars::JsonSchema + 'static>() -> Arc<rmcp::model::JsonObject> {
+    rmcp::handler::server::tool::schema_for_type::<T>()
+}
+
+#[rmcp::tool_handler(router = Self::tool_router())]
+impl rmcp::ServerHandler for MediaAdminMcp {
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, ErrorData> {
+        let supports_cache_hints = context
+            .protocol_version()
+            .is_some_and(|version| version >= rmcp::model::ProtocolVersion::V_2026_07_28);
+        Ok(rmcp::model::ListToolsResult {
+            result_type: Some(rmcp::model::ResultType::COMPLETE),
+            tools: Self::tool_router().list_all(),
+            meta: None,
+            next_cursor: None,
+            ttl_ms: supports_cache_hints.then_some(TOOL_SCHEMA_TTL_MS),
+            cache_scope: supports_cache_hints.then_some(rmcp::model::CacheScope::Public),
+        })
+    }
 }
 
 fn mcp_scope(owner: media_core::UserId) -> SearchScopeDto {
@@ -1530,7 +1831,200 @@ fn tracking_error(error: TrackingApplicationError) -> ErrorData {
     }
 }
 
-fn result_json<T: serde::Serialize>(value: T) -> Result<CallToolResult, ErrorData> {
+fn validate_limit(limit: u16) -> Result<u16, ErrorData> {
+    if (1..=MAX_PAGE_LIMIT).contains(&limit) {
+        Ok(limit)
+    } else {
+        Err(ErrorData::invalid_params(
+            "limit must be between 1 and 50",
+            None,
+        ))
+    }
+}
+
+fn page_bounds(
+    total: usize,
+    input: &PageInput,
+) -> Result<(usize, usize, Option<String>), ErrorData> {
+    let limit = usize::from(validate_limit(input.limit)?);
+    let start = match input.cursor.as_deref() {
+        None => 0,
+        Some(cursor) => cursor
+            .strip_prefix("v1:")
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|offset| *offset <= total)
+            .ok_or_else(|| ErrorData::invalid_params("cursor is invalid", None))?,
+    };
+    let end = start.saturating_add(limit).min(total);
+    let next_cursor = (end < total).then(|| format!("v1:{end}"));
+    Ok((start, end, next_cursor))
+}
+
+fn json_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn job_list_item(value: Value, view: ReadView) -> JobListItemOutput {
+    let card = !matches!(view, ReadView::Summary);
+    let diagnostic = matches!(view, ReadView::Diagnostic);
+    JobListItemOutput {
+        id: json_string(&value, "id").unwrap_or_default(),
+        provider: json_string(&value, "provider").unwrap_or_default(),
+        state: json_string(&value, "state").unwrap_or_default(),
+        title: json_string(&value, "title"),
+        media_kind: json_string(&value, "media_kind"),
+        season: value.get("season").and_then(Value::as_u64),
+        episode: value.get("episode").and_then(Value::as_u64),
+        episode_count: value.get("episode_count").and_then(Value::as_u64),
+        translation: card.then(|| json_string(&value, "translation")).flatten(),
+        library_title: card.then(|| json_string(&value, "library_title")).flatten(),
+        release_year: card
+            .then(|| value.get("release_year").and_then(Value::as_i64))
+            .flatten(),
+        notify_scope: diagnostic
+            .then(|| json_string(&value, "notify_scope"))
+            .flatten(),
+        needs_action_reason: diagnostic
+            .then(|| json_string(&value, "needs_action_reason"))
+            .flatten(),
+        result_ref: diagnostic
+            .then(|| json_string(&value, "result_ref"))
+            .flatten(),
+    }
+}
+
+fn serialized_name<T: Serialize>(value: &T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_default()
+}
+
+fn tracking_list_item(
+    value: media_contract::TrackingDto,
+    view: ReadView,
+) -> TrackingListItemOutput {
+    let card = !matches!(view, ReadView::Summary);
+    let diagnostic = matches!(view, ReadView::Diagnostic);
+    let mut known_episodes = value
+        .known_episodes
+        .into_iter()
+        .map(|item| EpisodeOutput {
+            season: item.season,
+            episode: item.episode,
+        })
+        .collect::<Vec<_>>();
+    if !diagnostic {
+        known_episodes = known_episodes
+            .into_iter()
+            .max_by_key(|item| (item.season, item.episode))
+            .into_iter()
+            .collect();
+    }
+    TrackingListItemOutput {
+        id: value.id.to_string(),
+        title: value.title,
+        provider: serialized_name(&value.provider),
+        scope: serialized_name(&value.scope),
+        state: serialized_name(&value.state),
+        check_status: serialized_name(&value.check_status),
+        known_episodes,
+        translation: card.then_some(value.translation),
+        last_checked_at: card.then_some(value.last_checked_at).flatten(),
+        next_check_at: card.then_some(value.next_check_at),
+        release_identity: diagnostic
+            .then(|| {
+                value
+                    .release_identity
+                    .map(|item| TrackingReleaseIdentityOutput {
+                        source: serialized_name(&item.source),
+                        source_id: item.source_id,
+                    })
+            })
+            .flatten(),
+        download: card
+            .then(|| {
+                value.download.map(|item| TrackingDownloadOutput {
+                    provider_media_ref: item.provider_media_ref,
+                    translation_id: item.translation_id,
+                    season: item.season,
+                })
+            })
+            .flatten(),
+    }
+}
+
+fn value_u64(value: &Value, key: &str) -> Option<u64> {
+    value.get(key).and_then(parse_u64_value)
+}
+
+fn value_strings(value: &Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn plex_recent_item(value: &Value) -> Option<PlexRecentItemOutput> {
+    Some(PlexRecentItemOutput {
+        rating_key: plex_rating_key(value)?.to_string(),
+        media_type: json_string(value, "type").unwrap_or_else(|| "unknown".to_owned()),
+        title: json_string(value, "title").unwrap_or_else(|| "Untitled".to_owned()),
+        grandparent_title: json_string(value, "grandparentTitle"),
+        parent_title: json_string(value, "parentTitle"),
+        parent_index: value_u64(value, "parentIndex"),
+        index: value_u64(value, "index"),
+        year: value_u64(value, "year"),
+        added_at: value_u64(value, "addedAt"),
+        thumb: json_string(value, "thumb"),
+        summary: json_string(value, "summary"),
+        tmdb_id: value_u64(value, "tmdb_id").or_else(|| plex_tmdb_id(value)),
+        original_title: json_string(value, "original_title"),
+        release_date: json_string(value, "release_date"),
+        rating: value.get("rating").and_then(Value::as_f64),
+        poster_url: json_string(value, "poster_url"),
+        overview: json_string(value, "overview"),
+        countries: value_strings(value, "countries"),
+        genres: value_strings(value, "genres"),
+        status: json_string(value, "status"),
+        season_count: value_u64(value, "season_count"),
+        episode_count: value_u64(value, "episode_count"),
+        tmdb_url: json_string(value, "tmdb_url"),
+        imdb_url: json_string(value, "imdb_url"),
+        trailer_url: json_string(value, "trailer_url"),
+    })
+}
+
+fn storage_status(value: Value) -> StorageStatusOutput {
+    let roots = value
+        .get("roots")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|root| {
+            Some(StorageRootOutput {
+                path: json_string(root, "path")?,
+                total_bytes: value_u64(root, "total_bytes")?,
+                available_bytes: value_u64(root, "available_bytes")?,
+                used_bytes: value_u64(root, "used_bytes")?,
+                used_percent: value_u64(root, "used_percent")?,
+            })
+        })
+        .collect();
+    StorageStatusOutput { roots }
+}
+
+fn result_json_for<T: serde::Serialize>(
+    parts: &Parts,
+    value: T,
+) -> Result<CallToolResult, ErrorData> {
     let value = serde_json::to_value(value)
         .map_err(|_| ErrorData::internal_error("result could not be serialized", None))?;
     let structured = match value {
@@ -1538,7 +2032,16 @@ fn result_json<T: serde::Serialize>(value: T) -> Result<CallToolResult, ErrorDat
         serde_json::Value::Array(items) => serde_json::json!({ "items": items }),
         value => serde_json::json!({ "value": value }),
     };
-    Ok(CallToolResult::structured(structured))
+    let mut result = CallToolResult::structured(structured);
+    if parts
+        .headers
+        .get("mcp-protocol-version")
+        .and_then(|value| value.to_str().ok())
+        == Some("2026-07-28")
+    {
+        result.content.clear();
+    }
+    Ok(result)
 }
 
 async fn enrich_recent_card(
@@ -1818,7 +2321,10 @@ fn media_details_error(error: crate::MediaDetailsServiceError) -> ErrorData {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_job_id, result_json};
+    use super::{
+        PageInput, ReadView, page_bounds, parse_job_id, plex_recent_item, result_json_for,
+    };
+    use axum::http::{HeaderValue, Request};
 
     #[test]
     fn rejects_invalid_job_ids_before_touching_storage() {
@@ -1827,11 +2333,80 @@ mod tests {
 
     #[test]
     fn wraps_array_results_in_an_mcp_structured_content_object() {
-        let result = result_json(Vec::<String>::new()).unwrap();
+        let parts = Request::new(()).into_parts().0;
+        let result = result_json_for(&parts, Vec::<String>::new()).unwrap();
 
         assert_eq!(
             result.structured_content,
             Some(serde_json::json!({ "items": [] }))
         );
+    }
+
+    #[test]
+    fn modern_results_do_not_repeat_structured_json_as_text() {
+        let mut parts = Request::new(()).into_parts().0;
+        parts.headers.insert(
+            "mcp-protocol-version",
+            HeaderValue::from_static("2026-07-28"),
+        );
+        let result = result_json_for(&parts, serde_json::json!({ "queued": 2 })).unwrap();
+
+        assert_eq!(
+            result.structured_content,
+            Some(serde_json::json!({ "queued": 2 }))
+        );
+        assert!(result.content.is_empty());
+    }
+
+    #[test]
+    fn page_limits_and_cursors_are_bounded() {
+        let first = PageInput {
+            limit: 10,
+            cursor: None,
+            view: ReadView::Summary,
+        };
+        assert_eq!(
+            page_bounds(23, &first).unwrap(),
+            (0, 10, Some("v1:10".into()))
+        );
+        let next = PageInput {
+            limit: 10,
+            cursor: Some("v1:10".into()),
+            view: ReadView::Summary,
+        };
+        assert_eq!(
+            page_bounds(23, &next).unwrap(),
+            (10, 20, Some("v1:20".into()))
+        );
+        let oversized = PageInput {
+            limit: 51,
+            cursor: None,
+            view: ReadView::Summary,
+        };
+        assert!(page_bounds(23, &oversized).is_err());
+    }
+
+    #[test]
+    fn plex_recent_item_drops_large_provider_objects() {
+        let item = serde_json::json!({
+            "ratingKey": "42",
+            "type": "episode",
+            "title": "Episode title",
+            "grandparentTitle": "Show title",
+            "parentIndex": 2,
+            "index": 7,
+            "Media": [{"Part": [{"Stream": [{"raw": "x".repeat(50_000)}]}]}],
+            "Guid": [{"id": "tmdb://123"}]
+        });
+        let compact = plex_recent_item(&item).unwrap();
+        let serialized = serde_json::to_vec(&compact).unwrap();
+
+        assert!(
+            serialized.len() < 1_000,
+            "compact item is {} bytes",
+            serialized.len()
+        );
+        assert_eq!(compact.rating_key, "42");
+        assert_eq!(compact.tmdb_id, Some(123));
     }
 }

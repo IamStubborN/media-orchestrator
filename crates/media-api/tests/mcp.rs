@@ -164,8 +164,83 @@ async fn stateless_mcp_2026_lists_tools_without_initialize_or_session() {
         .map(|tool| tool["name"].as_str().unwrap().to_owned())
         .collect();
     assert_eq!(names, capability_manifest_tool_names());
-    assert_eq!(body["result"]["ttlMs"], 0);
+    assert_eq!(body["result"]["ttlMs"], 300_000);
     assert_eq!(body["result"]["cacheScope"], "public");
+
+    for name in ["media_jobs_list", "media_tracking_list", "plex_recent"] {
+        let tool = body["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap();
+        assert_eq!(tool["inputSchema"]["properties"]["limit"]["minimum"], 1);
+        assert_eq!(tool["inputSchema"]["properties"]["limit"]["maximum"], 50);
+    }
+    for (name, property) in [
+        ("media_jobs_list", "jobs"),
+        ("media_tracking_list", "tracking"),
+        ("plex_recent", "items"),
+        ("media_storage_status", "roots"),
+    ] {
+        let tool = body["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap();
+        assert!(
+            tool["outputSchema"]["properties"][property].is_object(),
+            "{name} must publish a typed {property} output"
+        );
+    }
+
+    let serialized = serde_json::to_vec(&body["result"]["tools"]).unwrap();
+    if let Ok(path) = std::env::var("MCP_SCHEMA_SNAPSHOT") {
+        std::fs::write(path, &serialized).unwrap();
+    }
+    assert!(
+        serialized.len() < 32_000,
+        "tool discovery schema grew unexpectedly: {} bytes",
+        serialized.len()
+    );
+}
+
+#[tokio::test]
+async fn stateless_mcp_2026_returns_each_tool_result_once() {
+    let app = router(state(
+        FakeClientStore::new([(
+            VALID_TOKEN,
+            Actor::new(PRIMARY_CLIENT_ID, Some(PRIMARY_USER_ID), ClientRole::Hermes).unwrap(),
+        )]),
+        FakeReadiness::ready(),
+    ));
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"media_queue_status","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"media-api-test","version":"1.0"},"io.modelcontextprotocol/clientCapabilities":{}}}}"#;
+    let response = app
+        .oneshot(
+            Request::post("/internal/mcp")
+                .header("authorization", format!("Bearer {VALID_TOKEN}"))
+                .header("host", "media-service")
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .header("mcp-protocol-version", "2026-07-28")
+                .header("mcp-method", "tools/call")
+                .header("mcp-name", "media_queue_status")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    if let Ok(path) = std::env::var("MCP_RESULT_SNAPSHOT") {
+        std::fs::write(path, serde_json::to_vec(&body).unwrap()).unwrap();
+    }
+    assert_eq!(body["result"]["isError"], false);
+    assert_eq!(body["result"]["structuredContent"]["queued"], 0);
+    assert_eq!(body["result"]["content"], serde_json::json!([]));
 }
 
 #[tokio::test]
