@@ -118,11 +118,35 @@ assert(service_deploy.include?("protected_snapshot") && service_deploy.include?(
        "service deployment must prove protected containers were unchanged")
 assert(homelab.include?("verify_live_mcp_schema") && homelab.include?("MCP_SCHEMA_SHA256"),
        "deployment rollback must preserve and verify the exact MCP schema")
+assert(homelab.include?("DB_MIGRATION_VERSION") &&
+       homelab.include?("migrate-down-one --expected-current") &&
+       homelab.include?("assert_db_migration_version"),
+       "service rollback must preserve and verify the exact database migration version")
+migration_down_helper = homelab.split("migrate_down_one_with_image() {", 2).fetch(1).split("prepare_hermes_cli() {", 2).fetch(0)
+assert(migration_down_helper.include?('migration_image=$1') &&
+       !migration_down_helper.include?('service_image=$1'),
+       "migration rollback helper must not overwrite the checkpointed old service image")
 assert(homelab.include?('docker image inspect "$service_image"') &&
        homelab.include?('docker image inspect "$runner_image"') &&
        homelab.include?('mktemp -d "${rollback_file}.generation.XXXXXX"') &&
        homelab.include?('mv -Tf "$link" "$rollback_file"'),
        "rollback checkpoint must validate both images and publish atomically")
+
+service_rollback = homelab.split("rollback_service() {", 2).fetch(1).split("rollback_full() {", 2).fetch(0)
+down_index = service_rollback.index("migrate_down_one_with_image")
+old_image_index = service_rollback.index('replace_service_image "$service_image"')
+old_schema_index = service_rollback.index('verify_live_mcp_schema')
+assert(down_index && old_image_index && old_schema_index &&
+       down_index < old_image_index && old_image_index < old_schema_index,
+       "service rollback must migrate down with the forward image before starting and verifying the old image")
+recovery_index = service_rollback.index('replace_service_image "$forward_image"')
+recovery_migration_index = service_rollback.index('assert_db_migration_version "$forward_migration_version"')
+assert(recovery_index && recovery_migration_index && recovery_index < recovery_migration_index,
+       "failed rollback must migrate up with the forward image and verify the forward migration version")
+assert(service_rollback.index("assert_no_active_job") < down_index &&
+       service_rollback.index("protected_snapshot") < down_index &&
+       service_rollback.rindex("assert_protected_unchanged") > recovery_migration_index,
+       "migration rollback and recovery must remain inside the idle and protected-container guards")
 
 clean_env = { "PATH" => ENV.fetch("PATH") }
 _stdout, stderr, status = Open3.capture3(clean_env, "./scripts/homelab.sh", "invalid-command", chdir: ROOT, unsetenv_others: true)

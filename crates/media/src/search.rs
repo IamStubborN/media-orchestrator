@@ -585,66 +585,61 @@ impl ProviderEpisodeAvailability {
         &self,
         request: &EpisodeAvailabilityRequest<'_>,
     ) -> Result<(ProviderAvailability, usize), PortError> {
-        let mut candidates = Vec::new();
-        let mut successful_search = false;
-        for title in prowlarr_availability_titles(request) {
-            let page = self
-                .provider
-                .search(
-                    &StartSearchRequest {
-                        scope: media_contract::SearchScopeDto {
-                            platform: "system".to_owned(),
-                            chat_id: format!("tracking:{}", request.tracking().id()),
-                            thread_id: Some(format!(
-                                "episode:{}:{}",
-                                request.episode().season(),
-                                request.episode().episode()
-                            )),
-                        },
-                        source: ProviderDto::Prowlarr,
-                        query: title.clone(),
-                        media_kind: Some(MediaKindDto::Series),
-                        season: Some(
-                            u16::try_from(request.episode().season())
-                                .map_err(|_| PortError::Conflict)?,
-                        ),
-                        preferred_qualities: Vec::new(),
-                        preferred_languages: Vec::new(),
-                        preferred_codecs: Vec::new(),
-                        preferred_release_groups: Vec::new(),
+        let title = prowlarr_availability_title(request);
+        let page = self
+            .provider
+            .search(
+                &StartSearchRequest {
+                    scope: media_contract::SearchScopeDto {
+                        platform: "system".to_owned(),
+                        chat_id: format!("tracking:{}", request.tracking().id()),
+                        thread_id: Some(format!(
+                            "episode:{}:{}",
+                            request.episode().season(),
+                            request.episode().episode()
+                        )),
                     },
-                    None,
-                )
-                .await;
-            let Ok(page) = page else {
-                continue;
-            };
-            successful_search = true;
-            candidates.extend(page.results.into_iter().filter(|result| {
+                    source: ProviderDto::Prowlarr,
+                    query: title.to_owned(),
+                    media_kind: Some(MediaKindDto::Series),
+                    season: Some(
+                        u16::try_from(request.episode().season())
+                            .map_err(|_| PortError::Conflict)?,
+                    ),
+                    preferred_qualities: Vec::new(),
+                    preferred_languages: Vec::new(),
+                    preferred_codecs: Vec::new(),
+                    preferred_release_groups: Vec::new(),
+                },
+                None,
+            )
+            .await;
+        let Ok(page) = page else {
+            self.persist_empty_choice_session(request, ProviderDto::Prowlarr)
+                .await?;
+            return Ok((ProviderAvailability::Unknown, 0));
+        };
+        let mut candidates = page
+            .results
+            .into_iter()
+            .filter(|result| {
                 let SearchResultDto::Prowlarr { title: release, .. } = &result.public else {
                     return false;
                 };
-                media_integrations::series_title_matches(release, &title)
+                media_integrations::series_title_matches(release, title)
                     && media_integrations::title_contains_episode(
                         release,
                         request.episode().season(),
                         request.episode().episode(),
                     )
-            }));
-        }
+            })
+            .collect::<Vec<_>>();
         candidates.sort_by(|left, right| left.public.result_id().cmp(right.public.result_id()));
         candidates.dedup_by(|left, right| left.public.result_id() == right.public.result_id());
         if candidates.is_empty() {
             self.persist_empty_choice_session(request, ProviderDto::Prowlarr)
                 .await?;
-            return Ok((
-                if successful_search {
-                    ProviderAvailability::Unavailable
-                } else {
-                    ProviderAvailability::Unknown
-                },
-                0,
-            ));
+            return Ok((ProviderAvailability::Unavailable, 0));
         }
         let count = self
             .persist_choice_session(
@@ -742,6 +737,13 @@ fn prowlarr_availability_titles(request: &EpisodeAvailabilityRequest<'_>) -> Vec
         Some(request.discovery().release_title()),
         Some(request.tracking().title()),
     ])
+}
+
+fn prowlarr_availability_title<'a>(request: &'a EpisodeAvailabilityRequest<'a>) -> &'a str {
+    request
+        .discovery()
+        .original_release_title()
+        .unwrap_or_else(|| request.discovery().release_title())
 }
 
 fn distinct_titles<const N: usize>(values: [Option<&str>; N]) -> Vec<String> {

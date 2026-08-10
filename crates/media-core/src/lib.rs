@@ -27,8 +27,8 @@ pub use application::{
 };
 pub use id::{
     PRIMARY_CLIENT_ID, PRIMARY_USER_ID, ClientId, EpisodeId, JobEventId, JobId, LIFECYCLE_CLIENT_ID,
-    LeaseId, MediaId, NotificationId, RUNNER_CLIENT_ID, SeasonId, TaskId, TrackingId, UserId,
-    SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
+    LeaseId, MediaId, NotificationId, RUNNER_CLIENT_ID, SeasonId, TaskId, TrackingClaimToken,
+    TrackingId, UserId, SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
 };
 pub use identity::{
     CanonicalEpisode, CanonicalEpisodeCoordinates, CanonicalMedia, CanonicalSeason,

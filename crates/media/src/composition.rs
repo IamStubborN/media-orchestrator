@@ -900,6 +900,44 @@ pub async fn migrate(config: &DatabaseConfig) -> Result<(), ServiceError> {
         .map_err(|_| ServiceError::Migration)
 }
 
+pub async fn migrate_down_one(
+    config: &DatabaseConfig,
+    expected_current: &str,
+    expected_target: &str,
+) -> Result<(), ServiceError> {
+    let database = connect(config.database_url()).await?;
+    let migration_files = media_storage::Migrator::get_migration_files();
+    let current_index = migration_files
+        .iter()
+        .position(|migration| migration.name() == expected_current)
+        .ok_or(ServiceError::Migration)?;
+    let target_index = current_index
+        .checked_sub(1)
+        .ok_or(ServiceError::Migration)?;
+    if migration_files[target_index].name() != expected_target
+        || current_index + 1 != migration_files.len()
+    {
+        return Err(ServiceError::Migration);
+    }
+    let applied = media_storage::Migrator::get_applied_migrations(&database)
+        .await
+        .map_err(|_| ServiceError::Migration)?;
+    if applied.last().map(|migration| migration.name()) != Some(expected_current) {
+        return Err(ServiceError::Migration);
+    }
+    media_storage::Migrator::down(&database, Some(1))
+        .await
+        .map_err(|_| ServiceError::Migration)?;
+    let applied = media_storage::Migrator::get_applied_migrations(&database)
+        .await
+        .map_err(|_| ServiceError::Migration)?;
+    if applied.last().map(|migration| migration.name()) == Some(expected_target) {
+        Ok(())
+    } else {
+        Err(ServiceError::Migration)
+    }
+}
+
 pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, ServiceError> {
     let database = connect(config.database_url()).await?;
     let readiness = Arc::new(SeaOrmReadiness::new(database.clone()));

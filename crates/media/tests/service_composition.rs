@@ -10,7 +10,9 @@ use std::{
 };
 
 use media::{
-    composition::{ServiceError, StorageIdempotencyAdapter, migrate, prepare_service, serve},
+    composition::{
+        ServiceError, StorageIdempotencyAdapter, migrate, migrate_down_one, prepare_service, serve,
+    },
     config::{ConfigSource, DatabaseConfig, ServerConfig},
 };
 use media_api::{
@@ -47,6 +49,55 @@ const POSTGRES_TAG_AND_DIGEST: &str = concat!(
 const POSTGRES_PORT: u16 = 5432;
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 static SECRET_FILE_ID: AtomicU64 = AtomicU64::new(0);
+
+#[tokio::test]
+async fn one_step_migration_rollback_requires_the_exact_latest_predecessor() {
+    let database = TestDatabase::start().await;
+    let config = database_config(&database.url);
+    migrate(&config).await.unwrap();
+    let files = Migrator::get_migration_files();
+    let current = files[files.len() - 1].name().to_owned();
+    let target = files[files.len() - 2].name().to_owned();
+
+    assert_eq!(
+        migrate_down_one(&config, &current, "m00000000_000000_wrong").await,
+        Err(ServiceError::Migration)
+    );
+    assert_eq!(
+        Migrator::get_applied_migrations(&database.connection)
+            .await
+            .unwrap()
+            .last()
+            .unwrap()
+            .name(),
+        current
+    );
+    assert_eq!(
+        migrate_down_one(&config, &target, files[files.len() - 3].name()).await,
+        Err(ServiceError::Migration)
+    );
+    assert_eq!(
+        Migrator::get_applied_migrations(&database.connection)
+            .await
+            .unwrap()
+            .last()
+            .unwrap()
+            .name(),
+        current
+    );
+
+    migrate_down_one(&config, &current, &target).await.unwrap();
+    assert_eq!(
+        Migrator::get_applied_migrations(&database.connection)
+            .await
+            .unwrap()
+            .last()
+            .unwrap()
+            .name(),
+        target
+    );
+    database.shutdown().await;
+}
 
 struct SecretFile(PathBuf);
 

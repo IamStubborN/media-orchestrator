@@ -1,6 +1,9 @@
 use std::{
     future::Future,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Barrier, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll, Waker},
 };
 
@@ -11,7 +14,7 @@ use media_core::{
     NotificationDispatcher, NotificationEventType, NotificationId, NotificationOutboxPort,
     NotificationRecipient, NotificationSink, OperationKey, PortError, Provider,
     ProviderAvailability, ReleaseIdentity, ReleaseSource, SourceChoiceAction,
-    TrackedEpisodeDownloadPort, TrackingDownload, TrackingId, TrackingRuntime,
+    TrackedEpisodeDownloadPort, TrackingClaimToken, TrackingDownload, TrackingId, TrackingRuntime,
     TrackingScheduleStore, TrackingScope, TrackingSubscription,
 };
 
@@ -36,6 +39,7 @@ impl TrackingScheduleStore for ScheduleStore {
     async fn claim_due(
         &self,
         _: time::OffsetDateTime,
+        _: TrackingClaimToken,
         _: time::OffsetDateTime,
         _: u32,
     ) -> Result<Vec<TrackingSubscription>, PortError> {
@@ -45,6 +49,7 @@ impl TrackingScheduleStore for ScheduleStore {
     async fn set_release_metadata_if_missing(
         &self,
         _: TrackingId,
+        _: TrackingClaimToken,
         release_identity: media_core::ReleaseIdentity,
         poster_url: String,
     ) -> Result<(), PortError> {
@@ -58,6 +63,7 @@ impl TrackingScheduleStore for ScheduleStore {
     async fn record_future_episode(
         &self,
         _: TrackingId,
+        _: TrackingClaimToken,
         episode: EpisodeSnapshot,
         _: time::OffsetDateTime,
         actions: Vec<SourceChoiceAction>,
@@ -71,13 +77,18 @@ impl TrackingScheduleStore for ScheduleStore {
         Ok(true)
     }
 
-    async fn pending_episodes(&self, _: TrackingId) -> Result<Vec<EpisodeSnapshot>, PortError> {
+    async fn pending_episodes(
+        &self,
+        _: TrackingId,
+        _: TrackingClaimToken,
+    ) -> Result<Vec<EpisodeSnapshot>, PortError> {
         Ok(self.pending.lock().unwrap().clone())
     }
 
     async fn record_pending_episode(
         &self,
         _: TrackingId,
+        _: TrackingClaimToken,
         episode: EpisodeSnapshot,
     ) -> Result<(), PortError> {
         let mut pending = self.pending.lock().unwrap();
@@ -87,9 +98,19 @@ impl TrackingScheduleStore for ScheduleStore {
         Ok(())
     }
 
+    async fn reserve_episode_download(
+        &self,
+        _: TrackingId,
+        _: TrackingClaimToken,
+        _: EpisodeSnapshot,
+    ) -> Result<(), PortError> {
+        Ok(())
+    }
+
     async fn finish_check(
         &self,
         _: TrackingId,
+        _: TrackingClaimToken,
         next_check_at: time::OffsetDateTime,
         status: media_core::TrackingCheckStatus,
     ) -> Result<(), PortError> {
@@ -206,6 +227,46 @@ fn tracking_named(title: &str) -> TrackingSubscription {
     .into_persisted()
 }
 
+struct FailingDiscovery;
+
+#[async_trait::async_trait]
+impl EpisodeDiscoveryPort for FailingDiscovery {
+    async fn available_episodes(
+        &self,
+        _: &TrackingSubscription,
+    ) -> Result<EpisodeDiscovery, PortError> {
+        Err(PortError::Infrastructure)
+    }
+}
+
+#[test]
+fn release_failure_retries_after_the_exact_failure_cooldown() {
+    block_on(async {
+        let store = Arc::new(ScheduleStore {
+            due: tracking_named("Failed release"),
+            discovered: Mutex::new(Vec::new()),
+            pending: Mutex::new(Vec::new()),
+            finished: Mutex::new(Vec::new()),
+            release_metadata: Mutex::new(Vec::new()),
+        });
+        let now = time::OffsetDateTime::now_utc();
+        let result = TrackingRuntime::new(store.clone(), Arc::new(FailingDiscovery))
+            .run_once(now, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(result.checked, 1);
+        assert_eq!(result.failed, 1);
+        assert_eq!(
+            *store.finished.lock().unwrap(),
+            vec![(
+                now + time::Duration::minutes(15),
+                media_core::TrackingCheckStatus::ReleaseError,
+            )]
+        );
+    });
+}
+
 fn download_tracking() -> TrackingSubscription {
     NewTrackingSubscription::new(
         TrackingId::new(),
@@ -309,6 +370,7 @@ impl TrackingScheduleStore for MetadataBatchStore {
     async fn claim_due(
         &self,
         _: time::OffsetDateTime,
+        _: TrackingClaimToken,
         _: time::OffsetDateTime,
         _: u32,
     ) -> Result<Vec<TrackingSubscription>, PortError> {
@@ -318,6 +380,7 @@ impl TrackingScheduleStore for MetadataBatchStore {
     async fn set_release_metadata_if_missing(
         &self,
         id: TrackingId,
+        _: TrackingClaimToken,
         _: ReleaseIdentity,
         _: String,
     ) -> Result<(), PortError> {
@@ -331,6 +394,7 @@ impl TrackingScheduleStore for MetadataBatchStore {
     async fn record_future_episode(
         &self,
         _: TrackingId,
+        _: TrackingClaimToken,
         _: EpisodeSnapshot,
         _: time::OffsetDateTime,
         _: Vec<SourceChoiceAction>,
@@ -339,13 +403,27 @@ impl TrackingScheduleStore for MetadataBatchStore {
         Ok(false)
     }
 
-    async fn pending_episodes(&self, _: TrackingId) -> Result<Vec<EpisodeSnapshot>, PortError> {
+    async fn pending_episodes(
+        &self,
+        _: TrackingId,
+        _: TrackingClaimToken,
+    ) -> Result<Vec<EpisodeSnapshot>, PortError> {
         Ok(Vec::new())
     }
 
     async fn record_pending_episode(
         &self,
         _: TrackingId,
+        _: TrackingClaimToken,
+        _: EpisodeSnapshot,
+    ) -> Result<(), PortError> {
+        Ok(())
+    }
+
+    async fn reserve_episode_download(
+        &self,
+        _: TrackingId,
+        _: TrackingClaimToken,
         _: EpisodeSnapshot,
     ) -> Result<(), PortError> {
         Ok(())
@@ -354,6 +432,7 @@ impl TrackingScheduleStore for MetadataBatchStore {
     async fn finish_check(
         &self,
         id: TrackingId,
+        _: TrackingClaimToken,
         _: time::OffsetDateTime,
         status: media_core::TrackingCheckStatus,
     ) -> Result<(), PortError> {
@@ -439,7 +518,13 @@ struct DiscoveryWriteFailureStore {
     due: Vec<TrackingSubscription>,
     fail_id: TrackingId,
     recorded: Mutex<Vec<TrackingId>>,
-    finished: Mutex<Vec<(TrackingId, media_core::TrackingCheckStatus)>>,
+    finished: Mutex<
+        Vec<(
+            TrackingId,
+            time::OffsetDateTime,
+            media_core::TrackingCheckStatus,
+        )>,
+    >,
     claims: Mutex<Vec<(time::OffsetDateTime, time::OffsetDateTime)>>,
 }
 
@@ -448,6 +533,7 @@ impl TrackingScheduleStore for DiscoveryWriteFailureStore {
     async fn claim_due(
         &self,
         now: time::OffsetDateTime,
+        _: TrackingClaimToken,
         claim_until: time::OffsetDateTime,
         _: u32,
     ) -> Result<Vec<TrackingSubscription>, PortError> {
@@ -458,6 +544,7 @@ impl TrackingScheduleStore for DiscoveryWriteFailureStore {
     async fn set_release_metadata_if_missing(
         &self,
         _: TrackingId,
+        _: TrackingClaimToken,
         _: ReleaseIdentity,
         _: String,
     ) -> Result<(), PortError> {
@@ -467,6 +554,7 @@ impl TrackingScheduleStore for DiscoveryWriteFailureStore {
     async fn record_future_episode(
         &self,
         id: TrackingId,
+        _: TrackingClaimToken,
         _: EpisodeSnapshot,
         _: time::OffsetDateTime,
         _: Vec<SourceChoiceAction>,
@@ -479,13 +567,27 @@ impl TrackingScheduleStore for DiscoveryWriteFailureStore {
         Ok(true)
     }
 
-    async fn pending_episodes(&self, _: TrackingId) -> Result<Vec<EpisodeSnapshot>, PortError> {
+    async fn pending_episodes(
+        &self,
+        _: TrackingId,
+        _: TrackingClaimToken,
+    ) -> Result<Vec<EpisodeSnapshot>, PortError> {
         Ok(Vec::new())
     }
 
     async fn record_pending_episode(
         &self,
         _: TrackingId,
+        _: TrackingClaimToken,
+        _: EpisodeSnapshot,
+    ) -> Result<(), PortError> {
+        Ok(())
+    }
+
+    async fn reserve_episode_download(
+        &self,
+        _: TrackingId,
+        _: TrackingClaimToken,
         _: EpisodeSnapshot,
     ) -> Result<(), PortError> {
         Ok(())
@@ -494,10 +596,14 @@ impl TrackingScheduleStore for DiscoveryWriteFailureStore {
     async fn finish_check(
         &self,
         id: TrackingId,
-        _: time::OffsetDateTime,
+        _: TrackingClaimToken,
+        next_check_at: time::OffsetDateTime,
         status: media_core::TrackingCheckStatus,
     ) -> Result<(), PortError> {
-        self.finished.lock().unwrap().push((id, status));
+        self.finished
+            .lock()
+            .unwrap()
+            .push((id, next_check_at, status));
         Ok(())
     }
 }
@@ -531,8 +637,16 @@ fn discovery_write_failure_is_cooled_down_and_does_not_abort_the_batch() {
         assert_eq!(
             *store.finished.lock().unwrap(),
             vec![
-                (failed.id(), media_core::TrackingCheckStatus::SourceError),
-                (healthy.id(), media_core::TrackingCheckStatus::EpisodeFound,),
+                (
+                    failed.id(),
+                    now + time::Duration::minutes(15),
+                    media_core::TrackingCheckStatus::SourceError,
+                ),
+                (
+                    healthy.id(),
+                    now + time::Duration::hours(1),
+                    media_core::TrackingCheckStatus::EpisodeFound,
+                ),
             ]
         );
     });
@@ -808,6 +922,207 @@ impl EpisodeDiscoveryPort for DownloadDiscovery {
 #[derive(Default)]
 struct Enqueuer {
     episodes: Mutex<Vec<EpisodeSnapshot>>,
+}
+
+struct FencedDownloadStore {
+    due: TrackingSubscription,
+    claim_valid: AtomicBool,
+    reservations: Mutex<Vec<EpisodeSnapshot>>,
+    discoveries: Mutex<Vec<EpisodeSnapshot>>,
+}
+
+#[async_trait::async_trait]
+impl TrackingScheduleStore for FencedDownloadStore {
+    async fn claim_due(
+        &self,
+        _: time::OffsetDateTime,
+        _: TrackingClaimToken,
+        _: time::OffsetDateTime,
+        _: u32,
+    ) -> Result<Vec<TrackingSubscription>, PortError> {
+        Ok(vec![self.due.clone()])
+    }
+
+    async fn set_release_metadata_if_missing(
+        &self,
+        _: TrackingId,
+        _: TrackingClaimToken,
+        _: ReleaseIdentity,
+        _: String,
+    ) -> Result<(), PortError> {
+        Ok(())
+    }
+
+    async fn record_future_episode(
+        &self,
+        _: TrackingId,
+        _: TrackingClaimToken,
+        episode: EpisodeSnapshot,
+        _: time::OffsetDateTime,
+        _: Vec<SourceChoiceAction>,
+        _: Option<String>,
+    ) -> Result<bool, PortError> {
+        if !self.claim_valid.load(Ordering::SeqCst) {
+            return Err(PortError::Conflict);
+        }
+        self.discoveries.lock().unwrap().push(episode);
+        Ok(true)
+    }
+
+    async fn pending_episodes(
+        &self,
+        _: TrackingId,
+        _: TrackingClaimToken,
+    ) -> Result<Vec<EpisodeSnapshot>, PortError> {
+        Ok(Vec::new())
+    }
+
+    async fn record_pending_episode(
+        &self,
+        _: TrackingId,
+        _: TrackingClaimToken,
+        _: EpisodeSnapshot,
+    ) -> Result<(), PortError> {
+        Ok(())
+    }
+
+    async fn reserve_episode_download(
+        &self,
+        _: TrackingId,
+        _: TrackingClaimToken,
+        episode: EpisodeSnapshot,
+    ) -> Result<(), PortError> {
+        if !self.claim_valid.load(Ordering::SeqCst) {
+            return Err(PortError::Conflict);
+        }
+        self.reservations.lock().unwrap().push(episode);
+        Ok(())
+    }
+
+    async fn finish_check(
+        &self,
+        _: TrackingId,
+        _: TrackingClaimToken,
+        _: time::OffsetDateTime,
+        _: media_core::TrackingCheckStatus,
+    ) -> Result<(), PortError> {
+        if self.claim_valid.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(PortError::Conflict)
+        }
+    }
+}
+
+struct BlockedDownloadDiscovery {
+    reached: Arc<Barrier>,
+    resume: Arc<Barrier>,
+}
+
+#[async_trait::async_trait]
+impl EpisodeDiscoveryPort for BlockedDownloadDiscovery {
+    async fn available_episodes(
+        &self,
+        _: &TrackingSubscription,
+    ) -> Result<EpisodeDiscovery, PortError> {
+        self.reached.wait();
+        self.resume.wait();
+        EpisodeDiscovery::new(
+            vec![EpisodeSnapshot::new(2, 8).unwrap()],
+            "Blades of the Guardians S2".to_owned(),
+            None,
+        )
+        .map_err(|_| PortError::Conflict)
+    }
+}
+
+struct BlockedEnqueuer {
+    reached: Arc<Barrier>,
+    resume: Arc<Barrier>,
+    episodes: Mutex<Vec<EpisodeSnapshot>>,
+}
+
+#[async_trait::async_trait]
+impl TrackedEpisodeDownloadPort for BlockedEnqueuer {
+    async fn enqueue_episode(
+        &self,
+        _: &TrackingSubscription,
+        episode: EpisodeSnapshot,
+    ) -> Result<(), PortError> {
+        self.reached.wait();
+        self.resume.wait();
+        self.episodes.lock().unwrap().push(episode);
+        Ok(())
+    }
+}
+
+#[test]
+fn config_patch_while_discovery_is_blocked_prevents_download_enqueue() {
+    let reached = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    let store = Arc::new(FencedDownloadStore {
+        due: download_tracking(),
+        claim_valid: AtomicBool::new(true),
+        reservations: Mutex::new(Vec::new()),
+        discoveries: Mutex::new(Vec::new()),
+    });
+    let downloads = Arc::new(Enqueuer::default());
+    let runtime = TrackingRuntime::new(
+        store.clone(),
+        Arc::new(BlockedDownloadDiscovery {
+            reached: reached.clone(),
+            resume: resume.clone(),
+        }),
+    )
+    .with_downloads(downloads.clone());
+    let worker = std::thread::spawn(move || {
+        block_on(runtime.run_once(time::OffsetDateTime::now_utc(), 1)).unwrap()
+    });
+    reached.wait();
+    store.claim_valid.store(false, Ordering::SeqCst);
+    resume.wait();
+    let result = worker.join().unwrap();
+
+    assert_eq!(result.queued, 0);
+    assert!(store.reservations.lock().unwrap().is_empty());
+    assert!(downloads.episodes.lock().unwrap().is_empty());
+}
+
+#[test]
+fn config_patch_after_durable_reservation_does_not_undo_authorized_enqueue() {
+    let reached = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    let store = Arc::new(FencedDownloadStore {
+        due: download_tracking(),
+        claim_valid: AtomicBool::new(true),
+        reservations: Mutex::new(Vec::new()),
+        discoveries: Mutex::new(Vec::new()),
+    });
+    let downloads = Arc::new(BlockedEnqueuer {
+        reached: reached.clone(),
+        resume: resume.clone(),
+        episodes: Mutex::new(Vec::new()),
+    });
+    let runtime = TrackingRuntime::new(store.clone(), Arc::new(DownloadDiscovery))
+        .with_downloads(downloads.clone());
+    let worker = std::thread::spawn(move || {
+        block_on(runtime.run_once(time::OffsetDateTime::now_utc(), 1)).unwrap()
+    });
+    reached.wait();
+    assert_eq!(
+        *store.reservations.lock().unwrap(),
+        vec![EpisodeSnapshot::new(2, 8).unwrap()]
+    );
+    store.claim_valid.store(false, Ordering::SeqCst);
+    resume.wait();
+    let result = worker.join().unwrap();
+
+    assert_eq!(result.queued, 1);
+    assert_eq!(
+        *downloads.episodes.lock().unwrap(),
+        vec![EpisodeSnapshot::new(2, 8).unwrap()]
+    );
+    assert!(store.discoveries.lock().unwrap().is_empty());
 }
 
 #[async_trait::async_trait]

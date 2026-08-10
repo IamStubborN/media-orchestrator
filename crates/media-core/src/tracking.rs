@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use crate::{
-    PRIMARY_USER_ID, Actor, OperationKey, PortError, Provider, SourceChoiceAction, TrackingId,
-    UserId, SECONDARY_USER_ID,
+    PRIMARY_USER_ID, Actor, OperationKey, PortError, Provider, SourceChoiceAction,
+    TrackingClaimToken, TrackingId, UserId, SECONDARY_USER_ID,
 };
 
 /// Stable opaque identifier for the provider choices discovered for one tracked
@@ -248,6 +248,11 @@ impl EpisodeAvailability {
             (_, ProviderAvailability::Available) => vec![SourceChoiceAction::Prowlarr],
             _ => Vec::new(),
         }
+    }
+
+    #[must_use]
+    pub const fn prowlarr(self) -> ProviderAvailability {
+        self.prowlarr
     }
 
     #[must_use]
@@ -853,6 +858,7 @@ pub trait TrackingStore: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct FutureEpisodeRecord {
     pub id: TrackingId,
+    pub claim_token: TrackingClaimToken,
     pub episode: EpisodeSnapshot,
     pub next_check_at: time::OffsetDateTime,
     pub actions: Vec<SourceChoiceAction>,
@@ -866,18 +872,21 @@ pub trait TrackingScheduleStore: Send + Sync {
     async fn claim_due(
         &self,
         now: time::OffsetDateTime,
+        claim_token: TrackingClaimToken,
         claim_until: time::OffsetDateTime,
         limit: u32,
     ) -> Result<Vec<TrackingSubscription>, PortError>;
     async fn set_release_metadata_if_missing(
         &self,
         id: TrackingId,
+        claim_token: TrackingClaimToken,
         release_identity: crate::ReleaseIdentity,
         poster_url: String,
     ) -> Result<(), PortError>;
     async fn record_future_episode(
         &self,
         id: TrackingId,
+        claim_token: TrackingClaimToken,
         episode: EpisodeSnapshot,
         next_check_at: time::OffsetDateTime,
         actions: Vec<SourceChoiceAction>,
@@ -893,6 +902,7 @@ pub trait TrackingScheduleStore: Send + Sync {
     ) -> Result<bool, PortError> {
         self.record_future_episode(
             record.id,
+            record.claim_token,
             record.episode,
             record.next_check_at,
             record.actions,
@@ -900,15 +910,27 @@ pub trait TrackingScheduleStore: Send + Sync {
         )
         .await
     }
-    async fn pending_episodes(&self, id: TrackingId) -> Result<Vec<EpisodeSnapshot>, PortError>;
+    async fn pending_episodes(
+        &self,
+        id: TrackingId,
+        claim_token: TrackingClaimToken,
+    ) -> Result<Vec<EpisodeSnapshot>, PortError>;
     async fn record_pending_episode(
         &self,
         id: TrackingId,
+        claim_token: TrackingClaimToken,
+        episode: EpisodeSnapshot,
+    ) -> Result<(), PortError>;
+    async fn reserve_episode_download(
+        &self,
+        id: TrackingId,
+        claim_token: TrackingClaimToken,
         episode: EpisodeSnapshot,
     ) -> Result<(), PortError>;
     async fn finish_check(
         &self,
         id: TrackingId,
+        claim_token: TrackingClaimToken,
         next_check_at: time::OffsetDateTime,
         status: TrackingCheckStatus,
     ) -> Result<(), PortError>;
@@ -995,9 +1017,10 @@ impl TrackingRuntime {
         if limit == 0 || limit > 100 {
             return Err(PortError::Conflict);
         }
+        let claim_token = TrackingClaimToken::new();
         let due = self
             .store
-            .claim_due(now, now + TRACKING_FAILURE_COOLDOWN, limit)
+            .claim_due(now, claim_token, now + TRACKING_FAILURE_COOLDOWN, limit)
             .await?;
         let mut result = TrackingRunResult {
             checked: 0,
@@ -1021,7 +1044,12 @@ impl TrackingRuntime {
             {
                 metadata_backfilled = self
                     .store
-                    .set_release_metadata_if_missing(tracking.id(), release_identity, poster_url)
+                    .set_release_metadata_if_missing(
+                        tracking.id(),
+                        claim_token,
+                        release_identity,
+                        poster_url,
+                    )
                     .await
                     .is_ok();
             }
@@ -1032,7 +1060,8 @@ impl TrackingRuntime {
                         .store
                         .finish_check(
                             tracking.id(),
-                            default_next_check,
+                            claim_token,
+                            now + TRACKING_FAILURE_COOLDOWN,
                             TrackingCheckStatus::ReleaseError,
                         )
                         .await;
@@ -1050,6 +1079,7 @@ impl TrackingRuntime {
                     .store
                     .set_release_metadata_if_missing(
                         tracking.id(),
+                        claim_token,
                         release_identity,
                         poster_url.to_owned(),
                     )
@@ -1064,14 +1094,19 @@ impl TrackingRuntime {
                     .copied()
             });
             let pending = if tracking.download().is_none() {
-                match self.store.pending_episodes(tracking.id()).await {
+                match self
+                    .store
+                    .pending_episodes(tracking.id(), claim_token)
+                    .await
+                {
                     Ok(pending) => pending,
                     Err(_) => {
                         let _ = self
                             .store
                             .finish_check(
                                 tracking.id(),
-                                default_next_check,
+                                claim_token,
+                                now + TRACKING_FAILURE_COOLDOWN,
                                 TrackingCheckStatus::SourceError,
                             )
                             .await;
@@ -1120,7 +1155,7 @@ impl TrackingRuntime {
                     let Some(availability) = self.availability.as_deref() else {
                         if self
                             .store
-                            .record_pending_episode(tracking.id(), episode)
+                            .record_pending_episode(tracking.id(), claim_token, episode)
                             .await
                             .is_err()
                         {
@@ -1143,7 +1178,7 @@ impl TrackingRuntime {
                         Err(_) => {
                             if self
                                 .store
-                                .record_pending_episode(tracking.id(), episode)
+                                .record_pending_episode(tracking.id(), claim_token, episode)
                                 .await
                                 .is_err()
                             {
@@ -1162,7 +1197,7 @@ impl TrackingRuntime {
                     if actions.is_empty() {
                         if self
                             .store
-                            .record_pending_episode(tracking.id(), episode)
+                            .record_pending_episode(tracking.id(), claim_token, episode)
                             .await
                             .is_err()
                         {
@@ -1181,8 +1216,19 @@ impl TrackingRuntime {
                         source_error = true;
                         continue;
                     };
+                    if self
+                        .store
+                        .reserve_episode_download(tracking.id(), claim_token, episode)
+                        .await
+                        .is_err()
+                    {
+                        result.failed += 1;
+                        source_error = true;
+                        continue;
+                    }
                     if downloads.enqueue_episode(&tracking, episode).await.is_err() {
                         result.failed += 1;
+                        source_error = true;
                         continue;
                     }
                     result.queued += 1;
@@ -1191,6 +1237,7 @@ impl TrackingRuntime {
                     .store
                     .record_future_episode_with_counts(FutureEpisodeRecord {
                         id: tracking.id(),
+                        claim_token,
                         episode,
                         next_check_at: default_next_check,
                         actions,
@@ -1208,7 +1255,9 @@ impl TrackingRuntime {
                     }
                 }
             }
-            let next_check = if pending_availability {
+            let next_check = if source_error {
+                now + TRACKING_FAILURE_COOLDOWN
+            } else if pending_availability {
                 now + NOTIFY_TRACKING_INTERVAL
             } else {
                 default_next_check
@@ -1226,7 +1275,7 @@ impl TrackingRuntime {
             };
             if self
                 .store
-                .finish_check(tracking.id(), next_check, status)
+                .finish_check(tracking.id(), claim_token, next_check, status)
                 .await
                 .is_err()
             {

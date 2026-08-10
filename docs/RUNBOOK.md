@@ -132,12 +132,25 @@ mise run homelab-deploy
 It first runs the fail-closed `hermes-home/scripts/check-media-capabilities`
 schema/capability check, builds only the service target, verifies that both
 currently configured image tags still exist, atomically checkpoints their exact
-values together with the deployed MCP schema artifact and OCI revisions, runs
+values together with the deployed MCP schema artifact, OCI revisions, and the
+exact applied database migration version, runs
 migrations, and recreates only `media-service`. It refuses to run while a job is
 active. It does not build or
 recreate `download-runner`, and it does not stop or restart the watcher,
 qBittorrent, or either VPN container. Use `mise run homelab-rollback` for the
 matching service-only rollback.
+
+The service-only rollback is deliberately one schema step. While the queue is
+idle, the still-current forward image verifies that the live migration is its
+exact latest migration and that the checkpoint is its immediate predecessor,
+then executes that migration's real SeaORM `down` implementation. Only after
+the database is verified at the checkpoint does the old service image start and
+the paired Hermes schema return. Missing, malformed, equal, unknown, or
+multi-step version transitions fail closed. If schema rollback, old-service
+startup, or MCP verification fails, the workflow restores the forward schema,
+runs the forward image's migrations back to the captured forward version,
+restarts that image, and verifies the protected container snapshot before
+returning failure.
 
 The checker is discovered through sibling `../hermes-home` by default. Set
 `HERMES_HOME_ROOT` for a different checkout root, or

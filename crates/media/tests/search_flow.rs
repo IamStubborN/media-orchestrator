@@ -1014,7 +1014,7 @@ async fn tracking_prowlarr_availability_uses_one_search_for_results_and_readines
     let SearchResultDto::Prowlarr { title, .. } = &mut result.public else {
         panic!("expected Prowlarr result");
     };
-    *title = "Show [S01E05] (2026)".to_owned();
+    *title = "Original Show [S01E05] (2026)".to_owned();
     let provider = Arc::new(CountingAvailabilityProvider {
         prowlarr_calls: Mutex::new(Vec::new()),
         page: Mutex::new(Some(ProviderPage {
@@ -1028,7 +1028,7 @@ async fn tracking_prowlarr_availability_uses_one_search_for_results_and_readines
         TrackingId::new(),
         PRIMARY_USER_ID,
         Provider::Rezka,
-        "Show".to_owned(),
+        "Tracked Show".to_owned(),
         "release-calendar".to_owned(),
         vec![media_core::EpisodeSnapshot::new(1, 4).unwrap()],
         TrackingScope::Personal,
@@ -1037,8 +1037,8 @@ async fn tracking_prowlarr_availability_uses_one_search_for_results_and_readines
     .unwrap();
     let discovery = EpisodeDiscovery::new(
         vec![media_core::EpisodeSnapshot::new(1, 5).unwrap()],
-        "Show".to_owned(),
-        None,
+        "Localized Show".to_owned(),
+        Some("Original Show".to_owned()),
     )
     .unwrap();
 
@@ -1053,7 +1053,52 @@ async fn tracking_prowlarr_availability_uses_one_search_for_results_and_readines
 
     assert_eq!(result.actions(), vec![SourceChoiceAction::Prowlarr]);
     assert_eq!(result.prowlarr_count(), 1);
-    assert_eq!(*provider.prowlarr_calls.lock().unwrap(), vec!["Show"]);
+    assert_eq!(
+        *provider.prowlarr_calls.lock().unwrap(),
+        vec!["Original Show"]
+    );
+}
+
+#[tokio::test]
+async fn tracking_prowlarr_single_search_failure_is_unknown() {
+    let provider = Arc::new(CountingAvailabilityProvider {
+        prowlarr_calls: Mutex::new(Vec::new()),
+        page: Mutex::new(None),
+    });
+    let persistence = Arc::new(MemorySearchPersistence::default());
+    let availability = ProviderEpisodeAvailability::new(provider.clone(), persistence);
+    let tracking = TrackingSubscription::rehydrate(
+        TrackingId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        "Tracked Show".to_owned(),
+        "release-calendar".to_owned(),
+        vec![media_core::EpisodeSnapshot::new(1, 4).unwrap()],
+        TrackingScope::Personal,
+        None,
+    )
+    .unwrap();
+    let discovery = EpisodeDiscovery::new(
+        vec![media_core::EpisodeSnapshot::new(1, 5).unwrap()],
+        "Localized Show".to_owned(),
+        Some("Original Show".to_owned()),
+    )
+    .unwrap();
+
+    let result = availability
+        .probe(EpisodeAvailabilityRequest::new(
+            &tracking,
+            &discovery,
+            media_core::EpisodeSnapshot::new(1, 5).unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(result.prowlarr(), media_core::ProviderAvailability::Unknown);
+    assert_eq!(
+        *provider.prowlarr_calls.lock().unwrap(),
+        vec!["Original Show"]
+    );
 }
 
 #[derive(Default)]

@@ -3,12 +3,13 @@ mod support;
 use media_core::{
     PRIMARY_USER_ID, EpisodeSnapshot, NewTrackingCommand, NewTrackingSubscription,
     NotificationContent, NotificationEventType, NotificationId, NotificationRecipient,
-    OperationKey, Provider, ReleaseIdentity, ReleaseSource, SourceChoiceAction, TrackingId,
+    OperationKey, Provider, ReleaseIdentity, ReleaseSource, SourceChoiceAction,
+    TrackingCheckStatus, TrackingClaimToken, TrackingDownload, TrackingDownloadPatch, TrackingId,
     TrackingScheduleStore, TrackingScope, TrackingStore, SECONDARY_USER_ID,
 };
 use media_storage::{SeaOrmNotificationOutbox, SeaOrmTrackingStore};
 use sea_orm::ConnectionTrait;
-use support::{TestDatabase, operation_key, query};
+use support::{TestDatabase, execute, operation_key, query};
 
 fn all_source_actions() -> Vec<SourceChoiceAction> {
     vec![
@@ -16,6 +17,17 @@ fn all_source_actions() -> Vec<SourceChoiceAction> {
         SourceChoiceAction::Rezka,
         SourceChoiceAction::Prowlarr,
     ]
+}
+
+async fn claim_tracking(store: &SeaOrmTrackingStore, id: TrackingId) -> TrackingClaimToken {
+    let now = time::OffsetDateTime::now_utc();
+    let token = TrackingClaimToken::new();
+    let claimed = store
+        .claim_due(now, token, now + time::Duration::minutes(15), 100)
+        .await
+        .unwrap();
+    assert!(claimed.iter().any(|tracking| tracking.id() == id));
+    token
 }
 
 fn new_tracking(id: TrackingId, scope: TrackingScope) -> NewTrackingSubscription {
@@ -131,25 +143,506 @@ async fn due_tracking_is_claimed_atomically_with_a_failure_cooldown() {
     let now = time::OffsetDateTime::now_utc();
     let claim_until = now + time::Duration::minutes(15);
 
-    let first_claim = store.claim_due(now, claim_until, 1).await.unwrap();
-    let second_claim = store.claim_due(now, claim_until, 1).await.unwrap();
-    let exhausted = store.claim_due(now, claim_until, 1).await.unwrap();
+    let first_claim = store
+        .claim_due(now, TrackingClaimToken::new(), claim_until, 1)
+        .await
+        .unwrap();
+    let second_claim = store
+        .claim_due(now, TrackingClaimToken::new(), claim_until, 1)
+        .await
+        .unwrap();
+    let exhausted = store
+        .claim_due(now, TrackingClaimToken::new(), claim_until, 1)
+        .await
+        .unwrap();
 
     assert_eq!(first_claim.len(), 1);
     assert_eq!(second_claim.len(), 1);
     assert_ne!(first_claim[0].id(), second_claim[0].id());
     assert!(exhausted.is_empty());
-    assert_eq!(first_claim[0].next_check_at(), claim_until);
-    assert_eq!(second_claim[0].next_check_at(), claim_until);
+    assert!(first_claim[0].next_check_at() <= now);
+    assert!(second_claim[0].next_check_at() <= now);
     let claimed_ids = [first_claim[0].id(), second_claim[0].id()];
     assert!(claimed_ids.contains(&first.id()));
     assert!(claimed_ids.contains(&second.id()));
 
     let retry = store
-        .claim_due(claim_until, claim_until + time::Duration::minutes(15), 2)
+        .claim_due(
+            claim_until,
+            TrackingClaimToken::new(),
+            claim_until + time::Duration::minutes(15),
+            2,
+        )
         .await
         .unwrap();
     assert_eq!(retry.len(), 2);
+}
+
+#[tokio::test]
+async fn manual_check_during_an_active_claim_is_deferred_until_finish() {
+    let test_db = TestDatabase::start_migrated().await;
+    let store = SeaOrmTrackingStore::new(test_db.connection().clone());
+    let tracking = store
+        .add(
+            operation_key(),
+            new_tracking(TrackingId::new(), TrackingScope::Personal),
+        )
+        .await
+        .unwrap();
+    let now = time::OffsetDateTime::now_utc();
+    let token = TrackingClaimToken::new();
+    let claimed = store
+        .claim_due(now, token, now + time::Duration::minutes(15), 1)
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+
+    store
+        .request_check_visible(tracking.id(), PRIMARY_USER_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        store
+            .claim_due(
+                now + time::Duration::seconds(1),
+                TrackingClaimToken::new(),
+                now + time::Duration::minutes(16),
+                1,
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    store
+        .finish_check(
+            tracking.id(),
+            token,
+            now + time::Duration::hours(1),
+            TrackingCheckStatus::NoNewEpisode,
+        )
+        .await
+        .unwrap();
+    let recheck = store
+        .claim_due(
+            now + time::Duration::seconds(2),
+            TrackingClaimToken::new(),
+            now + time::Duration::minutes(17),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(recheck.len(), 1);
+    assert_eq!(recheck[0].id(), tracking.id());
+}
+
+#[tokio::test]
+async fn manual_check_survives_discovery_schedule_write_and_worker_crash() {
+    let test_db = TestDatabase::start_migrated().await;
+    let store = SeaOrmTrackingStore::new(test_db.connection().clone());
+    let tracking = store
+        .add(
+            operation_key(),
+            new_tracking(TrackingId::new(), TrackingScope::Personal),
+        )
+        .await
+        .unwrap();
+    let now = time::OffsetDateTime::now_utc();
+    let claim_until = now + time::Duration::minutes(15);
+    let token = TrackingClaimToken::new();
+    store.claim_due(now, token, claim_until, 1).await.unwrap();
+    store
+        .request_check_visible(tracking.id(), PRIMARY_USER_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .record_future_episode(
+            tracking.id(),
+            token,
+            EpisodeSnapshot::new(1, 5).unwrap(),
+            now + time::Duration::hours(1),
+            all_source_actions(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .claim_due(
+                claim_until - time::Duration::seconds(1),
+                TrackingClaimToken::new(),
+                claim_until + time::Duration::minutes(15),
+                1,
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let replacement_token = TrackingClaimToken::new();
+    let reclaimed = store
+        .claim_due(
+            claim_until,
+            replacement_token,
+            claim_until + time::Duration::minutes(15),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(reclaimed.len(), 1);
+    assert_eq!(reclaimed[0].id(), tracking.id());
+    let claim = query(
+        test_db.connection(),
+        "SELECT check_claim_token, check_requested_at FROM tracking_subscriptions",
+    )
+    .await;
+    assert_eq!(
+        claim[0]
+            .try_get::<uuid::Uuid>("", "check_claim_token")
+            .unwrap(),
+        replacement_token.into_uuid()
+    );
+    assert_eq!(
+        claim[0]
+            .try_get::<Option<time::OffsetDateTime>>("", "check_requested_at")
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn stale_finish_cannot_overwrite_a_reclaimed_subscription() {
+    let test_db = TestDatabase::start_migrated().await;
+    let store = SeaOrmTrackingStore::new(test_db.connection().clone());
+    let tracking = store
+        .add(
+            operation_key(),
+            new_tracking(TrackingId::new(), TrackingScope::Personal),
+        )
+        .await
+        .unwrap();
+    let now = time::OffsetDateTime::now_utc();
+    let first_token = TrackingClaimToken::new();
+    let first_until = now + time::Duration::minutes(15);
+    store
+        .claim_due(now, first_token, first_until, 1)
+        .await
+        .unwrap();
+    let second_token = TrackingClaimToken::new();
+    store
+        .claim_due(
+            first_until,
+            second_token,
+            first_until + time::Duration::minutes(15),
+            1,
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        store
+            .finish_check(
+                tracking.id(),
+                first_token,
+                now + time::Duration::hours(8),
+                TrackingCheckStatus::ReleaseError,
+            )
+            .await,
+        Err(media_core::PortError::Conflict)
+    ));
+    let claim = query(
+        test_db.connection(),
+        "SELECT check_claim_token, check_status FROM tracking_subscriptions",
+    )
+    .await;
+    assert_eq!(
+        claim[0]
+            .try_get::<uuid::Uuid>("", "check_claim_token")
+            .unwrap(),
+        second_token.into_uuid()
+    );
+    assert_eq!(
+        claim[0].try_get::<String>("", "check_status").unwrap(),
+        "never"
+    );
+}
+
+#[tokio::test]
+async fn baseline_and_download_patches_during_claim_preserve_an_immediate_recheck() {
+    let test_db = TestDatabase::start_migrated().await;
+    let store = SeaOrmTrackingStore::new(test_db.connection().clone());
+    let tracking = store
+        .add(
+            operation_key(),
+            new_tracking(TrackingId::new(), TrackingScope::Personal),
+        )
+        .await
+        .unwrap();
+    let now = time::OffsetDateTime::now_utc();
+    let baseline_token = TrackingClaimToken::new();
+    let baseline_until = now + time::Duration::minutes(15);
+    store
+        .claim_due(now, baseline_token, baseline_until, 1)
+        .await
+        .unwrap();
+    store
+        .set_baseline_visible(
+            tracking.id(),
+            PRIMARY_USER_ID,
+            EpisodeSnapshot::new(1, 6).unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        store
+            .finish_check(
+                tracking.id(),
+                baseline_token,
+                now + time::Duration::hours(1),
+                TrackingCheckStatus::NoNewEpisode,
+            )
+            .await,
+        Err(media_core::PortError::Conflict)
+    ));
+    assert!(
+        store
+            .claim_due(
+                baseline_until - time::Duration::seconds(1),
+                TrackingClaimToken::new(),
+                baseline_until + time::Duration::minutes(15),
+                1,
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let download_token = TrackingClaimToken::new();
+    let download_until = baseline_until + time::Duration::minutes(15);
+    let claimed = store
+        .claim_due(baseline_until, download_token, download_until, 1)
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+    store
+        .patch_download_visible(
+            tracking.id(),
+            PRIMARY_USER_ID,
+            TrackingDownloadPatch::new(
+                "Studio Dub".to_owned(),
+                TrackingDownload::new("42".to_owned(), 7, 1).unwrap(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        store
+            .finish_check(
+                tracking.id(),
+                download_token,
+                now + time::Duration::minutes(15),
+                TrackingCheckStatus::NoNewEpisode,
+            )
+            .await,
+        Err(media_core::PortError::Conflict)
+    ));
+    assert!(
+        store
+            .claim_due(
+                download_until - time::Duration::seconds(1),
+                TrackingClaimToken::new(),
+                download_until + time::Duration::minutes(15),
+                1,
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let final_claim = store
+        .claim_due(
+            download_until,
+            TrackingClaimToken::new(),
+            download_until + time::Duration::minutes(15),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(final_claim.len(), 1);
+    assert_eq!(final_claim[0].id(), tracking.id());
+}
+
+#[tokio::test]
+async fn expired_claim_cannot_write_or_reserve_without_being_reclaimed() {
+    let test_db = TestDatabase::start_migrated().await;
+    let store = SeaOrmTrackingStore::new(test_db.connection().clone());
+    let tracking = store
+        .add(
+            operation_key(),
+            new_tracking(TrackingId::new(), TrackingScope::Personal),
+        )
+        .await
+        .unwrap();
+    store
+        .patch_download_visible(
+            tracking.id(),
+            PRIMARY_USER_ID,
+            TrackingDownloadPatch::new(
+                "Studio Dub".to_owned(),
+                TrackingDownload::new("42".to_owned(), 7, 1).unwrap(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let token = claim_tracking(&store, tracking.id()).await;
+    execute(
+        test_db.connection(),
+        "UPDATE tracking_subscriptions SET check_claim_until = now() - interval '1 second'",
+    )
+    .await
+    .unwrap();
+    let episode = EpisodeSnapshot::new(1, 5).unwrap();
+
+    assert!(
+        store
+            .set_release_metadata_if_missing(
+                tracking.id(),
+                token,
+                ReleaseIdentity::new(ReleaseSource::Tvmaze, 99).unwrap(),
+                "https://static.tvmaze.com/expired.jpg".to_owned(),
+            )
+            .await
+            .is_err()
+    );
+    assert!(store.pending_episodes(tracking.id(), token).await.is_err());
+    assert!(
+        store
+            .record_pending_episode(tracking.id(), token, episode)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .reserve_episode_download(tracking.id(), token, episode)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .record_future_episode(
+                tracking.id(),
+                token,
+                episode,
+                time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+                all_source_actions(),
+                None,
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .finish_check(
+                tracking.id(),
+                token,
+                time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+                TrackingCheckStatus::NoNewEpisode,
+            )
+            .await
+            .is_err()
+    );
+    let mutations = query(
+        test_db.connection(),
+        "SELECT
+           (SELECT count(*) FROM tracking_download_reservations) AS reservations,
+           (SELECT count(*) FROM tracking_discoveries) AS discoveries,
+           (SELECT count(*) FROM tracking_availability_candidates) AS candidates",
+    )
+    .await;
+    assert_eq!(mutations[0].try_get::<i64>("", "reservations").unwrap(), 0);
+    assert_eq!(mutations[0].try_get::<i64>("", "discoveries").unwrap(), 0);
+    assert_eq!(mutations[0].try_get::<i64>("", "candidates").unwrap(), 0);
+}
+
+#[tokio::test]
+async fn download_reservation_is_fenced_and_keeps_the_authorized_configuration() {
+    let test_db = TestDatabase::start_migrated().await;
+    let store = SeaOrmTrackingStore::new(test_db.connection().clone());
+    let tracking = store
+        .add(
+            operation_key(),
+            new_tracking(TrackingId::new(), TrackingScope::Personal),
+        )
+        .await
+        .unwrap();
+    store
+        .patch_download_visible(
+            tracking.id(),
+            PRIMARY_USER_ID,
+            TrackingDownloadPatch::new(
+                "Old Dub".to_owned(),
+                TrackingDownload::new("42".to_owned(), 7, 1).unwrap(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let token = claim_tracking(&store, tracking.id()).await;
+    let episode = EpisodeSnapshot::new(1, 5).unwrap();
+    store
+        .reserve_episode_download(tracking.id(), token, episode)
+        .await
+        .unwrap();
+    store
+        .patch_download_visible(
+            tracking.id(),
+            PRIMARY_USER_ID,
+            TrackingDownloadPatch::new(
+                "New Dub".to_owned(),
+                TrackingDownload::new("84".to_owned(), 9, 1).unwrap(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        store
+            .reserve_episode_download(tracking.id(), token, episode)
+            .await
+            .is_err()
+    );
+    let reservation = query(
+        test_db.connection(),
+        "SELECT provider_media_ref, translation_id, download_season
+         FROM tracking_download_reservations",
+    )
+    .await;
+    assert_eq!(
+        reservation[0]
+            .try_get::<String>("", "provider_media_ref")
+            .unwrap(),
+        "42"
+    );
+    assert_eq!(
+        reservation[0].try_get::<i64>("", "translation_id").unwrap(),
+        7
+    );
+    assert_eq!(
+        reservation[0]
+            .try_get::<i32>("", "download_season")
+            .unwrap(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -164,11 +657,13 @@ async fn resolved_release_metadata_backfill_is_atomic_and_identity_safe() {
         .await
         .unwrap();
     let resolved = ReleaseIdentity::new(ReleaseSource::Tvmaze, 81228).unwrap();
+    let claim_token = claim_tracking(&store, created.id()).await;
 
     assert!(matches!(
         store
             .set_release_metadata_if_missing(
                 created.id(),
+                claim_token,
                 resolved,
                 "http://invalid.test/poster.jpg".to_owned(),
             )
@@ -182,6 +677,7 @@ async fn resolved_release_metadata_backfill_is_atomic_and_identity_safe() {
     store
         .set_release_metadata_if_missing(
             created.id(),
+            claim_token,
             resolved,
             "https://static.tvmaze.com/lucky.jpg".to_owned(),
         )
@@ -198,6 +694,7 @@ async fn resolved_release_metadata_backfill_is_atomic_and_identity_safe() {
     store
         .set_release_metadata_if_missing(
             created.id(),
+            claim_token,
             ReleaseIdentity::new(ReleaseSource::Tvmaze, 99999).unwrap(),
             "https://static.tvmaze.com/wrong.jpg".to_owned(),
         )
@@ -471,11 +968,13 @@ async fn future_discovery_updates_snapshot_and_atomically_fans_out_family_notifi
         .unwrap();
     let episode = EpisodeSnapshot::new(1, 5).unwrap();
     let next_check = time::OffsetDateTime::now_utc() + time::Duration::hours(6);
+    let claim_token = claim_tracking(&store, tracking.id()).await;
 
     assert!(
         store
             .record_future_episode(
                 tracking.id(),
+                claim_token,
                 episode,
                 next_check,
                 all_source_actions(),
@@ -488,6 +987,7 @@ async fn future_discovery_updates_snapshot_and_atomically_fans_out_family_notifi
         !store
             .record_future_episode(
                 tracking.id(),
+                claim_token,
                 episode,
                 next_check,
                 all_source_actions(),
@@ -639,11 +1139,13 @@ async fn future_discovery_persists_only_the_confirmed_source_action() {
         )
         .await
         .unwrap();
+    let claim_token = claim_tracking(&store, tracking.id()).await;
 
     assert!(
         store
             .record_future_episode(
                 tracking.id(),
+                claim_token,
                 EpisodeSnapshot::new(1, 5).unwrap(),
                 time::OffsetDateTime::now_utc() + time::Duration::hours(6),
                 vec![SourceChoiceAction::Rezka],
@@ -677,9 +1179,11 @@ async fn outbox_leases_once_retries_with_backoff_and_keeps_stable_delivery_id() 
         )
         .await
         .unwrap();
+    let claim_token = claim_tracking(&tracking, value.id()).await;
     tracking
         .record_future_episode(
             value.id(),
+            claim_token,
             EpisodeSnapshot::new(1, 5).unwrap(),
             time::OffsetDateTime::now_utc() + time::Duration::hours(6),
             all_source_actions(),
@@ -766,9 +1270,11 @@ async fn stale_delivery_ack_releases_the_lease_without_consuming_a_new_generatio
         )
         .await
         .unwrap();
+    let claim_token = claim_tracking(&tracking, value.id()).await;
     tracking
         .record_future_episode(
             value.id(),
+            claim_token,
             EpisodeSnapshot::new(1, 5).unwrap(),
             time::OffsetDateTime::now_utc() + time::Duration::hours(6),
             all_source_actions(),
@@ -907,9 +1413,11 @@ async fn mark_failed_does_not_overflow_backoff_at_high_attempt_counts() {
         )
         .await
         .unwrap();
+    let claim_token = claim_tracking(&tracking, value.id()).await;
     tracking
         .record_future_episode(
             value.id(),
+            claim_token,
             EpisodeSnapshot::new(1, 5).unwrap(),
             time::OffsetDateTime::now_utc() + time::Duration::hours(6),
             all_source_actions(),
@@ -959,9 +1467,11 @@ async fn mark_dead_buries_a_delivery_so_it_is_never_leased_again() {
         )
         .await
         .unwrap();
+    let claim_token = claim_tracking(&tracking, value.id()).await;
     tracking
         .record_future_episode(
             value.id(),
+            claim_token,
             EpisodeSnapshot::new(1, 5).unwrap(),
             time::OffsetDateTime::now_utc() + time::Duration::hours(6),
             all_source_actions(),

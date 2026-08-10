@@ -26,8 +26,17 @@ enum Command {
     Download(DownloadArgs),
     Rezka(RezkaArgs),
     Migrate,
+    MigrateDownOne(MigrateDownOneArgs),
     Serve,
     Runner,
+}
+
+#[derive(Debug, Args)]
+struct MigrateDownOneArgs {
+    #[arg(long)]
+    expected_current: String,
+    #[arg(long)]
+    expected_target: String,
 }
 
 #[derive(Debug, Args)]
@@ -393,6 +402,12 @@ async fn run(cli: Cli) -> Result<(), RunError> {
         Command::Migrate => {
             let config = DatabaseConfig::load()?;
             composition::migrate(&config).await?;
+            Ok(())
+        }
+        Command::MigrateDownOne(args) => {
+            let config = DatabaseConfig::load()?;
+            composition::migrate_down_one(&config, &args.expected_current, &args.expected_target)
+                .await?;
             Ok(())
         }
         Command::Serve => {

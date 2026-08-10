@@ -52,7 +52,12 @@ service_revision=$(docker image inspect "$service_image" --format '{{index .Conf
 runner_revision=$(docker image inspect "$runner_image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')
 schema_sha256=$(sha256sum "$schema_file" | awk '{print $1}')
 schema_source_digest=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_digest"])' "$schema_file")
-printf 'MEDIA_SERVICE_IMAGE=%s\nDOWNLOAD_RUNNER_IMAGE=%s\nSERVICE_REVISION=%s\nRUNNER_REVISION=%s\nMCP_SCHEMA_SHA256=%s\nMCP_SCHEMA_SOURCE_DIGEST=%s\n' "$service_image" "$runner_image" "$service_revision" "$runner_revision" "$schema_sha256" "$schema_source_digest" >"$generation/images.env"
+db_migration_version=$(docker exec media-postgres sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "select version from seaql_migrations order by version desc limit 1;"')
+printf '%s\n' "$db_migration_version" | grep -Eq '^m[0-9]{8}_[0-9]{6}_[a-z0-9_]+$' || {
+    echo "current database migration version is missing or invalid" >&2
+    exit 1
+}
+printf 'MEDIA_SERVICE_IMAGE=%s\nDOWNLOAD_RUNNER_IMAGE=%s\nSERVICE_REVISION=%s\nRUNNER_REVISION=%s\nDB_MIGRATION_VERSION=%s\nMCP_SCHEMA_SHA256=%s\nMCP_SCHEMA_SOURCE_DIGEST=%s\n' "$service_image" "$runner_image" "$service_revision" "$runner_revision" "$db_migration_version" "$schema_sha256" "$schema_source_digest" >"$generation/images.env"
 cp "$schema_file" "$generation/MCP_SCHEMA.json"
 link=$(mktemp "${rollback_file}.link.XXXXXX")
 rm "$link"
@@ -207,6 +212,27 @@ assert_no_active_job() {
     }
 }
 
+validate_migration_version() {
+    printf '%s\n' "$1" | grep -Eq '^m[0-9]{8}_[0-9]{6}_[a-z0-9_]+$' || {
+        echo "database migration version is missing or invalid" >&2
+        exit 1
+    }
+}
+
+read_db_migration_version() {
+    version=$(remote "docker exec media-postgres sh -lc 'psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -Atc \"select version from seaql_migrations order by version desc limit 1;\"'")
+    validate_migration_version "$version"
+    printf '%s\n' "$version"
+}
+
+assert_db_migration_version() {
+    actual=$(read_db_migration_version)
+    test "$actual" = "$1" || {
+        echo "database migration version mismatch: expected $1, found $actual" >&2
+        exit 1
+    }
+}
+
 replace_images() {
     service_image=$1
     runner_image=$2
@@ -226,6 +252,7 @@ test "$(grep -c '^MEDIA_SERVICE_IMAGE=' "$environment_file" || true)" = 1 || {
     echo "MEDIA_SERVICE_IMAGE must occur exactly once in $environment_file" >&2
     exit 1
 }
+
 docker image inspect "$service_image" >/dev/null
 umask 077
 next=$(mktemp "${environment_file}.next.XXXXXX")
@@ -238,6 +265,36 @@ trap - EXIT HUP INT TERM
 docker compose --env-file "$environment_file" -f "$compose_file" up -d --no-deps --force-recreate media-service
 REMOTE
     verify_service
+}
+
+migrate_down_one_with_image() {
+    migration_image=$1
+    expected_current=$2
+    expected_target=$3
+    validate_migration_version "$expected_current"
+    validate_migration_version "$expected_target"
+    test "$expected_current" != "$expected_target" || {
+        echo "rollback migration versions must differ" >&2
+        exit 1
+    }
+    remote sh -s "$environment_file" "$remote_root" "$compose_file" "$migration_image" "$expected_current" "$expected_target" <<'REMOTE'
+set -eu
+environment_file=$1
+remote_root=$2
+compose_file=$3
+service_image=$4
+expected_current=$5
+expected_target=$6
+docker image inspect "$service_image" >/dev/null
+umask 077
+rollback_env=$(mktemp "${environment_file}.rollback.XXXXXX")
+trap 'rm -f "$rollback_env"' EXIT HUP INT TERM
+sed "s#^MEDIA_SERVICE_IMAGE=.*#MEDIA_SERVICE_IMAGE=$service_image#" "$environment_file" >"$rollback_env"
+cd "$remote_root/media"
+docker compose --env-file "$rollback_env" -f "$compose_file" run --rm --no-deps media-service \
+    migrate-down-one --expected-current "$expected_current" --expected-target "$expected_target"
+REMOTE
+    assert_db_migration_version "$expected_target"
 }
 
 prepare_hermes_cli() {
@@ -360,10 +417,12 @@ read_rollback_images() {
     previous=$(remote "cat '$rollback_file/images.env'")
     service_image=$(printf '%s\n' "$previous" | sed -n 's/^MEDIA_SERVICE_IMAGE=//p')
     runner_image=$(printf '%s\n' "$previous" | sed -n 's/^DOWNLOAD_RUNNER_IMAGE=//p')
-    test -n "$service_image" && test -n "$runner_image" || {
+    rollback_migration_version=$(printf '%s\n' "$previous" | sed -n 's/^DB_MIGRATION_VERSION=//p')
+    test -n "$service_image" && test -n "$runner_image" && test -n "$rollback_migration_version" || {
         echo "rollback image record is incomplete" >&2
         exit 1
     }
+    validate_migration_version "$rollback_migration_version"
     remote "docker image inspect '$service_image' >/dev/null && docker image inspect '$runner_image' >/dev/null"
 }
 
@@ -373,17 +432,21 @@ rollback_service() {
     read_rollback_images
     protected_before=$(protected_snapshot)
     forward_image=$(remote "sed -n 's/^MEDIA_SERVICE_IMAGE=//p' '$environment_file'")
+    forward_migration_version=$(read_db_migration_version)
     forward_schema=$remote_root/media/.media-orchestrator-mcp-schema.forward.$$
     remote "cp '$remote_schema_file' '$forward_schema'"
     if ! (
         remote "set -eu; expected=\$(sed -n 's/^MCP_SCHEMA_SHA256=//p' '$rollback_file/images.env'); actual=\$(sha256sum '$rollback_file/MCP_SCHEMA.json' | awk '{print \$1}'); test \"\$expected\" = \"\$actual\"; cp '$rollback_file/MCP_SCHEMA.json' '$remote_schema_file.next'; chmod 0644 '$remote_schema_file.next'; mv -f '$remote_schema_file.next' '$remote_schema_file'"
+        migrate_down_one_with_image "$forward_image" "$forward_migration_version" "$rollback_migration_version"
         replace_service_image "$service_image"
+        assert_db_migration_version "$rollback_migration_version"
         replace_hermes_agents
         verify_live_mcp_schema
     ); then
         echo "rollback compatibility check failed; restoring the forward service and schema" >&2
         remote "cp '$forward_schema' '$remote_schema_file.next'; chmod 0644 '$remote_schema_file.next'; mv -f '$remote_schema_file.next' '$remote_schema_file'"
         replace_service_image "$forward_image"
+        assert_db_migration_version "$forward_migration_version"
         replace_hermes_agents
         verify_live_mcp_schema
         remote "rm -f '$forward_schema'"

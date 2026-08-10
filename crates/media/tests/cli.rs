@@ -27,9 +27,24 @@ fn help_keeps_existing_commands_and_exposes_runtime_commands() {
         "runner",
         "healthcheck",
         "migrate",
+        "migrate-down-one",
         "serve",
     ] {
         assert!(stdout.contains(command), "help did not include {command}");
+    }
+}
+
+#[test]
+fn migration_rollback_requires_both_exact_versions() {
+    for args in [
+        vec!["migrate-down-one"],
+        vec!["migrate-down-one", "--expected-current", "current"],
+        vec!["migrate-down-one", "--expected-target", "target"],
+    ] {
+        assert_cmd::cargo::cargo_bin_cmd!("media")
+            .args(args)
+            .assert()
+            .failure();
     }
 }
 

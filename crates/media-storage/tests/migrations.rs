@@ -9,7 +9,7 @@ use support::{TestDatabase, assert_rejected, execute, query};
 const PRIMARY_ID: &str = "00000000-0000-0000-0000-000000000001";
 const SECONDARY_ID: &str = "00000000-0000-0000-0000-000000000002";
 
-const APPLICATION_TABLES: [&str; 22] = [
+const APPLICATION_TABLES: [&str; 23] = [
     "api_clients",
     "episode_provider_mappings",
     "episodes",
@@ -30,6 +30,7 @@ const APPLICATION_TABLES: [&str; 22] = [
     "seasons",
     "tracking_availability_candidates",
     "tracking_discoveries",
+    "tracking_download_reservations",
     "tracking_subscriptions",
     "users",
 ];
@@ -109,7 +110,10 @@ async fn migrations_apply_seed_fixed_users_and_reverse_cleanly() {
             .filter(|table| {
                 !matches!(
                     *table,
-                    "search_executions" | "runner_lifecycle" | "tracking_availability_candidates"
+                    "search_executions"
+                        | "runner_lifecycle"
+                        | "tracking_availability_candidates"
+                        | "tracking_download_reservations"
                 )
             })
             .map(str::to_owned)
@@ -188,6 +192,39 @@ async fn migrations_apply_seed_fixed_users_and_reverse_cleanly() {
             .try_get::<String>("", "is_nullable")
             .unwrap(),
         "NO"
+    );
+
+    let tracking_claim_columns = query(
+        db,
+        "SELECT column_name, data_type
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'tracking_subscriptions'
+           AND column_name IN ('check_claim_token', 'check_claim_until', 'check_requested_at')
+         ORDER BY column_name",
+    )
+    .await
+    .into_iter()
+    .map(|row| {
+        (
+            row.try_get::<String>("", "column_name").unwrap(),
+            row.try_get::<String>("", "data_type").unwrap(),
+        )
+    })
+    .collect::<Vec<_>>();
+    assert_eq!(
+        tracking_claim_columns,
+        [
+            ("check_claim_token".to_owned(), "uuid".to_owned()),
+            (
+                "check_claim_until".to_owned(),
+                "timestamp with time zone".to_owned(),
+            ),
+            (
+                "check_requested_at".to_owned(),
+                "timestamp with time zone".to_owned(),
+            ),
+        ]
     );
 
     let generation_constraint = query(
@@ -283,7 +320,8 @@ async fn migrations_apply_seed_fixed_users_and_reverse_cleanly() {
              'seasons', 'episodes', 'episode_provider_mappings', 'jobs',
              'job_tasks', 'job_stages', 'idempotency_records', 'job_leases'
              , 'operation_receipts', 'job_events', 'outbox_events'
-             , 'tracking_subscriptions', 'tracking_discoveries', 'notification_outbox',
+             , 'tracking_subscriptions', 'tracking_discoveries',
+             'tracking_download_reservations', 'notification_outbox',
              'runner_lifecycle'
            ])",
     )
@@ -315,8 +353,8 @@ async fn a_failed_migration_explicitly_rolls_back_partial_schema() {
     );
     assert_eq!(
         names.last().map(String::as_str),
-        Some("m20260810_000039_tracking_posters"),
-        "tracking poster persistence must remain the latest schema change",
+        Some("m20260810_000040_tracking_claims"),
+        "fenced tracking claims must remain the latest schema change",
     );
     for migration in migrations {
         assert_eq!(
@@ -644,7 +682,7 @@ async fn structured_notifications_migration_preserves_legacy_rows_and_enforces_v
 
     // The latest migration adds one step; keep the historical assertion at
     // the structured-notification boundary by rolling back one extra step.
-    Migrator::down(db, Some(16)).await.unwrap();
+    Migrator::down(db, Some(17)).await.unwrap();
 
     let retained_rows = query(
         db,
@@ -936,7 +974,7 @@ async fn detailed_notifications_migration_preserves_legacy_payloads_and_validate
 
     // Include the detailed-notification migration in the rollback after the
     // source-choice choice-set migration was added.
-    Migrator::down(db, Some(13)).await.unwrap();
+    Migrator::down(db, Some(14)).await.unwrap();
 
     let normalized = query(
         db,
