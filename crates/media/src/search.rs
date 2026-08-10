@@ -18,6 +18,7 @@ use media_core::{
 };
 use sha2::{Digest as _, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use unicode_normalization::UnicodeNormalization;
 
 const SEARCH_TTL: time::Duration = time::Duration::hours(24);
 const REZKA_CATALOG_CONTINUATION_PREFIX: &str = "catalog:";
@@ -2606,7 +2607,7 @@ fn execution(
     request: &SelectResultRequest,
     searched_kind: Option<MediaKindDto>,
     searched_season: Option<u16>,
-    series_title_hint: Option<&str>,
+    library_title_hint: Option<&str>,
 ) -> Result<ExecutionSelectionDto, SearchError> {
     match (&result.public, &result.private) {
         (
@@ -2657,7 +2658,7 @@ fn execution(
                 media_kind: searched_kind.ok_or(SearchError::Infrastructure)?,
                 season,
                 episode,
-                library_title: series_title_hint.map(str::to_owned),
+                library_title: library_title_hint.map(str::to_owned),
                 thumbnail_url: thumbnail_url.clone(),
                 title: title.clone(),
             })
@@ -2799,12 +2800,8 @@ fn execution(
                 episode_mappings: Vec::new(),
                 ambiguous_episodes,
                 release_year: *year,
-                library_title: (*media_kind == MediaKindDto::Series)
-                    .then(|| {
-                        series_title_hint
-                            .and_then(|hint| canonical_series_library_title(hint, title))
-                    })
-                    .flatten()
+                library_title: library_title_hint
+                    .and_then(|hint| canonical_rezka_library_title(hint, title, *media_kind))
                     .map(str::to_owned),
                 thumbnail_url: thumbnail_url.clone(),
                 title: title.clone(),
@@ -2814,14 +2811,45 @@ fn execution(
     }
 }
 
-fn canonical_series_library_title<'a>(query: &'a str, provider_title: &str) -> Option<&'a str> {
+fn canonical_rezka_library_title<'a>(
+    query: &'a str,
+    provider_title: &str,
+    media_kind: MediaKindDto,
+) -> Option<&'a str> {
     let query = query.trim();
     if query.is_empty() {
         return None;
     }
+    let normalized_query = canonical_title_key(query);
+    let aliases = provider_title
+        .split(" / ")
+        .map(str::trim)
+        .filter(|alias| !alias.is_empty())
+        .collect::<Vec<_>>();
+    if aliases
+        .iter()
+        .any(|alias| canonical_title_key(alias) == normalized_query)
+    {
+        return Some(query);
+    }
+    if media_kind != MediaKindDto::Series {
+        return None;
+    }
+    aliases.iter().find_map(|alias| {
+        let normalized_alias = canonical_title_key(alias);
+        let suffix = normalized_alias.strip_prefix(&normalized_query)?;
+        (suffix.is_empty() || suffix.starts_with(':') || suffix.starts_with(" [")).then_some(query)
+    })
+}
 
-    let suffix = provider_title.strip_prefix(query)?;
-    (suffix.is_empty() || suffix.starts_with(':') || suffix.starts_with(" [")).then_some(query)
+fn canonical_title_key(value: &str) -> String {
+    value
+        .trim()
+        .nfc()
+        .flat_map(char::to_lowercase)
+        .collect::<String>()
+        .nfc()
+        .collect()
 }
 
 fn ambiguous_episode_label(label: &str) -> bool {
@@ -2913,26 +2941,68 @@ fn job_dto(job: &Job) -> JobDto {
 #[cfg(test)]
 mod tests {
     use super::{
-        ambiguous_episode_label, canonical_series_library_title, retryable_rezka_auth_error,
+        ambiguous_episode_label, canonical_rezka_library_title, retryable_rezka_auth_error,
         rezka_translation_available, skippable_title_error,
     };
+    use media_contract::MediaKindDto;
 
     #[test]
     fn season_release_titles_share_an_exact_base_query_as_the_plex_title() {
         assert_eq!(
-            canonical_series_library_title("Магия и мускулы", "Магия и мускулы [ТВ-1]",),
-            Some("Магия и мускулы"),
-        );
-        assert_eq!(
-            canonical_series_library_title(
+            canonical_rezka_library_title(
                 "Магия и мускулы",
-                "Магия и мускулы: Экзамен на звание Вестника Бога [ТВ-2]",
+                "Магия и мускулы [ТВ-1]",
+                MediaKindDto::Series,
             ),
             Some("Магия и мускулы"),
         );
         assert_eq!(
-            canonical_series_library_title("Магия", "Магия и мускулы [ТВ-1]"),
+            canonical_rezka_library_title(
+                "Магия и мускулы",
+                "Магия и мускулы: Экзамен на звание Вестника Бога [ТВ-2]",
+                MediaKindDto::Series,
+            ),
+            Some("Магия и мускулы"),
+        );
+        assert_eq!(
+            canonical_rezka_library_title("Магия", "Магия и мускулы [ТВ-1]", MediaKindDto::Series,),
             None,
+        );
+    }
+
+    #[test]
+    fn exact_rezka_movie_alias_is_a_safe_library_title() {
+        let provider =
+            "Аватар Аанг: Последний маг воздуха / Легенда об Аанге: Последний маг воздуха";
+        assert_eq!(
+            canonical_rezka_library_title(
+                "  легенда ОБ аанге: последний маг воздуха ",
+                provider,
+                MediaKindDto::Movie,
+            ),
+            Some("легенда ОБ аанге: последний маг воздуха"),
+        );
+        assert_eq!(
+            canonical_rezka_library_title("Легенда об Аанге", provider, MediaKindDto::Movie,),
+            None,
+        );
+    }
+
+    #[test]
+    fn exact_rezka_alias_match_uses_unicode_canonical_normalization() {
+        let decomposed_cafe = "Cafe\u{301}";
+        assert_eq!(
+            canonical_rezka_library_title(
+                decomposed_cafe,
+                "Café / Другой фильм",
+                MediaKindDto::Movie,
+            ),
+            Some(decomposed_cafe),
+        );
+        let decomposed_cyrillic = "и\u{306}ога";
+        assert_eq!(
+            canonical_rezka_library_title(decomposed_cyrillic, "Фильм / Йога", MediaKindDto::Movie,),
+            Some(decomposed_cyrillic),
         );
     }
 

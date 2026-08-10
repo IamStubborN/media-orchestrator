@@ -59,6 +59,7 @@ time = { version = "=0.3.53", default-features = false, features = ["std"] }
 tokio = { version = "=1.52.3", features = ["macros", "rt-multi-thread"] }
 tower = { version = "=0.5.3", features = ["util"] }
 tracing = "=0.1.44"
+unicode-normalization = "=0.1.25"
 url = "=2.5.8"
 uuid = { version = "=1.23.4", features = ["v4", "v5", "serde"] }
 wiremock = "=0.6.5"

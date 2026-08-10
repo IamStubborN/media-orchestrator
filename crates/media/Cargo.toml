@@ -34,6 +34,7 @@ time.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "signal", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["env-filter", "fmt", "json"] }
+unicode-normalization.workspace = true
 url.workspace = true
 uuid.workspace = true
 

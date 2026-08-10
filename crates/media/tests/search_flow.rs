@@ -1553,6 +1553,66 @@ async fn rezka_accepts_media_kind_as_a_search_filter() {
 }
 
 #[tokio::test]
+async fn rezka_movie_selection_persists_an_exact_second_alias_as_library_title() {
+    let public = SearchResultDto::Rezka {
+        result_id: "rezka-avatar".to_owned(),
+        title: "Аватар Аанг: Последний маг воздуха / Легенда об Аанге: Последний маг воздуха"
+            .to_owned(),
+        original_title: None,
+        year: Some(2026),
+        media_kind: MediaKindDto::Movie,
+        thumbnail_url: None,
+        translations: vec![RezkaTranslationDto {
+            id: 7,
+            name: "Дубляж".to_owned(),
+            premium: false,
+            director: false,
+            camrip: false,
+            has_ads: false,
+            seasons: vec![],
+        }],
+        availability: None,
+    };
+    let service = service(HashMap::from([(
+        ProviderDto::Rezka,
+        vec![ProviderPage {
+            results: vec![ProviderResult::rezka(public, "/avatar.html".to_owned(), 42)],
+            provider_continuation: None,
+        }],
+    )]));
+    let mut search = request(ProviderDto::Rezka);
+    search.query = "Легенда об Аанге: Последний маг воздуха".to_owned();
+    search.media_kind = Some(MediaKindDto::Movie);
+    let page = service.start(PRIMARY_USER_ID, search).await.unwrap();
+
+    let job = service
+        .select(
+            PRIMARY_USER_ID,
+            OperationKey::from_bytes([41; 32]),
+            SelectResultRequest {
+                session_id: page.session_id,
+                result_id: "rezka-avatar".to_owned(),
+                translation_id: Some(7),
+                season: None,
+                episode: None,
+                scope: telegram_scope("default", None),
+            },
+        )
+        .await
+        .unwrap();
+    let execution = service.execution_for(&job.result_ref).await.unwrap();
+
+    assert!(matches!(
+        execution,
+        media_contract::ExecutionSelectionDto::Rezka {
+            media_kind: MediaKindDto::Movie,
+            library_title: Some(library_title),
+            ..
+        } if library_title == "Легенда об Аанге: Последний маг воздуха"
+    ));
+}
+
+#[tokio::test]
 async fn prowlarr_paginates_ten_and_runner_gets_only_the_exact_selected_result() {
     let mut pages = HashMap::new();
     pages.insert(
