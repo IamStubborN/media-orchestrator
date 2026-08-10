@@ -367,21 +367,34 @@ impl TrackingStore for SeaOrmTrackingStore {
 
 #[async_trait::async_trait]
 impl TrackingScheduleStore for SeaOrmTrackingStore {
-    async fn list_due(
+    async fn claim_due(
         &self,
         now: time::OffsetDateTime,
+        claim_until: time::OffsetDateTime,
         limit: u32,
     ) -> Result<Vec<TrackingSubscription>, PortError> {
-        if limit == 0 || limit > 100 {
+        if limit == 0 || limit > 100 || claim_until <= now {
             return Err(PortError::Conflict);
         }
         self.database
             .query_all_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
-                "SELECT id, owner_id, provider, title, translation, known_episodes, scope, poster_url, release_source, release_source_id, download_provider_media_ref, download_translation_id, download_season, last_checked_at, next_check_at, check_status \
-                 FROM tracking_subscriptions WHERE deleted_at IS NULL AND next_check_at <= $1 \
-                 ORDER BY next_check_at, created_at LIMIT $2",
-                [now.into(), i64::from(limit).into()],
+                "WITH due AS ( \
+                     SELECT id FROM tracking_subscriptions \
+                     WHERE deleted_at IS NULL AND next_check_at <= $1 \
+                     ORDER BY next_check_at, created_at \
+                     FOR UPDATE SKIP LOCKED LIMIT $2 \
+                 ) \
+                 UPDATE tracking_subscriptions AS tracking \
+                 SET next_check_at = $3, updated_at = now() \
+                 FROM due WHERE tracking.id = due.id \
+                 RETURNING tracking.id, tracking.owner_id, tracking.provider, tracking.title, \
+                           tracking.translation, tracking.known_episodes, tracking.scope, \
+                           tracking.poster_url, tracking.release_source, tracking.release_source_id, \
+                           tracking.download_provider_media_ref, tracking.download_translation_id, \
+                           tracking.download_season, tracking.last_checked_at, tracking.next_check_at, \
+                           tracking.check_status",
+                [now.into(), i64::from(limit).into(), claim_until.into()],
             ))
             .await
             .map_err(map_tracking_database_error)?

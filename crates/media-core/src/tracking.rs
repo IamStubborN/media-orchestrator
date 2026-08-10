@@ -15,6 +15,7 @@ pub fn episode_choice_set_id(id: TrackingId, season: u32, episode: u32) -> Strin
 
 const NOTIFY_TRACKING_INTERVAL: time::Duration = time::Duration::hours(1);
 const DOWNLOAD_TRACKING_INTERVAL: time::Duration = time::Duration::minutes(15);
+const TRACKING_FAILURE_COOLDOWN: time::Duration = time::Duration::minutes(15);
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum TrackingScope {
@@ -862,9 +863,10 @@ pub struct FutureEpisodeRecord {
 
 #[async_trait::async_trait]
 pub trait TrackingScheduleStore: Send + Sync {
-    async fn list_due(
+    async fn claim_due(
         &self,
         now: time::OffsetDateTime,
+        claim_until: time::OffsetDateTime,
         limit: u32,
     ) -> Result<Vec<TrackingSubscription>, PortError>;
     async fn set_release_metadata_if_missing(
@@ -993,7 +995,10 @@ impl TrackingRuntime {
         if limit == 0 || limit > 100 {
             return Err(PortError::Conflict);
         }
-        let due = self.store.list_due(now, limit).await?;
+        let due = self
+            .store
+            .claim_due(now, now + TRACKING_FAILURE_COOLDOWN, limit)
+            .await?;
         let mut result = TrackingRunResult {
             checked: 0,
             discovered: 0,
@@ -1023,13 +1028,14 @@ impl TrackingRuntime {
             let discovery = match self.discovery.available_episodes(&tracking).await {
                 Ok(available) => available,
                 Err(_) => {
-                    self.store
+                    let _ = self
+                        .store
                         .finish_check(
                             tracking.id(),
                             default_next_check,
                             TrackingCheckStatus::ReleaseError,
                         )
-                        .await?;
+                        .await;
                     result.failed += 1;
                     continue;
                 }
@@ -1061,13 +1067,14 @@ impl TrackingRuntime {
                 match self.store.pending_episodes(tracking.id()).await {
                     Ok(pending) => pending,
                     Err(_) => {
-                        self.store
+                        let _ = self
+                            .store
                             .finish_check(
                                 tracking.id(),
                                 default_next_check,
                                 TrackingCheckStatus::SourceError,
                             )
-                            .await?;
+                            .await;
                         result.failed += 1;
                         continue;
                     }
@@ -1111,9 +1118,16 @@ impl TrackingRuntime {
                     (Vec::new(), (0, 0))
                 } else {
                     let Some(availability) = self.availability.as_deref() else {
-                        self.store
+                        if self
+                            .store
                             .record_pending_episode(tracking.id(), episode)
-                            .await?;
+                            .await
+                            .is_err()
+                        {
+                            result.failed += 1;
+                            source_error = true;
+                            continue;
+                        }
                         result.failed += 1;
                         pending_availability = true;
                         source_error = true;
@@ -1127,9 +1141,16 @@ impl TrackingRuntime {
                     {
                         Ok(availability) => availability,
                         Err(_) => {
-                            self.store
+                            if self
+                                .store
                                 .record_pending_episode(tracking.id(), episode)
-                                .await?;
+                                .await
+                                .is_err()
+                            {
+                                result.failed += 1;
+                                source_error = true;
+                                continue;
+                            }
                             result.failed += 1;
                             pending_availability = true;
                             source_error = true;
@@ -1139,9 +1160,16 @@ impl TrackingRuntime {
                     let counts = (availability.rezka_count(), availability.prowlarr_count());
                     let actions = availability.actions();
                     if actions.is_empty() {
-                        self.store
+                        if self
+                            .store
                             .record_pending_episode(tracking.id(), episode)
-                            .await?;
+                            .await
+                            .is_err()
+                        {
+                            result.failed += 1;
+                            source_error = true;
+                            continue;
+                        }
                         pending_availability = true;
                         continue;
                     }
@@ -1159,7 +1187,7 @@ impl TrackingRuntime {
                     }
                     result.queued += 1;
                 }
-                if self
+                let recorded = self
                     .store
                     .record_future_episode_with_counts(FutureEpisodeRecord {
                         id: tracking.id(),
@@ -1170,9 +1198,14 @@ impl TrackingRuntime {
                         rezka_count,
                         prowlarr_count,
                     })
-                    .await?
-                {
-                    result.discovered += 1;
+                    .await;
+                match recorded {
+                    Ok(true) => result.discovered += 1,
+                    Ok(false) => {}
+                    Err(_) => {
+                        result.failed += 1;
+                        source_error = true;
+                    }
                 }
             }
             let next_check = if pending_availability {
@@ -1191,9 +1224,14 @@ impl TrackingRuntime {
             } else {
                 TrackingCheckStatus::NoNewEpisode
             };
-            self.store
+            if self
+                .store
                 .finish_check(tracking.id(), next_check, status)
-                .await?;
+                .await
+                .is_err()
+            {
+                result.failed += 1;
+            }
         }
         Ok(result)
     }

@@ -33,8 +33,9 @@ struct ScheduleStore {
 
 #[async_trait::async_trait]
 impl TrackingScheduleStore for ScheduleStore {
-    async fn list_due(
+    async fn claim_due(
         &self,
+        _: time::OffsetDateTime,
         _: time::OffsetDateTime,
         _: u32,
     ) -> Result<Vec<TrackingSubscription>, PortError> {
@@ -305,8 +306,9 @@ struct MetadataBatchStore {
 
 #[async_trait::async_trait]
 impl TrackingScheduleStore for MetadataBatchStore {
-    async fn list_due(
+    async fn claim_due(
         &self,
+        _: time::OffsetDateTime,
         _: time::OffsetDateTime,
         _: u32,
     ) -> Result<Vec<TrackingSubscription>, PortError> {
@@ -428,6 +430,109 @@ fn optional_metadata_failures_do_not_abort_or_starve_the_tracking_batch() {
                     media_core::TrackingCheckStatus::NoNewEpisode,
                 ),
                 (good.id(), media_core::TrackingCheckStatus::NoNewEpisode),
+            ]
+        );
+    });
+}
+
+struct DiscoveryWriteFailureStore {
+    due: Vec<TrackingSubscription>,
+    fail_id: TrackingId,
+    recorded: Mutex<Vec<TrackingId>>,
+    finished: Mutex<Vec<(TrackingId, media_core::TrackingCheckStatus)>>,
+    claims: Mutex<Vec<(time::OffsetDateTime, time::OffsetDateTime)>>,
+}
+
+#[async_trait::async_trait]
+impl TrackingScheduleStore for DiscoveryWriteFailureStore {
+    async fn claim_due(
+        &self,
+        now: time::OffsetDateTime,
+        claim_until: time::OffsetDateTime,
+        _: u32,
+    ) -> Result<Vec<TrackingSubscription>, PortError> {
+        self.claims.lock().unwrap().push((now, claim_until));
+        Ok(self.due.clone())
+    }
+
+    async fn set_release_metadata_if_missing(
+        &self,
+        _: TrackingId,
+        _: ReleaseIdentity,
+        _: String,
+    ) -> Result<(), PortError> {
+        Ok(())
+    }
+
+    async fn record_future_episode(
+        &self,
+        id: TrackingId,
+        _: EpisodeSnapshot,
+        _: time::OffsetDateTime,
+        _: Vec<SourceChoiceAction>,
+        _: Option<String>,
+    ) -> Result<bool, PortError> {
+        if id == self.fail_id {
+            return Err(PortError::Infrastructure);
+        }
+        self.recorded.lock().unwrap().push(id);
+        Ok(true)
+    }
+
+    async fn pending_episodes(&self, _: TrackingId) -> Result<Vec<EpisodeSnapshot>, PortError> {
+        Ok(Vec::new())
+    }
+
+    async fn record_pending_episode(
+        &self,
+        _: TrackingId,
+        _: EpisodeSnapshot,
+    ) -> Result<(), PortError> {
+        Ok(())
+    }
+
+    async fn finish_check(
+        &self,
+        id: TrackingId,
+        _: time::OffsetDateTime,
+        status: media_core::TrackingCheckStatus,
+    ) -> Result<(), PortError> {
+        self.finished.lock().unwrap().push((id, status));
+        Ok(())
+    }
+}
+
+#[test]
+fn discovery_write_failure_is_cooled_down_and_does_not_abort_the_batch() {
+    block_on(async {
+        let failed = tracking_named("Failed write");
+        let healthy = tracking_named("Healthy write");
+        let store = Arc::new(DiscoveryWriteFailureStore {
+            due: vec![failed.clone(), healthy.clone()],
+            fail_id: failed.id(),
+            recorded: Mutex::new(Vec::new()),
+            finished: Mutex::new(Vec::new()),
+            claims: Mutex::new(Vec::new()),
+        });
+        let now = time::OffsetDateTime::now_utc();
+        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery))
+            .with_availability(Arc::new(Availability));
+
+        let result = runtime.run_once(now, 10).await.unwrap();
+
+        assert_eq!(result.checked, 2);
+        assert_eq!(result.discovered, 1);
+        assert_eq!(result.failed, 1);
+        assert_eq!(*store.recorded.lock().unwrap(), vec![healthy.id()]);
+        assert_eq!(
+            *store.claims.lock().unwrap(),
+            vec![(now, now + time::Duration::minutes(15))]
+        );
+        assert_eq!(
+            *store.finished.lock().unwrap(),
+            vec![
+                (failed.id(), media_core::TrackingCheckStatus::SourceError),
+                (healthy.id(), media_core::TrackingCheckStatus::EpisodeFound,),
             ]
         );
     });

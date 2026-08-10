@@ -111,6 +111,48 @@ async fn tracking_release_identity_round_trips_through_repository() {
 }
 
 #[tokio::test]
+async fn due_tracking_is_claimed_atomically_with_a_failure_cooldown() {
+    let test_db = TestDatabase::start_migrated().await;
+    let store = SeaOrmTrackingStore::new(test_db.connection().clone());
+    let first = store
+        .add(
+            operation_key(),
+            new_tracking(TrackingId::new(), TrackingScope::Personal),
+        )
+        .await
+        .unwrap();
+    let second = store
+        .add(
+            operation_key(),
+            new_tracking_with_release_identity(TrackingId::new()),
+        )
+        .await
+        .unwrap();
+    let now = time::OffsetDateTime::now_utc();
+    let claim_until = now + time::Duration::minutes(15);
+
+    let first_claim = store.claim_due(now, claim_until, 1).await.unwrap();
+    let second_claim = store.claim_due(now, claim_until, 1).await.unwrap();
+    let exhausted = store.claim_due(now, claim_until, 1).await.unwrap();
+
+    assert_eq!(first_claim.len(), 1);
+    assert_eq!(second_claim.len(), 1);
+    assert_ne!(first_claim[0].id(), second_claim[0].id());
+    assert!(exhausted.is_empty());
+    assert_eq!(first_claim[0].next_check_at(), claim_until);
+    assert_eq!(second_claim[0].next_check_at(), claim_until);
+    let claimed_ids = [first_claim[0].id(), second_claim[0].id()];
+    assert!(claimed_ids.contains(&first.id()));
+    assert!(claimed_ids.contains(&second.id()));
+
+    let retry = store
+        .claim_due(claim_until, claim_until + time::Duration::minutes(15), 2)
+        .await
+        .unwrap();
+    assert_eq!(retry.len(), 2);
+}
+
+#[tokio::test]
 async fn resolved_release_metadata_backfill_is_atomic_and_identity_safe() {
     let test_db = TestDatabase::start_migrated().await;
     let store = SeaOrmTrackingStore::new(test_db.connection().clone());

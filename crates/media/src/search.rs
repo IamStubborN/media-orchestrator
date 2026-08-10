@@ -389,20 +389,14 @@ impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
 
 pub struct ProviderEpisodeAvailability {
     provider: Arc<dyn SearchProvider>,
-    prowlarr: Option<media_integrations::prowlarr::ProwlarrClient>,
     persistence: Arc<dyn SearchPersistence>,
 }
 
 impl ProviderEpisodeAvailability {
     #[must_use]
-    pub fn new(
-        provider: Arc<dyn SearchProvider>,
-        prowlarr: Option<media_integrations::prowlarr::ProwlarrClient>,
-        persistence: Arc<dyn SearchPersistence>,
-    ) -> Self {
+    pub fn new(provider: Arc<dyn SearchProvider>, persistence: Arc<dyn SearchPersistence>) -> Self {
         Self {
             provider,
-            prowlarr,
             persistence,
         }
     }
@@ -591,124 +585,99 @@ impl ProviderEpisodeAvailability {
         &self,
         request: &EpisodeAvailabilityRequest<'_>,
     ) -> Result<(ProviderAvailability, usize), PortError> {
-        let Some(client) = &self.prowlarr else {
-            self.persist_empty_choice_session(request, ProviderDto::Prowlarr)
-                .await?;
-            return Ok((ProviderAvailability::Unknown, 0));
-        };
-        let query = media_integrations::prowlarr::EpisodeAvailabilityQuery::new(
-            prowlarr_availability_titles(request),
-            request.episode().season(),
-            request.episode().episode(),
-        );
-        let Ok(query) = query else {
-            self.persist_empty_choice_session(request, ProviderDto::Prowlarr)
-                .await?;
-            return Ok((ProviderAvailability::Unknown, 0));
-        };
-        // Keep the dedicated indexer endpoint as a cheap availability probe,
-        // then hydrate a durable search session for the exact matching releases.
-        match client.episode_available(&query).await {
-            Ok(false) => {
-                self.persist_empty_choice_session(request, ProviderDto::Prowlarr)
-                    .await?;
-                Ok((ProviderAvailability::Unavailable, 0))
-            }
-            Err(_) => {
-                self.persist_empty_choice_session(request, ProviderDto::Prowlarr)
-                    .await?;
-                Ok((ProviderAvailability::Unknown, 0))
-            }
-            Ok(true) => {
-                let mut candidates = Vec::new();
-                for title in prowlarr_availability_titles(request) {
-                    let page = self
-                        .provider
-                        .search(
-                            &StartSearchRequest {
-                                scope: media_contract::SearchScopeDto {
-                                    platform: "system".to_owned(),
-                                    chat_id: format!("tracking:{}", request.tracking().id()),
-                                    thread_id: Some(format!(
-                                        "episode:{}:{}",
-                                        request.episode().season(),
-                                        request.episode().episode()
-                                    )),
-                                },
-                                source: ProviderDto::Prowlarr,
-                                query: title.clone(),
-                                media_kind: Some(MediaKindDto::Series),
-                                season: Some(
-                                    u16::try_from(request.episode().season())
-                                        .map_err(|_| PortError::Conflict)?,
-                                ),
-                                preferred_qualities: Vec::new(),
-                                preferred_languages: Vec::new(),
-                                preferred_codecs: Vec::new(),
-                                preferred_release_groups: Vec::new(),
-                            },
-                            None,
-                        )
-                        .await;
-                    let Ok(page) = page else {
-                        continue;
-                    };
-                    candidates.extend(page.results.into_iter().filter(|result| {
-                        let SearchResultDto::Prowlarr { title: release, .. } = &result.public
-                        else {
-                            return false;
-                        };
-                        media_integrations::series_title_matches(release, &title)
-                            && media_integrations::title_contains_episode(
-                                release,
+        let mut candidates = Vec::new();
+        let mut successful_search = false;
+        for title in prowlarr_availability_titles(request) {
+            let page = self
+                .provider
+                .search(
+                    &StartSearchRequest {
+                        scope: media_contract::SearchScopeDto {
+                            platform: "system".to_owned(),
+                            chat_id: format!("tracking:{}", request.tracking().id()),
+                            thread_id: Some(format!(
+                                "episode:{}:{}",
                                 request.episode().season(),
-                                request.episode().episode(),
-                            )
-                    }));
-                }
-                candidates
-                    .sort_by(|left, right| left.public.result_id().cmp(right.public.result_id()));
-                candidates
-                    .dedup_by(|left, right| left.public.result_id() == right.public.result_id());
-                if candidates.is_empty() {
-                    self.persist_empty_choice_session(request, ProviderDto::Prowlarr)
-                        .await?;
-                    return Ok((ProviderAvailability::Unavailable, 0));
-                }
-                let count = self
-                    .persist_choice_session(
-                        StartSearchRequest {
-                            scope: media_contract::SearchScopeDto {
-                                platform: "system".to_owned(),
-                                chat_id: format!("tracking:{}", request.tracking().id()),
-                                thread_id: Some(format!(
-                                    "episode:{}:{}",
-                                    request.episode().season(),
-                                    request.episode().episode()
-                                )),
-                            },
-                            source: ProviderDto::Prowlarr,
-                            query: request.tracking().title().to_owned(),
-                            media_kind: Some(MediaKindDto::Series),
-                            season: Some(
-                                u16::try_from(request.episode().season())
-                                    .map_err(|_| PortError::Conflict)?,
-                            ),
-                            preferred_qualities: Vec::new(),
-                            preferred_languages: Vec::new(),
-                            preferred_codecs: Vec::new(),
-                            preferred_release_groups: Vec::new(),
+                                request.episode().episode()
+                            )),
                         },
-                        prowlarr_availability_titles(request),
-                        request.tracking().owner_id(),
-                        &Self::choice_set_id(request),
-                        ProviderDto::Prowlarr,
-                        candidates,
+                        source: ProviderDto::Prowlarr,
+                        query: title.clone(),
+                        media_kind: Some(MediaKindDto::Series),
+                        season: Some(
+                            u16::try_from(request.episode().season())
+                                .map_err(|_| PortError::Conflict)?,
+                        ),
+                        preferred_qualities: Vec::new(),
+                        preferred_languages: Vec::new(),
+                        preferred_codecs: Vec::new(),
+                        preferred_release_groups: Vec::new(),
+                    },
+                    None,
+                )
+                .await;
+            let Ok(page) = page else {
+                continue;
+            };
+            successful_search = true;
+            candidates.extend(page.results.into_iter().filter(|result| {
+                let SearchResultDto::Prowlarr { title: release, .. } = &result.public else {
+                    return false;
+                };
+                media_integrations::series_title_matches(release, &title)
+                    && media_integrations::title_contains_episode(
+                        release,
+                        request.episode().season(),
+                        request.episode().episode(),
                     )
-                    .await?;
-                Ok((ProviderAvailability::Available, count))
-            }
+            }));
         }
+        candidates.sort_by(|left, right| left.public.result_id().cmp(right.public.result_id()));
+        candidates.dedup_by(|left, right| left.public.result_id() == right.public.result_id());
+        if candidates.is_empty() {
+            self.persist_empty_choice_session(request, ProviderDto::Prowlarr)
+                .await?;
+            return Ok((
+                if successful_search {
+                    ProviderAvailability::Unavailable
+                } else {
+                    ProviderAvailability::Unknown
+                },
+                0,
+            ));
+        }
+        let count = self
+            .persist_choice_session(
+                StartSearchRequest {
+                    scope: media_contract::SearchScopeDto {
+                        platform: "system".to_owned(),
+                        chat_id: format!("tracking:{}", request.tracking().id()),
+                        thread_id: Some(format!(
+                            "episode:{}:{}",
+                            request.episode().season(),
+                            request.episode().episode()
+                        )),
+                    },
+                    source: ProviderDto::Prowlarr,
+                    query: request.tracking().title().to_owned(),
+                    media_kind: Some(MediaKindDto::Series),
+                    season: Some(
+                        u16::try_from(request.episode().season())
+                            .map_err(|_| PortError::Conflict)?,
+                    ),
+                    preferred_qualities: Vec::new(),
+                    preferred_languages: Vec::new(),
+                    preferred_codecs: Vec::new(),
+                    preferred_release_groups: Vec::new(),
+                },
+                prowlarr_availability_titles(request),
+                request.tracking().owner_id(),
+                &Self::choice_set_id(request),
+                ProviderDto::Prowlarr,
+                candidates,
+            )
+            .await?;
+        Ok((ProviderAvailability::Available, count))
     }
 }
 

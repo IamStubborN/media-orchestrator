@@ -840,9 +840,18 @@ impl PreparedService {
         let tracking_task = tracking.map(|runtime| {
             tokio::spawn(async move {
                 loop {
-                    if let Err(error) = runtime.run_once(time::OffsetDateTime::now_utc(), 25).await
-                    {
-                        tracing::warn!(error = %error, "tracking discovery pass failed");
+                    match runtime.run_once(time::OffsetDateTime::now_utc(), 25).await {
+                        Ok(report) if report.failed > 0 => tracing::warn!(
+                            checked = report.checked,
+                            discovered = report.discovered,
+                            failed = report.failed,
+                            queued = report.queued,
+                            "tracking discovery pass completed with failures"
+                        ),
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(error = %error, "tracking discovery pass failed");
+                        }
                     }
                     tokio::time::sleep(Duration::from_secs(60)).await;
                 }
@@ -998,7 +1007,6 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
                     .map_err(|_| ServiceError::Bootstrap)
             })
             .transpose()?;
-        let availability_prowlarr = prowlarr.clone();
         let persistence = Arc::new(StorageSearchPersistence::new(
             media_storage::SeaOrmSearchRepository::new(database.clone()),
         ));
@@ -1038,7 +1046,6 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
                 )),
                 Arc::new(crate::search::ProviderEpisodeAvailability::new(
                     provider.clone(),
-                    availability_prowlarr,
                     persistence.clone(),
                 )),
                 downloads,

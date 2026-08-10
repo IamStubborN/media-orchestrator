@@ -5,8 +5,8 @@ use std::{
 use time::OffsetDateTime;
 
 use media::search::{
-    DurableSearchService, ProviderPage, ProviderResult, SearchPersistence, SearchProvider,
-    StoredSearchSession, TrackedEpisodeDownloader,
+    DurableSearchService, ProviderEpisodeAvailability, ProviderPage, ProviderResult,
+    SearchPersistence, SearchProvider, StoredSearchSession, TrackedEpisodeDownloader,
 };
 use media_api::{ChoiceSetSelection, SearchError, SearchService};
 use media_contract::{
@@ -16,12 +16,13 @@ use media_contract::{
 };
 use media_core::{
     PRIMARY_USER_ID, CanonicalEpisode, CanonicalEpisodeCoordinates, CanonicalMedia, CanonicalSeason,
-    EpisodeDiscoveryPort, EpisodeId, EpisodeMappingConfirmation, EpisodeProviderMapping,
-    ExternalNamespace, IdentityStore, Job, JobApplication, JobId, JobStore, MediaExternalReference,
-    NewJob, NotifyScope, OperationKey, PortError, Provider, QueueStatus, ReleaseCandidate,
+    EpisodeAvailabilityPort, EpisodeAvailabilityRequest, EpisodeDiscovery, EpisodeDiscoveryPort,
+    EpisodeId, EpisodeMappingConfirmation, EpisodeProviderMapping, ExternalNamespace,
+    IdentityStore, Job, JobApplication, JobId, JobStore, MediaExternalReference, NewJob,
+    NotifyScope, OperationKey, PortError, Provider, QueueStatus, ReleaseCandidate,
     ReleaseLifecycle, ReleaseMetadataPort, ReleaseMetadataResult, ReleasePrecision, ReleaseQuery,
-    ReleaseQueryError, ScheduledEpisode, TrackedEpisodeDownloadPort, TrackingDownload, TrackingId,
-    TrackingScope, TrackingSubscription, UserId, SECONDARY_USER_ID,
+    ReleaseQueryError, ScheduledEpisode, SourceChoiceAction, TrackedEpisodeDownloadPort,
+    TrackingDownload, TrackingId, TrackingScope, TrackingSubscription, UserId, SECONDARY_USER_ID,
 };
 
 #[derive(Default)]
@@ -978,6 +979,81 @@ impl SearchProvider for FakeProvider {
         }
         Ok(pages.remove(0))
     }
+}
+
+struct CountingAvailabilityProvider {
+    prowlarr_calls: Mutex<Vec<String>>,
+    page: Mutex<Option<ProviderPage>>,
+}
+
+#[async_trait::async_trait]
+impl SearchProvider for CountingAvailabilityProvider {
+    async fn search(
+        &self,
+        request: &StartSearchRequest,
+        _: Option<&str>,
+    ) -> Result<ProviderPage, SearchError> {
+        if request.source != ProviderDto::Prowlarr {
+            return Err(SearchError::Provider);
+        }
+        self.prowlarr_calls
+            .lock()
+            .unwrap()
+            .push(request.query.clone());
+        self.page
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or(SearchError::Provider)
+    }
+}
+
+#[tokio::test]
+async fn tracking_prowlarr_availability_uses_one_search_for_results_and_readiness() {
+    let mut result = prowlarr_result(1);
+    let SearchResultDto::Prowlarr { title, .. } = &mut result.public else {
+        panic!("expected Prowlarr result");
+    };
+    *title = "Show [S01E05] (2026)".to_owned();
+    let provider = Arc::new(CountingAvailabilityProvider {
+        prowlarr_calls: Mutex::new(Vec::new()),
+        page: Mutex::new(Some(ProviderPage {
+            results: vec![result],
+            provider_continuation: None,
+        })),
+    });
+    let persistence = Arc::new(MemorySearchPersistence::default());
+    let availability = ProviderEpisodeAvailability::new(provider.clone(), persistence);
+    let tracking = TrackingSubscription::rehydrate(
+        TrackingId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        "Show".to_owned(),
+        "release-calendar".to_owned(),
+        vec![media_core::EpisodeSnapshot::new(1, 4).unwrap()],
+        TrackingScope::Personal,
+        None,
+    )
+    .unwrap();
+    let discovery = EpisodeDiscovery::new(
+        vec![media_core::EpisodeSnapshot::new(1, 5).unwrap()],
+        "Show".to_owned(),
+        None,
+    )
+    .unwrap();
+
+    let result = availability
+        .probe(EpisodeAvailabilityRequest::new(
+            &tracking,
+            &discovery,
+            media_core::EpisodeSnapshot::new(1, 5).unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(result.actions(), vec![SourceChoiceAction::Prowlarr]);
+    assert_eq!(result.prowlarr_count(), 1);
+    assert_eq!(*provider.prowlarr_calls.lock().unwrap(), vec!["Show"]);
 }
 
 #[derive(Default)]
