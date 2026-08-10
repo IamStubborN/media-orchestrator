@@ -238,7 +238,7 @@ async fn manual_check_during_an_active_claim_is_deferred_until_finish() {
 }
 
 #[tokio::test]
-async fn manual_check_survives_discovery_schedule_write_and_worker_crash() {
+async fn manual_check_survives_schedule_write_and_repeated_worker_crashes() {
     let test_db = TestDatabase::start_migrated().await;
     let store = SeaOrmTrackingStore::new(test_db.connection().clone());
     let tracking = store
@@ -310,6 +310,18 @@ async fn manual_check_survives_discovery_schedule_write_and_worker_crash() {
             .unwrap(),
         None
     );
+
+    let reclaimed_after_second_crash = store
+        .claim_due(
+            claim_until + time::Duration::minutes(15),
+            TrackingClaimToken::new(),
+            claim_until + time::Duration::minutes(30),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(reclaimed_after_second_crash.len(), 1);
+    assert_eq!(reclaimed_after_second_crash[0].id(), tracking.id());
 }
 
 #[tokio::test]
@@ -530,6 +542,12 @@ async fn expired_claim_cannot_write_or_reserve_without_being_reclaimed() {
     );
     assert!(
         store
+            .release_episode_download(tracking.id(), token, episode)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
             .reserve_episode_download(tracking.id(), token, episode)
             .await
             .is_err()
@@ -642,6 +660,85 @@ async fn download_reservation_is_fenced_and_keeps_the_authorized_configuration()
             .try_get::<i32>("", "download_season")
             .unwrap(),
         1
+    );
+}
+
+#[tokio::test]
+async fn failed_download_reservation_can_be_reclaimed_with_a_new_configuration() {
+    let test_db = TestDatabase::start_migrated().await;
+    let store = SeaOrmTrackingStore::new(test_db.connection().clone());
+    let tracking = store
+        .add(
+            operation_key(),
+            new_tracking(TrackingId::new(), TrackingScope::Personal),
+        )
+        .await
+        .unwrap();
+    store
+        .patch_download_visible(
+            tracking.id(),
+            PRIMARY_USER_ID,
+            TrackingDownloadPatch::new(
+                "Old Dub".to_owned(),
+                TrackingDownload::new("42".to_owned(), 7, 1).unwrap(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let first_token = claim_tracking(&store, tracking.id()).await;
+    let episode = EpisodeSnapshot::new(1, 5).unwrap();
+    store
+        .reserve_episode_download(tracking.id(), first_token, episode)
+        .await
+        .unwrap();
+
+    store
+        .patch_download_visible(
+            tracking.id(),
+            PRIMARY_USER_ID,
+            TrackingDownloadPatch::new(
+                "New Dub".to_owned(),
+                TrackingDownload::new("84".to_owned(), 9, 1).unwrap(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        store
+            .reserve_episode_download(tracking.id(), first_token, episode)
+            .await
+            .is_err()
+    );
+    execute(
+        test_db.connection(),
+        "UPDATE tracking_subscriptions SET check_claim_until = now() - interval '1 second'",
+    )
+    .await
+    .unwrap();
+    let second_token = claim_tracking(&store, tracking.id()).await;
+    store
+        .reserve_episode_download(tracking.id(), second_token, episode)
+        .await
+        .unwrap();
+
+    let reservation = query(
+        test_db.connection(),
+        "SELECT provider_media_ref, translation_id FROM tracking_download_reservations",
+    )
+    .await;
+    assert_eq!(
+        reservation[0]
+            .try_get::<String>("", "provider_media_ref")
+            .unwrap(),
+        "84"
+    );
+    assert_eq!(
+        reservation[0].try_get::<i64>("", "translation_id").unwrap(),
+        9
     );
 }
 

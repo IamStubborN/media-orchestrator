@@ -927,6 +927,14 @@ pub trait TrackingScheduleStore: Send + Sync {
         claim_token: TrackingClaimToken,
         episode: EpisodeSnapshot,
     ) -> Result<(), PortError>;
+    async fn release_episode_download(
+        &self,
+        _id: TrackingId,
+        _claim_token: TrackingClaimToken,
+        _episode: EpisodeSnapshot,
+    ) -> Result<(), PortError> {
+        Err(PortError::Conflict)
+    }
     async fn finish_check(
         &self,
         id: TrackingId,
@@ -1061,7 +1069,7 @@ impl TrackingRuntime {
                         .finish_check(
                             tracking.id(),
                             claim_token,
-                            now + TRACKING_FAILURE_COOLDOWN,
+                            time::OffsetDateTime::now_utc().max(now) + TRACKING_FAILURE_COOLDOWN,
                             TrackingCheckStatus::ReleaseError,
                         )
                         .await;
@@ -1106,7 +1114,8 @@ impl TrackingRuntime {
                             .finish_check(
                                 tracking.id(),
                                 claim_token,
-                                now + TRACKING_FAILURE_COOLDOWN,
+                                time::OffsetDateTime::now_utc().max(now)
+                                    + TRACKING_FAILURE_COOLDOWN,
                                 TrackingCheckStatus::SourceError,
                             )
                             .await;
@@ -1227,6 +1236,10 @@ impl TrackingRuntime {
                         continue;
                     }
                     if downloads.enqueue_episode(&tracking, episode).await.is_err() {
+                        let _ = self
+                            .store
+                            .release_episode_download(tracking.id(), claim_token, episode)
+                            .await;
                         result.failed += 1;
                         source_error = true;
                         continue;
@@ -1256,7 +1269,7 @@ impl TrackingRuntime {
                 }
             }
             let next_check = if source_error {
-                now + TRACKING_FAILURE_COOLDOWN
+                time::OffsetDateTime::now_utc().max(now) + TRACKING_FAILURE_COOLDOWN
             } else if pending_availability {
                 now + NOTIFY_TRACKING_INTERVAL
             } else {

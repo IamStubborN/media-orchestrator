@@ -432,6 +432,8 @@ impl TrackingScheduleStore for SeaOrmTrackingStore {
                  ) \
                  UPDATE tracking_subscriptions AS tracking \
                  SET check_claim_token = $3, check_claim_until = $4, \
+                     next_check_at = CASE WHEN check_requested_at IS NULL THEN next_check_at \
+                                          ELSE LEAST(next_check_at, check_requested_at) END, \
                      check_requested_at = NULL, updated_at = now() \
                  FROM due WHERE tracking.id = due.id \
                  RETURNING tracking.id, tracking.owner_id, tracking.provider, tracking.title, \
@@ -623,10 +625,9 @@ impl TrackingScheduleStore for SeaOrmTrackingStore {
                  WHERE id = $1 AND deleted_at IS NULL AND check_claim_token = $2 \
                    AND check_claim_until > now() AND download_provider_media_ref IS NOT NULL \
                  ON CONFLICT (tracking_id, season, episode) DO UPDATE \
-                   SET tracking_id = EXCLUDED.tracking_id \
-                 WHERE tracking_download_reservations.provider_media_ref = EXCLUDED.provider_media_ref \
-                   AND tracking_download_reservations.translation_id = EXCLUDED.translation_id \
-                   AND tracking_download_reservations.download_season = EXCLUDED.download_season",
+                   SET provider_media_ref = EXCLUDED.provider_media_ref, \
+                       translation_id = EXCLUDED.translation_id, \
+                       download_season = EXCLUDED.download_season",
                 [
                     id.into_uuid().into(),
                     claim_token.into_uuid().into(),
@@ -641,6 +642,45 @@ impl TrackingScheduleStore for SeaOrmTrackingStore {
             .await
             .map_err(map_tracking_database_error)?;
         if reserved.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(PortError::Conflict)
+        }
+    }
+
+    async fn release_episode_download(
+        &self,
+        id: TrackingId,
+        claim_token: TrackingClaimToken,
+        episode: EpisodeSnapshot,
+    ) -> Result<(), PortError> {
+        let released = self
+            .database
+            .execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "DELETE FROM tracking_download_reservations AS reservation \
+                 USING tracking_subscriptions AS tracking \
+                 WHERE reservation.tracking_id = $1 AND reservation.season = $3 \
+                   AND reservation.episode = $4 AND tracking.id = reservation.tracking_id \
+                   AND tracking.deleted_at IS NULL AND tracking.check_claim_token = $2 \
+                   AND tracking.check_claim_until > now() \
+                   AND reservation.provider_media_ref = tracking.download_provider_media_ref \
+                   AND reservation.translation_id = tracking.download_translation_id \
+                   AND reservation.download_season = tracking.download_season",
+                [
+                    id.into_uuid().into(),
+                    claim_token.into_uuid().into(),
+                    i32::try_from(episode.season())
+                        .map_err(|_| PortError::Conflict)?
+                        .into(),
+                    i32::try_from(episode.episode())
+                        .map_err(|_| PortError::Conflict)?
+                        .into(),
+                ],
+            ))
+            .await
+            .map_err(map_tracking_database_error)?;
+        if released.rows_affected() == 1 {
             Ok(())
         } else {
             Err(PortError::Conflict)

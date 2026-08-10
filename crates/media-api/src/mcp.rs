@@ -1008,7 +1008,10 @@ impl MediaAdminMcp {
                 }),
             download: input.download.map(tracking_download_dto),
         };
-        let operation = stable_payload_operation_key("tracking-create", &request)?;
+        let owner = actor
+            .user_id()
+            .ok_or_else(|| ErrorData::internal_error("authenticated user is unavailable", None))?;
+        let operation = stable_owner_payload_operation_key("tracking-create", owner, &request)?;
         let command = convert::new_tracking_command(request)
             .map_err(|_| ErrorData::invalid_params("tracking request is invalid", None))?;
         let value = tracking
@@ -2069,6 +2072,26 @@ fn stable_payload_operation_key<T: serde::Serialize>(
     let mut digest = Sha256::new();
     digest.update(b"mcp:");
     digest.update(action.as_bytes());
+    digest.update(b":");
+    digest.update(payload);
+    Ok(media_core::OperationKey::from_bytes(
+        digest.finalize().into(),
+    ))
+}
+
+fn stable_owner_payload_operation_key<T: serde::Serialize>(
+    action: &str,
+    owner: media_core::UserId,
+    value: &T,
+) -> Result<media_core::OperationKey, ErrorData> {
+    let payload = serde_json::to_vec(value)
+        .map_err(|_| ErrorData::internal_error("operation could not be serialized", None))?;
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(b"mcp:");
+    digest.update(action.as_bytes());
+    digest.update(b":owner:");
+    digest.update(owner.as_uuid().as_bytes());
     digest.update(b":");
     digest.update(payload);
     Ok(media_core::OperationKey::from_bytes(

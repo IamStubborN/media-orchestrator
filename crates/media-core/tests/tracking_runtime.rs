@@ -240,7 +240,7 @@ impl EpisodeDiscoveryPort for FailingDiscovery {
 }
 
 #[test]
-fn release_failure_retries_after_the_exact_failure_cooldown() {
+fn release_failure_cooldown_starts_when_failure_is_observed() {
     block_on(async {
         let store = Arc::new(ScheduleStore {
             due: tracking_named("Failed release"),
@@ -249,20 +249,20 @@ fn release_failure_retries_after_the_exact_failure_cooldown() {
             finished: Mutex::new(Vec::new()),
             release_metadata: Mutex::new(Vec::new()),
         });
-        let now = time::OffsetDateTime::now_utc();
+        let started_at = time::OffsetDateTime::now_utc() - time::Duration::minutes(5);
+        let failure_observed_at = time::OffsetDateTime::now_utc();
         let result = TrackingRuntime::new(store.clone(), Arc::new(FailingDiscovery))
-            .run_once(now, 10)
+            .run_once(started_at, 10)
             .await
             .unwrap();
 
         assert_eq!(result.checked, 1);
         assert_eq!(result.failed, 1);
-        assert_eq!(
-            *store.finished.lock().unwrap(),
-            vec![(
-                now + time::Duration::minutes(15),
-                media_core::TrackingCheckStatus::ReleaseError,
-            )]
+        let finished = store.finished.lock().unwrap();
+        assert_eq!(finished[0].1, media_core::TrackingCheckStatus::ReleaseError);
+        assert!(
+            finished[0].0 >= failure_observed_at + time::Duration::minutes(15),
+            "failure cooldown started before the failure was observed"
         );
     });
 }
@@ -634,20 +634,17 @@ fn discovery_write_failure_is_cooled_down_and_does_not_abort_the_batch() {
             *store.claims.lock().unwrap(),
             vec![(now, now + time::Duration::minutes(15))]
         );
+        let finished = store.finished.lock().unwrap();
+        assert_eq!(finished[0].0, failed.id());
+        assert_eq!(finished[0].2, media_core::TrackingCheckStatus::SourceError);
+        assert!(finished[0].1 >= now + time::Duration::minutes(15));
         assert_eq!(
-            *store.finished.lock().unwrap(),
-            vec![
-                (
-                    failed.id(),
-                    now + time::Duration::minutes(15),
-                    media_core::TrackingCheckStatus::SourceError,
-                ),
-                (
-                    healthy.id(),
-                    now + time::Duration::hours(1),
-                    media_core::TrackingCheckStatus::EpisodeFound,
-                ),
-            ]
+            finished[1],
+            (
+                healthy.id(),
+                now + time::Duration::hours(1),
+                media_core::TrackingCheckStatus::EpisodeFound,
+            )
         );
     });
 }
@@ -928,6 +925,7 @@ struct FencedDownloadStore {
     due: TrackingSubscription,
     claim_valid: AtomicBool,
     reservations: Mutex<Vec<EpisodeSnapshot>>,
+    released: Mutex<Vec<EpisodeSnapshot>>,
     discoveries: Mutex<Vec<EpisodeSnapshot>>,
 }
 
@@ -999,6 +997,19 @@ impl TrackingScheduleStore for FencedDownloadStore {
         Ok(())
     }
 
+    async fn release_episode_download(
+        &self,
+        _: TrackingId,
+        _: TrackingClaimToken,
+        episode: EpisodeSnapshot,
+    ) -> Result<(), PortError> {
+        if !self.claim_valid.load(Ordering::SeqCst) {
+            return Err(PortError::Conflict);
+        }
+        self.released.lock().unwrap().push(episode);
+        Ok(())
+    }
+
     async fn finish_check(
         &self,
         _: TrackingId,
@@ -1064,6 +1075,7 @@ fn config_patch_while_discovery_is_blocked_prevents_download_enqueue() {
         due: download_tracking(),
         claim_valid: AtomicBool::new(true),
         reservations: Mutex::new(Vec::new()),
+        released: Mutex::new(Vec::new()),
         discoveries: Mutex::new(Vec::new()),
     });
     let downloads = Arc::new(Enqueuer::default());
@@ -1096,6 +1108,7 @@ fn config_patch_after_durable_reservation_does_not_undo_authorized_enqueue() {
         due: download_tracking(),
         claim_valid: AtomicBool::new(true),
         reservations: Mutex::new(Vec::new()),
+        released: Mutex::new(Vec::new()),
         discoveries: Mutex::new(Vec::new()),
     });
     let downloads = Arc::new(BlockedEnqueuer {
@@ -1123,6 +1136,43 @@ fn config_patch_after_durable_reservation_does_not_undo_authorized_enqueue() {
         vec![EpisodeSnapshot::new(2, 8).unwrap()]
     );
     assert!(store.discoveries.lock().unwrap().is_empty());
+}
+
+struct FailingEnqueuer;
+
+#[async_trait::async_trait]
+impl TrackedEpisodeDownloadPort for FailingEnqueuer {
+    async fn enqueue_episode(
+        &self,
+        _: &TrackingSubscription,
+        _: EpisodeSnapshot,
+    ) -> Result<(), PortError> {
+        Err(PortError::Infrastructure)
+    }
+}
+
+#[test]
+fn failed_enqueue_releases_its_durable_reservation_for_a_new_configuration() {
+    block_on(async {
+        let store = Arc::new(FencedDownloadStore {
+            due: download_tracking(),
+            claim_valid: AtomicBool::new(true),
+            reservations: Mutex::new(Vec::new()),
+            released: Mutex::new(Vec::new()),
+            discoveries: Mutex::new(Vec::new()),
+        });
+        let result = TrackingRuntime::new(store.clone(), Arc::new(DownloadDiscovery))
+            .with_downloads(Arc::new(FailingEnqueuer))
+            .run_once(time::OffsetDateTime::now_utc(), 1)
+            .await
+            .unwrap();
+
+        assert_eq!(result.queued, 0);
+        assert_eq!(
+            *store.released.lock().unwrap(),
+            vec![EpisodeSnapshot::new(2, 8).unwrap()]
+        );
+    });
 }
 
 #[async_trait::async_trait]

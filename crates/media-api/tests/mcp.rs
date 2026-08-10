@@ -1,12 +1,65 @@
 mod support;
 
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+
 use axum::{body::Body, body::to_bytes, http::Request};
 use media_api::router;
-use media_core::{PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole};
+use media_core::{
+    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole, NewTrackingSubscription, OperationKey,
+    PortError, TrackingDownloadPatch, TrackingId, TrackingStore, TrackingSubscription, UserId,
+    SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
+};
 use serde_json::Value;
 use tower::ServiceExt;
 
-use support::{FakeClientStore, FakeReadiness, VALID_TOKEN, state};
+use support::{FakeClientStore, FakeReadiness, SECONDARY_TOKEN, VALID_TOKEN, state};
+
+#[derive(Default)]
+struct IdempotentTrackingStore {
+    operations: Mutex<HashMap<OperationKey, TrackingSubscription>>,
+}
+
+#[async_trait::async_trait]
+impl TrackingStore for IdempotentTrackingStore {
+    async fn add(
+        &self,
+        operation: OperationKey,
+        value: NewTrackingSubscription,
+    ) -> Result<TrackingSubscription, PortError> {
+        let mut operations = self.operations.lock().unwrap();
+        if let Some(existing) = operations.get(&operation) {
+            return Ok(existing.clone());
+        }
+        let value = value.into_persisted();
+        operations.insert(operation, value.clone());
+        Ok(value)
+    }
+
+    async fn list_visible(&self, _: UserId) -> Result<Vec<TrackingSubscription>, PortError> {
+        unreachable!("tracking-create regression does not list subscriptions")
+    }
+
+    async fn patch_download_visible(
+        &self,
+        _: TrackingId,
+        _: UserId,
+        _: TrackingDownloadPatch,
+    ) -> Result<Option<TrackingSubscription>, PortError> {
+        unreachable!("tracking-create regression does not patch subscriptions")
+    }
+
+    async fn remove_visible(
+        &self,
+        _: OperationKey,
+        _: TrackingId,
+        _: UserId,
+    ) -> Result<Option<TrackingSubscription>, PortError> {
+        unreachable!("tracking-create regression does not remove subscriptions")
+    }
+}
 
 fn capability_manifest_tool_names() -> Vec<String> {
     let manifest: Value =
@@ -34,6 +87,95 @@ fn mcp_request(body: &'static str) -> Request<Body> {
         .header("accept", "application/json, text/event-stream")
         .body(Body::from(body))
         .unwrap()
+}
+
+fn tracking_create_request(token: &str, id: u32) -> Request<Body> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": {
+            "name": "media_tracking_create",
+            "arguments": {
+                "provider": "rezka",
+                "title": "Shared Show",
+                "translation": "Studio Dub",
+                "known_episodes": [{"season": 1, "episode": 4}],
+                "scope": "personal",
+                "series_ongoing": true
+            },
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "tracking-idempotency-test",
+                    "version": "1.0"
+                },
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }
+        }
+    });
+    Request::post("/internal/mcp")
+        .header("authorization", format!("Bearer {token}"))
+        .header("host", "media-service")
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-protocol-version", "2026-07-28")
+        .header("mcp-method", "tools/call")
+        .header("mcp-name", "media_tracking_create")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn identical_tracking_create_payloads_are_idempotent_per_owner() {
+    let primary = Actor::new(PRIMARY_CLIENT_ID, Some(PRIMARY_USER_ID), ClientRole::Hermes).unwrap();
+    let secondary = Actor::new(
+        SECONDARY_CLIENT_ID,
+        Some(SECONDARY_USER_ID),
+        ClientRole::Hermes,
+    )
+    .unwrap();
+    let app = router(
+        state(
+            FakeClientStore::new([(VALID_TOKEN, primary), (SECONDARY_TOKEN, secondary)]),
+            FakeReadiness::ready(),
+        )
+        .with_tracking(Arc::new(media_core::TrackingApplication::new(Arc::new(
+            IdempotentTrackingStore::default(),
+        )))),
+    );
+
+    let first = app
+        .clone()
+        .oneshot(tracking_create_request(VALID_TOKEN, 1))
+        .await
+        .unwrap();
+    let second = app
+        .clone()
+        .oneshot(tracking_create_request(SECONDARY_TOKEN, 2))
+        .await
+        .unwrap();
+    let replay = app
+        .oneshot(tracking_create_request(VALID_TOKEN, 3))
+        .await
+        .unwrap();
+    let first: Value =
+        serde_json::from_slice(&to_bytes(first.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let second: Value =
+        serde_json::from_slice(&to_bytes(second.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let replay: Value =
+        serde_json::from_slice(&to_bytes(replay.into_body(), usize::MAX).await.unwrap()).unwrap();
+
+    assert_eq!(first["result"]["isError"], false, "{first}");
+    assert_eq!(second["result"]["isError"], false, "{second}");
+    assert_ne!(
+        first["result"]["structuredContent"]["id"],
+        second["result"]["structuredContent"]["id"]
+    );
+    assert_eq!(
+        first["result"]["structuredContent"]["id"],
+        replay["result"]["structuredContent"]["id"]
+    );
 }
 
 #[tokio::test]
