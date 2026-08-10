@@ -75,5 +75,5 @@ pub use tracking::{
     TrackingApplication, TrackingApplicationError, TrackingCheckStatus, TrackingDownload,
     TrackingDownloadPatch, TrackingRunResult, TrackingRuntime, TrackingScheduleStore,
     TrackingScope, TrackingState, TrackingStore, TrackingSubscription, TrackingValidationError,
-    episode_choice_set_id,
+    episode_choice_set_id, is_valid_tracking_poster_url,
 };

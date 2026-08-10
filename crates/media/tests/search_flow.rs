@@ -112,6 +112,119 @@ async fn tracking_discovery_keeps_missing_rezka_thumbnail_as_none() {
     assert_eq!(discovery.poster_url(), None);
 }
 
+struct ShowReleaseProvider {
+    matched: bool,
+}
+
+#[async_trait::async_trait]
+impl ReleaseMetadataPort for ShowReleaseProvider {
+    async fn query(
+        &self,
+        query: &ReleaseQuery,
+    ) -> Result<ReleaseMetadataResult, ReleaseQueryError> {
+        assert_eq!(query.title, "Show");
+        assert_eq!(query.year, Some(2026));
+        let candidate = ReleaseCandidate {
+            source_id: 88,
+            title: "Show".to_owned(),
+            original_title: None,
+            year: Some(2026),
+            poster_url: Some("https://static.tvmaze.com/resolved.jpg".to_owned()),
+            lifecycle: ReleaseLifecycle::Ongoing,
+        };
+        if self.matched {
+            Ok(ReleaseMetadataResult::Matched {
+                source: "tvmaze".to_owned(),
+                fetched_at: "2026-08-10T00:00:00Z".to_owned(),
+                show: candidate,
+                precision: ReleasePrecision::Unknown,
+                lifecycle: ReleaseLifecycle::Ongoing,
+                released_episodes: 2,
+                expected_episodes: None,
+                next_episode: None,
+                schedule: Vec::new(),
+            })
+        } else {
+            Ok(ReleaseMetadataResult::ChoiceNeeded {
+                source: "tvmaze".to_owned(),
+                fetched_at: "2026-08-10T00:00:00Z".to_owned(),
+                candidates: vec![candidate],
+            })
+        }
+    }
+}
+
+async fn discover_show_with_release(matched: bool) -> media_core::EpisodeDiscovery {
+    let public = SearchResultDto::Rezka {
+        result_id: "rezka-show".to_owned(),
+        title: "Show".to_owned(),
+        original_title: None,
+        year: Some(2026),
+        media_kind: MediaKindDto::Series,
+        thumbnail_url: Some("https://rezka.test/show.jpg".to_owned()),
+        translations: vec![RezkaTranslationDto {
+            id: 37,
+            name: "Original".to_owned(),
+            premium: false,
+            director: false,
+            camrip: false,
+            has_ads: false,
+            seasons: vec![],
+        }],
+        availability: Some(SeriesAvailabilityDto {
+            lifecycle_status: media_contract::SeriesLifecycleStatusDto::Ongoing,
+            incomplete: true,
+            seasons: vec![SeasonAvailabilityDto {
+                season: 1,
+                episodes: vec![1, 2],
+            }],
+            tracking_prompt: None,
+        }),
+    };
+    let provider = Arc::new(FakeProvider {
+        pages: Mutex::new(HashMap::from([(
+            ProviderDto::Rezka,
+            vec![ProviderPage {
+                results: vec![ProviderResult::rezka(public, "/show.html".to_owned(), 42)],
+                provider_continuation: None,
+            }],
+        )])),
+    });
+    let discovery = media::search::ProviderEpisodeDiscovery::with_release(
+        provider,
+        Arc::new(ShowReleaseProvider { matched }),
+    );
+    let tracking = TrackingSubscription::rehydrate(
+        TrackingId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        "Show".to_owned(),
+        "Original".to_owned(),
+        vec![media_core::EpisodeSnapshot::new(1, 1).unwrap()],
+        TrackingScope::Personal,
+        None,
+    )
+    .unwrap();
+    discovery.available_episodes(&tracking).await.unwrap()
+}
+
+#[tokio::test]
+async fn tracking_discovery_attaches_identity_only_after_an_exact_release_match() {
+    let matched = discover_show_with_release(true).await;
+    assert_eq!(
+        matched.release_identity(),
+        Some(media_core::ReleaseIdentity::new(media_core::ReleaseSource::Tvmaze, 88).unwrap())
+    );
+    assert_eq!(
+        matched.poster_url(),
+        Some("https://static.tvmaze.com/resolved.jpg")
+    );
+
+    let ambiguous = discover_show_with_release(false).await;
+    assert_eq!(ambiguous.release_identity(), None);
+    assert_eq!(ambiguous.poster_url(), Some("https://rezka.test/show.jpg"));
+}
+
 struct FakeReleaseProvider {
     expected_source_id: Option<u64>,
 }
@@ -219,6 +332,16 @@ async fn calendar_tracking_uses_persisted_release_identity() {
     )
     .unwrap();
 
+    assert_eq!(
+        discovery
+            .resolved_release_metadata(&tracking)
+            .await
+            .unwrap(),
+        Some((
+            media_core::ReleaseIdentity::new(media_core::ReleaseSource::Tvmaze, 7).unwrap(),
+            "https://static.tvmaze.com/poster.jpg".to_owned(),
+        ))
+    );
     discovery.available_episodes(&tracking).await.unwrap();
 }
 

@@ -12,9 +12,9 @@ use media_core::{
     EpisodeAvailability, EpisodeAvailabilityPort, EpisodeAvailabilityRequest, EpisodeDiscovery,
     EpisodeDiscoveryPort, EpisodeMappingConfirmation, EpisodeSnapshot, IdentityStore, Job,
     JobApplication, JobId, JobState, NeedsActionReason, NewJobCommand, NotifyScope, OperationKey,
-    PortError, Provider, ProviderAvailability, ReleaseMetadataPort, ReleaseMetadataResult,
-    ReleasePrecision, ReleaseQuery, ScheduledEpisode, TrackedEpisodeDownloadPort,
-    TrackingSubscription, UserId,
+    PortError, Provider, ProviderAvailability, ReleaseIdentity, ReleaseMetadataPort,
+    ReleaseMetadataResult, ReleasePrecision, ReleaseQuery, ReleaseSource, ScheduledEpisode,
+    TrackedEpisodeDownloadPort, TrackingSubscription, UserId,
 };
 use sha2::{Digest as _, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -219,6 +219,19 @@ impl ProviderEpisodeDiscovery {
 
 #[async_trait::async_trait]
 impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
+    async fn resolved_release_metadata(
+        &self,
+        tracking: &TrackingSubscription,
+    ) -> Result<Option<(ReleaseIdentity, String)>, PortError> {
+        if tracking.release_identity().is_none() {
+            return Ok(None);
+        }
+        Ok(self
+            .resolve_release_match(tracking, tracking.title(), None, None)
+            .await
+            .and_then(|(identity, poster_url)| poster_url.map(|poster| (identity, poster))))
+    }
+
     async fn available_episodes(
         &self,
         tracking: &TrackingSubscription,
@@ -265,6 +278,9 @@ impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
         let Some(ProviderResult {
             public:
                 SearchResultDto::Rezka {
+                    title,
+                    original_title,
+                    year,
                     translations,
                     thumbnail_url,
                     ..
@@ -311,9 +327,25 @@ impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
             .collect::<Vec<_>>();
         episodes.sort_unstable();
         episodes.dedup();
-        EpisodeDiscovery::new(episodes, tracking.title().to_owned(), None)
-            .map(|discovery| discovery.with_poster_url(thumbnail_url))
-            .map_err(|_| PortError::Conflict)
+        let release_match = self
+            .resolve_release_match(
+                tracking,
+                &title,
+                original_title.as_deref(),
+                year.map(i32::from),
+            )
+            .await;
+        let poster_url = release_match
+            .as_ref()
+            .and_then(|(_, poster_url)| poster_url.clone())
+            .or(thumbnail_url);
+        let mut discovery = EpisodeDiscovery::new(episodes, title, original_title)
+            .map(|discovery| discovery.with_poster_url(poster_url))
+            .map_err(|_| PortError::Conflict)?;
+        if let Some((identity, _)) = release_match {
+            discovery = discovery.with_release_identity(identity);
+        }
+        Ok(discovery)
     }
 }
 
@@ -855,6 +887,36 @@ impl TrackedEpisodeDownloadPort for TrackedEpisodeDownloader {
 }
 
 impl ProviderEpisodeDiscovery {
+    async fn resolve_release_match(
+        &self,
+        tracking: &TrackingSubscription,
+        title: &str,
+        original_title: Option<&str>,
+        year: Option<i32>,
+    ) -> Option<(ReleaseIdentity, Option<String>)> {
+        let release = self.release.as_ref()?;
+        let mut query = ReleaseQuery::new(title, original_title.map(str::to_owned), year).ok()?;
+        if let Some(identity) = tracking.release_identity() {
+            query = query.with_source_id(identity.source_id()).ok()?;
+        }
+        let ReleaseMetadataResult::Matched { source, show, .. } =
+            release.query(&query).await.ok()?
+        else {
+            return None;
+        };
+        if source != ReleaseSource::Tvmaze.as_str() {
+            return None;
+        }
+        let identity = ReleaseIdentity::new(ReleaseSource::Tvmaze, show.source_id).ok()?;
+        if tracking
+            .release_identity()
+            .is_some_and(|existing| existing != identity)
+        {
+            return None;
+        }
+        Some((identity, show.poster_url))
+    }
+
     async fn release_episodes(
         &self,
         tracking: &TrackingSubscription,
@@ -887,8 +949,14 @@ impl ProviderEpisodeDiscovery {
         episodes.sort_unstable();
         episodes.dedup();
         let poster_url = show.poster_url.clone();
+        let identity = ReleaseIdentity::new(ReleaseSource::Tvmaze, show.source_id)
+            .map_err(|_| PortError::Conflict)?;
         EpisodeDiscovery::new(episodes, show.title, show.original_title)
-            .map(|discovery| discovery.with_poster_url(poster_url))
+            .map(|discovery| {
+                discovery
+                    .with_poster_url(poster_url)
+                    .with_release_identity(identity)
+            })
             .map_err(|_| PortError::Conflict)
     }
 }

@@ -11,7 +11,7 @@ use media_core::{
     Provider, ReleaseIdentity, ReleaseSource, SourceChoiceAction, SourceChoiceNotification,
     TrackingCheckStatus, TrackingDownload, TrackingDownloadPatch, TrackingId,
     TrackingScheduleStore, TrackingScope, TrackingStore, TrackingSubscription, UserId,
-    SECONDARY_USER_ID, episode_choice_set_id,
+    SECONDARY_USER_ID, episode_choice_set_id, is_valid_tracking_poster_url,
 };
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
 
@@ -388,6 +388,43 @@ impl TrackingScheduleStore for SeaOrmTrackingStore {
             .iter()
             .map(tracking_from_row)
             .collect()
+    }
+
+    async fn set_release_metadata_if_missing(
+        &self,
+        id: TrackingId,
+        release_identity: ReleaseIdentity,
+        poster_url: String,
+    ) -> Result<(), PortError> {
+        if !is_valid_tracking_poster_url(&poster_url) {
+            return Err(PortError::Conflict);
+        }
+        let source_id =
+            i64::try_from(release_identity.source_id()).map_err(|_| PortError::Conflict)?;
+        let result = self
+            .database
+            .execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "UPDATE tracking_subscriptions \
+                 SET release_source = COALESCE(release_source, $2), \
+                     release_source_id = COALESCE(release_source_id, $3), \
+                     poster_url = $4, updated_at = now() \
+                 WHERE id = $1 AND deleted_at IS NULL AND poster_url IS NULL \
+                   AND ((release_source = $2 AND release_source_id = $3) \
+                        OR (release_source IS NULL AND release_source_id IS NULL))",
+                [
+                    id.into_uuid().into(),
+                    release_identity.source().as_str().to_owned().into(),
+                    source_id.into(),
+                    poster_url.into(),
+                ],
+            ))
+            .await
+            .map_err(map_tracking_database_error)?;
+        if result.rows_affected() > 1 {
+            return Err(PortError::Infrastructure);
+        }
+        Ok(())
     }
 
     async fn record_future_episode(

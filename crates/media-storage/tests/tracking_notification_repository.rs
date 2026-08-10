@@ -4,7 +4,7 @@ use media_core::{
     PRIMARY_USER_ID, EpisodeSnapshot, NewTrackingCommand, NewTrackingSubscription,
     NotificationContent, NotificationEventType, NotificationId, NotificationRecipient,
     OperationKey, Provider, ReleaseIdentity, ReleaseSource, SourceChoiceAction, TrackingId,
-    TrackingScope, TrackingStore, SECONDARY_USER_ID,
+    TrackingScheduleStore, TrackingScope, TrackingStore, SECONDARY_USER_ID,
 };
 use media_storage::{SeaOrmNotificationOutbox, SeaOrmTrackingStore};
 use sea_orm::ConnectionTrait;
@@ -108,6 +108,65 @@ async fn tracking_release_identity_round_trips_through_repository() {
     let listed = store.list_visible(PRIMARY_USER_ID).await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].release_identity(), created.release_identity());
+}
+
+#[tokio::test]
+async fn resolved_release_metadata_backfill_is_atomic_and_identity_safe() {
+    let test_db = TestDatabase::start_migrated().await;
+    let store = SeaOrmTrackingStore::new(test_db.connection().clone());
+    let created = store
+        .add(
+            operation_key(),
+            new_tracking(TrackingId::new(), TrackingScope::Personal),
+        )
+        .await
+        .unwrap();
+    let resolved = ReleaseIdentity::new(ReleaseSource::Tvmaze, 81228).unwrap();
+
+    assert!(matches!(
+        store
+            .set_release_metadata_if_missing(
+                created.id(),
+                resolved,
+                "http://invalid.test/poster.jpg".to_owned(),
+            )
+            .await,
+        Err(media_core::PortError::Conflict)
+    ));
+    let listed = store.list_visible(PRIMARY_USER_ID).await.unwrap();
+    assert_eq!(listed[0].release_identity(), None);
+    assert_eq!(listed[0].poster_url(), None);
+
+    store
+        .set_release_metadata_if_missing(
+            created.id(),
+            resolved,
+            "https://static.tvmaze.com/lucky.jpg".to_owned(),
+        )
+        .await
+        .unwrap();
+
+    let listed = store.list_visible(PRIMARY_USER_ID).await.unwrap();
+    assert_eq!(listed[0].release_identity(), Some(resolved));
+    assert_eq!(
+        listed[0].poster_url(),
+        Some("https://static.tvmaze.com/lucky.jpg")
+    );
+
+    store
+        .set_release_metadata_if_missing(
+            created.id(),
+            ReleaseIdentity::new(ReleaseSource::Tvmaze, 99999).unwrap(),
+            "https://static.tvmaze.com/wrong.jpg".to_owned(),
+        )
+        .await
+        .unwrap();
+    let listed = store.list_visible(PRIMARY_USER_ID).await.unwrap();
+    assert_eq!(listed[0].release_identity(), Some(resolved));
+    assert_eq!(
+        listed[0].poster_url(),
+        Some("https://static.tvmaze.com/lucky.jpg")
+    );
 }
 
 #[tokio::test]

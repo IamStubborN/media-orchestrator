@@ -137,6 +137,7 @@ pub struct EpisodeDiscovery {
     release_title: String,
     original_release_title: Option<String>,
     poster_url: Option<String>,
+    release_identity: Option<crate::ReleaseIdentity>,
 }
 
 impl EpisodeDiscovery {
@@ -159,12 +160,19 @@ impl EpisodeDiscovery {
             release_title,
             original_release_title,
             poster_url: None,
+            release_identity: None,
         })
     }
 
     #[must_use]
     pub fn with_poster_url(mut self, poster_url: Option<String>) -> Self {
         self.poster_url = poster_url;
+        self
+    }
+
+    #[must_use]
+    pub fn with_release_identity(mut self, release_identity: crate::ReleaseIdentity) -> Self {
+        self.release_identity = Some(release_identity);
         self
     }
 
@@ -186,6 +194,11 @@ impl EpisodeDiscovery {
     #[must_use]
     pub fn poster_url(&self) -> Option<&str> {
         self.poster_url.as_deref()
+    }
+
+    #[must_use]
+    pub const fn release_identity(&self) -> Option<crate::ReleaseIdentity> {
+        self.release_identity
     }
 }
 
@@ -764,6 +777,11 @@ fn validate_poster_url(value: Option<&str>) -> Result<(), TrackingValidationErro
     Ok(())
 }
 
+#[must_use]
+pub fn is_valid_tracking_poster_url(value: &str) -> bool {
+    validate_poster_url(Some(value)).is_ok()
+}
+
 fn validate(
     title: &str,
     translation: &str,
@@ -849,6 +867,12 @@ pub trait TrackingScheduleStore: Send + Sync {
         now: time::OffsetDateTime,
         limit: u32,
     ) -> Result<Vec<TrackingSubscription>, PortError>;
+    async fn set_release_metadata_if_missing(
+        &self,
+        id: TrackingId,
+        release_identity: crate::ReleaseIdentity,
+        poster_url: String,
+    ) -> Result<(), PortError>;
     async fn record_future_episode(
         &self,
         id: TrackingId,
@@ -890,6 +914,13 @@ pub trait TrackingScheduleStore: Send + Sync {
 
 #[async_trait::async_trait]
 pub trait EpisodeDiscoveryPort: Send + Sync {
+    async fn resolved_release_metadata(
+        &self,
+        _tracking: &TrackingSubscription,
+    ) -> Result<Option<(crate::ReleaseIdentity, String)>, PortError> {
+        Ok(None)
+    }
+
     async fn available_episodes(
         &self,
         tracking: &TrackingSubscription,
@@ -977,6 +1008,18 @@ impl TrackingRuntime {
             };
             result.checked += 1;
             let selected_season = tracking.download().map(TrackingDownload::season);
+            let mut metadata_backfilled = false;
+            if tracking.poster_url().is_none()
+                && let Ok(Some((release_identity, poster_url))) =
+                    self.discovery.resolved_release_metadata(&tracking).await
+                && is_valid_tracking_poster_url(&poster_url)
+            {
+                metadata_backfilled = self
+                    .store
+                    .set_release_metadata_if_missing(tracking.id(), release_identity, poster_url)
+                    .await
+                    .is_ok();
+            }
             let discovery = match self.discovery.available_episodes(&tracking).await {
                 Ok(available) => available,
                 Err(_) => {
@@ -991,6 +1034,21 @@ impl TrackingRuntime {
                     continue;
                 }
             };
+            if !metadata_backfilled
+                && tracking.poster_url().is_none()
+                && let (Some(release_identity), Some(poster_url)) =
+                    (discovery.release_identity(), discovery.poster_url())
+                && is_valid_tracking_poster_url(poster_url)
+            {
+                let _ = self
+                    .store
+                    .set_release_metadata_if_missing(
+                        tracking.id(),
+                        release_identity,
+                        poster_url.to_owned(),
+                    )
+                    .await;
+            }
             let baseline = selected_season.and_then(|season| {
                 tracking
                     .known_episodes()
