@@ -195,6 +195,50 @@ async fn stateless_mcp_2026_lists_tools_without_initialize_or_session() {
         );
     }
 
+    for (name, required_input, required_output) in [
+        ("media_best", "ranking", "results"),
+        ("media_premieres", "feed", "results"),
+        ("media_genres", "media_type", "genres"),
+        ("media_discover", "genre_id", "results"),
+    ] {
+        let tool = body["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("missing discovery tool {name}"));
+        assert!(
+            tool["inputSchema"]["properties"][required_input].is_object(),
+            "{name} must publish typed input {required_input}"
+        );
+        assert!(
+            tool["outputSchema"]["properties"][required_output].is_object(),
+            "{name} must publish typed output {required_output}"
+        );
+    }
+
+    for name in ["media_jobs_list", "media_tracking_list"] {
+        let tool = body["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap();
+        let item = if name == "media_jobs_list" {
+            &tool["outputSchema"]["$defs"]["JobListItemOutput"]
+        } else {
+            &tool["outputSchema"]["$defs"]["TrackingListItemOutput"]
+        };
+        assert!(item["properties"]["poster_url"].is_object());
+    }
+    let tracking_create = body["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "media_tracking_create")
+        .unwrap();
+    assert!(tracking_create["inputSchema"]["properties"]["poster_url"].is_object());
+
     let serialized = serde_json::to_vec(&body["result"]["tools"]).unwrap();
     if let Ok(path) = std::env::var("MCP_SCHEMA_SNAPSHOT") {
         std::fs::write(path, &serialized).unwrap();

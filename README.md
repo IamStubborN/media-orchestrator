@@ -131,6 +131,13 @@ destructive confirmations remain explicit durable application resources rather
 than transport-session state. Tools publish structured output schemas and
 read-only/destructive/idempotency annotations.
 
+TMDB discovery is list-first and returns at most 10 cards per page. `media_best`
+defaults to TMDB `top_rated`, with `popular` available explicitly.
+`media_premieres` exposes `now_playing` and `upcoming` for movies, and
+`on_the_air` and `airing_today` for TV. `media_genres` supplies localized IDs
+for `media_discover`, whose results are ordered by descending popularity.
+Full metadata remains available through `media_details`.
+
 Secrets stay in `media-service`; Hermes has no Docker socket or direct provider
 credentials. Both Hermes profiles can request Plex/qBittorrent mutations.
 Deletions use preview and one-time confirmation, and direct file deletion is

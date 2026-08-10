@@ -58,7 +58,7 @@ impl TrackingStore for FakeTrackingStore {
             return Ok(None);
         };
         let value = &values[index];
-        let updated = TrackingSubscription::rehydrate(
+        let updated = TrackingSubscription::rehydrate_with_poster(
             value.id(),
             value.owner_id(),
             value.provider(),
@@ -67,6 +67,7 @@ impl TrackingStore for FakeTrackingStore {
             value.known_episodes().to_vec(),
             value.scope(),
             Some(patch.download().clone()),
+            value.poster_url().map(str::to_owned),
         )
         .map_err(|_| PortError::Conflict)?;
         values[index] = updated.clone();
@@ -97,7 +98,7 @@ impl TrackingStore for FakeTrackingStore {
             (1..=baseline.episode())
                 .map(|episode| EpisodeSnapshot::new(baseline.season(), episode).unwrap()),
         );
-        let updated = TrackingSubscription::rehydrate(
+        let updated = TrackingSubscription::rehydrate_with_poster(
             value.id(),
             value.owner_id(),
             value.provider(),
@@ -106,6 +107,7 @@ impl TrackingStore for FakeTrackingStore {
             known,
             value.scope(),
             value.download().cloned(),
+            value.poster_url().map(str::to_owned),
         )
         .map_err(|_| PortError::Conflict)?;
         values[index] = updated.clone();
@@ -160,7 +162,7 @@ fn app() -> axum::Router {
 }
 
 fn create_body() -> &'static str {
-    r#"{"provider":"rezka","title":"Ongoing Show","translation":"Studio Dub","known_episodes":[{"season":1,"episode":4}],"scope":"family","series_ongoing":true,"release_identity":{"source":"tvmaze","source_id":77}}"#
+    r#"{"provider":"rezka","title":"Ongoing Show","translation":"Studio Dub","known_episodes":[{"season":1,"episode":4}],"scope":"family","series_ongoing":true,"poster_url":"https://image.tmdb.org/t/p/w780/show.jpg","release_identity":{"source":"tvmaze","source_id":77}}"#
 }
 
 fn download_body() -> &'static str {
@@ -189,6 +191,10 @@ async fn authenticated_owner_can_add_list_and_other_family_user_can_remove() {
     assert_eq!(value["state"], "active");
     assert_eq!(value["release_identity"]["source"], "tvmaze");
     assert_eq!(value["release_identity"]["source_id"], 77);
+    assert_eq!(
+        value["poster_url"],
+        "https://image.tmdb.org/t/p/w780/show.jpg"
+    );
     assert!(value.get("owner_id").is_none());
     assert!(value.get("auto_download").is_none());
     let id = value["id"].as_str().unwrap();
@@ -235,6 +241,10 @@ async fn authenticated_owner_can_add_list_and_other_family_user_can_remove() {
     let listed: serde_json::Value =
         serde_json::from_slice(&to_bytes(listed.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(listed["tracking"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        listed["tracking"][0]["poster_url"],
+        "https://image.tmdb.org/t/p/w780/show.jpg"
+    );
 
     let removed = app
         .oneshot(

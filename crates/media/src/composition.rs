@@ -61,6 +61,70 @@ impl media_api::TrendingService for TmdbMediaAdapter {
                 }
             })
     }
+
+    async fn best(
+        &self,
+        media_type: media_contract::TrendingMediaTypeDto,
+        ranking: media_contract::BestRankingDto,
+        page: u32,
+    ) -> Result<media_contract::BestPageDto, media_api::TrendingServiceError> {
+        self.0
+            .best(media_type, ranking, page)
+            .await
+            .map_err(map_tmdb_trending_error)
+    }
+
+    async fn premieres(
+        &self,
+        media_type: media_contract::TrendingMediaTypeDto,
+        feed: media_contract::PremiereFeedDto,
+        page: u32,
+    ) -> Result<media_contract::PremieresPageDto, media_api::TrendingServiceError> {
+        self.0
+            .premieres(media_type, feed, page)
+            .await
+            .map_err(map_tmdb_trending_error)
+    }
+
+    async fn genres(
+        &self,
+        media_type: media_contract::TrendingMediaTypeDto,
+    ) -> Result<media_contract::GenreListDto, media_api::TrendingServiceError> {
+        self.0
+            .genres(media_type)
+            .await
+            .map_err(map_tmdb_trending_error)
+    }
+
+    async fn discover(
+        &self,
+        media_type: media_contract::TrendingMediaTypeDto,
+        genre_id: u64,
+        page: u32,
+    ) -> Result<media_contract::DiscoverPageDto, media_api::TrendingServiceError> {
+        self.0
+            .discover(media_type, genre_id, page)
+            .await
+            .map_err(map_tmdb_trending_error)
+    }
+}
+
+fn map_tmdb_trending_error(
+    error: media_integrations::tmdb::TmdbError,
+) -> media_api::TrendingServiceError {
+    match error.code() {
+        media_integrations::tmdb::TmdbErrorCode::InvalidRequest => {
+            media_api::TrendingServiceError::InvalidRequest
+        }
+        media_integrations::tmdb::TmdbErrorCode::Configuration => {
+            media_api::TrendingServiceError::Unavailable
+        }
+        media_integrations::tmdb::TmdbErrorCode::Transport
+        | media_integrations::tmdb::TmdbErrorCode::Unauthorized
+        | media_integrations::tmdb::TmdbErrorCode::ProviderResponse => {
+            media_api::TrendingServiceError::Provider
+        }
+    }
 }
 
 #[async_trait::async_trait]

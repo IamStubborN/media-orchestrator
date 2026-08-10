@@ -2,11 +2,13 @@ use std::sync::Arc;
 
 use axum::{Router, http::request::Parts};
 use media_contract::{
-    AlternativeSearchRequest, ContinueSearchRequest, CreateTrackingRequest, EpisodeSnapshotDto,
-    ExecutionSelectionDto, MediaKindDto, PatchTrackingRequest, ProviderDto, ReleaseQueryRequest,
-    ResolveEpisodeMappingRequest, RezkaSessionRefreshRequest, SearchScopeDto, SelectResultRequest,
-    StartSearchRequest, TrackingDownloadDto, TrackingReleaseIdentityDto, TrackingReleaseSourceDto,
-    TrackingScopeDto, TrendingCategoryDto, TrendingMediaTypeDto,
+    AlternativeSearchRequest, BestPageDto, BestRankingDto, ContinueSearchRequest,
+    CreateTrackingRequest, DiscoverPageDto, EpisodeSnapshotDto, ExecutionSelectionDto,
+    GenreListDto, MediaKindDto, PatchTrackingRequest, PremiereFeedDto, PremieresPageDto,
+    ProviderDto, ReleaseQueryRequest, ResolveEpisodeMappingRequest, RezkaSessionRefreshRequest,
+    SearchScopeDto, SelectResultRequest, StartSearchRequest, TrackingDownloadDto,
+    TrackingReleaseIdentityDto, TrackingReleaseSourceDto, TrackingScopeDto, TrendingCategoryDto,
+    TrendingItemDto, TrendingMediaTypeDto,
 };
 use media_core::{
     Actor, ApplicationError, EpisodeSnapshot, JobId, ReleaseQuery, ReleaseQueryError,
@@ -100,6 +102,251 @@ struct TrendingInput {
     page: u32,
 }
 
+#[derive(Debug, Copy, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum DiscoveryMediaType {
+    Movie,
+    Tv,
+}
+
+impl From<DiscoveryMediaType> for TrendingMediaTypeDto {
+    fn from(value: DiscoveryMediaType) -> Self {
+        match value {
+            DiscoveryMediaType::Movie => Self::Movie,
+            DiscoveryMediaType::Tv => Self::Tv,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum BestRankingInput {
+    #[default]
+    TopRated,
+    Popular,
+}
+
+impl From<BestRankingInput> for BestRankingDto {
+    fn from(value: BestRankingInput) -> Self {
+        match value {
+            BestRankingInput::TopRated => Self::TopRated,
+            BestRankingInput::Popular => Self::Popular,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum PremiereFeedInput {
+    NowPlaying,
+    Upcoming,
+    OnTheAir,
+    AiringToday,
+}
+
+impl From<PremiereFeedInput> for PremiereFeedDto {
+    fn from(value: PremiereFeedInput) -> Self {
+        match value {
+            PremiereFeedInput::NowPlaying => Self::NowPlaying,
+            PremiereFeedInput::Upcoming => Self::Upcoming,
+            PremiereFeedInput::OnTheAir => Self::OnTheAir,
+            PremiereFeedInput::AiringToday => Self::AiringToday,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct BestInput {
+    media_type: DiscoveryMediaType,
+    #[serde(default)]
+    ranking: BestRankingInput,
+    #[serde(default = "default_page")]
+    page: u32,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct PremieresInput {
+    media_type: DiscoveryMediaType,
+    feed: Option<PremiereFeedInput>,
+    #[serde(default = "default_page")]
+    page: u32,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct GenresInput {
+    media_type: DiscoveryMediaType,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct DiscoverInput {
+    media_type: DiscoveryMediaType,
+    #[schemars(range(min = 1), description = "TMDB genre identifier")]
+    genre_id: u64,
+    #[serde(default = "default_page")]
+    page: u32,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct DiscoveryItemOutput {
+    tmdb_id: u64,
+    media_type: DiscoveryMediaType,
+    title: String,
+    original_title: Option<String>,
+    year: Option<u16>,
+    rating: Option<f32>,
+    poster_url: Option<String>,
+    overview: Option<String>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct BestPageOutput {
+    source: String,
+    media_type: DiscoveryMediaType,
+    ranking: BestRankingInput,
+    page: u32,
+    total_pages: u32,
+    total_results: u32,
+    results: Vec<DiscoveryItemOutput>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct PremieresPageOutput {
+    source: String,
+    media_type: DiscoveryMediaType,
+    feed: PremiereFeedInput,
+    page: u32,
+    total_pages: u32,
+    total_results: u32,
+    results: Vec<DiscoveryItemOutput>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct GenreOutput {
+    id: u64,
+    name: String,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct GenreListOutput {
+    source: String,
+    media_type: DiscoveryMediaType,
+    genres: Vec<GenreOutput>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct DiscoverPageOutput {
+    source: String,
+    media_type: DiscoveryMediaType,
+    genre_id: u64,
+    page: u32,
+    total_pages: u32,
+    total_results: u32,
+    results: Vec<DiscoveryItemOutput>,
+}
+
+impl From<TrendingMediaTypeDto> for DiscoveryMediaType {
+    fn from(value: TrendingMediaTypeDto) -> Self {
+        match value {
+            TrendingMediaTypeDto::Movie => Self::Movie,
+            TrendingMediaTypeDto::Tv => Self::Tv,
+        }
+    }
+}
+
+impl From<BestRankingDto> for BestRankingInput {
+    fn from(value: BestRankingDto) -> Self {
+        match value {
+            BestRankingDto::TopRated => Self::TopRated,
+            BestRankingDto::Popular => Self::Popular,
+        }
+    }
+}
+
+impl From<PremiereFeedDto> for PremiereFeedInput {
+    fn from(value: PremiereFeedDto) -> Self {
+        match value {
+            PremiereFeedDto::NowPlaying => Self::NowPlaying,
+            PremiereFeedDto::Upcoming => Self::Upcoming,
+            PremiereFeedDto::OnTheAir => Self::OnTheAir,
+            PremiereFeedDto::AiringToday => Self::AiringToday,
+        }
+    }
+}
+
+impl From<TrendingItemDto> for DiscoveryItemOutput {
+    fn from(value: TrendingItemDto) -> Self {
+        Self {
+            tmdb_id: value.tmdb_id,
+            media_type: value.media_type.into(),
+            title: value.title,
+            original_title: value.original_title,
+            year: value.year,
+            rating: value.rating,
+            poster_url: value.poster_url,
+            overview: value.overview,
+        }
+    }
+}
+
+impl From<BestPageDto> for BestPageOutput {
+    fn from(value: BestPageDto) -> Self {
+        Self {
+            source: value.source,
+            media_type: value.media_type.into(),
+            ranking: value.ranking.into(),
+            page: value.page,
+            total_pages: value.total_pages,
+            total_results: value.total_results,
+            results: value.results.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<PremieresPageDto> for PremieresPageOutput {
+    fn from(value: PremieresPageDto) -> Self {
+        Self {
+            source: value.source,
+            media_type: value.media_type.into(),
+            feed: value.feed.into(),
+            page: value.page,
+            total_pages: value.total_pages,
+            total_results: value.total_results,
+            results: value.results.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<GenreListDto> for GenreListOutput {
+    fn from(value: GenreListDto) -> Self {
+        Self {
+            source: value.source,
+            media_type: value.media_type.into(),
+            genres: value
+                .genres
+                .into_iter()
+                .map(|genre| GenreOutput {
+                    id: genre.id,
+                    name: genre.name,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<DiscoverPageDto> for DiscoverPageOutput {
+    fn from(value: DiscoverPageDto) -> Self {
+        Self {
+            source: value.source,
+            media_type: value.media_type.into(),
+            genre_id: value.genre_id,
+            page: value.page,
+            total_pages: value.total_pages,
+            total_results: value.total_results,
+            results: value.results.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct MediaDetailsInput {
     #[schemars(description = "TMDB media identifier")]
@@ -162,6 +409,7 @@ struct TrackingCreateInput {
     scope: String,
     #[serde(default = "default_true")]
     series_ongoing: bool,
+    poster_url: Option<String>,
     release_identity: Option<TrackingReleaseIdentityInput>,
     download: Option<TrackingDownloadInput>,
 }
@@ -269,6 +517,8 @@ struct JobListItemOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    poster_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     media_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     season: Option<u64>,
@@ -331,6 +581,8 @@ struct TrackingListItemOutput {
     state: String,
     check_status: String,
     known_episodes: Vec<EpisodeOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    poster_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(skip)]
     translation: Option<String>,
@@ -733,6 +985,7 @@ impl MediaAdminMcp {
             known_episodes: input.known_episodes.into_iter().map(episode_dto).collect(),
             scope,
             series_ongoing: input.series_ongoing,
+            poster_url: input.poster_url,
             release_identity: input
                 .release_identity
                 .map(|identity| TrackingReleaseIdentityDto {
@@ -1160,6 +1413,106 @@ impl MediaAdminMcp {
             .await
             .map_err(trending_error)?;
         result_json_for(&parts, value)
+    }
+
+    #[tool(
+        name = "media_best",
+        description = "List up to 10 localized TMDB titles by top_rated (default) or popular.",
+        output_schema = output_schema::<BestPageOutput>(),
+        annotations(title = "List best media", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn best(
+        &self,
+        Parameters(input): Parameters<BestInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        actor_from_parts(&parts)?;
+        if input.page == 0 {
+            return Err(ErrorData::invalid_params("page must be positive", None));
+        }
+        let value = self
+            .state
+            .trending()
+            .best(input.media_type.into(), input.ranking.into(), input.page)
+            .await
+            .map_err(trending_error)?;
+        result_json_for(&parts, BestPageOutput::from(value))
+    }
+
+    #[tool(
+        name = "media_premieres",
+        description = "List up to 10 TMDB premieres: movie now_playing/upcoming or TV on_the_air/airing_today.",
+        output_schema = output_schema::<PremieresPageOutput>(),
+        annotations(title = "List media premieres", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn premieres(
+        &self,
+        Parameters(input): Parameters<PremieresInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        actor_from_parts(&parts)?;
+        if input.page == 0 {
+            return Err(ErrorData::invalid_params("page must be positive", None));
+        }
+        let feed = input.feed.unwrap_or(match input.media_type {
+            DiscoveryMediaType::Movie => PremiereFeedInput::NowPlaying,
+            DiscoveryMediaType::Tv => PremiereFeedInput::OnTheAir,
+        });
+        let value = self
+            .state
+            .trending()
+            .premieres(input.media_type.into(), feed.into(), input.page)
+            .await
+            .map_err(trending_error)?;
+        result_json_for(&parts, PremieresPageOutput::from(value))
+    }
+
+    #[tool(
+        name = "media_genres",
+        description = "List localized TMDB genre IDs for media_discover.",
+        output_schema = output_schema::<GenreListOutput>(),
+        annotations(title = "List media genres", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn genres(
+        &self,
+        Parameters(input): Parameters<GenresInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        actor_from_parts(&parts)?;
+        let value = self
+            .state
+            .trending()
+            .genres(input.media_type.into())
+            .await
+            .map_err(trending_error)?;
+        result_json_for(&parts, GenreListOutput::from(value))
+    }
+
+    #[tool(
+        name = "media_discover",
+        description = "List up to 10 localized TMDB titles in a genre by popularity.",
+        output_schema = output_schema::<DiscoverPageOutput>(),
+        annotations(title = "Discover media by genre", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn discover(
+        &self,
+        Parameters(input): Parameters<DiscoverInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        actor_from_parts(&parts)?;
+        if input.genre_id == 0 || input.page == 0 {
+            return Err(ErrorData::invalid_params(
+                "genre_id and page must be positive",
+                None,
+            ));
+        }
+        let value = self
+            .state
+            .trending()
+            .discover(input.media_type.into(), input.genre_id, input.page)
+            .await
+            .map_err(trending_error)?;
+        result_json_for(&parts, DiscoverPageOutput::from(value))
     }
 
     #[tool(
@@ -1729,15 +2082,28 @@ impl rmcp::ServerHandler for MediaAdminMcp {
         let supports_cache_hints = context
             .protocol_version()
             .is_some_and(|version| version >= rmcp::model::ProtocolVersion::V_2026_07_28);
+        let mut tools = Self::tool_router().list_all();
+        for tool in &mut tools {
+            compact_schema(&mut tool.input_schema);
+            if let Some(schema) = &mut tool.output_schema {
+                compact_schema(schema);
+            }
+        }
         Ok(rmcp::model::ListToolsResult {
             result_type: Some(rmcp::model::ResultType::COMPLETE),
-            tools: Self::tool_router().list_all(),
+            tools,
             meta: None,
             next_cursor: None,
             ttl_ms: supports_cache_hints.then_some(TOOL_SCHEMA_TTL_MS),
             cache_scope: supports_cache_hints.then_some(rmcp::model::CacheScope::Public),
         })
     }
+}
+
+fn compact_schema(schema: &mut Arc<rmcp::model::JsonObject>) {
+    let schema = Arc::make_mut(schema);
+    schema.remove("$schema");
+    schema.remove("title");
 }
 
 fn mcp_scope(owner: media_core::UserId) -> SearchScopeDto {
@@ -1867,6 +2233,20 @@ fn json_string(value: &Value, key: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn safe_poster_url(value: Option<String>) -> Option<String> {
+    let value = value?;
+    if value.is_empty() || value.len() > 2048 {
+        return None;
+    }
+    let url = url::Url::parse(&value).ok()?;
+    (url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none())
+    .then_some(value)
+}
+
 fn job_list_item(value: Value, view: ReadView) -> JobListItemOutput {
     let card = !matches!(view, ReadView::Summary);
     let diagnostic = matches!(view, ReadView::Diagnostic);
@@ -1875,6 +2255,9 @@ fn job_list_item(value: Value, view: ReadView) -> JobListItemOutput {
         provider: json_string(&value, "provider").unwrap_or_default(),
         state: json_string(&value, "state").unwrap_or_default(),
         title: json_string(&value, "title"),
+        poster_url: card
+            .then(|| safe_poster_url(json_string(&value, "poster_url")))
+            .flatten(),
         media_kind: json_string(&value, "media_kind"),
         season: value.get("season").and_then(Value::as_u64),
         episode: value.get("episode").and_then(Value::as_u64),
@@ -1932,6 +2315,7 @@ fn tracking_list_item(
         state: serialized_name(&value.state),
         check_status: serialized_name(&value.check_status),
         known_episodes,
+        poster_url: card.then_some(value.poster_url).flatten(),
         translation: card.then_some(value.translation),
         last_checked_at: card.then_some(value.last_checked_at).flatten(),
         next_check_at: card.then_some(value.next_check_at),
@@ -2158,6 +2542,7 @@ async fn enrich_job_value(state: &ApiState, result_ref: &str, mut value: Value) 
             episodes,
             release_year,
             library_title,
+            thumbnail_url,
             title,
             ..
         } => {
@@ -2172,6 +2557,7 @@ async fn enrich_job_value(state: &ApiState, result_ref: &str, mut value: Value) 
             if let Some(library_title) = library_title {
                 object.insert("library_title".to_owned(), Value::String(library_title));
             }
+            insert_safe_poster(object, thumbnail_url);
             let derived_season = season.or_else(|| {
                 let first = episodes.first()?.season;
                 episodes
@@ -2197,6 +2583,7 @@ async fn enrich_job_value(state: &ApiState, result_ref: &str, mut value: Value) 
             season,
             episode,
             library_title,
+            thumbnail_url,
             title,
             ..
         } => {
@@ -2205,6 +2592,7 @@ async fn enrich_job_value(state: &ApiState, result_ref: &str, mut value: Value) 
             if let Some(library_title) = library_title {
                 object.insert("library_title".to_owned(), Value::String(library_title));
             }
+            insert_safe_poster(object, thumbnail_url);
             if let Some(season) = season {
                 object.insert("season".to_owned(), serde_json::json!(season));
             }
@@ -2214,6 +2602,12 @@ async fn enrich_job_value(state: &ApiState, result_ref: &str, mut value: Value) 
         }
     }
     value
+}
+
+fn insert_safe_poster(object: &mut serde_json::Map<String, Value>, value: Option<String>) {
+    if let Some(value) = safe_poster_url(value) {
+        object.insert("poster_url".to_owned(), Value::String(value));
+    }
 }
 
 fn admin_error(error: crate::MediaAdminError) -> ErrorData {
@@ -2322,7 +2716,8 @@ fn media_details_error(error: crate::MediaDetailsServiceError) -> ErrorData {
 #[cfg(test)]
 mod tests {
     use super::{
-        PageInput, ReadView, page_bounds, parse_job_id, plex_recent_item, result_json_for,
+        PageInput, ReadView, job_list_item, page_bounds, parse_job_id, plex_recent_item,
+        result_json_for, tracking_list_item,
     };
     use axum::http::{HeaderValue, Request};
 
@@ -2408,5 +2803,56 @@ mod tests {
         );
         assert_eq!(compact.rating_key, "42");
         assert_eq!(compact.tmdb_id, Some(123));
+    }
+
+    #[test]
+    fn job_cards_keep_only_safe_poster_urls() {
+        let safe = job_list_item(
+            serde_json::json!({
+                "id": "job-1",
+                "provider": "rezka",
+                "state": "queued",
+                "poster_url": "https://image.tmdb.org/t/p/w780/show.jpg"
+            }),
+            ReadView::Card,
+        );
+        assert_eq!(
+            safe.poster_url.as_deref(),
+            Some("https://image.tmdb.org/t/p/w780/show.jpg")
+        );
+
+        let unsafe_item = job_list_item(
+            serde_json::json!({
+                "id": "job-2",
+                "provider": "rezka",
+                "state": "queued",
+                "poster_url": "https://user@example.test/show.jpg"
+            }),
+            ReadView::Card,
+        );
+        assert_eq!(unsafe_item.poster_url, None);
+    }
+
+    #[test]
+    fn tracking_cards_keep_the_persisted_poster() {
+        let value: media_contract::TrackingDto = serde_json::from_value(serde_json::json!({
+            "id": "018f3f86-7b4c-7b4f-9b6a-6d62f45bb111",
+            "provider": "rezka",
+            "title": "Show",
+            "translation": "release-calendar",
+            "known_episodes": [{"season": 1, "episode": 1}],
+            "scope": "personal",
+            "state": "active",
+            "check_status": "never",
+            "next_check_at": "2026-08-10T00:00:00Z",
+            "poster_url": "https://image.tmdb.org/t/p/w780/show.jpg"
+        }))
+        .unwrap();
+
+        let card = tracking_list_item(value, ReadView::Card);
+        assert_eq!(
+            card.poster_url.as_deref(),
+            Some("https://image.tmdb.org/t/p/w780/show.jpg")
+        );
     }
 }

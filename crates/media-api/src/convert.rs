@@ -126,6 +126,7 @@ pub(crate) fn new_tracking_command(
             TrackingScopeDto::Family => TrackingScope::Family,
         },
         series_ongoing: request.series_ongoing,
+        poster_url: request.poster_url,
         release_identity: request
             .release_identity
             .map(|identity| {
@@ -199,6 +200,7 @@ pub(crate) fn tracking(value: &TrackingSubscription) -> TrackingDto {
             media_core::TrackingCheckStatus::ReleaseError => TrackingCheckStatusDto::ReleaseError,
             media_core::TrackingCheckStatus::SourceError => TrackingCheckStatusDto::SourceError,
         },
+        poster_url: value.poster_url().map(str::to_owned),
         last_checked_at: value
             .last_checked_at()
             .map(|timestamp| timestamp.to_string()),

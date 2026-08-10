@@ -65,6 +65,8 @@ pub struct CreateTrackingRequest {
     pub scope: TrackingScopeDto,
     pub series_ongoing: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poster_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_identity: Option<TrackingReleaseIdentityDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download: Option<TrackingDownloadDto>,
@@ -94,6 +96,8 @@ pub struct TrackingDto {
     pub state: TrackingStateDto,
     pub check_status: TrackingCheckStatusDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poster_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_checked_at: Option<String>,
     pub next_check_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -105,4 +109,41 @@ pub struct TrackingDto {
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TrackingListDto {
     pub tracking: Vec<TrackingDto>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CreateTrackingRequest, TrackingDto};
+
+    #[test]
+    fn tracking_posters_are_optional_and_backward_compatible() {
+        let legacy: CreateTrackingRequest = serde_json::from_value(serde_json::json!({
+            "provider": "rezka",
+            "title": "Show",
+            "translation": "release-calendar",
+            "known_episodes": [{"season": 1, "episode": 1}],
+            "scope": "personal",
+            "series_ongoing": true
+        }))
+        .unwrap();
+        assert_eq!(legacy.poster_url, None);
+
+        let tracking: TrackingDto = serde_json::from_value(serde_json::json!({
+            "id": "018f3f86-7b4c-7b4f-9b6a-6d62f45bb111",
+            "provider": "rezka",
+            "title": "Show",
+            "translation": "release-calendar",
+            "known_episodes": [{"season": 1, "episode": 1}],
+            "scope": "personal",
+            "state": "active",
+            "check_status": "never",
+            "next_check_at": "2026-08-10T00:00:00Z",
+            "poster_url": "https://image.tmdb.org/t/p/w780/show.jpg"
+        }))
+        .unwrap();
+        assert_eq!(
+            tracking.poster_url.as_deref(),
+            Some("https://image.tmdb.org/t/p/w780/show.jpg")
+        );
+    }
 }

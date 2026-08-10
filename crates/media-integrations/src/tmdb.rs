@@ -1,8 +1,9 @@
 use std::{fmt, time::Duration};
 
 use media_contract::{
-    MediaDetailsDto, SimilarPageDto, TrendingCategoryDto, TrendingItemDto, TrendingMediaTypeDto,
-    TrendingPageDto, UpcomingEpisodeDto,
+    BestPageDto, BestRankingDto, DiscoverPageDto, GenreDto, GenreListDto, MediaDetailsDto,
+    PremiereFeedDto, PremieresPageDto, SimilarPageDto, TrendingCategoryDto, TrendingItemDto,
+    TrendingMediaTypeDto, TrendingPageDto, UpcomingEpisodeDto,
 };
 use reqwest::StatusCode;
 use secrecy::{ExposeSecret, SecretString};
@@ -133,22 +134,153 @@ impl TmdbClient {
             .base_url
             .join(&format!("trending/{category_path}/week"))
             .map_err(|_| TmdbError::Configuration)?;
-        let query = vec![("page", page.to_string())];
+        let query = vec![("page", provider_page(page).to_string())];
         let payload: TrendingResponse = self.get_json(endpoint, &query).await?;
         let results = payload
             .results
             .into_iter()
-            .filter_map(map_item)
+            .skip(ui_page_offset(page))
             .take(MAX_RESULTS)
+            .filter_map(map_item)
             .collect();
         Ok(TrendingPageDto {
             source: "tmdb".to_owned(),
             window: "week".to_owned(),
             category,
-            page: payload.page,
-            total_pages: payload.total_pages,
+            page,
+            total_pages: ui_total_pages(payload.total_results),
             total_results: payload.total_results,
             results,
+        })
+    }
+
+    pub async fn best(
+        &self,
+        media_type: TrendingMediaTypeDto,
+        ranking: BestRankingDto,
+        page: u32,
+    ) -> Result<BestPageDto, TmdbError> {
+        if page == 0 {
+            return Err(TmdbError::InvalidRequest);
+        }
+        let endpoint = self
+            .config
+            .base_url
+            .join(&format!(
+                "{}/{}",
+                media_type_path(media_type),
+                match ranking {
+                    BestRankingDto::TopRated => "top_rated",
+                    BestRankingDto::Popular => "popular",
+                }
+            ))
+            .map_err(|_| TmdbError::Configuration)?;
+        let payload: TrendingResponse = self
+            .get_json(endpoint, &[("page", provider_page(page).to_string())])
+            .await?;
+        Ok(BestPageDto {
+            source: "tmdb".to_owned(),
+            media_type,
+            ranking,
+            page,
+            total_pages: ui_total_pages(payload.total_results),
+            total_results: payload.total_results,
+            results: map_typed_results(payload.results, media_type, page),
+        })
+    }
+
+    pub async fn premieres(
+        &self,
+        media_type: TrendingMediaTypeDto,
+        feed: PremiereFeedDto,
+        page: u32,
+    ) -> Result<PremieresPageDto, TmdbError> {
+        if page == 0 {
+            return Err(TmdbError::InvalidRequest);
+        }
+        let feed_path = match (media_type, feed) {
+            (TrendingMediaTypeDto::Movie, PremiereFeedDto::NowPlaying) => "now_playing",
+            (TrendingMediaTypeDto::Movie, PremiereFeedDto::Upcoming) => "upcoming",
+            (TrendingMediaTypeDto::Tv, PremiereFeedDto::OnTheAir) => "on_the_air",
+            (TrendingMediaTypeDto::Tv, PremiereFeedDto::AiringToday) => "airing_today",
+            _ => return Err(TmdbError::InvalidRequest),
+        };
+        let endpoint = self
+            .config
+            .base_url
+            .join(&format!("{}/{feed_path}", media_type_path(media_type)))
+            .map_err(|_| TmdbError::Configuration)?;
+        let payload: TrendingResponse = self
+            .get_json(endpoint, &[("page", provider_page(page).to_string())])
+            .await?;
+        Ok(PremieresPageDto {
+            source: "tmdb".to_owned(),
+            media_type,
+            feed,
+            page,
+            total_pages: ui_total_pages(payload.total_results),
+            total_results: payload.total_results,
+            results: map_typed_results(payload.results, media_type, page),
+        })
+    }
+
+    pub async fn genres(
+        &self,
+        media_type: TrendingMediaTypeDto,
+    ) -> Result<GenreListDto, TmdbError> {
+        let endpoint = self
+            .config
+            .base_url
+            .join(&format!("genre/{}/list", media_type_path(media_type)))
+            .map_err(|_| TmdbError::Configuration)?;
+        let payload: GenreListResponse = self.get_json(endpoint, &[]).await?;
+        let genres = payload
+            .genres
+            .into_iter()
+            .filter_map(|genre| {
+                let name = non_empty(Some(genre.name))?;
+                (genre.id > 0).then_some(GenreDto { id: genre.id, name })
+            })
+            .collect();
+        Ok(GenreListDto {
+            source: "tmdb".to_owned(),
+            media_type,
+            genres,
+        })
+    }
+
+    pub async fn discover(
+        &self,
+        media_type: TrendingMediaTypeDto,
+        genre_id: u64,
+        page: u32,
+    ) -> Result<DiscoverPageDto, TmdbError> {
+        if genre_id == 0 || page == 0 {
+            return Err(TmdbError::InvalidRequest);
+        }
+        let endpoint = self
+            .config
+            .base_url
+            .join(&format!("discover/{}", media_type_path(media_type)))
+            .map_err(|_| TmdbError::Configuration)?;
+        let payload: TrendingResponse = self
+            .get_json(
+                endpoint,
+                &[
+                    ("with_genres", genre_id.to_string()),
+                    ("sort_by", "popularity.desc".to_owned()),
+                    ("page", provider_page(page).to_string()),
+                ],
+            )
+            .await?;
+        Ok(DiscoverPageDto {
+            source: "tmdb".to_owned(),
+            media_type,
+            genre_id,
+            page,
+            total_pages: ui_total_pages(payload.total_results),
+            total_results: payload.total_results,
+            results: map_typed_results(payload.results, media_type, page),
         })
     }
 
@@ -208,20 +340,21 @@ impl TmdbClient {
             media_type,
             "/recommendations",
         )?;
-        let query = vec![("page", page.to_string())];
+        let query = vec![("page", provider_page(page).to_string())];
         let payload: TrendingResponse = self.get_json(endpoint, &query).await?;
         let results = payload
             .results
             .into_iter()
-            .filter_map(|item| map_item_for_type(item, media_type))
+            .skip(ui_page_offset(page))
             .take(MAX_RESULTS)
+            .filter_map(|item| map_item_for_type(item, media_type))
             .collect();
         Ok(SimilarPageDto {
             source: "tmdb".to_owned(),
             tmdb_id,
             media_type,
-            page: payload.page,
-            total_pages: payload.total_pages,
+            page,
+            total_pages: ui_total_pages(payload.total_results),
             total_results: payload.total_results,
             results,
         })
@@ -295,8 +428,6 @@ impl fmt::Debug for TmdbClient {
 
 #[derive(Debug, Deserialize)]
 struct TrendingResponse {
-    page: u32,
-    total_pages: u32,
     total_results: u32,
     results: Vec<TrendingResult>,
 }
@@ -314,6 +445,17 @@ struct TrendingResult {
     vote_average: Option<f32>,
     poster_path: Option<String>,
     overview: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GenreListResponse {
+    genres: Vec<GenreResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GenreResult {
+    id: u64,
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -397,6 +539,13 @@ fn media_endpoint(
         .map_err(|_| TmdbError::Configuration)
 }
 
+const fn media_type_path(media_type: TrendingMediaTypeDto) -> &'static str {
+    match media_type {
+        TrendingMediaTypeDto::Movie => "movie",
+        TrendingMediaTypeDto::Tv => "tv",
+    }
+}
+
 fn poster_url(path: Option<String>) -> Option<String> {
     let path = path?.trim().to_owned();
     if path.is_empty()
@@ -447,6 +596,35 @@ fn map_item_for_type(
         poster_url: poster_url(item.poster_path),
         overview: non_empty(item.overview),
     })
+}
+
+fn map_typed_results(
+    results: Vec<TrendingResult>,
+    media_type: TrendingMediaTypeDto,
+    page: u32,
+) -> Vec<TrendingItemDto> {
+    results
+        .into_iter()
+        .skip(ui_page_offset(page))
+        .take(MAX_RESULTS)
+        .filter_map(|item| map_item_for_type(item, media_type))
+        .collect()
+}
+
+const fn provider_page(ui_page: u32) -> u32 {
+    (ui_page - 1) / 2 + 1
+}
+
+const fn ui_page_offset(ui_page: u32) -> usize {
+    if ui_page.is_multiple_of(2) {
+        MAX_RESULTS
+    } else {
+        0
+    }
+}
+
+const fn ui_total_pages(total_results: u32) -> u32 {
+    total_results.div_ceil(MAX_RESULTS as u32)
 }
 
 fn map_details(

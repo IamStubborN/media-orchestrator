@@ -36,6 +36,7 @@ mod m20260805_000035_tracking_release_identity;
 mod m20260809_000036_notification_posters;
 mod m20260809_000037_source_choice_posters;
 mod m20260809_000038_source_choice_sets;
+mod m20260810_000039_tracking_posters;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseTransaction;
@@ -84,6 +85,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260809_000036_notification_posters::Migration),
             Box::new(m20260809_000037_source_choice_posters::Migration),
             Box::new(m20260809_000038_source_choice_sets::Migration),
+            Box::new(m20260810_000039_tracking_posters::Migration),
         ]
     }
 }

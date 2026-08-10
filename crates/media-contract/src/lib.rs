@@ -54,6 +54,7 @@ pub use tracking::{
     TrackingReleaseIdentityDto, TrackingReleaseSourceDto, TrackingScopeDto, TrackingStateDto,
 };
 pub use trending::{
-    MediaDetailsDto, SimilarPageDto, TrendingCategoryDto, TrendingItemDto, TrendingMediaTypeDto,
-    TrendingPageDto, UpcomingEpisodeDto,
+    BestPageDto, BestRankingDto, DiscoverPageDto, GenreDto, GenreListDto, MediaDetailsDto,
+    PremiereFeedDto, PremieresPageDto, SimilarPageDto, TrendingCategoryDto, TrendingItemDto,
+    TrendingMediaTypeDto, TrendingPageDto, UpcomingEpisodeDto,
 };

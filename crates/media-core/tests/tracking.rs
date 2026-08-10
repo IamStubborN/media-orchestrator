@@ -8,7 +8,7 @@ use media_core::{
     PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole, EpisodeSnapshot, NewTrackingCommand,
     NewTrackingSubscription, OperationKey, PortError, Provider, TrackingApplication,
     TrackingDownloadPatch, TrackingId, TrackingScope, TrackingState, TrackingStore,
-    TrackingSubscription, SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
+    TrackingSubscription, TrackingValidationError, SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
 };
 
 #[derive(Default)]
@@ -106,6 +106,7 @@ fn command(scope: TrackingScope) -> NewTrackingCommand {
         known_episodes: vec![EpisodeSnapshot::new(1, 1).unwrap()],
         scope,
         series_ongoing: true,
+        poster_url: None,
         release_identity: None,
         download: None,
     }
@@ -187,4 +188,28 @@ fn known_episode_snapshot_accepts_specials_but_rejects_zero_episode() {
     assert_eq!(EpisodeSnapshot::new(2, 7).unwrap().episode(), 7);
     assert_eq!(EpisodeSnapshot::new(0, 7).unwrap().season(), 0);
     assert!(EpisodeSnapshot::new(2, 0).is_err());
+}
+
+#[test]
+fn tracking_accepts_only_safe_https_posters() {
+    let mut valid = command(TrackingScope::Personal);
+    valid.poster_url = Some("https://image.tmdb.org/t/p/w780/show.jpg".to_owned());
+    let tracking = NewTrackingSubscription::new(TrackingId::new(), PRIMARY_USER_ID, valid).unwrap();
+    assert_eq!(
+        tracking.poster_url(),
+        Some("https://image.tmdb.org/t/p/w780/show.jpg")
+    );
+
+    for poster_url in [
+        "http://example.test/poster.jpg",
+        "https://user@example.test/poster.jpg",
+        "https://example.test/poster.jpg#fragment",
+    ] {
+        let mut invalid = command(TrackingScope::Personal);
+        invalid.poster_url = Some(poster_url.to_owned());
+        assert_eq!(
+            NewTrackingSubscription::new(TrackingId::new(), PRIMARY_USER_ID, invalid),
+            Err(TrackingValidationError::InvalidPosterUrl)
+        );
+    }
 }

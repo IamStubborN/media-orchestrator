@@ -316,6 +316,7 @@ pub struct NewTrackingCommand {
     pub known_episodes: Vec<EpisodeSnapshot>,
     pub scope: TrackingScope,
     pub series_ongoing: bool,
+    pub poster_url: Option<String>,
     pub release_identity: Option<crate::ReleaseIdentity>,
     pub download: Option<TrackingDownload>,
 }
@@ -340,6 +341,7 @@ pub struct NewTrackingSubscription {
     translation: String,
     known_episodes: Vec<EpisodeSnapshot>,
     scope: TrackingScope,
+    poster_url: Option<String>,
     release_identity: Option<crate::ReleaseIdentity>,
     download: Option<TrackingDownload>,
 }
@@ -353,6 +355,7 @@ pub struct TrackingSubscription {
     translation: String,
     known_episodes: Vec<EpisodeSnapshot>,
     scope: TrackingScope,
+    poster_url: Option<String>,
     release_identity: Option<crate::ReleaseIdentity>,
     download: Option<TrackingDownload>,
     last_checked_at: Option<time::OffsetDateTime>,
@@ -368,6 +371,8 @@ pub enum TrackingValidationError {
     EmptyTranslation,
     #[error("tracking metadata cannot contain a URL")]
     UrlNotAllowed,
+    #[error("tracking poster URL is invalid")]
+    InvalidPosterUrl,
     #[error("known episode snapshot cannot be empty")]
     EmptyEpisodeSnapshot,
     #[error("known episode snapshot contains duplicates")]
@@ -393,6 +398,7 @@ impl NewTrackingSubscription {
             &command.translation,
             &command.known_episodes,
         )?;
+        validate_poster_url(command.poster_url.as_deref())?;
         if !command.series_ongoing {
             return Err(TrackingValidationError::SeriesNotOngoing);
         }
@@ -409,6 +415,7 @@ impl NewTrackingSubscription {
             translation: command.translation,
             known_episodes: command.known_episodes,
             scope: command.scope,
+            poster_url: command.poster_url,
             release_identity: command.release_identity,
             download: command.download,
         })
@@ -425,6 +432,7 @@ impl NewTrackingSubscription {
             translation: self.translation,
             known_episodes: self.known_episodes,
             scope: self.scope,
+            poster_url: self.poster_url,
             release_identity: self.release_identity,
             download: self.download,
             last_checked_at: None,
@@ -462,6 +470,10 @@ impl NewTrackingSubscription {
         self.scope
     }
     #[must_use]
+    pub fn poster_url(&self) -> Option<&str> {
+        self.poster_url.as_deref()
+    }
+    #[must_use]
     pub const fn release_identity(&self) -> Option<crate::ReleaseIdentity> {
         self.release_identity
     }
@@ -493,6 +505,35 @@ impl TrackingSubscription {
             scope,
             None,
             download,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn rehydrate_with_poster(
+        id: TrackingId,
+        owner_id: UserId,
+        provider: Provider,
+        title: String,
+        translation: String,
+        known_episodes: Vec<EpisodeSnapshot>,
+        scope: TrackingScope,
+        download: Option<TrackingDownload>,
+        poster_url: Option<String>,
+    ) -> Result<Self, TrackingValidationError> {
+        Self::rehydrate_with_check_identity_and_poster(
+            id,
+            owner_id,
+            provider,
+            title,
+            translation,
+            known_episodes,
+            scope,
+            None,
+            download,
+            poster_url,
+            None,
+            time::OffsetDateTime::now_utc(),
+            TrackingCheckStatus::Never,
         )
     }
 
@@ -569,8 +610,42 @@ impl TrackingSubscription {
         next_check_at: time::OffsetDateTime,
         check_status: TrackingCheckStatus,
     ) -> Result<Self, TrackingValidationError> {
+        Self::rehydrate_with_check_identity_and_poster(
+            id,
+            owner_id,
+            provider,
+            title,
+            translation,
+            known_episodes,
+            scope,
+            release_identity,
+            download,
+            None,
+            last_checked_at,
+            next_check_at,
+            check_status,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn rehydrate_with_check_identity_and_poster(
+        id: TrackingId,
+        owner_id: UserId,
+        provider: Provider,
+        title: String,
+        translation: String,
+        known_episodes: Vec<EpisodeSnapshot>,
+        scope: TrackingScope,
+        release_identity: Option<crate::ReleaseIdentity>,
+        download: Option<TrackingDownload>,
+        poster_url: Option<String>,
+        last_checked_at: Option<time::OffsetDateTime>,
+        next_check_at: time::OffsetDateTime,
+        check_status: TrackingCheckStatus,
+    ) -> Result<Self, TrackingValidationError> {
         validate(&title, &translation, &known_episodes)?;
         validate_download(provider, &translation, download.as_ref())?;
+        validate_poster_url(poster_url.as_deref())?;
         Ok(Self {
             id,
             owner_id,
@@ -579,6 +654,7 @@ impl TrackingSubscription {
             translation,
             known_episodes,
             scope,
+            poster_url,
             release_identity,
             download,
             last_checked_at,
@@ -614,6 +690,10 @@ impl TrackingSubscription {
     #[must_use]
     pub const fn scope(&self) -> TrackingScope {
         self.scope
+    }
+    #[must_use]
+    pub fn poster_url(&self) -> Option<&str> {
+        self.poster_url.as_deref()
     }
     #[must_use]
     pub const fn release_identity(&self) -> Option<crate::ReleaseIdentity> {
@@ -661,6 +741,25 @@ fn validate_download(
         || download.season() == 0
     {
         return Err(TrackingValidationError::InvalidDownloadSelection);
+    }
+    Ok(())
+}
+
+fn validate_poster_url(value: Option<&str>) -> Result<(), TrackingValidationError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.is_empty() || value.len() > 2048 {
+        return Err(TrackingValidationError::InvalidPosterUrl);
+    }
+    let url = url::Url::parse(value).map_err(|_| TrackingValidationError::InvalidPosterUrl)?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(TrackingValidationError::InvalidPosterUrl);
     }
     Ok(())
 }

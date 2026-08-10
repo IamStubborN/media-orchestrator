@@ -315,8 +315,8 @@ async fn a_failed_migration_explicitly_rolls_back_partial_schema() {
     );
     assert_eq!(
         names.last().map(String::as_str),
-        Some("m20260809_000038_source_choice_sets"),
-        "source-choice choice-set validation must remain the latest schema change",
+        Some("m20260810_000039_tracking_posters"),
+        "tracking poster persistence must remain the latest schema change",
     );
     for migration in migrations {
         assert_eq!(
@@ -644,7 +644,7 @@ async fn structured_notifications_migration_preserves_legacy_rows_and_enforces_v
 
     // The latest migration adds one step; keep the historical assertion at
     // the structured-notification boundary by rolling back one extra step.
-    Migrator::down(db, Some(15)).await.unwrap();
+    Migrator::down(db, Some(16)).await.unwrap();
 
     let retained_rows = query(
         db,
@@ -936,7 +936,7 @@ async fn detailed_notifications_migration_preserves_legacy_payloads_and_validate
 
     // Include the detailed-notification migration in the rollback after the
     // source-choice choice-set migration was added.
-    Migrator::down(db, Some(12)).await.unwrap();
+    Migrator::down(db, Some(13)).await.unwrap();
 
     let normalized = query(
         db,
@@ -1695,6 +1695,64 @@ async fn source_choice_posters_accept_only_bounded_https_urls_and_reverse_cleanl
         "notification_payload_check",
     )
     .await;
+}
+
+#[tokio::test]
+async fn tracking_posters_are_constrained_and_reverse_cleanly() {
+    let test_db = TestDatabase::start().await;
+    let db = test_db.connection();
+    Migrator::up(db, Some(38)).await.unwrap();
+    execute(
+        db,
+        &format!(
+            "INSERT INTO tracking_subscriptions
+               (id, owner_id, provider, title, translation, known_episodes, scope, created_operation_key)
+             VALUES
+               ('00000000-0000-0000-0000-000000000639', '{PRIMARY_ID}', 'rezka',
+                'Poster Show', 'release-calendar', '[{{\"season\":1,\"episode\":1}}]'::jsonb,
+                'personal', decode(repeat('39', 32), 'hex'))"
+        ),
+    )
+    .await
+    .unwrap();
+
+    Migrator::up(db, Some(1)).await.unwrap();
+    execute(
+        db,
+        "UPDATE tracking_subscriptions
+         SET poster_url = 'https://image.tmdb.org/t/p/w780/show.jpg'
+         WHERE id = '00000000-0000-0000-0000-000000000639'",
+    )
+    .await
+    .unwrap();
+    for value in [
+        "http://example.test/poster.jpg",
+        "https://user@example.test/poster.jpg",
+        "https://example.test/poster.jpg#fragment",
+    ] {
+        assert_rejected(
+            db,
+            &format!(
+                "UPDATE tracking_subscriptions SET poster_url = '{value}'
+                 WHERE id = '00000000-0000-0000-0000-000000000639'"
+            ),
+            "tracking_poster_url_check",
+        )
+        .await;
+    }
+
+    Migrator::down(db, Some(1)).await.unwrap();
+    assert!(
+        query(
+            db,
+            "SELECT column_name FROM information_schema.columns
+             WHERE table_schema = 'public'
+               AND table_name = 'tracking_subscriptions'
+               AND column_name = 'poster_url'",
+        )
+        .await
+        .is_empty()
+    );
 }
 
 #[tokio::test]

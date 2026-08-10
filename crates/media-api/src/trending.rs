@@ -1,4 +1,7 @@
-use media_contract::{TrendingCategoryDto, TrendingPageDto};
+use media_contract::{
+    BestPageDto, BestRankingDto, DiscoverPageDto, GenreListDto, PremiereFeedDto, PremieresPageDto,
+    TrendingCategoryDto, TrendingMediaTypeDto, TrendingPageDto,
+};
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
 pub enum TrendingServiceError {
@@ -17,6 +20,37 @@ pub trait TrendingService: Send + Sync {
         category: TrendingCategoryDto,
         page: u32,
     ) -> Result<TrendingPageDto, TrendingServiceError>;
+
+    async fn best(
+        &self,
+        _: TrendingMediaTypeDto,
+        _: BestRankingDto,
+        _: u32,
+    ) -> Result<BestPageDto, TrendingServiceError> {
+        Err(TrendingServiceError::Unavailable)
+    }
+
+    async fn premieres(
+        &self,
+        _: TrendingMediaTypeDto,
+        _: PremiereFeedDto,
+        _: u32,
+    ) -> Result<PremieresPageDto, TrendingServiceError> {
+        Err(TrendingServiceError::Unavailable)
+    }
+
+    async fn genres(&self, _: TrendingMediaTypeDto) -> Result<GenreListDto, TrendingServiceError> {
+        Err(TrendingServiceError::Unavailable)
+    }
+
+    async fn discover(
+        &self,
+        _: TrendingMediaTypeDto,
+        _: u64,
+        _: u32,
+    ) -> Result<DiscoverPageDto, TrendingServiceError> {
+        Err(TrendingServiceError::Unavailable)
+    }
 }
 
 pub(crate) struct UnavailableTrendingService;

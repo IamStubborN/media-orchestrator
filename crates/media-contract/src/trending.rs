@@ -15,6 +15,22 @@ pub enum TrendingMediaTypeDto {
     Tv,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BestRankingDto {
+    TopRated,
+    Popular,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PremiereFeedDto {
+    NowPlaying,
+    Upcoming,
+    OnTheAir,
+    AiringToday,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrendingItemDto {
     pub tmdb_id: u64,
@@ -37,6 +53,52 @@ pub struct TrendingPageDto {
     pub source: String,
     pub window: String,
     pub category: TrendingCategoryDto,
+    pub page: u32,
+    pub total_pages: u32,
+    pub total_results: u32,
+    pub results: Vec<TrendingItemDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BestPageDto {
+    pub source: String,
+    pub media_type: TrendingMediaTypeDto,
+    pub ranking: BestRankingDto,
+    pub page: u32,
+    pub total_pages: u32,
+    pub total_results: u32,
+    pub results: Vec<TrendingItemDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PremieresPageDto {
+    pub source: String,
+    pub media_type: TrendingMediaTypeDto,
+    pub feed: PremiereFeedDto,
+    pub page: u32,
+    pub total_pages: u32,
+    pub total_results: u32,
+    pub results: Vec<TrendingItemDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GenreDto {
+    pub id: u64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GenreListDto {
+    pub source: String,
+    pub media_type: TrendingMediaTypeDto,
+    pub genres: Vec<GenreDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DiscoverPageDto {
+    pub source: String,
+    pub media_type: TrendingMediaTypeDto,
+    pub genre_id: u64,
     pub page: u32,
     pub total_pages: u32,
     pub total_results: u32,

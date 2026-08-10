@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use media_contract::{TrendingCategoryDto, TrendingMediaTypeDto};
+use media_contract::{BestRankingDto, PremiereFeedDto, TrendingCategoryDto, TrendingMediaTypeDto};
 use media_integrations::tmdb::{TmdbClient, TmdbConfig, TmdbErrorCode};
 use secrecy::SecretString;
 use serde_json::json;
@@ -59,7 +59,7 @@ async fn maps_weekly_trending_and_limits_output_to_ten_items() {
         .and(path("/3/trending/all/week"))
         .and(query_param("api_key", "test-key"))
         .and(query_param("language", "ru-RU"))
-        .and(query_param("page", "2"))
+        .and(query_param("page", "1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "page": 2,
             "total_pages": 10,
@@ -78,22 +78,10 @@ async fn maps_weekly_trending_and_limits_output_to_ten_items() {
     assert_eq!(page.source, "tmdb");
     assert_eq!(page.window, "week");
     assert_eq!(page.page, 2);
-    assert_eq!(page.results.len(), 10);
-    assert_eq!(page.results[0].title, "Фильм 1");
-    assert_eq!(page.results[0].original_title.as_deref(), Some("Movie 1"));
-    assert_eq!(page.results[0].year, Some(2025));
-    assert_eq!(
-        page.results[0].poster_url.as_deref(),
-        Some("https://image.tmdb.org/t/p/w780/film-1.jpg")
-    );
-    assert_eq!(
-        page.results[0].overview.as_deref(),
-        Some("Описание фильма 1")
-    );
-    assert_eq!(page.results[1].media_type, TrendingMediaTypeDto::Tv);
-    assert_eq!(page.results[1].poster_url, None);
-    assert_eq!(page.results[1].overview, None);
-    assert_eq!(page.results[9].tmdb_id, 10);
+    assert_eq!(page.total_pages, 20);
+    assert_eq!(page.results.len(), 2);
+    assert_eq!(page.results[0].tmdb_id, 11);
+    assert_eq!(page.results[1].tmdb_id, 12);
 }
 
 #[tokio::test]
@@ -269,7 +257,7 @@ async fn maps_similar_results_without_provider_media_type_and_limits_to_ten() {
         .and(path("/3/tv/42/recommendations"))
         .and(query_param("api_key", "test-key"))
         .and(query_param("language", "ru-RU"))
-        .and(query_param("page", "2"))
+        .and(query_param("page", "1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "page": 2,
             "total_pages": 4,
@@ -290,10 +278,11 @@ async fn maps_similar_results_without_provider_media_type_and_limits_to_ten() {
     assert_eq!(page.page, 2);
     assert_eq!(page.total_pages, 4);
     assert_eq!(page.total_results, 37);
-    assert_eq!(page.results.len(), 10);
-    assert_eq!(page.results[0].title, "Похожий сериал 1");
+    assert_eq!(page.total_pages, 4);
+    assert_eq!(page.results.len(), 2);
+    assert_eq!(page.results[0].title, "Похожий сериал 11");
     assert_eq!(page.results[0].media_type, TrendingMediaTypeDto::Tv);
-    assert_eq!(page.results[9].tmdb_id, 10);
+    assert_eq!(page.results[1].tmdb_id, 12);
 }
 
 #[tokio::test]
@@ -312,6 +301,252 @@ async fn rejects_invalid_details_and_similar_requests() {
     assert_eq!(
         client
             .similar(42, TrendingMediaTypeDto::Movie, 0)
+            .await
+            .unwrap_err()
+            .code(),
+        TmdbErrorCode::InvalidRequest
+    );
+}
+
+#[tokio::test]
+async fn lists_top_rated_movies_and_limits_output_to_ten_items() {
+    let server = MockServer::start().await;
+    let results = (1..=12)
+        .map(|id| {
+            json!({
+                "id": id,
+                "title": format!("Best Movie {id}"),
+                "original_title": format!("Original Movie {id}"),
+                "release_date": "2026-06-01",
+                "vote_average": 8.4,
+                "poster_path": format!("/best-{id}.jpg")
+            })
+        })
+        .collect::<Vec<_>>();
+    Mock::given(method("GET"))
+        .and(path("/3/movie/top_rated"))
+        .and(query_param("api_key", "test-key"))
+        .and(query_param("language", "ru-RU"))
+        .and(query_param("page", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "page": 2,
+            "total_pages": 7,
+            "total_results": 68,
+            "results": results
+        })))
+        .mount(&server)
+        .await;
+
+    let page = TmdbClient::new(config(&server))
+        .unwrap()
+        .best(TrendingMediaTypeDto::Movie, BestRankingDto::TopRated, 2)
+        .await
+        .unwrap();
+
+    assert_eq!(page.ranking, BestRankingDto::TopRated);
+    assert_eq!(page.media_type, TrendingMediaTypeDto::Movie);
+    assert_eq!(page.page, 2);
+    assert_eq!(page.total_pages, 7);
+    assert_eq!(page.results.len(), 2);
+    assert_eq!(page.results[0].tmdb_id, 11);
+    assert_eq!(page.results[1].tmdb_id, 12);
+}
+
+#[tokio::test]
+async fn lists_tv_premieres_from_on_the_air_feed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/3/tv/on_the_air"))
+        .and(query_param("api_key", "test-key"))
+        .and(query_param("language", "ru-RU"))
+        .and(query_param("page", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "page": 1,
+            "total_pages": 3,
+            "total_results": 22,
+            "results": [{
+                "id": 42,
+                "name": "Новый сериал",
+                "original_name": "New Series",
+                "first_air_date": "2026-08-10",
+                "vote_average": 7.8,
+                "poster_path": "/new-series.jpg",
+                "overview": "Описание"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let page = TmdbClient::new(config(&server))
+        .unwrap()
+        .premieres(TrendingMediaTypeDto::Tv, PremiereFeedDto::OnTheAir, 1)
+        .await
+        .unwrap();
+
+    assert_eq!(page.feed, PremiereFeedDto::OnTheAir);
+    assert_eq!(page.media_type, TrendingMediaTypeDto::Tv);
+    assert_eq!(page.results[0].tmdb_id, 42);
+    assert_eq!(page.results[0].title, "Новый сериал");
+}
+
+#[tokio::test]
+async fn lists_localized_movie_genres() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/3/genre/movie/list"))
+        .and(query_param("api_key", "test-key"))
+        .and(query_param("language", "ru-RU"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "genres": [
+                {"id": 28, "name": "Боевик"},
+                {"id": 35, "name": "Комедия"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let genres = TmdbClient::new(config(&server))
+        .unwrap()
+        .genres(TrendingMediaTypeDto::Movie)
+        .await
+        .unwrap();
+
+    assert_eq!(genres.media_type, TrendingMediaTypeDto::Movie);
+    assert_eq!(genres.genres.len(), 2);
+    assert_eq!(genres.genres[0].id, 28);
+    assert_eq!(genres.genres[0].name, "Боевик");
+}
+
+#[tokio::test]
+async fn discovers_tv_by_genre_and_popularity() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/3/discover/tv"))
+        .and(query_param("api_key", "test-key"))
+        .and(query_param("language", "ru-RU"))
+        .and(query_param("with_genres", "18"))
+        .and(query_param("sort_by", "popularity.desc"))
+        .and(query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "page": 3,
+            "total_pages": 9,
+            "total_results": 82,
+            "results": [{
+                "id": 77,
+                "name": "Драматический сериал",
+                "first_air_date": "2024-01-02"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let page = TmdbClient::new(config(&server))
+        .unwrap()
+        .discover(TrendingMediaTypeDto::Tv, 18, 3)
+        .await
+        .unwrap();
+
+    assert_eq!(page.genre_id, 18);
+    assert_eq!(page.media_type, TrendingMediaTypeDto::Tv);
+    assert_eq!(page.page, 3);
+    assert_eq!(page.total_pages, 9);
+    assert_eq!(page.results[0].tmdb_id, 77);
+}
+
+#[tokio::test]
+async fn maps_last_partial_ui_page_without_skipping_provider_results() {
+    let server = MockServer::start().await;
+    let results = (21..=25)
+        .map(|id| json!({"id": id, "title": format!("Movie {id}")}))
+        .collect::<Vec<_>>();
+    Mock::given(method("GET"))
+        .and(path("/3/movie/upcoming"))
+        .and(query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "page": 2,
+            "total_pages": 2,
+            "total_results": 25,
+            "results": results
+        })))
+        .mount(&server)
+        .await;
+
+    let page = TmdbClient::new(config(&server))
+        .unwrap()
+        .premieres(TrendingMediaTypeDto::Movie, PremiereFeedDto::Upcoming, 3)
+        .await
+        .unwrap();
+
+    assert_eq!(page.page, 3);
+    assert_eq!(page.total_pages, 3);
+    assert_eq!(page.results.len(), 5);
+    assert_eq!(page.results[0].tmdb_id, 21);
+    assert_eq!(page.results[4].tmdb_id, 25);
+}
+
+#[tokio::test]
+async fn maps_every_supported_best_and_premiere_feed() {
+    let server = MockServer::start().await;
+    for endpoint in [
+        "/3/tv/popular",
+        "/3/movie/now_playing",
+        "/3/movie/upcoming",
+        "/3/tv/airing_today",
+    ] {
+        Mock::given(method("GET"))
+            .and(path(endpoint))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "page": 1,
+                "total_pages": 1,
+                "total_results": 0,
+                "results": []
+            })))
+            .mount(&server)
+            .await;
+    }
+    let client = TmdbClient::new(config(&server)).unwrap();
+
+    client
+        .best(TrendingMediaTypeDto::Tv, BestRankingDto::Popular, 1)
+        .await
+        .unwrap();
+    for feed in [PremiereFeedDto::NowPlaying, PremiereFeedDto::Upcoming] {
+        client
+            .premieres(TrendingMediaTypeDto::Movie, feed, 1)
+            .await
+            .unwrap();
+    }
+    client
+        .premieres(TrendingMediaTypeDto::Tv, PremiereFeedDto::AiringToday, 1)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn rejects_mismatched_premiere_feed_and_invalid_discovery_page() {
+    let server = MockServer::start().await;
+    let client = TmdbClient::new(config(&server)).unwrap();
+
+    assert_eq!(
+        client
+            .premieres(TrendingMediaTypeDto::Movie, PremiereFeedDto::OnTheAir, 1,)
+            .await
+            .unwrap_err()
+            .code(),
+        TmdbErrorCode::InvalidRequest
+    );
+    assert_eq!(
+        client
+            .discover(TrendingMediaTypeDto::Tv, 0, 1)
+            .await
+            .unwrap_err()
+            .code(),
+        TmdbErrorCode::InvalidRequest
+    );
+    assert_eq!(
+        client
+            .discover(TrendingMediaTypeDto::Tv, 18, 0)
             .await
             .unwrap_err()
             .code(),

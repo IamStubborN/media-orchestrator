@@ -2516,6 +2516,7 @@ dependencies = [
  "time",
  "tokio",
  "tower",
+ "url",
  "uuid",
 ]
 
@@ -2551,6 +2552,7 @@ dependencies = [
  "async-trait",
  "thiserror",
  "time",
+ "url",
  "uuid",
 ]
 

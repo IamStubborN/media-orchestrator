@@ -552,6 +552,7 @@ async fn run_tracking(args: TrackingArgs) -> Result<(), RunError> {
                     known_episodes,
                     scope: scope.into(),
                     series_ongoing: true,
+                    poster_url: None,
                     release_identity,
                     download,
                 })

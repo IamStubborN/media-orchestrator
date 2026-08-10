@@ -29,6 +29,7 @@ fn new_tracking(id: TrackingId, scope: TrackingScope) -> NewTrackingSubscription
             known_episodes: vec![EpisodeSnapshot::new(1, 4).unwrap()],
             scope,
             series_ongoing: true,
+            poster_url: None,
             release_identity: None,
             download: None,
         },
@@ -47,11 +48,48 @@ fn new_tracking_with_release_identity(id: TrackingId) -> NewTrackingSubscription
             known_episodes: vec![EpisodeSnapshot::new(1, 4).unwrap()],
             scope: TrackingScope::Personal,
             series_ongoing: true,
+            poster_url: None,
             release_identity: Some(ReleaseIdentity::new(ReleaseSource::Tvmaze, 77).unwrap()),
             download: None,
         },
     )
     .unwrap()
+}
+
+fn new_tracking_with_poster(id: TrackingId) -> NewTrackingSubscription {
+    NewTrackingSubscription::new(
+        id,
+        PRIMARY_USER_ID,
+        NewTrackingCommand {
+            provider: Provider::Rezka,
+            title: "Poster Show".to_owned(),
+            translation: "release-calendar".to_owned(),
+            known_episodes: vec![EpisodeSnapshot::new(1, 1).unwrap()],
+            scope: TrackingScope::Personal,
+            series_ongoing: true,
+            poster_url: Some("https://image.tmdb.org/t/p/w780/show.jpg".to_owned()),
+            release_identity: None,
+            download: None,
+        },
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn tracking_poster_round_trips_through_repository() {
+    let test_db = TestDatabase::start_migrated().await;
+    let store = SeaOrmTrackingStore::new(test_db.connection().clone());
+    let created = store
+        .add(operation_key(), new_tracking_with_poster(TrackingId::new()))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        created.poster_url(),
+        Some("https://image.tmdb.org/t/p/w780/show.jpg")
+    );
+    let listed = store.list_visible(PRIMARY_USER_ID).await.unwrap();
+    assert_eq!(listed[0].poster_url(), created.poster_url());
 }
 
 #[tokio::test]
@@ -362,6 +400,10 @@ async fn future_discovery_updates_snapshot_and_atomically_fans_out_family_notifi
     assert_eq!(
         refreshed[0].known_episodes(),
         &[EpisodeSnapshot::new(1, 4).unwrap(), episode]
+    );
+    assert_eq!(
+        refreshed[0].poster_url(),
+        Some("https://static.tvmaze.com/poster.jpg")
     );
     let notifications = query(
         test_db.connection(),
