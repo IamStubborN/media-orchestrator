@@ -1,7 +1,8 @@
 use crate::{NotificationId, TrackingId};
 pub use dispatch::{
-    NotificationDeliveryFailure, NotificationDispatchResult, NotificationDispatcher,
-    NotificationOutboxPort, NotificationSink,
+    NotificationDeliveryFailure, NotificationDeliveryFence, NotificationDeliveryPermit,
+    NotificationDispatchResult, NotificationDispatcher, NotificationOutboxPort, NotificationSink,
+    NotificationSinkOutcome,
 };
 use validation::{
     valid_card_key, validate_channel_layout, validate_codec, validate_display_field,

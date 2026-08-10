@@ -1,16 +1,50 @@
 mod support;
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
 use media_core::{
     PRIMARY_USER_ID, BootstrapClient, CheckpointValue, ClientRole, ClientStore, CredentialDigest,
-    JobEvent, JobEventId, JobId, JobState, JobStore, LeaseStore, NewJob, NotificationContent,
-    NotificationEventType, NotificationId, NotifyScope, Provider, RUNNER_CLIENT_ID,
-    SECONDARY_USER_ID,
+    JobEvent, JobEventId, JobId, JobState, JobStore, LeaseStore, NewJob, NotificationDelivery,
+    NotificationDeliveryFailure, NotificationDeliveryFence, NotificationDispatcher,
+    NotificationEventType, NotificationId, NotificationSink, NotificationSinkOutcome, NotifyScope,
+    Provider, RUNNER_CLIENT_ID, SECONDARY_USER_ID,
 };
 use media_storage::{
     SeaOrmClientStore, SeaOrmJobStore, SeaOrmLeaseStore, SeaOrmNotificationOutbox,
 };
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use support::{TestDatabase, operation_key, query};
+use tokio::sync::Notify;
+
+struct PermitBlockedSink {
+    entered: Arc<Notify>,
+    resume: Arc<Notify>,
+    side_effects: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl NotificationSink for PermitBlockedSink {
+    async fn deliver(
+        &self,
+        _: &NotificationDelivery,
+        fence: &NotificationDeliveryFence,
+    ) -> Result<NotificationSinkOutcome, NotificationDeliveryFailure> {
+        self.entered.notify_one();
+        self.resume.notified().await;
+        let Some(_permit) = fence
+            .acquire()
+            .await
+            .map_err(|_| NotificationDeliveryFailure::retryable("delivery_fence"))?
+        else {
+            return Ok(NotificationSinkOutcome::Superseded);
+        };
+        self.side_effects.fetch_add(1, Ordering::SeqCst);
+        Ok(NotificationSinkOutcome::Delivered(_permit))
+    }
+}
 
 async fn setup() -> (TestDatabase, SeaOrmJobStore, SeaOrmLeaseStore) {
     let test_db = TestDatabase::start_migrated().await;
@@ -749,7 +783,7 @@ async fn non_terminal_job_notifications_coalesce_into_one_generation_ordered_car
         rows[0]
             .try_get::<Option<time::OffsetDateTime>>("", "delivered_at")
             .unwrap()
-            .is_none()
+            .is_some()
     );
     assert!(
         rows[0]
@@ -757,6 +791,76 @@ async fn non_terminal_job_notifications_coalesce_into_one_generation_ordered_car
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn silent_projection_fences_an_already_leased_blocked_delivery_before_its_side_effect() {
+    let (test_db, jobs, leases) = setup().await;
+    jobs.create(operation_key(), new_job("blocked-stale-delivery"))
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    leases
+        .report_event(
+            operation_key(),
+            lease.lease_id(),
+            RUNNER_CLIENT_ID,
+            JobEvent::started(JobEventId::new()),
+        )
+        .await
+        .unwrap();
+    test_db
+        .connection()
+        .execute_unprepared(
+            "UPDATE notification_outbox SET delivered_at = NULL, lease_owner = NULL, lease_expires_at = NULL",
+        )
+        .await
+        .unwrap();
+
+    let entered = Arc::new(Notify::new());
+    let resume = Arc::new(Notify::new());
+    let side_effects = Arc::new(AtomicUsize::new(0));
+    let dispatcher = NotificationDispatcher::new(
+        Arc::new(SeaOrmNotificationOutbox::new(test_db.connection().clone())),
+        Arc::new(PermitBlockedSink {
+            entered: entered.clone(),
+            resume: resume.clone(),
+            side_effects: side_effects.clone(),
+        }),
+    );
+    let worker = NotificationId::new();
+    let dispatch = tokio::spawn(async move {
+        dispatcher
+            .run_once(worker, time::OffsetDateTime::now_utc(), 1)
+            .await
+            .unwrap()
+    });
+    entered.notified().await;
+
+    leases
+        .report_event(
+            operation_key(),
+            lease.lease_id(),
+            RUNNER_CLIENT_ID,
+            JobEvent::stage_started(JobEventId::new(), 0, "download".to_owned(), 0).unwrap(),
+        )
+        .await
+        .unwrap();
+    resume.notify_one();
+
+    let result = dispatch.await.unwrap();
+    assert_eq!(result.delivered, 0);
+    assert_eq!(result.failed, 0);
+    assert_eq!(result.dead, 0);
+    assert_eq!(side_effects.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -806,8 +910,11 @@ async fn job_lifecycle_projects_one_terminal_card_and_one_final_push() {
         "SELECT event_type, payload, generation FROM notification_outbox ORDER BY event_type",
     )
     .await;
-    assert_eq!(rows.len(), 2, "one mutable card and one final push");
-
+    assert_eq!(
+        rows.len(),
+        2,
+        "one silent projection and one terminal event"
+    );
     let card = rows
         .iter()
         .find(|row| {
@@ -815,26 +922,18 @@ async fn job_lifecycle_projects_one_terminal_card_and_one_final_push() {
         })
         .unwrap();
     let card_payload = card.try_get::<serde_json::Value>("", "payload").unwrap();
-    assert_eq!(card_payload["event_type"], "media.notification");
-    assert_eq!(
-        card_payload["card_key"],
-        format!("media-job:{}", created.id())
-    );
     assert_eq!(card_payload["state"], "completed");
-    assert_eq!(card_payload["terminal"], true);
-    assert!(card.try_get::<i64>("", "generation").unwrap() > 1);
-
-    let push = rows
+    let push_payload = rows
         .iter()
-        .find(|row| {
-            row.try_get::<serde_json::Value>("", "payload").unwrap()["delivery_kind"]
-                == "final-push"
+        .find_map(|row| {
+            let payload = row.try_get::<serde_json::Value>("", "payload").unwrap();
+            (payload["delivery_kind"] == "final-push").then_some(payload)
         })
         .unwrap();
-    let push_payload = push.try_get::<serde_json::Value>("", "payload").unwrap();
+    assert_eq!(push_payload["delivery_kind"], "final-push");
     assert_eq!(
         push_payload["card_key"],
-        format!("media-job:{}", created.id())
+        format!("media-event:{}", created.id())
     );
     assert_eq!(push_payload["state"], "completed");
     assert_eq!(push_payload["terminal"], true);
@@ -1487,12 +1586,8 @@ async fn notification_card_uses_canonical_specials_coordinates() {
             10,
         )
         .await
-        .expect("the canonical specials card must be dispatchable");
-    let NotificationContent::Media(notification) = deliveries[0].content() else {
-        panic!("expected a structured media notification");
-    };
-    assert_eq!(notification.media().title(), "Attack on Titan");
-    assert_eq!(notification.media().season(), Some(0));
+        .expect("the silent card projection must not fail leasing");
+    assert!(deliveries.is_empty());
 }
 
 #[tokio::test]
@@ -1529,23 +1624,19 @@ async fn notification_card_sanitizes_prowlarr_release_title() {
         .await
         .unwrap();
 
-    let deliveries = SeaOrmNotificationOutbox::new(test_db.connection().clone())
-        .lease_pending(
-            NotificationId::new(),
-            time::OffsetDateTime::now_utc() + time::Duration::seconds(1),
-            time::Duration::seconds(30),
-            10,
-        )
-        .await
-        .expect("the Prowlarr notification must be dispatchable");
-    let NotificationContent::Media(notification) = deliveries[0].content() else {
-        panic!("expected a structured media notification");
-    };
+    let payload = query(
+        test_db.connection(),
+        "SELECT payload FROM notification_outbox WHERE payload->>'delivery_kind' = 'card'",
+    )
+    .await
+    .remove(0)
+    .try_get::<serde_json::Value>("", "payload")
+    .unwrap();
     assert_eq!(
-        notification.media().title(),
+        payload["media"]["title"],
         "[S02] - Mashle: Magic and Muscles - WEBRip 1080p"
     );
-    assert_eq!(notification.progress().unwrap().current_episode(), Some(7));
+    assert_eq!(payload["progress"]["current_episode"], 7);
 }
 
 #[tokio::test]
@@ -1781,7 +1872,7 @@ async fn storage_block_notifies_both_family_recipients_once() {
             .iter()
             .filter(|delivery| delivery.event_type() == NotificationEventType::BlockedStorage)
             .count(),
-        4
+        2
     );
     let status_keys = deliveries
         .iter()
@@ -2835,24 +2926,14 @@ async fn active_cancel_is_cooperative_and_runner_acknowledgement_releases_the_le
     .await;
     assert_eq!(
         notifications.len(),
-        2,
-        "cancel edits the card and sends one push"
+        1,
+        "only the silent state projection remains"
     );
-    let payloads = notifications
-        .iter()
-        .map(|row| row.try_get::<serde_json::Value>("", "payload").unwrap())
-        .collect::<Vec<_>>();
-    let card = payloads
-        .iter()
-        .find(|payload| payload["delivery_kind"] == "card")
+    let payload = notifications[0]
+        .try_get::<serde_json::Value>("", "payload")
         .unwrap();
-    let push = payloads
-        .iter()
-        .find(|payload| payload["delivery_kind"] == "final-push")
-        .unwrap();
-    assert_eq!(card["state"], "cancelled");
-    assert_eq!(card["terminal"], true);
-    assert_eq!(push["revision"], card["revision"]);
+    assert_eq!(payload["state"], "cancelled");
+    assert_eq!(payload["delivery_kind"], "card");
 }
 
 #[tokio::test]

@@ -30,6 +30,14 @@ pub use tracking::{SeaOrmNotificationOutbox, SeaOrmTrackingStore};
 use media_core::PortError;
 use sea_orm::{DbErr, RuntimeErr, SqlErr};
 
+fn notification_delivery_fence_key(
+    recipient: &str,
+    aggregate_type: &str,
+    aggregate_id: uuid::Uuid,
+) -> String {
+    format!("notification:{recipient}:{aggregate_type}:{aggregate_id}")
+}
+
 fn map_database_error(error: DbErr) -> PortError {
     if matches!(error.sql_err(), Some(SqlErr::UniqueConstraintViolation(_))) {
         PortError::Conflict

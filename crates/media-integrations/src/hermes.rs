@@ -425,10 +425,19 @@ impl NotificationSink for HermesWebhookClient {
     async fn deliver(
         &self,
         delivery: &NotificationDelivery,
-    ) -> Result<(), NotificationDeliveryFailure> {
+        fence: &media_core::NotificationDeliveryFence,
+    ) -> Result<media_core::NotificationSinkOutcome, NotificationDeliveryFailure> {
+        let Some(_permit) = fence
+            .acquire()
+            .await
+            .map_err(|_| NotificationDeliveryFailure::retryable("delivery_fence"))?
+        else {
+            return Ok(media_core::NotificationSinkOutcome::Superseded);
+        };
         HermesWebhookClient::deliver(self, delivery)
             .await
-            .map_err(classify_delivery_failure)
+            .map_err(classify_delivery_failure)?;
+        Ok(media_core::NotificationSinkOutcome::Delivered(_permit))
     }
 }
 

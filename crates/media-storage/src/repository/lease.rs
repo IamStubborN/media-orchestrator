@@ -16,7 +16,7 @@ use crate::{
     mapping::{job_state_value, needs_action_reason_value},
     repository::{
         job::insert_outbox,
-        map_database_error,
+        map_database_error, notification_delivery_fence_key,
         operation::{self, OperationClaim, OperationKind, OperationResult},
     },
 };
@@ -774,6 +774,14 @@ async fn insert_projected_notification(
     recipient: &str,
     projected: &ProjectedNotification,
 ) -> Result<(), sea_orm::DbErr> {
+    let fence_key = notification_delivery_fence_key(recipient, "job", job.id().into_uuid());
+    transaction
+        .query_one_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            [fence_key.into()],
+        ))
+        .await?;
     let card_key = format!("media-job:{}", job.id());
     let card_dedupe = [job.id().into_uuid().as_bytes().as_slice(), b"card"].concat();
     let previous = transaction.query_one_raw(Statement::from_sql_and_values(
@@ -789,21 +797,22 @@ async fn insert_projected_notification(
     let payload = projected_payload(projected, "card", &card_key, revision as u64);
     transaction.execute_raw(Statement::from_sql_and_values(
         DatabaseBackend::Postgres,
-        "INSERT INTO notification_outbox (id, aggregate_type, aggregate_id, event_type, recipient, source_dedupe_key, payload) \
-         VALUES ($1, 'job', $2, $3, $4, $5, $6) ON CONFLICT (source_dedupe_key, recipient) DO UPDATE SET \
+        "INSERT INTO notification_outbox (id, aggregate_type, aggregate_id, event_type, recipient, source_dedupe_key, payload, delivered_at) \
+         VALUES ($1, 'job', $2, $3, $4, $5, $6, now()) ON CONFLICT (source_dedupe_key, recipient) DO UPDATE SET \
          event_type = EXCLUDED.event_type, payload = EXCLUDED.payload, generation = notification_outbox.generation + 1, \
-         delivered_at = NULL, dead_at = NULL, next_attempt_at = now(), attempt_count = 0, last_error_code = NULL",
+         delivered_at = now(), dead_at = NULL, attempt_count = 0, last_error_code = NULL",
         [Uuid::new_v4().into(), job.id().into_uuid().into(), projected.event_type.into(), recipient.into(), card_dedupe.into(), payload.into()],
     )).await?;
-    if projected.terminal {
+    if projected.terminal && projected.state != "cancelled" {
+        let event_key = format!("media-event:{}", job.id());
         let dedupe = format!(
-            "final-push:{}:{}:{}",
+            "terminal-event:{}:{}:{}",
             job.id(),
             projected.lifecycle_cycle,
             projected.state
         )
         .into_bytes();
-        let payload = projected_payload(projected, "final-push", &card_key, revision as u64);
+        let payload = projected_payload(projected, "final-push", &event_key, revision as u64);
         transaction.execute_raw(Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
             "INSERT INTO notification_outbox (id, aggregate_type, aggregate_id, event_type, recipient, source_dedupe_key, payload) \

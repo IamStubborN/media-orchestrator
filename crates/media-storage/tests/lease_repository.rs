@@ -707,15 +707,12 @@ async fn expired_cancel_requested_job_becomes_cancelled_instead_of_being_strande
          WHERE aggregate_id = (SELECT id FROM jobs WHERE result_ref = 'cancel-job')",
     )
     .await;
-    assert_eq!(notifications.len(), 2);
+    assert_eq!(notifications.len(), 1);
     assert!(notifications.iter().all(|row| {
+        let payload = row.try_get::<serde_json::Value>("", "payload").unwrap();
         row.try_get::<String>("", "event_type").unwrap() == "cancelled"
-            && row
-                .try_get::<serde_json::Value>("", "payload")
-                .unwrap()
-                .get("state")
-                .and_then(serde_json::Value::as_str)
-                == Some("cancelled")
+            && payload.get("state").and_then(serde_json::Value::as_str) == Some("cancelled")
+            && payload["delivery_kind"] == "card"
     }));
     let outbox = query(
         test_db.connection(),

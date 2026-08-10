@@ -6,16 +6,17 @@ use media_core::{
     MediaNotificationOrigin, MediaNotificationProcessing, MediaNotificationProcessingMode,
     MediaNotificationProgress, MediaNotificationPublication, MediaNotificationResult,
     MediaNotificationStage, MediaNotificationState, MediaNotificationSubtitles,
-    MediaNotificationVideo, NewTrackingSubscription, NotificationDelivery, NotificationEventType,
-    NotificationId, NotificationOutboxPort, NotificationRecipient, OperationKey, PortError,
-    Provider, ReleaseIdentity, ReleaseSource, SourceChoiceAction, SourceChoiceNotification,
-    TrackingCheckStatus, TrackingClaimToken, TrackingDownload, TrackingDownloadPatch, TrackingId,
-    TrackingScheduleStore, TrackingScope, TrackingStore, TrackingSubscription, UserId,
-    SECONDARY_USER_ID, episode_choice_set_id, is_valid_tracking_poster_url,
+    MediaNotificationVideo, NewTrackingSubscription, NotificationDelivery,
+    NotificationDeliveryPermit, NotificationEventType, NotificationId, NotificationOutboxPort,
+    NotificationRecipient, OperationKey, PortError, Provider, ReleaseIdentity, ReleaseSource,
+    SourceChoiceAction, SourceChoiceNotification, TrackingCheckStatus, TrackingClaimToken,
+    TrackingDownload, TrackingDownloadPatch, TrackingId, TrackingScheduleStore, TrackingScope,
+    TrackingStore, TrackingSubscription, UserId, SECONDARY_USER_ID, episode_choice_set_id,
+    is_valid_tracking_poster_url,
 };
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
 
-use crate::repository::map_tracking_database_error;
+use crate::repository::{map_tracking_database_error, notification_delivery_fence_key};
 
 #[derive(Clone)]
 pub struct SeaOrmTrackingStore {
@@ -222,6 +223,23 @@ fn source_choice_payload(notification: &SourceChoiceNotification) -> serde_json:
     payload
 }
 
+async fn lock_tracking_notification_fences(
+    transaction: &sea_orm::DatabaseTransaction,
+    id: TrackingId,
+) -> Result<(), sea_orm::DbErr> {
+    for recipient in ["primary", "secondary"] {
+        let fence_key = notification_delivery_fence_key(recipient, "tracking", id.into_uuid());
+        transaction
+            .query_one_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                [fence_key.into()],
+            ))
+            .await?;
+    }
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl TrackingStore for SeaOrmTrackingStore {
     async fn add(
@@ -337,6 +355,7 @@ impl TrackingStore for SeaOrmTrackingStore {
             let Some(row) = row else {
                 return Ok(None);
             };
+            lock_tracking_notification_fences(&transaction, id).await?;
             transaction.execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
                 "DELETE FROM tracking_availability_candidates
@@ -398,12 +417,34 @@ impl TrackingStore for SeaOrmTrackingStore {
         id: TrackingId,
         user: UserId,
     ) -> Result<Option<TrackingSubscription>, PortError> {
-        let row = self.database.query_one_raw(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            "UPDATE tracking_subscriptions SET deleted_at = COALESCE(deleted_at, now()), remove_operation_key = COALESCE(remove_operation_key, $3), updated_at = now() WHERE id = $1 AND (remove_operation_key = $3 OR (deleted_at IS NULL AND (owner_id = $2 OR (scope = 'family' AND $2 IN ($4, $5))))) RETURNING id, owner_id, provider, title, translation, known_episodes, scope, poster_url, release_source, release_source_id, download_provider_media_ref, download_translation_id, download_season, last_checked_at, next_check_at, check_status",
-            [id.into_uuid().into(), user.into_uuid().into(), operation.as_bytes().to_vec().into(), PRIMARY_USER_ID.into_uuid().into(), SECONDARY_USER_ID.into_uuid().into()],
-        )).await.map_err(map_tracking_database_error)?;
-        row.as_ref().map(tracking_from_row).transpose()
+        let transaction = self
+            .database
+            .begin()
+            .await
+            .map_err(map_tracking_database_error)?;
+        let result = async {
+            let row = transaction.query_one_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "UPDATE tracking_subscriptions SET deleted_at = COALESCE(deleted_at, now()), remove_operation_key = COALESCE(remove_operation_key, $3), updated_at = now() WHERE id = $1 AND (remove_operation_key = $3 OR (deleted_at IS NULL AND (owner_id = $2 OR (scope = 'family' AND $2 IN ($4, $5))))) RETURNING id, owner_id, provider, title, translation, known_episodes, scope, poster_url, release_source, release_source_id, download_provider_media_ref, download_translation_id, download_season, last_checked_at, next_check_at, check_status",
+                [id.into_uuid().into(), user.into_uuid().into(), operation.as_bytes().to_vec().into(), PRIMARY_USER_ID.into_uuid().into(), SECONDARY_USER_ID.into_uuid().into()],
+            )).await?;
+            let Some(row) = row else {
+                return Ok(None);
+            };
+            lock_tracking_notification_fences(&transaction, id).await?;
+            transaction.execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "DELETE FROM notification_outbox
+                 WHERE aggregate_type = 'tracking' AND aggregate_id = $1
+                   AND delivered_at IS NULL AND dead_at IS NULL
+                   AND payload->>'event_type' = 'media.source-choice'",
+                [id.into_uuid().into()],
+            )).await?;
+            tracking_from_row(&row)
+                .map(Some)
+                .map_err(|_| sea_orm::DbErr::Type("invalid tracking row".to_owned()))
+        }.await;
+        finish(transaction, result).await
     }
 }
 
@@ -744,11 +785,142 @@ impl SeaOrmNotificationOutbox {
         if !(1..=300).contains(&ttl_seconds) || limit == 0 || limit > 100 {
             return Err(PortError::Conflict);
         }
-        self.database.query_all_raw(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            "WITH pending AS (SELECT id FROM notification_outbox WHERE delivered_at IS NULL AND dead_at IS NULL AND next_attempt_at <= $1 AND (lease_expires_at IS NULL OR lease_expires_at <= $1) ORDER BY next_attempt_at, created_at FOR UPDATE SKIP LOCKED LIMIT $2) UPDATE notification_outbox n SET lease_owner = $3, lease_expires_at = $1 + make_interval(secs => $4) FROM pending WHERE n.id = pending.id RETURNING n.id, n.aggregate_type, n.aggregate_id, n.recipient, n.event_type, n.payload, n.generation, n.attempt_count",
-            [now.into(), i64::from(limit).into(), worker.into_uuid().into(), ttl_seconds.into()],
-        )).await.map_err(map_tracking_database_error)?.iter().map(delivery_from_row).collect()
+        let transaction = self
+            .database
+            .begin()
+            .await
+            .map_err(map_tracking_database_error)?;
+        let scan_limit = i64::from(limit).saturating_mul(4);
+        let candidates = transaction
+            .query_all_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "SELECT id, aggregate_type, aggregate_id, recipient FROM notification_outbox \
+                 WHERE delivered_at IS NULL AND dead_at IS NULL AND next_attempt_at <= $1 \
+                   AND (lease_expires_at IS NULL OR lease_expires_at <= $1) \
+                 ORDER BY next_attempt_at, created_at LIMIT $2",
+                [now.into(), scan_limit.into()],
+            ))
+            .await
+            .map_err(map_tracking_database_error)?;
+        let mut deliveries = Vec::with_capacity(limit as usize);
+        for candidate in candidates {
+            if deliveries.len() >= limit as usize {
+                break;
+            }
+            let id = candidate
+                .try_get::<uuid::Uuid>("", "id")
+                .map_err(|_| PortError::Infrastructure)?;
+            let aggregate_type = candidate
+                .try_get::<String>("", "aggregate_type")
+                .map_err(|_| PortError::Infrastructure)?;
+            let aggregate_id = candidate
+                .try_get::<uuid::Uuid>("", "aggregate_id")
+                .map_err(|_| PortError::Infrastructure)?;
+            let recipient = candidate
+                .try_get::<String>("", "recipient")
+                .map_err(|_| PortError::Infrastructure)?;
+            let fence_key =
+                notification_delivery_fence_key(&recipient, &aggregate_type, aggregate_id);
+            let locked = transaction
+                .query_one_raw(Statement::from_sql_and_values(
+                    DatabaseBackend::Postgres,
+                    "SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0)) AS locked",
+                    [fence_key.into()],
+                ))
+                .await
+                .map_err(map_tracking_database_error)?
+                .and_then(|row| row.try_get::<bool>("", "locked").ok())
+                .unwrap_or(false);
+            if !locked {
+                continue;
+            }
+            if let Some(row) = transaction
+                .query_one_raw(Statement::from_sql_and_values(
+                    DatabaseBackend::Postgres,
+                    "UPDATE notification_outbox SET lease_owner = $2, \
+                       lease_expires_at = $3 + make_interval(secs => $4) \
+                     WHERE id = $1 AND delivered_at IS NULL AND dead_at IS NULL \
+                       AND next_attempt_at <= $3 \
+                       AND (lease_expires_at IS NULL OR lease_expires_at <= $3) \
+                     RETURNING id, aggregate_type, aggregate_id, recipient, event_type, payload, generation, attempt_count",
+                    [
+                        id.into(),
+                        worker.into_uuid().into(),
+                        now.into(),
+                        ttl_seconds.into(),
+                    ],
+                ))
+                .await
+                .map_err(map_tracking_database_error)?
+            {
+                deliveries.push(delivery_from_row(&row)?);
+            }
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(map_tracking_database_error)?;
+        Ok(deliveries)
+    }
+
+    pub async fn acquire_delivery_permit(
+        &self,
+        id: NotificationId,
+        worker: NotificationId,
+        generation: u64,
+    ) -> Result<Option<NotificationDeliveryPermit>, PortError> {
+        let generation = i64::try_from(generation).map_err(|_| PortError::Conflict)?;
+        let transaction = self
+            .database
+            .begin()
+            .await
+            .map_err(map_tracking_database_error)?;
+        let identity = transaction
+            .query_one_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "SELECT aggregate_type, aggregate_id, recipient FROM notification_outbox WHERE id = $1",
+                [id.into_uuid().into()],
+            ))
+            .await
+            .map_err(map_tracking_database_error)?;
+        let Some(identity) = identity else {
+            return Ok(None);
+        };
+        let aggregate_type = identity
+            .try_get::<String>("", "aggregate_type")
+            .map_err(|_| PortError::Infrastructure)?;
+        let aggregate_id = identity
+            .try_get::<uuid::Uuid>("", "aggregate_id")
+            .map_err(|_| PortError::Infrastructure)?;
+        let recipient = identity
+            .try_get::<String>("", "recipient")
+            .map_err(|_| PortError::Infrastructure)?;
+        let fence_key = notification_delivery_fence_key(&recipient, &aggregate_type, aggregate_id);
+        transaction
+            .query_one_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                [fence_key.into()],
+            ))
+            .await
+            .map_err(map_tracking_database_error)?;
+        let current = transaction
+            .query_one_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "SELECT 1 AS current FROM notification_outbox \
+                 WHERE id = $1 AND lease_owner = $2 AND generation = $3 \
+                   AND lease_expires_at > now() \
+                   AND delivered_at IS NULL AND dead_at IS NULL",
+                [
+                    id.into_uuid().into(),
+                    worker.into_uuid().into(),
+                    generation.into(),
+                ],
+            ))
+            .await
+            .map_err(map_tracking_database_error)?
+            .is_some();
+        Ok(current.then(|| NotificationDeliveryPermit::hold(transaction)))
     }
 
     pub async fn mark_delivered(
@@ -855,6 +1027,15 @@ impl NotificationOutboxPort for SeaOrmNotificationOutbox {
         limit: u32,
     ) -> Result<Vec<NotificationDelivery>, PortError> {
         SeaOrmNotificationOutbox::lease_pending(self, worker, now, ttl, limit).await
+    }
+
+    async fn acquire_delivery_permit(
+        &self,
+        id: NotificationId,
+        worker: NotificationId,
+        generation: u64,
+    ) -> Result<Option<NotificationDeliveryPermit>, PortError> {
+        SeaOrmNotificationOutbox::acquire_delivery_permit(self, id, worker, generation).await
     }
 
     async fn mark_delivered(

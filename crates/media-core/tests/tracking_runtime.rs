@@ -2,7 +2,7 @@ use std::{
     future::Future,
     sync::{
         Arc, Barrier, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::{Context, Poll, Waker},
 };
@@ -11,8 +11,9 @@ use media_core::{
     PRIMARY_USER_ID, EpisodeAvailability, EpisodeAvailabilityPort, EpisodeAvailabilityRequest,
     EpisodeDiscovery, EpisodeDiscoveryPort, EpisodeSnapshot, NewTrackingCommand,
     NewTrackingSubscription, NotificationDelivery, NotificationDeliveryFailure,
-    NotificationDispatcher, NotificationEventType, NotificationId, NotificationOutboxPort,
-    NotificationRecipient, NotificationSink, OperationKey, PortError, Provider,
+    NotificationDeliveryFence, NotificationDeliveryPermit, NotificationDispatcher,
+    NotificationEventType, NotificationId, NotificationOutboxPort, NotificationRecipient,
+    NotificationSink, NotificationSinkOutcome, OperationKey, PortError, Provider,
     ProviderAvailability, ReleaseIdentity, ReleaseSource, SourceChoiceAction,
     TrackedEpisodeDownloadPort, TrackingClaimToken, TrackingDownload, TrackingId, TrackingRuntime,
     TrackingScheduleStore, TrackingScope, TrackingSubscription,
@@ -1221,6 +1222,7 @@ fn scheduler_enqueues_only_new_episodes_from_the_selected_download_season() {
 
 struct Outbox {
     delivery: NotificationDelivery,
+    current_generation: AtomicU64,
     delivered: Mutex<Vec<NotificationId>>,
     failed: Mutex<Vec<NotificationId>>,
     dead: Mutex<Vec<NotificationId>>,
@@ -1229,6 +1231,7 @@ struct Outbox {
 impl Outbox {
     fn new(delivery: NotificationDelivery) -> Self {
         Self {
+            current_generation: AtomicU64::new(delivery.generation()),
             delivery,
             delivered: Mutex::new(Vec::new()),
             failed: Mutex::new(Vec::new()),
@@ -1247,6 +1250,17 @@ impl NotificationOutboxPort for Outbox {
         _: u32,
     ) -> Result<Vec<NotificationDelivery>, PortError> {
         Ok(vec![self.delivery.clone()])
+    }
+
+    async fn acquire_delivery_permit(
+        &self,
+        id: NotificationId,
+        _: NotificationId,
+        generation: u64,
+    ) -> Result<Option<NotificationDeliveryPermit>, PortError> {
+        Ok((id == self.delivery.id()
+            && generation == self.current_generation.load(Ordering::SeqCst))
+        .then(|| NotificationDeliveryPermit::hold(())))
     }
 
     async fn mark_delivered(
@@ -1290,8 +1304,47 @@ struct Sink {
 
 #[async_trait::async_trait]
 impl NotificationSink for Sink {
-    async fn deliver(&self, _: &NotificationDelivery) -> Result<(), NotificationDeliveryFailure> {
+    async fn deliver(
+        &self,
+        _: &NotificationDelivery,
+        fence: &NotificationDeliveryFence,
+    ) -> Result<NotificationSinkOutcome, NotificationDeliveryFailure> {
+        let Some(_permit) = fence
+            .acquire()
+            .await
+            .map_err(|_| NotificationDeliveryFailure::retryable("delivery_fence"))?
+        else {
+            return Ok(NotificationSinkOutcome::Superseded);
+        };
         self.outcome
+            .map(|()| NotificationSinkOutcome::Delivered(_permit))
+    }
+}
+
+struct BlockedSink {
+    entered: Arc<Barrier>,
+    resume: Arc<Barrier>,
+    side_effected: Arc<AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl NotificationSink for BlockedSink {
+    async fn deliver(
+        &self,
+        _: &NotificationDelivery,
+        fence: &NotificationDeliveryFence,
+    ) -> Result<NotificationSinkOutcome, NotificationDeliveryFailure> {
+        self.entered.wait();
+        self.resume.wait();
+        let Some(_permit) = fence
+            .acquire()
+            .await
+            .map_err(|_| NotificationDeliveryFailure::retryable("delivery_fence"))?
+        else {
+            return Ok(NotificationSinkOutcome::Superseded);
+        };
+        self.side_effected.store(true, Ordering::SeqCst);
+        Ok(NotificationSinkOutcome::Delivered(_permit))
     }
 }
 
@@ -1326,6 +1379,36 @@ fn dispatcher_marks_exact_stable_delivery_id_after_sink_success() {
         assert!(outbox.failed.lock().unwrap().is_empty());
         assert!(outbox.dead.lock().unwrap().is_empty());
     });
+}
+
+#[test]
+fn dispatcher_fences_a_blocked_stale_generation_before_the_side_effect() {
+    let delivery = started_delivery();
+    let outbox = Arc::new(Outbox::new(delivery));
+    let entered = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    let side_effected = Arc::new(AtomicBool::new(false));
+    let dispatcher = NotificationDispatcher::new(
+        outbox.clone(),
+        Arc::new(BlockedSink {
+            entered: entered.clone(),
+            resume: resume.clone(),
+            side_effected: side_effected.clone(),
+        }),
+    );
+    let task = std::thread::spawn(move || {
+        block_on(dispatcher.run_once(NotificationId::new(), time::OffsetDateTime::now_utc(), 10))
+            .unwrap()
+    });
+
+    entered.wait();
+    outbox.current_generation.store(2, Ordering::SeqCst);
+    resume.wait();
+    let result = task.join().unwrap();
+
+    assert_eq!(result, media_core::NotificationDispatchResult::default());
+    assert!(!side_effected.load(Ordering::SeqCst));
+    assert!(outbox.delivered.lock().unwrap().is_empty());
 }
 
 #[test]

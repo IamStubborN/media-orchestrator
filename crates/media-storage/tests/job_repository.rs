@@ -140,7 +140,7 @@ async fn repeated_operation_key_returns_the_original_job_without_a_second_insert
 }
 
 #[tokio::test]
-async fn cancelling_a_queued_job_terminalizes_its_notification_card() {
+async fn cancelling_a_queued_job_creates_no_notification() {
     let test_db = TestDatabase::start_migrated().await;
     let store = SeaOrmJobStore::new(test_db.connection().clone());
     let created = store
@@ -163,25 +163,14 @@ async fn cancelling_a_queued_job_terminalizes_its_notification_card() {
         "SELECT payload FROM notification_outbox ORDER BY created_at",
     )
     .await;
-    assert_eq!(rows.len(), 2, "one terminal card and one final push");
-    let payloads = rows
-        .iter()
-        .map(|row| {
-            row.try_get("", "payload")
-                .expect("notification payload must be JSON")
-        })
-        .collect::<Vec<serde_json::Value>>();
-    let card = payloads
-        .iter()
-        .find(|payload| payload["delivery_kind"] == "card")
-        .unwrap();
-    let push = payloads
-        .iter()
-        .find(|payload| payload["delivery_kind"] == "final-push")
-        .unwrap();
-    assert_eq!(card["state"], "cancelled");
-    assert_eq!(card["terminal"], true);
-    assert_eq!(push["revision"], card["revision"]);
+    assert_eq!(
+        rows.len(),
+        1,
+        "only the already-delivered state projection remains"
+    );
+    let payload: serde_json::Value = rows[0].try_get("", "payload").unwrap();
+    assert_eq!(payload["delivery_kind"], "card");
+    assert_eq!(payload["state"], "cancelled");
 }
 
 #[tokio::test]
@@ -229,9 +218,10 @@ async fn cancelling_a_needs_action_job_clears_reason_and_terminalizes_its_card()
         "SELECT payload FROM notification_outbox ORDER BY created_at",
     )
     .await;
-    assert_eq!(notifications.len(), 2);
+    assert_eq!(notifications.len(), 1);
     assert!(notifications.iter().all(|row| {
-        row.try_get::<serde_json::Value>("", "payload").unwrap()["state"] == "cancelled"
+        let payload = row.try_get::<serde_json::Value>("", "payload").unwrap();
+        payload["state"] == "cancelled" && payload["delivery_kind"] == "card"
     }));
 }
 

@@ -53,8 +53,9 @@ pub use notification::{
     MediaNotificationProcessingMode, MediaNotificationProgress, MediaNotificationPublication,
     MediaNotificationResult, MediaNotificationStage, MediaNotificationState,
     MediaNotificationSubtitles, MediaNotificationVideo, NotificationContent, NotificationDelivery,
-    NotificationDeliveryFailure, NotificationDispatchResult, NotificationDispatcher,
-    NotificationEventType, NotificationOutboxPort, NotificationRecipient, NotificationSink,
+    NotificationDeliveryFailure, NotificationDeliveryFence, NotificationDeliveryPermit,
+    NotificationDispatchResult, NotificationDispatcher, NotificationEventType,
+    NotificationOutboxPort, NotificationRecipient, NotificationSink, NotificationSinkOutcome,
     NotificationValidationError, SourceChoiceAction, SourceChoiceNotification,
 };
 pub use operation::OperationKey;

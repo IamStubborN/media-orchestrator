@@ -4,6 +4,27 @@ use crate::{NotificationId, PortError};
 
 use super::NotificationDelivery;
 
+/// Keeps the persistence-side delivery fence held across the external side
+/// effect. Storage adapters construct this from an owned transaction guard.
+pub struct NotificationDeliveryPermit {
+    _guard: Box<dyn Send>,
+}
+
+impl NotificationDeliveryPermit {
+    #[doc(hidden)]
+    #[must_use]
+    pub fn hold<T: Send + 'static>(guard: T) -> Self {
+        Self {
+            _guard: Box::new(guard),
+        }
+    }
+}
+
+pub enum NotificationSinkOutcome {
+    Delivered(NotificationDeliveryPermit),
+    Superseded,
+}
+
 /// The outcome of a failed delivery attempt. A retryable failure is rescheduled
 /// with backoff; a terminal failure (for example an authentication or signature
 /// rejection that will never succeed on replay) is moved to a dead state so the
@@ -51,6 +72,14 @@ pub trait NotificationOutboxPort: Send + Sync {
         ttl: time::Duration,
         limit: u32,
     ) -> Result<Vec<NotificationDelivery>, PortError>;
+    /// Acquires a process-safe fence for the exact leased generation. `None`
+    /// means a newer projection won before the external side effect began.
+    async fn acquire_delivery_permit(
+        &self,
+        id: NotificationId,
+        worker: NotificationId,
+        generation: u64,
+    ) -> Result<Option<NotificationDeliveryPermit>, PortError>;
     async fn mark_delivered(
         &self,
         id: NotificationId,
@@ -81,7 +110,23 @@ pub trait NotificationSink: Send + Sync {
     async fn deliver(
         &self,
         delivery: &NotificationDelivery,
-    ) -> Result<(), NotificationDeliveryFailure>;
+        fence: &NotificationDeliveryFence,
+    ) -> Result<NotificationSinkOutcome, NotificationDeliveryFailure>;
+}
+
+pub struct NotificationDeliveryFence {
+    outbox: Arc<dyn NotificationOutboxPort>,
+    id: NotificationId,
+    worker: NotificationId,
+    generation: u64,
+}
+
+impl NotificationDeliveryFence {
+    pub async fn acquire(&self) -> Result<Option<NotificationDeliveryPermit>, PortError> {
+        self.outbox
+            .acquire_delivery_permit(self.id, self.worker, self.generation)
+            .await
+    }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
@@ -114,13 +159,20 @@ impl NotificationDispatcher {
             .await?;
         let mut result = NotificationDispatchResult::default();
         for delivery in deliveries {
-            match self.sink.deliver(&delivery).await {
-                Ok(()) => {
+            let fence = NotificationDeliveryFence {
+                outbox: Arc::clone(&self.outbox),
+                id: delivery.id(),
+                worker,
+                generation: delivery.generation(),
+            };
+            match self.sink.deliver(&delivery, &fence).await {
+                Ok(NotificationSinkOutcome::Delivered(_permit)) => {
                     self.outbox
                         .mark_delivered(delivery.id(), worker, delivery.generation())
                         .await?;
                     result.delivered += 1;
                 }
+                Ok(NotificationSinkOutcome::Superseded) => {}
                 Err(failure) if failure.is_retryable() => {
                     self.outbox
                         .mark_failed(

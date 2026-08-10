@@ -1499,6 +1499,214 @@ async fn stale_delivery_ack_releases_the_lease_without_consuming_a_new_generatio
 }
 
 #[tokio::test]
+async fn delivery_permit_rejects_expired_lease_and_only_allows_current_owner() {
+    let test_db = TestDatabase::start_migrated().await;
+    let tracking = SeaOrmTrackingStore::new(test_db.connection().clone());
+    let outbox = SeaOrmNotificationOutbox::new(test_db.connection().clone());
+    let value = tracking
+        .add(
+            operation_key(),
+            new_tracking(TrackingId::new(), TrackingScope::Personal),
+        )
+        .await
+        .unwrap();
+    let claim_token = claim_tracking(&tracking, value.id()).await;
+    tracking
+        .record_future_episode(
+            value.id(),
+            claim_token,
+            EpisodeSnapshot::new(1, 5).unwrap(),
+            time::OffsetDateTime::now_utc() + time::Duration::hours(6),
+            all_source_actions(),
+            None,
+        )
+        .await
+        .unwrap();
+    let now = time::OffsetDateTime::now_utc();
+    let worker = NotificationId::new();
+    let delivery = outbox
+        .lease_pending(worker, now, time::Duration::seconds(30), 1)
+        .await
+        .unwrap()
+        .remove(0);
+    test_db
+        .connection()
+        .execute_unprepared(
+            "UPDATE notification_outbox SET lease_expires_at = now() - interval '1 second'",
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        outbox
+            .acquire_delivery_permit(delivery.id(), worker, delivery.generation())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        outbox
+            .acquire_delivery_permit(delivery.id(), NotificationId::new(), delivery.generation(),)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn live_delivery_permit_blocks_takeover_until_http_and_ack_fence_is_released() {
+    let test_db = TestDatabase::start_migrated().await;
+    let tracking = SeaOrmTrackingStore::new(test_db.connection().clone());
+    let outbox = SeaOrmNotificationOutbox::new(test_db.connection().clone());
+    let value = tracking
+        .add(
+            operation_key(),
+            new_tracking(TrackingId::new(), TrackingScope::Personal),
+        )
+        .await
+        .unwrap();
+    let claim_token = claim_tracking(&tracking, value.id()).await;
+    tracking
+        .record_future_episode(
+            value.id(),
+            claim_token,
+            EpisodeSnapshot::new(1, 5).unwrap(),
+            time::OffsetDateTime::now_utc() + time::Duration::hours(6),
+            all_source_actions(),
+            None,
+        )
+        .await
+        .unwrap();
+    let now = time::OffsetDateTime::now_utc();
+    let worker_a = NotificationId::new();
+    let delivery = outbox
+        .lease_pending(worker_a, now, time::Duration::seconds(30), 1)
+        .await
+        .unwrap()
+        .remove(0);
+    let permit = outbox
+        .acquire_delivery_permit(delivery.id(), worker_a, delivery.generation())
+        .await
+        .unwrap()
+        .expect("the exact live owner must acquire a permit");
+    let worker_b = NotificationId::new();
+
+    assert!(
+        outbox
+            .lease_pending(
+                worker_b,
+                now + time::Duration::minutes(1),
+                time::Duration::seconds(30),
+                1,
+            )
+            .await
+            .unwrap()
+            .is_empty(),
+        "takeover must skip an aggregate whose external side effect fence is held"
+    );
+    drop(permit);
+
+    let takeover = outbox
+        .lease_pending(
+            worker_b,
+            now + time::Duration::minutes(1),
+            time::Duration::seconds(30),
+            1,
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    assert!(
+        outbox
+            .acquire_delivery_permit(takeover.id(), worker_a, takeover.generation())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        outbox
+            .acquire_delivery_permit(takeover.id(), worker_b, takeover.generation())
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn removing_tracking_revokes_queued_and_already_leased_source_choice() {
+    for lease_before_remove in [false, true] {
+        let test_db = TestDatabase::start_migrated().await;
+        let tracking = SeaOrmTrackingStore::new(test_db.connection().clone());
+        let outbox = SeaOrmNotificationOutbox::new(test_db.connection().clone());
+        let value = tracking
+            .add(
+                operation_key(),
+                new_tracking(TrackingId::new(), TrackingScope::Personal),
+            )
+            .await
+            .unwrap();
+        let claim_token = claim_tracking(&tracking, value.id()).await;
+        tracking
+            .record_future_episode(
+                value.id(),
+                claim_token,
+                EpisodeSnapshot::new(1, 5).unwrap(),
+                time::OffsetDateTime::now_utc() + time::Duration::hours(6),
+                all_source_actions(),
+                None,
+            )
+            .await
+            .unwrap();
+        let worker = NotificationId::new();
+        let leased = if lease_before_remove {
+            Some(
+                outbox
+                    .lease_pending(
+                        worker,
+                        time::OffsetDateTime::now_utc(),
+                        time::Duration::seconds(30),
+                        1,
+                    )
+                    .await
+                    .unwrap()
+                    .remove(0),
+            )
+        } else {
+            None
+        };
+
+        tracking
+            .remove_visible(operation_key(), value.id(), PRIMARY_USER_ID)
+            .await
+            .unwrap()
+            .expect("the owner must be allowed to remove tracking");
+
+        assert!(
+            outbox
+                .lease_pending(
+                    NotificationId::new(),
+                    time::OffsetDateTime::now_utc() + time::Duration::minutes(1),
+                    time::Duration::seconds(30),
+                    10,
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        if let Some(leased) = leased {
+            assert!(
+                outbox
+                    .acquire_delivery_permit(leased.id(), worker, leased.generation())
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "a leased stale source choice must be fenced before the sink side effect"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn mark_failed_does_not_overflow_backoff_at_high_attempt_counts() {
     let test_db = TestDatabase::start_migrated().await;
     let tracking = SeaOrmTrackingStore::new(test_db.connection().clone());
