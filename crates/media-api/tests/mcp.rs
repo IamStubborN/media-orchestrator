@@ -215,7 +215,56 @@ async fn stateless_mcp_2026_lists_tools_without_initialize_or_session() {
             tool["outputSchema"]["properties"][required_output].is_object(),
             "{name} must publish typed output {required_output}"
         );
+        if name != "media_genres" {
+            assert_eq!(
+                tool["inputSchema"]["properties"]["page"]["minimum"], 1,
+                "{name} must publish a positive page input"
+            );
+            assert_eq!(
+                tool["inputSchema"]["properties"]["page"]["format"], "uint32",
+                "{name} must preserve the page width"
+            );
+            assert_eq!(
+                tool["outputSchema"]["properties"]["page"]["minimum"], 1,
+                "{name} must publish a positive page output"
+            );
+            assert_eq!(
+                tool["outputSchema"]["properties"]["page"]["format"], "uint32",
+                "{name} must preserve the output page width"
+            );
+            assert_eq!(
+                tool["outputSchema"]["properties"]["results"]["maxItems"], 10,
+                "{name} must publish the list-first result bound"
+            );
+            assert_eq!(
+                tool["outputSchema"]["$defs"]["DiscoveryItemOutput"]["properties"]["tmdb_id"]["minimum"],
+                1,
+                "{name} must publish positive TMDB result identifiers"
+            );
+            assert_eq!(
+                tool["outputSchema"]["$defs"]["DiscoveryItemOutput"]["properties"]["tmdb_id"]["format"],
+                "uint64",
+                "{name} must preserve the TMDB identifier width"
+            );
+            assert_eq!(
+                tool["outputSchema"]["$defs"]["DiscoveryItemOutput"]["properties"]["rating"]["format"],
+                "float",
+                "{name} must preserve the rating width"
+            );
+        }
     }
+
+    let trending = body["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "media_trending")
+        .unwrap();
+    assert_eq!(trending["inputSchema"]["properties"]["page"]["minimum"], 1);
+    assert_eq!(
+        trending["inputSchema"]["properties"]["page"]["format"],
+        "uint32"
+    );
 
     for name in ["media_jobs_list", "media_tracking_list"] {
         let tool = body["result"]["tools"]
@@ -244,10 +293,88 @@ async fn stateless_mcp_2026_lists_tools_without_initialize_or_session() {
         std::fs::write(path, &serialized).unwrap();
     }
     assert!(
-        serialized.len() < 32_000,
+        serialized.len() <= 30_500,
         "tool discovery schema grew unexpectedly: {} bytes",
         serialized.len()
     );
+    for tool in body["result"]["tools"].as_array().unwrap() {
+        let tool_size = serde_json::to_vec(tool).unwrap().len();
+        assert!(
+            tool_size <= 2_000,
+            "{} schema grew unexpectedly: {tool_size} bytes",
+            tool["name"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn discovery_tools_reject_zero_pages_at_the_mcp_boundary() {
+    let app = router(state(
+        FakeClientStore::new([(
+            VALID_TOKEN,
+            Actor::new(PRIMARY_CLIENT_ID, Some(PRIMARY_USER_ID), ClientRole::Hermes).unwrap(),
+        )]),
+        FakeReadiness::ready(),
+    ));
+
+    for (request_id, name, arguments) in [
+        (1, "media_trending", serde_json::json!({"page": 0})),
+        (
+            2,
+            "media_best",
+            serde_json::json!({"media_type": "movie", "page": 0}),
+        ),
+        (
+            3,
+            "media_premieres",
+            serde_json::json!({"media_type": "movie", "page": 0}),
+        ),
+        (
+            4,
+            "media_discover",
+            serde_json::json!({"media_type": "movie", "genre_id": 28, "page": 0}),
+        ),
+    ] {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {
+                "name": name,
+                "arguments": arguments,
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientInfo": {
+                        "name": "media-api-test",
+                        "version": "1.0"
+                    },
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/internal/mcp")
+                    .header("authorization", format!("Bearer {VALID_TOKEN}"))
+                    .header("host", "media-service")
+                    .header("content-type", "application/json")
+                    .header("accept", "application/json, text/event-stream")
+                    .header("mcp-protocol-version", "2026-07-28")
+                    .header("mcp-method", "tools/call")
+                    .header("mcp-tool-name", name)
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            400,
+            "{name} accepted page zero at the MCP boundary"
+        );
+    }
 }
 
 #[tokio::test]

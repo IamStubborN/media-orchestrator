@@ -39,6 +39,23 @@ fn duplicate_exact_matches_remain_ambiguous() {
 }
 
 #[test]
+fn duplicate_exact_title_and_year_ignore_lifecycle_tie_break() {
+    let query = ReleaseQuery::new("The Office", None, Some(2005)).unwrap();
+    let candidates = vec![
+        ReleaseCandidate {
+            lifecycle: ReleaseLifecycle::Ongoing,
+            ..candidate(1, "The Office", None, Some(2005))
+        },
+        ReleaseCandidate {
+            lifecycle: ReleaseLifecycle::Ended,
+            ..candidate(2, "The Office", None, Some(2005))
+        },
+    ];
+
+    assert_eq!(select_release_candidate(&query, &candidates), None);
+}
+
+#[test]
 fn title_only_does_not_auto_select_from_multiple_candidates() {
     let query = ReleaseQuery::new("The Office", None, None).unwrap();
     let candidates = vec![

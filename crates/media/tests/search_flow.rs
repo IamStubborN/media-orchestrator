@@ -77,7 +77,7 @@ async fn discover_selected_rezka_translation(
         "Original".to_owned(),
         vec![media_core::EpisodeSnapshot::new(1, 1).unwrap()],
         TrackingScope::Personal,
-        None,
+        Some(TrackingDownload::new("42".to_owned(), 37, 1).unwrap()),
     )
     .unwrap();
 
@@ -154,7 +154,9 @@ impl ReleaseMetadataPort for ShowReleaseProvider {
     }
 }
 
-async fn discover_show_with_release(matched: bool) -> media_core::EpisodeDiscovery {
+async fn discover_show_with_release(
+    matched: bool,
+) -> Result<media_core::EpisodeDiscovery, PortError> {
     let public = SearchResultDto::Rezka {
         result_id: "rezka-show".to_owned(),
         title: "Show".to_owned(),
@@ -205,12 +207,12 @@ async fn discover_show_with_release(matched: bool) -> media_core::EpisodeDiscove
         None,
     )
     .unwrap();
-    discovery.available_episodes(&tracking).await.unwrap()
+    discovery.available_episodes(&tracking).await
 }
 
 #[tokio::test]
 async fn tracking_discovery_attaches_identity_only_after_an_exact_release_match() {
-    let matched = discover_show_with_release(true).await;
+    let matched = discover_show_with_release(true).await.unwrap();
     assert_eq!(
         matched.release_identity(),
         Some(media_core::ReleaseIdentity::new(media_core::ReleaseSource::Tvmaze, 88).unwrap())
@@ -220,9 +222,190 @@ async fn tracking_discovery_attaches_identity_only_after_an_exact_release_match(
         Some("https://static.tvmaze.com/resolved.jpg")
     );
 
-    let ambiguous = discover_show_with_release(false).await;
-    assert_eq!(ambiguous.release_identity(), None);
-    assert_eq!(ambiguous.poster_url(), Some("https://rezka.test/show.jpg"));
+    assert!(matches!(
+        discover_show_with_release(false).await,
+        Err(PortError::Conflict)
+    ));
+}
+
+#[derive(Default)]
+struct SameTitleReleaseProvider {
+    queries: Mutex<Vec<ReleaseQuery>>,
+}
+
+#[async_trait::async_trait]
+impl ReleaseMetadataPort for SameTitleReleaseProvider {
+    async fn query(
+        &self,
+        query: &ReleaseQuery,
+    ) -> Result<ReleaseMetadataResult, ReleaseQueryError> {
+        self.queries.lock().unwrap().push(query.clone());
+        let year = query.year.expect("candidate year");
+        let candidate = ReleaseCandidate {
+            source_id: u64::try_from(year).unwrap(),
+            title: query.title.clone(),
+            original_title: query.original_title.clone(),
+            year: Some(year),
+            poster_url: Some(format!("https://static.tvmaze.com/{year}.jpg")),
+            lifecycle: ReleaseLifecycle::Ongoing,
+        };
+        Ok(ReleaseMetadataResult::Matched {
+            source: "tvmaze".to_owned(),
+            fetched_at: "2026-08-10T00:00:00Z".to_owned(),
+            show: candidate,
+            precision: ReleasePrecision::Unknown,
+            lifecycle: ReleaseLifecycle::Ongoing,
+            released_episodes: 1,
+            expected_episodes: None,
+            next_episode: None,
+            schedule: Vec::new(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn tracking_discovery_rejects_same_title_rezka_results_from_different_years() {
+    let result = |year: u16, title_id: u64| {
+        ProviderResult::rezka(
+            SearchResultDto::Rezka {
+                result_id: format!("rezka-show-{year}"),
+                title: "Show".to_owned(),
+                original_title: Some(format!("Original {year}")),
+                year: Some(year),
+                media_kind: MediaKindDto::Series,
+                thumbnail_url: Some(format!("https://rezka.test/{year}.jpg")),
+                translations: vec![RezkaTranslationDto {
+                    id: 37,
+                    name: "Original".to_owned(),
+                    premium: false,
+                    director: false,
+                    camrip: false,
+                    has_ads: false,
+                    seasons: vec![],
+                }],
+                availability: Some(SeriesAvailabilityDto {
+                    lifecycle_status: media_contract::SeriesLifecycleStatusDto::Ongoing,
+                    incomplete: true,
+                    seasons: vec![SeasonAvailabilityDto {
+                        season: 1,
+                        episodes: vec![1],
+                    }],
+                    tracking_prompt: None,
+                }),
+            },
+            format!("/show-{year}.html"),
+            title_id,
+        )
+    };
+    let provider = Arc::new(FakeProvider {
+        pages: Mutex::new(HashMap::from([(
+            ProviderDto::Rezka,
+            vec![ProviderPage {
+                results: vec![result(2024, 42), result(2026, 43)],
+                provider_continuation: None,
+            }],
+        )])),
+    });
+    let discovery = media::search::ProviderEpisodeDiscovery::with_release(
+        provider,
+        Arc::new(SameTitleReleaseProvider::default()),
+    );
+    let tracking = TrackingSubscription::rehydrate(
+        TrackingId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        "Show".to_owned(),
+        "Original".to_owned(),
+        vec![media_core::EpisodeSnapshot::new(1, 1).unwrap()],
+        TrackingScope::Personal,
+        None,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        discovery.available_episodes(&tracking).await,
+        Err(PortError::Conflict)
+    ));
+}
+
+#[tokio::test]
+async fn tracking_discovery_resolves_candidates_before_matching_persisted_identity() {
+    let result = |year: u16, title_id: u64| {
+        ProviderResult::rezka(
+            SearchResultDto::Rezka {
+                result_id: format!("rezka-show-{year}"),
+                title: "Show".to_owned(),
+                original_title: Some(format!("Original {year}")),
+                year: Some(year),
+                media_kind: MediaKindDto::Series,
+                thumbnail_url: Some(format!("https://rezka.test/{year}.jpg")),
+                translations: vec![RezkaTranslationDto {
+                    id: 37,
+                    name: "Original".to_owned(),
+                    premium: false,
+                    director: false,
+                    camrip: false,
+                    has_ads: false,
+                    seasons: vec![],
+                }],
+                availability: Some(SeriesAvailabilityDto {
+                    lifecycle_status: media_contract::SeriesLifecycleStatusDto::Ongoing,
+                    incomplete: true,
+                    seasons: vec![SeasonAvailabilityDto {
+                        season: 1,
+                        episodes: vec![1],
+                    }],
+                    tracking_prompt: None,
+                }),
+            },
+            format!("/show-{year}.html"),
+            title_id,
+        )
+    };
+    let provider = Arc::new(FakeProvider {
+        pages: Mutex::new(HashMap::from([(
+            ProviderDto::Rezka,
+            vec![
+                ProviderPage {
+                    results: vec![result(2024, 42), result(2026, 43)],
+                    provider_continuation: None,
+                },
+                ProviderPage {
+                    results: vec![result(2024, 42), result(2026, 43)],
+                    provider_continuation: None,
+                },
+            ],
+        )])),
+    });
+    let release = Arc::new(SameTitleReleaseProvider::default());
+    let discovery =
+        media::search::ProviderEpisodeDiscovery::with_release(provider, release.clone());
+    let expected_identity =
+        media_core::ReleaseIdentity::new(media_core::ReleaseSource::Tvmaze, 2026).unwrap();
+    let tracking = TrackingSubscription::rehydrate_with_identity(
+        TrackingId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        "Show".to_owned(),
+        "Original".to_owned(),
+        vec![media_core::EpisodeSnapshot::new(1, 1).unwrap()],
+        TrackingScope::Personal,
+        Some(expected_identity),
+        None,
+    )
+    .unwrap();
+
+    for _ in 0..2 {
+        let result = discovery.available_episodes(&tracking).await.unwrap();
+        assert_eq!(result.release_identity(), Some(expected_identity));
+        assert_eq!(
+            result.poster_url(),
+            Some("https://static.tvmaze.com/2026.jpg")
+        );
+    }
+    let queries = release.queries.lock().unwrap();
+    assert_eq!(queries.len(), 4);
+    assert!(queries.iter().all(|query| query.source_id.is_none()));
 }
 
 struct FakeReleaseProvider {

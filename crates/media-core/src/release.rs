@@ -203,6 +203,10 @@ pub fn select_release_candidate(
         return Some(matches[0]);
     }
 
+    if query.year.is_some() {
+        return None;
+    }
+
     let ongoing = matches
         .into_iter()
         .filter(|index| candidates[*index].lifecycle == ReleaseLifecycle::Ongoing)

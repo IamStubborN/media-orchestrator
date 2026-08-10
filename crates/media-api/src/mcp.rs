@@ -99,6 +99,7 @@ struct TrendingInput {
     #[serde(default = "default_trending_category")]
     category: String,
     #[serde(default = "default_page")]
+    #[schemars(range(min = 1))]
     page: u32,
 }
 
@@ -161,6 +162,7 @@ struct BestInput {
     #[serde(default)]
     ranking: BestRankingInput,
     #[serde(default = "default_page")]
+    #[schemars(range(min = 1))]
     page: u32,
 }
 
@@ -169,6 +171,7 @@ struct PremieresInput {
     media_type: DiscoveryMediaType,
     feed: Option<PremiereFeedInput>,
     #[serde(default = "default_page")]
+    #[schemars(range(min = 1))]
     page: u32,
 }
 
@@ -183,11 +186,13 @@ struct DiscoverInput {
     #[schemars(range(min = 1), description = "TMDB genre identifier")]
     genre_id: u64,
     #[serde(default = "default_page")]
+    #[schemars(range(min = 1))]
     page: u32,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 struct DiscoveryItemOutput {
+    #[schemars(range(min = 1))]
     tmdb_id: u64,
     media_type: DiscoveryMediaType,
     title: String,
@@ -203,9 +208,11 @@ struct BestPageOutput {
     source: String,
     media_type: DiscoveryMediaType,
     ranking: BestRankingInput,
+    #[schemars(range(min = 1))]
     page: u32,
     total_pages: u32,
     total_results: u32,
+    #[schemars(length(max = 10))]
     results: Vec<DiscoveryItemOutput>,
 }
 
@@ -214,9 +221,11 @@ struct PremieresPageOutput {
     source: String,
     media_type: DiscoveryMediaType,
     feed: PremiereFeedInput,
+    #[schemars(range(min = 1))]
     page: u32,
     total_pages: u32,
     total_results: u32,
+    #[schemars(length(max = 10))]
     results: Vec<DiscoveryItemOutput>,
 }
 
@@ -237,10 +246,13 @@ struct GenreListOutput {
 struct DiscoverPageOutput {
     source: String,
     media_type: DiscoveryMediaType,
+    #[schemars(range(min = 1))]
     genre_id: u64,
+    #[schemars(range(min = 1))]
     page: u32,
     total_pages: u32,
     total_results: u32,
+    #[schemars(length(max = 10))]
     results: Vec<DiscoveryItemOutput>,
 }
 
@@ -965,7 +977,7 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_tracking_create",
-        description = "Create a personal or family release tracking subscription. Optionally enables the explicitly selected Rezka translation for future automatic downloads.",
+        description = "Create personal or family tracking, optionally with an explicit Rezka translation for future downloads.",
         output_schema = object_output_schema(),
         annotations(title = "Create media tracking", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
@@ -1090,7 +1102,7 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_search",
-        description = "Search Rezka, Prowlarr, or both, or continue one provider page with a continuation token. Returns separate provider results and never downloads automatically.",
+        description = "Search Rezka/Prowlarr or continue one provider page. Returns explicit results and never downloads.",
         output_schema = object_output_schema(),
         annotations(title = "Search media providers", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
     )]
@@ -1178,7 +1190,7 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_episode_choice_set",
-        description = "Read the cached, owner-authorized provider choices for one tracked episode. Returns only public result metadata; it never searches providers or exposes private locators.",
+        description = "Read cached public provider choices for a tracked episode; never searches or exposes private locators.",
         output_schema = object_output_schema(),
         annotations(title = "Get episode choices", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
@@ -1205,7 +1217,7 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_episode_choice_set_refresh",
-        description = "Refresh an expired tracked-episode choice set server-side and return its public provider choices. Provider searches happen only when the cached set is expired.",
+        description = "Refresh an expired tracked-episode choice set and return public provider choices.",
         output_schema = object_output_schema(),
         annotations(title = "Refresh episode choices", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
     )]
@@ -1232,7 +1244,7 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_episode_choice_set_download",
-        description = "Create a download from one exact provider result in a tracked-episode choice set. The source and result are explicit; no provider fallback or implicit selection is performed.",
+        description = "Download one explicit provider result from a tracked-episode choice set; no fallback or implicit selection.",
         output_schema = object_output_schema(),
         annotations(title = "Download tracked episode choice", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
     )]
@@ -1288,7 +1300,7 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_download",
-        description = "Create a download from one exact result in a previous media_search response. Never chooses a provider, result, translation, season, or episode implicitly.",
+        description = "Download one explicit media_search result; never selects provider, translation, season, or episode.",
         output_schema = object_output_schema(),
         annotations(title = "Download selected media", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
     )]
@@ -1321,7 +1333,7 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_rezka_session_refresh",
-        description = "Queue a Rezka session refresh from one approved credential request. The credential is resolved and consumed only by download-runner and is never returned to the caller.",
+        description = "Queue a Rezka refresh from an approved one-time credential request; credentials are never returned.",
         output_schema = object_output_schema(),
         annotations(title = "Refresh Rezka session", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
     )]
@@ -1417,7 +1429,7 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_best",
-        description = "List up to 10 localized TMDB titles by top_rated (default) or popular.",
+        description = "List up to 10 top-rated or popular localized TMDB titles.",
         output_schema = output_schema::<BestPageOutput>(),
         annotations(title = "List best media", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
     )]
@@ -1441,7 +1453,7 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_premieres",
-        description = "List up to 10 TMDB premieres: movie now_playing/upcoming or TV on_the_air/airing_today.",
+        description = "List up to 10 current or upcoming TMDB movies or TV series.",
         output_schema = output_schema::<PremieresPageOutput>(),
         annotations(title = "List media premieres", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
     )]
@@ -1517,7 +1529,7 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_details",
-        description = "Get read-only localized and original TMDB metadata for one movie or series, including poster, overview, genres, countries, status, provider URLs, TV episode counts, and the next scheduled episode when available.",
+        description = "Get localized TMDB details for one movie or series, including poster, metadata, URLs, and TV episode data.",
         output_schema = object_output_schema(),
         annotations(title = "Get media details", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
     )]
@@ -2104,6 +2116,28 @@ fn compact_schema(schema: &mut Arc<rmcp::model::JsonObject>) {
     let schema = Arc::make_mut(schema);
     schema.remove("$schema");
     schema.remove("title");
+    for value in schema.values_mut() {
+        compact_schema_value(value);
+    }
+}
+
+fn compact_schema_value(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            if object.get("description").is_some_and(Value::is_string) {
+                object.remove("description");
+            }
+            for value in object.values_mut() {
+                compact_schema_value(value);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                compact_schema_value(value);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn mcp_scope(owner: media_core::UserId) -> SearchScopeDto {

@@ -353,6 +353,32 @@ async fn lists_top_rated_movies_and_limits_output_to_ten_items() {
 }
 
 #[tokio::test]
+async fn drops_discovery_results_without_a_positive_tmdb_id() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/3/movie/popular"))
+        .and(query_param("page", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "total_results": 2,
+            "results": [
+                {"id": 0, "title": "Invalid provider result"},
+                {"id": 42, "title": "Valid provider result"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let page = TmdbClient::new(config(&server))
+        .unwrap()
+        .best(TrendingMediaTypeDto::Movie, BestRankingDto::Popular, 1)
+        .await
+        .unwrap();
+
+    assert_eq!(page.results.len(), 1);
+    assert_eq!(page.results[0].tmdb_id, 42);
+}
+
+#[tokio::test]
 async fn lists_tv_premieres_from_on_the_air_feed() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -527,6 +553,31 @@ async fn maps_every_supported_best_and_premiere_feed() {
 async fn rejects_mismatched_premiere_feed_and_invalid_discovery_page() {
     let server = MockServer::start().await;
     let client = TmdbClient::new(config(&server)).unwrap();
+
+    assert_eq!(
+        client
+            .trending(TrendingCategoryDto::All, 0)
+            .await
+            .unwrap_err()
+            .code(),
+        TmdbErrorCode::InvalidRequest
+    );
+    assert_eq!(
+        client
+            .best(TrendingMediaTypeDto::Movie, BestRankingDto::Popular, 0)
+            .await
+            .unwrap_err()
+            .code(),
+        TmdbErrorCode::InvalidRequest
+    );
+    assert_eq!(
+        client
+            .premieres(TrendingMediaTypeDto::Tv, PremiereFeedDto::AiringToday, 0,)
+            .await
+            .unwrap_err()
+            .code(),
+        TmdbErrorCode::InvalidRequest
+    );
 
     assert_eq!(
         client

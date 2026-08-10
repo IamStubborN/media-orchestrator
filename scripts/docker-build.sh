@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
 service_image=${MEDIA_SERVICE_IMAGE:-media-orchestrator-service:local}
@@ -32,5 +32,19 @@ build() {
     "$root"
 }
 
-build service "$service_image"
-build runner "$runner_image"
+case ${MEDIA_BUILD_TARGETS:-all} in
+  all)
+    build service "$service_image"
+    build runner "$runner_image"
+    ;;
+  service)
+    build service "$service_image"
+    ;;
+  runner)
+    build runner "$runner_image"
+    ;;
+  *)
+    echo "MEDIA_BUILD_TARGETS must be all, service, or runner" >&2
+    exit 2
+    ;;
+esac

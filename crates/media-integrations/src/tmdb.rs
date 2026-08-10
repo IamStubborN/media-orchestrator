@@ -578,6 +578,9 @@ fn map_item_for_type(
     item: TrendingResult,
     media_type: TrendingMediaTypeDto,
 ) -> Option<TrendingItemDto> {
+    if item.id == 0 {
+        return None;
+    }
     let (title, original_title, date) = match media_type {
         TrendingMediaTypeDto::Movie => (item.title?, item.original_title, item.release_date),
         TrendingMediaTypeDto::Tv => (item.name?, item.original_name, item.first_air_date),

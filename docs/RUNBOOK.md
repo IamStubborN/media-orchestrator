@@ -123,6 +123,32 @@ cached across normal Rust-only changes.
 
 ## Safe Deployment
 
+The normal rollout is service-only:
+
+```sh
+mise run homelab-deploy
+```
+
+It first runs the fail-closed `hermes-home/scripts/check-media-capabilities`
+schema/capability check, builds only the service target, verifies that both
+currently configured image tags still exist, atomically checkpoints their exact
+values together with the deployed MCP schema artifact and OCI revisions, runs
+migrations, and recreates only `media-service`. It refuses to run while a job is
+active. It does not build or
+recreate `download-runner`, and it does not stop or restart the watcher,
+qBittorrent, or either VPN container. Use `mise run homelab-rollback` for the
+matching service-only rollback.
+
+The checker is discovered through sibling `../hermes-home` by default. Set
+`HERMES_HOME_ROOT` for a different checkout root, or
+`HERMES_CAPABILITY_CHECKER` for an explicit checker path. A missing checker or
+schema mismatch aborts before any image build or container operation.
+
+`mise run homelab-deploy-full` and `mise run homelab-rollback-full` are explicit
+operator-only workflows for changes that genuinely require the runner and
+Hermes artifacts to move together. They retain the idle-job guard and the full
+health sequence below.
+
 1. Confirm no job is active before replacing the runner. `queued` is safe;
    `leased`, `running`, `publishing`, `plex_pending`, or `cancel_requested` is not.
 2. Build both immutable image tags.
@@ -212,8 +238,14 @@ path match, not merely a title match.
 
 ## Rollback
 
-Rollback means restoring the two previously recorded immutable image tags and
-repeating the safe deployment sequence. Do not roll back PostgreSQL migrations
+The default rollback restores the service image and its exactly paired Hermes
+MCP schema, recreates Hermes/notifier consumers to invalidate cached tool
+schemas, and compares the live `tools/list` response with the restored artifact.
+On any mismatch it automatically restores the forward service and schema. The
+runner, watcher, qBittorrent, and VPN containers must retain identical container
+IDs, start times, and healthy states throughout. Full rollback is explicit and
+restores both images. Do not
+roll back PostgreSQL migrations
 by deleting data. If the old service cannot read the current schema, stop and
 roll forward with a compatible image instead.
 

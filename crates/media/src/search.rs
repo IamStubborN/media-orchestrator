@@ -227,7 +227,7 @@ impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
             return Ok(None);
         }
         Ok(self
-            .resolve_release_match(tracking, tracking.title(), None, None)
+            .resolve_release_match(tracking, tracking.title(), None, None, true)
             .await
             .and_then(|(identity, poster_url)| poster_url.map(|poster| (identity, poster))))
     }
@@ -262,19 +262,52 @@ impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
             )
             .await
             .map_err(|_| PortError::Infrastructure)?;
-        let result =
-            page.results
-                .into_iter()
-                .find(|result| match (&result.public, &result.private) {
-                    (
-                        SearchResultDto::Rezka { title, .. },
-                        PrivateResult::Rezka { title_id, .. },
-                    ) => tracking.download().map_or_else(
+        let mut candidates = page
+            .results
+            .into_iter()
+            .filter(|result| match (&result.public, &result.private) {
+                (SearchResultDto::Rezka { title, .. }, PrivateResult::Rezka { title_id, .. }) => {
+                    tracking.download().map_or_else(
                         || title.trim().eq_ignore_ascii_case(tracking.title().trim()),
                         |download| download.provider_media_ref() == title_id.to_string(),
-                    ),
-                    _ => false,
-                });
+                    )
+                }
+                _ => false,
+            })
+            .collect::<Vec<_>>();
+        let (result, pre_resolved_match) = if tracking.download().is_some() {
+            (candidates.pop(), None)
+        } else {
+            let mut resolved = Vec::new();
+            for candidate in candidates {
+                let SearchResultDto::Rezka {
+                    title,
+                    original_title,
+                    year,
+                    ..
+                } = &candidate.public
+                else {
+                    continue;
+                };
+                if let Some(release_match) = self
+                    .resolve_release_match(
+                        tracking,
+                        title,
+                        original_title.as_deref(),
+                        year.map(i32::from),
+                        false,
+                    )
+                    .await
+                {
+                    resolved.push((candidate, release_match));
+                }
+            }
+            if resolved.len() != 1 {
+                return Err(PortError::Conflict);
+            }
+            let (candidate, release_match) = resolved.pop().expect("length checked");
+            (Some(candidate), Some(release_match))
+        };
         let Some(ProviderResult {
             public:
                 SearchResultDto::Rezka {
@@ -327,14 +360,19 @@ impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
             .collect::<Vec<_>>();
         episodes.sort_unstable();
         episodes.dedup();
-        let release_match = self
-            .resolve_release_match(
-                tracking,
-                &title,
-                original_title.as_deref(),
-                year.map(i32::from),
-            )
-            .await;
+        let release_match = match pre_resolved_match {
+            Some(release_match) => Some(release_match),
+            None => {
+                self.resolve_release_match(
+                    tracking,
+                    &title,
+                    original_title.as_deref(),
+                    year.map(i32::from),
+                    true,
+                )
+                .await
+            }
+        };
         let poster_url = release_match
             .as_ref()
             .and_then(|(_, poster_url)| poster_url.clone())
@@ -893,10 +931,11 @@ impl ProviderEpisodeDiscovery {
         title: &str,
         original_title: Option<&str>,
         year: Option<i32>,
+        constrain_to_persisted_identity: bool,
     ) -> Option<(ReleaseIdentity, Option<String>)> {
         let release = self.release.as_ref()?;
         let mut query = ReleaseQuery::new(title, original_title.map(str::to_owned), year).ok()?;
-        if let Some(identity) = tracking.release_identity() {
+        if constrain_to_persisted_identity && let Some(identity) = tracking.release_identity() {
             query = query.with_source_id(identity.source_id()).ok()?;
         }
         let ReleaseMetadataResult::Matched { source, show, .. } =

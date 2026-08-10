@@ -9,11 +9,129 @@ environment_file=$remote_root/.env
 rollback_file=$remote_root/media/.media-orchestrator-images.previous
 hermes_root=${HERMES_HOME_ROOT:-$root/../hermes-home}
 hermes_remote_root=${HERMES_HOME_REMOTE_ROOT:-/home/operator/hermes-home}
+remote_schema_file=$hermes_remote_root/shared/skills/media/MCP_SCHEMA.json
 homelab_root=${HOMELAB_ROOT:-$root/../homelab}
 
 usage() {
-    echo "usage: $0 status|verify|deploy|deploy-hermes|rollback" >&2
+    echo "usage: $0 status|verify|deploy|deploy-service|deploy-full|deploy-hermes|rollback|rollback-service|rollback-full" >&2
     exit 2
+}
+
+check_hermes_capabilities() {
+    checker=${HERMES_CAPABILITY_CHECKER:-$hermes_root/scripts/check-media-capabilities}
+    test -f "$checker" || {
+        echo "Hermes capability checker not found: $checker" >&2
+        exit 1
+    }
+    (cd "$hermes_root" && python3 "$checker")
+}
+
+checkpoint_images() {
+    remote sh -s "$environment_file" "$rollback_file" "$remote_schema_file" <<'REMOTE'
+set -eu
+environment_file=$1
+rollback_file=$2
+schema_file=$3
+read_image() {
+    key=$1
+    count=$(grep -c "^${key}=" "$environment_file" || true)
+    test "$count" = 1 || { echo "$key must occur exactly once in $environment_file" >&2; exit 1; }
+    sed -n "s/^${key}=//p" "$environment_file"
+}
+service_image=$(read_image MEDIA_SERVICE_IMAGE)
+runner_image=$(read_image DOWNLOAD_RUNNER_IMAGE)
+test -n "$service_image" && test -n "$runner_image" || { echo "current image record is incomplete" >&2; exit 1; }
+docker image inspect "$service_image" >/dev/null
+docker image inspect "$runner_image" >/dev/null
+test -s "$schema_file" || { echo "deployed Hermes MCP schema is missing: $schema_file" >&2; exit 1; }
+python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["schema_version"] == 1 and p["tools"]' "$schema_file"
+umask 077
+generation=$(mktemp -d "${rollback_file}.generation.XXXXXX")
+trap 'rm -rf "$generation"' EXIT HUP INT TERM
+service_revision=$(docker image inspect "$service_image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')
+runner_revision=$(docker image inspect "$runner_image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')
+schema_sha256=$(sha256sum "$schema_file" | awk '{print $1}')
+schema_source_digest=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_digest"])' "$schema_file")
+printf 'MEDIA_SERVICE_IMAGE=%s\nDOWNLOAD_RUNNER_IMAGE=%s\nSERVICE_REVISION=%s\nRUNNER_REVISION=%s\nMCP_SCHEMA_SHA256=%s\nMCP_SCHEMA_SOURCE_DIGEST=%s\n' "$service_image" "$runner_image" "$service_revision" "$runner_revision" "$schema_sha256" "$schema_source_digest" >"$generation/images.env"
+cp "$schema_file" "$generation/MCP_SCHEMA.json"
+link=$(mktemp "${rollback_file}.link.XXXXXX")
+rm "$link"
+ln -s "$(basename "$generation")" "$link"
+mv -Tf "$link" "$rollback_file"
+trap - EXIT HUP INT TERM
+REMOTE
+}
+
+protected_snapshot() {
+    remote "for name in download-runner gluetun-rezka gluetun-rezka-watcher qbittorrent; do docker inspect \"\$name\" --format '{{.Name}}|{{.Id}}|{{.State.StartedAt}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}'; done"
+}
+
+assert_protected_unchanged() {
+    before=$1
+    after=$(protected_snapshot)
+    test "$before" = "$after" || { echo "a protected container changed during service deployment" >&2; exit 1; }
+    if printf '%s\n' "$after" | grep -Ev '\|healthy$' >/dev/null; then
+        echo "a protected container is not healthy" >&2
+        exit 1
+    fi
+}
+
+sync_hermes_schema() {
+    source=$hermes_root/shared/skills/media/MCP_SCHEMA.json
+    test -s "$source" || { echo "local Hermes MCP schema is missing: $source" >&2; exit 1; }
+    scp "$source" "$host:$remote_schema_file.next" >/dev/null
+    remote "install -m 0644 '$remote_schema_file.next' '$remote_schema_file'; rm '$remote_schema_file.next'"
+}
+
+verify_live_mcp_schema() {
+    schema_file=${1:-$remote_schema_file}
+    remote sh -s "$schema_file" <<'REMOTE'
+set -eu
+schema_file=$1
+live=$(mktemp)
+trap 'rm -f "$live"' EXIT HUP INT TERM
+docker exec -i hermes-primary python3 - >"$live" <<'PY'
+import json, urllib.request
+token=open('/run/secrets/media_api_token').read().strip()
+headers={'Authorization':'Bearer '+token,'Content-Type':'application/json','Accept':'application/json, text/event-stream'}
+def call(payload, protocol=None):
+    request_headers=dict(headers)
+    if protocol: request_headers['MCP-Protocol-Version']=protocol
+    request=urllib.request.Request('http://media-service:8080/internal/mcp', data=json.dumps(payload).encode(), headers=request_headers, method='POST')
+    with urllib.request.urlopen(request, timeout=15) as response: return json.loads(response.read())
+call({'jsonrpc':'2.0','id':1,'method':'initialize','params':{'protocolVersion':'2025-03-26','capabilities':{},'clientInfo':{'name':'deploy-verifier','version':'1'}}})
+print(json.dumps(call({'jsonrpc':'2.0','id':2,'method':'tools/list'}, '2025-03-26')['result']['tools'], sort_keys=True, separators=(',',':')))
+PY
+python3 - "$schema_file" "$live" <<'PY'
+import json,sys
+expected=json.load(open(sys.argv[1]))['tools']
+actual=json.load(open(sys.argv[2]))
+canonical=lambda tools: json.dumps(sorted(tools,key=lambda tool:tool['name']),sort_keys=True,separators=(',',':'))
+assert canonical(expected) == canonical(actual), 'live MCP tools/list differs from restored artifact'
+PY
+REMOTE
+}
+
+ensure_deployed_mcp_schema() {
+    if ! remote "test -s '$remote_schema_file'"; then
+        remote "mkdir -p '$(dirname "$remote_schema_file")'"
+        remote "docker exec -i hermes-primary python3 - >'$remote_schema_file.next'" <<'PY'
+import hashlib,json,urllib.request
+token=open('/run/secrets/media_api_token').read().strip()
+headers={'Authorization':'Bearer '+token,'Content-Type':'application/json','Accept':'application/json, text/event-stream'}
+def call(payload, protocol=None):
+    current=dict(headers)
+    if protocol: current['MCP-Protocol-Version']=protocol
+    request=urllib.request.Request('http://media-service:8080/internal/mcp',data=json.dumps(payload).encode(),headers=current,method='POST')
+    with urllib.request.urlopen(request,timeout=15) as response: return json.loads(response.read())
+call({'jsonrpc':'2.0','id':1,'method':'initialize','params':{'protocolVersion':'2025-03-26','capabilities':{},'clientInfo':{'name':'deploy-checkpoint','version':'1'}}})
+tools=call({'jsonrpc':'2.0','id':2,'method':'tools/list'},'2025-03-26')['result']['tools']
+canonical=json.dumps(sorted(tools,key=lambda tool:tool['name']),sort_keys=True,separators=(',',':'))
+print(json.dumps({'schema_version':1,'source_digest':hashlib.sha256(canonical.encode()).hexdigest(),'tools':tools},sort_keys=True,separators=(',',':')))
+PY
+        remote "chmod 0644 '$remote_schema_file.next'; mv -f '$remote_schema_file.next' '$remote_schema_file'"
+    fi
+    verify_live_mcp_schema
 }
 
 remote() {
@@ -43,6 +161,7 @@ healthy() {
         sleep 5
     done
 }
+
 healthy media-postgres
 healthy media-service
 healthy gluetun-rezka
@@ -61,6 +180,24 @@ echo "homelab media verification passed"
 REMOTE
 }
 
+verify_service() {
+    remote sh -s <<'REMOTE'
+set -eu
+attempts=0
+while :; do
+    state=$(docker inspect media-service --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}')
+    test "$state" = healthy && break
+    attempts=$((attempts + 1))
+    test "$attempts" -lt 30 || { echo "media-service is not healthy: $state" >&2; exit 1; }
+    sleep 5
+done
+for protected in download-runner gluetun-rezka gluetun-rezka-watcher; do
+    docker inspect "$protected" >/dev/null
+done
+echo "homelab media-service verification passed"
+REMOTE
+}
+
 assert_no_active_job() {
     states=$(remote "docker exec media-postgres sh -lc 'psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -Atc \"select state from jobs;\"'")
     active=$(printf '%s\n' "$states" | grep -Ec '^(leased|running|cancel_requested|publishing|plex_pending)$' || true)
@@ -75,6 +212,32 @@ replace_images() {
     runner_image=$2
     remote "set -eu; sed -i 's#^MEDIA_SERVICE_IMAGE=.*#MEDIA_SERVICE_IMAGE=$service_image#; s#^DOWNLOAD_RUNNER_IMAGE=.*#DOWNLOAD_RUNNER_IMAGE=$runner_image#' '$environment_file'; cd '$remote_root/media'; docker compose --env-file '$environment_file' -f '$compose_file' run --rm --no-deps media-service migrate; docker compose --env-file '$environment_file' -f '$compose_file' up -d --no-deps --force-recreate media-service; docker stop gluetun-rezka-watcher >/dev/null; docker compose --env-file '$environment_file' -f '$compose_file' up -d --no-deps --force-recreate download-runner; docker start gluetun-rezka-watcher >/dev/null"
     verify
+}
+
+replace_service_image() {
+    service_image=$1
+    remote sh -s "$environment_file" "$remote_root" "$compose_file" "$service_image" <<'REMOTE'
+set -eu
+environment_file=$1
+remote_root=$2
+compose_file=$3
+service_image=$4
+test "$(grep -c '^MEDIA_SERVICE_IMAGE=' "$environment_file" || true)" = 1 || {
+    echo "MEDIA_SERVICE_IMAGE must occur exactly once in $environment_file" >&2
+    exit 1
+}
+docker image inspect "$service_image" >/dev/null
+umask 077
+next=$(mktemp "${environment_file}.next.XXXXXX")
+trap 'rm -f "$next"' EXIT HUP INT TERM
+sed "s#^MEDIA_SERVICE_IMAGE=.*#MEDIA_SERVICE_IMAGE=$service_image#" "$environment_file" >"$next"
+cd "$remote_root/media"
+docker compose --env-file "$next" -f "$compose_file" run --rm --no-deps media-service migrate
+mv -f "$next" "$environment_file"
+trap - EXIT HUP INT TERM
+docker compose --env-file "$environment_file" -f "$compose_file" up -d --no-deps --force-recreate media-service
+REMOTE
+    verify_service
 }
 
 prepare_hermes_cli() {
@@ -125,8 +288,7 @@ done
 REMOTE
 }
 
-deploy() {
-    assert_no_active_job
+image_suffix() {
     revision=$(git -C "$root" rev-parse --short HEAD)
     worktree_fingerprint=$(
         {
@@ -136,8 +298,37 @@ deploy() {
                 xargs -0 shasum -a 256 2>/dev/null || true
         } | shasum -a 256 | cut -c1-12
     )
-    service_image=media-orchestrator-service:local-$revision-$worktree_fingerprint
-    runner_image=media-orchestrator-runner:local-$revision-$worktree_fingerprint
+    printf 'local-%s-%s\n' "$revision" "$worktree_fingerprint"
+}
+
+deploy_service() {
+    check_hermes_capabilities
+    assert_no_active_job
+    suffix=$(image_suffix)
+    service_image=media-orchestrator-service:$suffix
+    docker_host=${MEDIA_DOCKER_HOST:-ssh://$host}
+    (
+        cd "$root"
+        DOCKER_HOST=$docker_host MEDIA_BUILD_TARGETS=service MEDIA_SERVICE_IMAGE=$service_image ./scripts/docker-build.sh
+    )
+    remote "docker image inspect '$service_image' >/dev/null"
+    sync_homelab_compose
+    ensure_deployed_mcp_schema
+    checkpoint_images
+    protected_before=$(protected_snapshot)
+    replace_service_image "$service_image"
+    sync_hermes_schema
+    replace_hermes_agents
+    verify_live_mcp_schema
+    assert_protected_unchanged "$protected_before"
+}
+
+deploy_full() {
+    check_hermes_capabilities
+    assert_no_active_job
+    suffix=$(image_suffix)
+    service_image=media-orchestrator-service:$suffix
+    runner_image=media-orchestrator-runner:$suffix
     docker_host=${MEDIA_DOCKER_HOST:-ssh://$host}
     (
         cd "$root"
@@ -148,12 +339,13 @@ deploy() {
     )
     prepare_hermes_cli "$service_image" "$docker_host"
     sync_homelab_compose
-    remote "set -eu; umask 077; grep -E '^(MEDIA_SERVICE_IMAGE|DOWNLOAD_RUNNER_IMAGE)=' '$environment_file' >'$rollback_file'"
+    checkpoint_images
     replace_images "$service_image" "$runner_image"
     replace_hermes_agents
 }
 
 deploy_hermes() {
+    check_hermes_capabilities
     assert_no_active_job
     service_image=$(remote "docker inspect media-service --format '{{.Config.Image}}'")
     docker_host=${MEDIA_DOCKER_HOST:-ssh://$host}
@@ -164,23 +356,58 @@ deploy_hermes() {
     verify
 }
 
-rollback() {
-    assert_no_active_job
-    previous=$(remote "cat '$rollback_file'")
+read_rollback_images() {
+    previous=$(remote "cat '$rollback_file/images.env'")
     service_image=$(printf '%s\n' "$previous" | sed -n 's/^MEDIA_SERVICE_IMAGE=//p')
     runner_image=$(printf '%s\n' "$previous" | sed -n 's/^DOWNLOAD_RUNNER_IMAGE=//p')
     test -n "$service_image" && test -n "$runner_image" || {
         echo "rollback image record is incomplete" >&2
         exit 1
     }
+    remote "docker image inspect '$service_image' >/dev/null && docker image inspect '$runner_image' >/dev/null"
+}
+
+rollback_service() {
+    check_hermes_capabilities
+    assert_no_active_job
+    read_rollback_images
+    protected_before=$(protected_snapshot)
+    forward_image=$(remote "sed -n 's/^MEDIA_SERVICE_IMAGE=//p' '$environment_file'")
+    forward_schema=$remote_root/media/.media-orchestrator-mcp-schema.forward.$$
+    remote "cp '$remote_schema_file' '$forward_schema'"
+    if ! (
+        remote "set -eu; expected=\$(sed -n 's/^MCP_SCHEMA_SHA256=//p' '$rollback_file/images.env'); actual=\$(sha256sum '$rollback_file/MCP_SCHEMA.json' | awk '{print \$1}'); test \"\$expected\" = \"\$actual\"; cp '$rollback_file/MCP_SCHEMA.json' '$remote_schema_file.next'; chmod 0644 '$remote_schema_file.next'; mv -f '$remote_schema_file.next' '$remote_schema_file'"
+        replace_service_image "$service_image"
+        replace_hermes_agents
+        verify_live_mcp_schema
+    ); then
+        echo "rollback compatibility check failed; restoring the forward service and schema" >&2
+        remote "cp '$forward_schema' '$remote_schema_file.next'; chmod 0644 '$remote_schema_file.next'; mv -f '$remote_schema_file.next' '$remote_schema_file'"
+        replace_service_image "$forward_image"
+        replace_hermes_agents
+        verify_live_mcp_schema
+        remote "rm -f '$forward_schema'"
+        assert_protected_unchanged "$protected_before"
+        return 1
+    fi
+    remote "rm -f '$forward_schema'"
+    assert_protected_unchanged "$protected_before"
+}
+
+rollback_full() {
+    check_hermes_capabilities
+    assert_no_active_job
+    read_rollback_images
     replace_images "$service_image" "$runner_image"
 }
 
 case ${1:-} in
     status) status ;;
     verify) verify ;;
-    deploy) deploy ;;
+    deploy | deploy-service) deploy_service ;;
+    deploy-full) deploy_full ;;
     deploy-hermes) deploy_hermes ;;
-    rollback) rollback ;;
+    rollback | rollback-service) rollback_service ;;
+    rollback-full) rollback_full ;;
     *) usage ;;
 esac

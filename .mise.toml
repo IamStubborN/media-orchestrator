@@ -101,7 +101,13 @@ run = "./scripts/homelab.sh status"
 run = "./scripts/homelab.sh verify"
 
 [tasks.homelab-deploy]
-run = "./scripts/homelab.sh deploy"
+run = "./scripts/homelab.sh deploy-service"
+
+[tasks.homelab-deploy-full]
+run = "./scripts/homelab.sh deploy-full"
 
 [tasks.homelab-rollback]
-run = "./scripts/homelab.sh rollback"
+run = "./scripts/homelab.sh rollback-service"
+
+[tasks.homelab-rollback-full]
+run = "./scripts/homelab.sh rollback-full"
