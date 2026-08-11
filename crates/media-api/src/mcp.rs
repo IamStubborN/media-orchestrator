@@ -6,9 +6,9 @@ use media_contract::{
     CreateTrackingRequest, DiscoverPageDto, EpisodeSnapshotDto, ExecutionSelectionDto,
     GenreListDto, MediaKindDto, PatchTrackingRequest, PremiereFeedDto, PremieresPageDto,
     ProviderDto, ReleaseQueryRequest, ResolveEpisodeMappingRequest, RezkaSessionRefreshRequest,
-    SearchScopeDto, SelectResultRequest, StartSearchRequest, TrackingDownloadDto,
-    TrackingReleaseIdentityDto, TrackingReleaseSourceDto, TrackingScopeDto, TrendingCategoryDto,
-    TrendingItemDto, TrendingMediaTypeDto,
+    SearchScopeDto, SelectResultRequest, SeriesGroupIdentityDto, SeriesGroupSourceDto,
+    StartSearchRequest, TrackingDownloadDto, TrackingReleaseIdentityDto, TrackingReleaseSourceDto,
+    TrackingScopeDto, TrendingCategoryDto, TrendingItemDto, TrendingMediaTypeDto,
 };
 use media_core::{
     Actor, ApplicationError, EpisodeSnapshot, JobId, ReleaseQuery, ReleaseQueryError,
@@ -57,6 +57,9 @@ struct SearchInput {
     source: String,
     media_kind: Option<String>,
     season: Option<u16>,
+    #[schemars(description = "Stable TMDB series identity for Plex season grouping")]
+    #[schemars(range(min = 1))]
+    tmdb_id: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -539,10 +542,8 @@ struct JobListItemOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     episode_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(skip)]
     translation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(skip)]
     library_title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(skip)]
@@ -1153,6 +1154,18 @@ impl MediaAdminMcp {
             }
             None => None,
         };
+        if input.tmdb_id.is_some_and(|value| value == 0)
+            || input.tmdb_id.is_some() && media_kind != Some(MediaKindDto::Series)
+        {
+            return Err(ErrorData::invalid_params(
+                "tmdb_id requires a positive series search identity",
+                None,
+            ));
+        }
+        let series_group = input.tmdb_id.map(|source_id| SeriesGroupIdentityDto {
+            source: SeriesGroupSourceDto::Tmdb,
+            source_id,
+        });
         let providers: &[ProviderDto] = match input.source.as_str() {
             "all" => &[ProviderDto::Rezka, ProviderDto::Prowlarr],
             "rezka" => &[ProviderDto::Rezka],
@@ -1172,6 +1185,7 @@ impl MediaAdminMcp {
                 query: query.clone(),
                 media_kind,
                 season: input.season,
+                series_group,
                 preferred_qualities: vec![],
                 preferred_languages: vec![],
                 preferred_codecs: vec![],

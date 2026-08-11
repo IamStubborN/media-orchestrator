@@ -12,6 +12,7 @@ use media_contract::{
     RunnerEventDto, RunnerEventRequest,
 };
 use secrecy::{ExposeSecret as _, SecretString};
+use unicode_normalization::UnicodeNormalization as _;
 
 use crate::config::ClientConfig;
 
@@ -544,6 +545,7 @@ impl MediaJobExecutor {
                 episode_mappings,
                 ambiguous_episodes,
                 library_title,
+                library_path_title,
                 title,
                 translation: _,
                 release_year: _,
@@ -567,6 +569,7 @@ impl MediaJobExecutor {
                     episodes,
                     episode_mappings,
                     library_title.as_deref(),
+                    library_path_title.as_deref(),
                     title,
                 )
                 .await
@@ -653,6 +656,7 @@ impl MediaJobExecutor {
         episodes: &[media_contract::EpisodeSnapshotDto],
         episode_mappings: &[media_contract::EpisodeCoordinateMappingDto],
         library_title: Option<&str>,
+        library_path_title: Option<&str>,
         title: &str,
     ) -> Result<ExecutionOutcome, RunnerError> {
         let mut prepared = self.rezka.lock().await;
@@ -822,7 +826,7 @@ impl MediaJobExecutor {
             let work = self.rezka_work(RezkaWorkRequest {
                 lease,
                 manifest: &manifest,
-                title: mapped_title.or(library_title).unwrap_or(title),
+                title: rezka_physical_title(library_path_title, mapped_title, library_title, title),
                 release_year: details.release_year(),
                 season,
                 episode,
@@ -1639,7 +1643,7 @@ impl JobExecutor for MediaJobExecutor {
 
 fn safe_name(value: &str) -> String {
     let value = value
-        .chars()
+        .nfc()
         .map(|character| {
             if character.is_alphanumeric() || matches!(character, ' ' | '-' | '_') {
                 character
@@ -1656,6 +1660,18 @@ fn safe_name(value: &str) -> String {
     } else {
         value
     }
+}
+
+fn rezka_physical_title<'a>(
+    path_title: Option<&'a str>,
+    mapped_title: Option<&'a str>,
+    library_title: Option<&'a str>,
+    provider_title: &'a str,
+) -> &'a str {
+    path_title
+        .or(mapped_title)
+        .or(library_title)
+        .unwrap_or(provider_title)
 }
 
 fn canonical_movie_name(safe_title: &str, release_year: Option<u16>) -> String {
@@ -2218,8 +2234,27 @@ mod tests {
         ExecutionOutcome, ProgressCheckpointGate, artifact_checkpoint, canonical_movie_name,
         combine_episode_outcome, expected_source_duration_seconds, highest_standard_variant,
         matching_episode_videos, parse_episode_coordinates, rezka_audio_language,
-        rezka_final_video_path, torrent_series_work_items,
+        rezka_final_video_path, rezka_physical_title, safe_name, torrent_series_work_items,
     };
+
+    #[test]
+    fn safe_names_normalize_unicode_before_building_library_paths() {
+        assert_eq!(safe_name("Cafe\u{301}"), safe_name("Café"));
+        assert_eq!(safe_name("и\u{306}ога"), safe_name("йога"));
+    }
+
+    #[test]
+    fn rezka_path_identity_wins_over_display_and_episode_mapping_titles() {
+        assert_eq!(
+            rezka_physical_title(
+                Some("rezka-90825"),
+                Some("Mapped Alias"),
+                Some("Localized Alias"),
+                "Provider Alias",
+            ),
+            "rezka-90825",
+        );
+    }
 
     #[test]
     fn non_premium_accounts_choose_the_highest_standard_quality() {

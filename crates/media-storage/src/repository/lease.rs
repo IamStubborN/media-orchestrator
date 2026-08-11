@@ -542,11 +542,15 @@ async fn project_notification(
         None
     };
     let title = canonical_title.unwrap_or_else(|| {
-        payload
-            .get("title")
-            .and_then(serde_json::Value::as_str)
-            .map(safe_notification_field)
-            .filter(|value| !value.is_empty())
+        ["library_title", "title"]
+            .into_iter()
+            .find_map(|field| {
+                payload
+                    .get(field)
+                    .and_then(serde_json::Value::as_str)
+                    .map(safe_notification_field)
+                    .filter(|value| !value.is_empty())
+            })
             .unwrap_or_else(|| "Media job".to_owned())
     });
     let kind = if payload

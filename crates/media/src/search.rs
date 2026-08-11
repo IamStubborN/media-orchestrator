@@ -254,6 +254,7 @@ impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
                     query: tracking.title().to_owned(),
                     media_kind: None,
                     season: None,
+                    series_group: tracking.release_identity().map(series_group_identity),
                     preferred_qualities: Vec::new(),
                     preferred_languages: Vec::new(),
                     preferred_codecs: Vec::new(),
@@ -494,6 +495,10 @@ impl ProviderEpisodeAvailability {
                         query: query.clone(),
                         media_kind: Some(MediaKindDto::Series),
                         season: None,
+                        series_group: request
+                            .tracking()
+                            .release_identity()
+                            .map(series_group_identity),
                         preferred_qualities: Vec::new(),
                         preferred_languages: Vec::new(),
                         preferred_codecs: Vec::new(),
@@ -558,6 +563,10 @@ impl ProviderEpisodeAvailability {
                         query: request.tracking().title().to_owned(),
                         media_kind: Some(MediaKindDto::Series),
                         season: None,
+                        series_group: request
+                            .tracking()
+                            .release_identity()
+                            .map(series_group_identity),
                         preferred_qualities: Vec::new(),
                         preferred_languages: Vec::new(),
                         preferred_codecs: Vec::new(),
@@ -607,6 +616,10 @@ impl ProviderEpisodeAvailability {
                         u16::try_from(request.episode().season())
                             .map_err(|_| PortError::Conflict)?,
                     ),
+                    series_group: request
+                        .tracking()
+                        .release_identity()
+                        .map(series_group_identity),
                     preferred_qualities: Vec::new(),
                     preferred_languages: Vec::new(),
                     preferred_codecs: Vec::new(),
@@ -661,6 +674,10 @@ impl ProviderEpisodeAvailability {
                         u16::try_from(request.episode().season())
                             .map_err(|_| PortError::Conflict)?,
                     ),
+                    series_group: request
+                        .tracking()
+                        .release_identity()
+                        .map(series_group_identity),
                     preferred_qualities: Vec::new(),
                     preferred_languages: Vec::new(),
                     preferred_codecs: Vec::new(),
@@ -717,6 +734,10 @@ fn choice_session_request(
                 Some(u16::try_from(request.episode().season()).map_err(|_| PortError::Conflict)?)
             }
         },
+        series_group: request
+            .tracking()
+            .release_identity()
+            .map(series_group_identity),
         preferred_qualities: Vec::new(),
         preferred_languages: Vec::new(),
         preferred_codecs: Vec::new(),
@@ -815,6 +836,7 @@ impl TrackedEpisodeDownloadPort for TrackedEpisodeDownloader {
                     query: tracking.title().to_owned(),
                     media_kind: Some(MediaKindDto::Series),
                     season: None,
+                    series_group: tracking.release_identity().map(series_group_identity),
                     preferred_qualities: Vec::new(),
                     preferred_languages: Vec::new(),
                     preferred_codecs: Vec::new(),
@@ -853,6 +875,7 @@ impl TrackedEpisodeDownloadPort for TrackedEpisodeDownloader {
             Some(MediaKindDto::Series),
             None,
             Some(tracking.title()),
+            tracking.release_identity().map(series_group_identity),
         )
         .map_err(|_| PortError::Infrastructure)?;
         if let Some(identity) = self.identity.as_deref() {
@@ -1829,6 +1852,9 @@ impl DurableSearchService {
         if request.query.trim().is_empty()
             || request.query.len() > 512
             || request.query.chars().any(char::is_control)
+            || request.series_group.is_some_and(|group| {
+                group.source_id == 0 || request.media_kind != Some(MediaKindDto::Series)
+            })
             || (request.source == ProviderDto::Prowlarr
                 && !matches!(
                     (request.media_kind, request.season),
@@ -2172,6 +2198,7 @@ impl DurableSearchService {
             session.request.media_kind,
             session.request.season,
             Some(&session.request.query),
+            session.request.series_group,
         )?;
         if let Some(identity) = self.identity.as_deref() {
             apply_persisted_episode_mappings(identity, &mut execution).await?;
@@ -2360,6 +2387,7 @@ impl SearchService for DurableSearchService {
                 query,
                 media_kind: Some(media_kind),
                 season,
+                series_group: None,
                 preferred_qualities: Vec::new(),
                 preferred_languages: Vec::new(),
                 preferred_codecs: Vec::new(),
@@ -2608,6 +2636,7 @@ fn execution(
     searched_kind: Option<MediaKindDto>,
     searched_season: Option<u16>,
     library_title_hint: Option<&str>,
+    series_group: Option<media_contract::SeriesGroupIdentityDto>,
 ) -> Result<ExecutionSelectionDto, SearchError> {
     match (&result.public, &result.private) {
         (
@@ -2801,8 +2830,11 @@ fn execution(
                 ambiguous_episodes,
                 release_year: *year,
                 library_title: library_title_hint
-                    .and_then(|hint| canonical_rezka_library_title(hint, title, *media_kind))
-                    .map(str::to_owned),
+                    .and_then(|hint| canonical_rezka_library_title(hint, title, *media_kind)),
+                library_path_title: Some(canonical_rezka_library_path_title(
+                    *title_id,
+                    series_group,
+                )),
                 thumbnail_url: thumbnail_url.clone(),
                 title: title.clone(),
             })
@@ -2811,11 +2843,11 @@ fn execution(
     }
 }
 
-fn canonical_rezka_library_title<'a>(
-    query: &'a str,
+fn canonical_rezka_library_title(
+    query: &str,
     provider_title: &str,
     media_kind: MediaKindDto,
-) -> Option<&'a str> {
+) -> Option<String> {
     let query = query.trim();
     if query.is_empty() {
         return None;
@@ -2826,20 +2858,58 @@ fn canonical_rezka_library_title<'a>(
         .map(str::trim)
         .filter(|alias| !alias.is_empty())
         .collect::<Vec<_>>();
-    if aliases
+    if let Some(alias) = aliases
         .iter()
-        .any(|alias| canonical_title_key(alias) == normalized_query)
+        .find(|alias| canonical_title_key(alias) == normalized_query)
     {
-        return Some(query);
+        return Some(alias.nfc().collect());
     }
     if media_kind != MediaKindDto::Series {
         return None;
     }
     aliases.iter().find_map(|alias| {
-        let normalized_alias = canonical_title_key(alias);
-        let suffix = normalized_alias.strip_prefix(&normalized_query)?;
-        (suffix.is_empty() || suffix.starts_with(':') || suffix.starts_with(" [")).then_some(query)
+        let without_marker = alias
+            .rsplit_once(" [")
+            .map_or(*alias, |(title, _)| title)
+            .trim();
+        [
+            without_marker,
+            without_marker
+                .split_once(':')
+                .map_or(without_marker, |(root, _)| root),
+        ]
+        .into_iter()
+        .find(|candidate| canonical_title_key(candidate) == normalized_query)
+        .map(|candidate| candidate.nfc().collect())
     })
+}
+
+fn series_group_identity(
+    identity: media_core::ReleaseIdentity,
+) -> media_contract::SeriesGroupIdentityDto {
+    let source = match identity.source() {
+        media_core::ReleaseSource::Tvmaze => media_contract::SeriesGroupSourceDto::Tvmaze,
+    };
+    media_contract::SeriesGroupIdentityDto {
+        source,
+        source_id: identity.source_id(),
+    }
+}
+
+fn canonical_rezka_library_path_title(
+    title_id: u64,
+    series_group: Option<media_contract::SeriesGroupIdentityDto>,
+) -> String {
+    series_group.map_or_else(
+        || format!("rezka-{title_id}"),
+        |group| {
+            let source = match group.source {
+                media_contract::SeriesGroupSourceDto::Tmdb => "tmdb",
+                media_contract::SeriesGroupSourceDto::Tvmaze => "tvmaze",
+            };
+            format!("rezka-series-{source}-{}", group.source_id)
+        },
+    )
 }
 
 fn canonical_title_key(value: &str) -> String {
@@ -2941,8 +3011,8 @@ fn job_dto(job: &Job) -> JobDto {
 #[cfg(test)]
 mod tests {
     use super::{
-        ambiguous_episode_label, canonical_rezka_library_title, retryable_rezka_auth_error,
-        rezka_translation_available, skippable_title_error,
+        ambiguous_episode_label, canonical_rezka_library_path_title, canonical_rezka_library_title,
+        retryable_rezka_auth_error, rezka_translation_available, skippable_title_error,
     };
     use media_contract::MediaKindDto;
 
@@ -2950,11 +3020,19 @@ mod tests {
     fn season_release_titles_share_an_exact_base_query_as_the_plex_title() {
         assert_eq!(
             canonical_rezka_library_title(
+                "мАгИя И мУсКуЛы",
+                "Магия и мускулы [ТВ-1]",
+                MediaKindDto::Series,
+            ),
+            Some("Магия и мускулы".to_owned()),
+        );
+        assert_eq!(
+            canonical_rezka_library_title(
                 "Магия и мускулы",
                 "Магия и мускулы [ТВ-1]",
                 MediaKindDto::Series,
             ),
-            Some("Магия и мускулы"),
+            Some("Магия и мускулы".to_owned()),
         );
         assert_eq!(
             canonical_rezka_library_title(
@@ -2962,7 +3040,7 @@ mod tests {
                 "Магия и мускулы: Экзамен на звание Вестника Бога [ТВ-2]",
                 MediaKindDto::Series,
             ),
-            Some("Магия и мускулы"),
+            Some("Магия и мускулы".to_owned()),
         );
         assert_eq!(
             canonical_rezka_library_title("Магия", "Магия и мускулы [ТВ-1]", MediaKindDto::Series,),
@@ -2980,7 +3058,7 @@ mod tests {
                 provider,
                 MediaKindDto::Movie,
             ),
-            Some("легенда ОБ аанге: последний маг воздуха"),
+            Some("Легенда об Аанге: Последний маг воздуха".to_owned()),
         );
         assert_eq!(
             canonical_rezka_library_title("Легенда об Аанге", provider, MediaKindDto::Movie,),
@@ -2997,12 +3075,50 @@ mod tests {
                 "Café / Другой фильм",
                 MediaKindDto::Movie,
             ),
-            Some(decomposed_cafe),
+            Some("Café".to_owned()),
         );
         let decomposed_cyrillic = "и\u{306}ога";
         assert_eq!(
             canonical_rezka_library_title(decomposed_cyrillic, "Фильм / Йога", MediaKindDto::Movie,),
-            Some(decomposed_cyrillic),
+            Some("Йога".to_owned()),
+        );
+    }
+
+    #[test]
+    fn rezka_path_title_is_stable_across_alias_order_case_and_unicode_forms() {
+        let variants = [
+            "Аватар Аанг / Легенда об Аанге",
+            "легенда ОБ аанге / АВАТАР ААНГ",
+            "Легенда об Аанге / Аватар Аанг",
+            "Cafe\u{301} / Другой фильм",
+            "ДРУГОЙ ФИЛЬМ / CAFÉ",
+        ];
+
+        for _provider in variants {
+            assert_eq!(
+                canonical_rezka_library_path_title(90825, None),
+                "rezka-90825"
+            );
+        }
+    }
+
+    #[test]
+    fn rezka_series_path_title_groups_only_by_explicit_stable_identity() {
+        use media_contract::{SeriesGroupIdentityDto, SeriesGroupSourceDto};
+
+        assert_eq!(canonical_rezka_library_path_title(101, None), "rezka-101");
+        assert_eq!(canonical_rezka_library_path_title(202, None), "rezka-202");
+        let group = Some(SeriesGroupIdentityDto {
+            source: SeriesGroupSourceDto::Tmdb,
+            source_id: 94997,
+        });
+        assert_eq!(
+            canonical_rezka_library_path_title(101, group),
+            "rezka-series-tmdb-94997",
+        );
+        assert_eq!(
+            canonical_rezka_library_path_title(202, group),
+            "rezka-series-tmdb-94997",
         );
     }
 

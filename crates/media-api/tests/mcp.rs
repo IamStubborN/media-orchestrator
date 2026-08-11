@@ -309,6 +309,18 @@ async fn stateless_mcp_2026_lists_tools_without_initialize_or_session() {
     assert_eq!(body["result"]["ttlMs"], 300_000);
     assert_eq!(body["result"]["cacheScope"], "public");
 
+    let search = body["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "media_search")
+        .unwrap();
+    assert_eq!(search["inputSchema"]["properties"]["tmdb_id"]["minimum"], 1);
+    assert_eq!(
+        search["inputSchema"]["properties"]["tmdb_id"]["format"],
+        "uint64"
+    );
+
     for name in ["media_jobs_list", "media_tracking_list", "plex_recent"] {
         let tool = body["result"]["tools"]
             .as_array()
@@ -421,6 +433,10 @@ async fn stateless_mcp_2026_lists_tools_without_initialize_or_session() {
             &tool["outputSchema"]["$defs"]["TrackingListItemOutput"]
         };
         assert!(item["properties"]["poster_url"].is_object());
+        if name == "media_jobs_list" {
+            assert!(item["properties"]["library_title"].is_object());
+            assert!(item["properties"]["translation"].is_object());
+        }
     }
     let tracking_create = body["result"]["tools"]
         .as_array()

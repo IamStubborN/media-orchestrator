@@ -12,7 +12,8 @@ use media_api::{ChoiceSetSelection, SearchError, SearchService};
 use media_contract::{
     AlternativeSearchRequest, ContinueSearchRequest, MediaKindDto, ProviderDto, ProwlarrRankingDto,
     RezkaTranslationDto, SearchResultDto, SearchScopeDto, SeasonAvailabilityDto,
-    SelectResultRequest, SeriesAvailabilityDto, StartSearchRequest, TrackingPromptDto,
+    SelectResultRequest, SeriesAvailabilityDto, SeriesGroupIdentityDto, SeriesGroupSourceDto,
+    StartSearchRequest, TrackingPromptDto,
 };
 use media_core::{
     PRIMARY_USER_ID, CanonicalEpisode, CanonicalEpisodeCoordinates, CanonicalMedia, CanonicalSeason,
@@ -667,6 +668,7 @@ async fn choice_set_download_selects_the_exact_cached_result_without_generic_sco
                 query: "Cached Show".to_owned(),
                 media_kind: Some(MediaKindDto::Series),
                 season: None,
+                series_group: None,
                 preferred_qualities: vec![],
                 preferred_languages: vec![],
                 preferred_codecs: vec![],
@@ -825,6 +827,7 @@ async fn choice_set_refreshes_empty_source_and_keeps_healthy_provider_after_fail
                     query: "Tracked Show".to_owned(),
                     media_kind: Some(MediaKindDto::Series),
                     season: Some(3),
+                    series_group: None,
                     preferred_qualities: vec![],
                     preferred_languages: vec![],
                     preferred_codecs: vec![],
@@ -1290,6 +1293,7 @@ async fn ambiguous_episode_is_resolved_persisted_in_execution_and_requeued() {
                 }],
                 release_year: Some(2016),
                 library_title: None,
+                library_path_title: None,
                 thumbnail_url: None,
                 title: "Separate OVA title".to_owned(),
             },
@@ -1347,6 +1351,7 @@ fn request(source: ProviderDto) -> StartSearchRequest {
         query: "Example".to_owned(),
         media_kind: (source == ProviderDto::Prowlarr).then_some(MediaKindDto::Movie),
         season: None,
+        series_group: None,
         preferred_qualities: vec![],
         preferred_languages: vec![],
         preferred_codecs: vec![],
@@ -1443,6 +1448,7 @@ async fn alternative_search_is_owner_scoped_and_uses_the_opposite_provider() {
                 ambiguous_episodes: Vec::new(),
                 release_year: Some(2026),
                 library_title: None,
+                library_path_title: None,
                 thumbnail_url: None,
                 title: "Blades of the Guardians".to_owned(),
             },
@@ -1553,11 +1559,12 @@ async fn rezka_accepts_media_kind_as_a_search_filter() {
 }
 
 #[tokio::test]
-async fn rezka_movie_selection_persists_an_exact_second_alias_as_library_title() {
+async fn rezka_movie_path_is_stable_across_root_alias_case_and_unicode_queries() {
     let public = SearchResultDto::Rezka {
         result_id: "rezka-avatar".to_owned(),
-        title: "Аватар Аанг: Последний маг воздуха / Легенда об Аанге: Последний маг воздуха"
-            .to_owned(),
+        title:
+            "Аватар Аанг: Последний маг воздуха / Легенда об Аанге: Последний маг воздуха / Café"
+                .to_owned(),
         original_title: None,
         year: Some(2026),
         media_kind: MediaKindDto::Movie,
@@ -1573,43 +1580,165 @@ async fn rezka_movie_selection_persists_an_exact_second_alias_as_library_title()
         }],
         availability: None,
     };
+    let provider_page = ProviderPage {
+        results: vec![ProviderResult::rezka(public, "/avatar.html".to_owned(), 42)],
+        provider_continuation: None,
+    };
     let service = service(HashMap::from([(
         ProviderDto::Rezka,
-        vec![ProviderPage {
-            results: vec![ProviderResult::rezka(public, "/avatar.html".to_owned(), 42)],
-            provider_continuation: None,
-        }],
+        vec![provider_page; 5],
     )]));
-    let mut search = request(ProviderDto::Rezka);
-    search.query = "Легенда об Аанге: Последний маг воздуха".to_owned();
-    search.media_kind = Some(MediaKindDto::Movie);
-    let page = service.start(PRIMARY_USER_ID, search).await.unwrap();
+    for (index, query) in [
+        "Аватар Аанг",
+        "Аватар Аанг: Последний маг воздуха",
+        "Легенда об Аанге: Последний маг воздуха",
+        "легенда ОБ аанге: последний маг воздуха",
+        "Cafe\u{301}",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut search = request(ProviderDto::Rezka);
+        search.query = query.to_owned();
+        search.media_kind = Some(MediaKindDto::Movie);
+        let page = service.start(PRIMARY_USER_ID, search).await.unwrap();
+        let job = service
+            .select(
+                PRIMARY_USER_ID,
+                OperationKey::from_bytes([u8::try_from(index + 41).unwrap(); 32]),
+                SelectResultRequest {
+                    session_id: page.session_id,
+                    result_id: "rezka-avatar".to_owned(),
+                    translation_id: Some(7),
+                    season: None,
+                    episode: None,
+                    scope: telegram_scope("default", None),
+                },
+            )
+            .await
+            .unwrap();
+        let execution = service.execution_for(&job.result_ref).await.unwrap();
 
-    let job = service
-        .select(
-            PRIMARY_USER_ID,
-            OperationKey::from_bytes([41; 32]),
-            SelectResultRequest {
-                session_id: page.session_id,
-                result_id: "rezka-avatar".to_owned(),
-                translation_id: Some(7),
-                season: None,
-                episode: None,
-                scope: telegram_scope("default", None),
+        assert!(matches!(
+            execution,
+            media_contract::ExecutionSelectionDto::Rezka {
+                media_kind: MediaKindDto::Movie,
+                library_path_title: Some(library_path_title),
+                ..
+            } if library_path_title == "rezka-42"
+        ));
+    }
+}
+
+#[tokio::test]
+async fn rezka_series_path_ignores_provider_variants_and_groups_only_by_explicit_identity() {
+    let result = |result_id: &str, title: &str, title_id| {
+        ProviderResult::rezka(
+            SearchResultDto::Rezka {
+                result_id: result_id.to_owned(),
+                title: title.to_owned(),
+                original_title: None,
+                year: Some(2026),
+                media_kind: MediaKindDto::Series,
+                thumbnail_url: None,
+                translations: vec![RezkaTranslationDto {
+                    id: 7,
+                    name: "Дубляж".to_owned(),
+                    premium: false,
+                    director: false,
+                    camrip: false,
+                    has_ads: false,
+                    seasons: vec![SeasonAvailabilityDto {
+                        season: 1,
+                        episodes: vec![1],
+                    }],
+                }],
+                availability: Some(SeriesAvailabilityDto {
+                    lifecycle_status: media_contract::SeriesLifecycleStatusDto::Ongoing,
+                    incomplete: true,
+                    seasons: vec![SeasonAvailabilityDto {
+                        season: 1,
+                        episodes: vec![1],
+                    }],
+                    tracking_prompt: None,
+                }),
             },
+            format!("/{title_id}.html"),
+            title_id,
         )
-        .await
-        .unwrap();
-    let execution = service.execution_for(&job.result_ref).await.unwrap();
+    };
+    let pages = [
+        ("same-a", "Магия и мускулы [ТВ-1]", 101),
+        ("same-b", "магия И МУСКУЛЫ", 101),
+        ("same-c", "Cafe\u{301} / CAFÉ [TV-1]", 101),
+        ("season-one", "Магия и мускулы [ТВ-1]", 101),
+        ("season-two", "Магия и мускулы [ТВ-2]", 202),
+    ]
+    .map(|(id, title, title_id)| ProviderPage {
+        results: vec![result(id, title, title_id)],
+        provider_continuation: None,
+    });
+    let service = service(HashMap::from([(ProviderDto::Rezka, pages.to_vec())]));
+    for (index, result_id) in ["same-a", "same-b", "same-c"].into_iter().enumerate() {
+        let mut search = request(ProviderDto::Rezka);
+        search.query = "магия И мускулы".to_owned();
+        search.media_kind = Some(MediaKindDto::Series);
+        let page = service.start(PRIMARY_USER_ID, search).await.unwrap();
+        let job = service
+            .select(
+                PRIMARY_USER_ID,
+                OperationKey::from_bytes([u8::try_from(index + 70).unwrap(); 32]),
+                SelectResultRequest {
+                    session_id: page.session_id,
+                    result_id: result_id.to_owned(),
+                    translation_id: Some(7),
+                    season: Some(1),
+                    episode: None,
+                    scope: telegram_scope("default", None),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            service.execution_for(&job.result_ref).await.unwrap(),
+            media_contract::ExecutionSelectionDto::Rezka {
+                library_path_title: Some(path), ..
+            } if path == "rezka-101"
+        ));
+    }
 
-    assert!(matches!(
-        execution,
-        media_contract::ExecutionSelectionDto::Rezka {
-            media_kind: MediaKindDto::Movie,
-            library_title: Some(library_title),
-            ..
-        } if library_title == "Легенда об Аанге: Последний маг воздуха"
-    ));
+    let group = Some(SeriesGroupIdentityDto {
+        source: SeriesGroupSourceDto::Tmdb,
+        source_id: 94997,
+    });
+    for (index, result_id) in ["season-one", "season-two"].into_iter().enumerate() {
+        let mut search = request(ProviderDto::Rezka);
+        search.query = "Магия и мускулы".to_owned();
+        search.media_kind = Some(MediaKindDto::Series);
+        search.series_group = group;
+        let page = service.start(PRIMARY_USER_ID, search).await.unwrap();
+        let job = service
+            .select(
+                PRIMARY_USER_ID,
+                OperationKey::from_bytes([u8::try_from(index + 80).unwrap(); 32]),
+                SelectResultRequest {
+                    session_id: page.session_id,
+                    result_id: result_id.to_owned(),
+                    translation_id: Some(7),
+                    season: Some(1),
+                    episode: None,
+                    scope: telegram_scope("default", None),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            service.execution_for(&job.result_ref).await.unwrap(),
+            media_contract::ExecutionSelectionDto::Rezka {
+                library_path_title: Some(path), ..
+            } if path == "rezka-series-tmdb-94997"
+        ));
+    }
 }
 
 #[tokio::test]
@@ -1723,6 +1852,7 @@ async fn prowlarr_selection_preserves_a_single_episode_target() {
                 query: "Example Show".to_owned(),
                 media_kind: Some(MediaKindDto::Series),
                 season: Some(2),
+                series_group: None,
                 preferred_qualities: vec![],
                 preferred_languages: vec![],
                 preferred_codecs: vec![],

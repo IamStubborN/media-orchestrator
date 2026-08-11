@@ -85,6 +85,46 @@ fn start_and_continue_reject_caller_identity_fields() {
 }
 
 #[test]
+fn search_series_group_identity_is_optional_strict_and_source_typed() {
+    let legacy = serde_json::json!({
+        "scope":{"platform":"telegram","chat_id":"42"},
+        "source":"rezka",
+        "query":"Show",
+        "media_kind":"series"
+    });
+    assert_eq!(
+        serde_json::from_value::<StartSearchRequest>(legacy)
+            .unwrap()
+            .series_group,
+        None,
+    );
+    let request = serde_json::from_value::<StartSearchRequest>(serde_json::json!({
+        "scope":{"platform":"telegram","chat_id":"42"},
+        "source":"rezka",
+        "query":"Show",
+        "media_kind":"series",
+        "series_group":{"source":"tmdb","source_id":94997}
+    }))
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(request).unwrap()["series_group"],
+        serde_json::json!({"source":"tmdb","source_id":94997}),
+    );
+    assert!(
+        serde_json::from_value::<StartSearchRequest>(serde_json::json!({
+            "scope":{"platform":"telegram","chat_id":"42"},
+            "source":"rezka",
+            "query":"Show",
+            "media_kind":"series",
+            "series_group":{"source":"tmdb","source_id":94997,"title":"unstable"}
+        }))
+        .unwrap_err()
+        .to_string()
+        .contains("unknown field")
+    );
+}
+
+#[test]
 fn alternative_search_contains_only_the_conversation_scope() {
     let request = AlternativeSearchRequest {
         scope: media_contract::SearchScopeDto {
@@ -260,6 +300,7 @@ fn legacy_rezka_execution_payloads_default_to_the_provider_title() {
         execution,
         ExecutionSelectionDto::Rezka {
             library_title: None,
+            library_path_title: None,
             title,
             ..
         } if title == "Example [TV-1]"

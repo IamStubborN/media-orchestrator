@@ -46,7 +46,8 @@ pub use search::{
     MAX_SEARCH_RESULTS_PER_PAGE, MediaKindDto, ProwlarrRankingDto, ResolveEpisodeMappingRequest,
     RezkaSessionRefreshRequest, RezkaTranslationDto, SearchPageDto, SearchResultDto,
     SearchScopeDto, SeasonAvailabilityDto, SelectResultRequest, SeriesAvailabilityDto,
-    SeriesLifecycleStatusDto, StartSearchRequest, TrackingPromptDto,
+    SeriesGroupIdentityDto, SeriesGroupSourceDto, SeriesLifecycleStatusDto, StartSearchRequest,
+    TrackingPromptDto,
 };
 pub use tracking::{
     CreateTrackingRequest, EpisodeSnapshotDto, PatchTrackingRequest, SetTrackingBaselineRequest,

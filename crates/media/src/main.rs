@@ -676,6 +676,7 @@ async fn run_search(args: SearchArgs) -> Result<(), RunError> {
                         .expect("clap requires query without continuation"),
                     media_kind: args.kind.map(Into::into),
                     season: args.season,
+                    series_group: None,
                     preferred_qualities: Vec::new(),
                     preferred_languages: Vec::new(),
                     preferred_codecs: Vec::new(),

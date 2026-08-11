@@ -878,7 +878,7 @@ async fn job_lifecycle_projects_one_terminal_card_and_one_final_push() {
         .execute_unprepared(
             "INSERT INTO search_executions (result_ref, payload) VALUES \
              ('selection:structured-lifecycle-card', \
-              '{\"title\":\"Structured Show\",\"media_kind\":\"series\",\"season\":1,\"translation\":\"Studio Dub\",\"episodes\":[{\"season\":1,\"episode\":1}]}')",
+              '{\"title\":\"Structured Show Release\",\"library_title\":\"Structured Show\",\"media_kind\":\"series\",\"season\":1,\"translation\":\"Studio Dub\",\"episodes\":[{\"season\":1,\"episode\":1}]}')",
         )
         .await
         .unwrap();
@@ -923,6 +923,7 @@ async fn job_lifecycle_projects_one_terminal_card_and_one_final_push() {
         .unwrap();
     let card_payload = card.try_get::<serde_json::Value>("", "payload").unwrap();
     assert_eq!(card_payload["state"], "completed");
+    assert_eq!(card_payload["media"]["title"], "Structured Show");
     let push_payload = rows
         .iter()
         .find_map(|row| {
@@ -936,6 +937,7 @@ async fn job_lifecycle_projects_one_terminal_card_and_one_final_push() {
         format!("media-event:{}", created.id())
     );
     assert_eq!(push_payload["state"], "completed");
+    assert_eq!(push_payload["media"]["title"], "Structured Show");
     assert_eq!(push_payload["terminal"], true);
     assert_eq!(push_payload["revision"], card_payload["revision"]);
 }
@@ -1377,7 +1379,8 @@ async fn detailed_notification_projects_retry_recovery_and_terminal_actions() {
             [
                 result_ref.into(),
                 serde_json::json!({
-                    "title": "Recovery Show",
+                    "title": "Recovery Show Release",
+                    "library_title": "Recovery Show",
                     "media_kind": "series",
                     "translation": "AniLibria",
                     "episodes": [{"season": 1, "episode": 7}]
@@ -1512,6 +1515,7 @@ async fn detailed_notification_projects_retry_recovery_and_terminal_actions() {
     .try_get::<serde_json::Value>("", "payload")
     .unwrap();
     assert_eq!(failed["state"], "failed");
+    assert_eq!(failed["media"]["title"], "Recovery Show");
     assert_eq!(failed["progress"]["connection_attempt"], 20);
     assert_eq!(failed["progress"]["connection_attempt_limit"], 20);
     assert_eq!(
@@ -1742,7 +1746,8 @@ async fn storage_block_notifies_both_family_recipients_once() {
                 "selection:blocked-private-reference".into(),
                 serde_json::json!({
                     "source": "rezka",
-                    "title": "Случайная любовь",
+                    "title": "Случайная любовь [ТВ-1]",
+                    "library_title": "Случайная любовь",
                     "media_kind": "series",
                     "season": 1,
                     "episode": 1,

@@ -12,6 +12,8 @@ pub struct StartSearchRequest {
     pub media_kind: Option<MediaKindDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub season: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub series_group: Option<SeriesGroupIdentityDto>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preferred_qualities: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -63,6 +65,20 @@ pub struct SearchScopeDto {
 pub enum MediaKindDto {
     Movie,
     Series,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SeriesGroupIdentityDto {
+    pub source: SeriesGroupSourceDto,
+    pub source_id: u64,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeriesGroupSourceDto {
+    Tmdb,
+    Tvmaze,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -260,6 +276,8 @@ pub enum ExecutionSelectionDto {
         release_year: Option<u16>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         library_title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library_path_title: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thumbnail_url: Option<String>,
         title: String,

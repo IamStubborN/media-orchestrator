@@ -316,7 +316,7 @@ prepare_hermes_cli() {
         --exclude secrets/ \
         "$hermes_root/" "$host:$hermes_remote_root/"
     scp "$artifact" "$host:$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next" >/dev/null
-    remote "set -eu; install -m 0755 '$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next' '$hermes_remote_root/artifacts/media-$media_version-linux-amd64'; rm '$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next'; sed -i '/^HERMES_HOME_IMAGE=/d; /^MEDIA_CLI_SHA256=/d' '$hermes_remote_root/.env'; cd '$hermes_remote_root'; attempts=0; until docker compose --env-file .env pull; do attempts=\$((attempts + 1)); test \"\$attempts\" -lt 5 || exit 1; sleep 5; done"
+    remote "set -eu; install -m 0755 '$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next' '$hermes_remote_root/artifacts/media-$media_version-linux-amd64'; rm '$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next'; sed -i '/^HERMES_HOME_IMAGE=/d; /^MEDIA_CLI_SHA256=/d' '$hermes_remote_root/.env'; cd '$hermes_remote_root'; attempts=0; until docker compose --env-file .env pull media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary; do attempts=\$((attempts + 1)); test \"\$attempts\" -lt 5 || exit 1; sleep 5; done"
 }
 
 sync_homelab_compose() {
@@ -326,10 +326,10 @@ sync_homelab_compose() {
 }
 
 replace_hermes_agents() {
-    remote "set -eu; cd '$hermes_remote_root'; docker compose --env-file .env up -d --force-recreate agent-browser-updater vaultwarden-init-primary vaultwarden-broker-primary media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary"
+    remote "set -eu; cd '$hermes_remote_root'; docker compose --env-file .env up -d --no-deps --force-recreate media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary"
     remote sh -s <<'REMOTE'
 set -eu
-for name in agent-browser-updater vaultwarden-broker-primary media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary; do
+for name in media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary; do
     attempts=0
     while :; do
         state=$(docker inspect "$name" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}')
@@ -407,9 +407,7 @@ deploy_hermes() {
     service_image=$(remote "docker inspect media-service --format '{{.Config.Image}}'")
     docker_host=${MEDIA_DOCKER_HOST:-ssh://$host}
     prepare_hermes_cli "$service_image" "$docker_host"
-    sync_homelab_compose
     replace_hermes_agents
-    remote "set -eu; cd '$remote_root/media'; docker compose --env-file '$environment_file' -f '$compose_file' up -d --no-deps --force-recreate media-service"
     verify
 }
 
@@ -437,9 +435,11 @@ rollback_service() {
     remote "cp '$remote_schema_file' '$forward_schema'"
     if ! (
         remote "set -eu; expected=\$(sed -n 's/^MCP_SCHEMA_SHA256=//p' '$rollback_file/images.env'); actual=\$(sha256sum '$rollback_file/MCP_SCHEMA.json' | awk '{print \$1}'); test \"\$expected\" = \"\$actual\"; cp '$rollback_file/MCP_SCHEMA.json' '$remote_schema_file.next'; chmod 0644 '$remote_schema_file.next'; mv -f '$remote_schema_file.next' '$remote_schema_file'"
-        migrate_down_one_with_image "$forward_image" "$forward_migration_version" "$rollback_migration_version"
-        replace_service_image "$service_image"
+        if test "$forward_migration_version" != "$rollback_migration_version"; then
+            migrate_down_one_with_image "$forward_image" "$forward_migration_version" "$rollback_migration_version"
+        fi
         assert_db_migration_version "$rollback_migration_version"
+        replace_service_image "$service_image"
         replace_hermes_agents
         verify_live_mcp_schema
     ); then

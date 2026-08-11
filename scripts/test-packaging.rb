@@ -147,6 +147,26 @@ assert(service_rollback.index("assert_no_active_job") < down_index &&
        service_rollback.index("protected_snapshot") < down_index &&
        service_rollback.rindex("assert_protected_unchanged") > recovery_migration_index,
        "migration rollback and recovery must remain inside the idle and protected-container guards")
+assert(service_rollback.include?('if test "$forward_migration_version" != "$rollback_migration_version"') &&
+       service_rollback.include?('assert_db_migration_version "$rollback_migration_version"'),
+       "service rollback must skip migrate-down for equal versions and still verify the checkpointed version")
+
+prepare_hermes = homelab.split("prepare_hermes_cli() {", 2).fetch(1).split("sync_homelab_compose() {", 2).fetch(0)
+hermes_services = "media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary"
+assert(prepare_hermes.include?("docker compose --env-file .env pull #{hermes_services}"),
+       "Hermes deployment must only pull the intended Hermes and notifier images")
+
+replace_hermes = homelab.split("replace_hermes_agents() {", 2).fetch(1).split("image_suffix() {", 2).fetch(0)
+assert(replace_hermes.include?("up -d --no-deps --force-recreate #{hermes_services}"),
+       "Hermes replacement must only recreate the intended Hermes and notifier containers")
+%w[agent-browser-updater vaultwarden-init-primary vaultwarden-broker-primary media-service].each do |service|
+  assert(!replace_hermes.include?(service), "Hermes replacement must not touch #{service}")
+end
+
+hermes_deploy = homelab.split("deploy_hermes() {", 2).fetch(1).split("read_rollback_images() {", 2).fetch(0)
+assert(!hermes_deploy.include?("sync_homelab_compose") &&
+       !hermes_deploy.include?("force-recreate media-service"),
+       "Hermes deployment must not sync or recreate media-service")
 
 clean_env = { "PATH" => ENV.fetch("PATH") }
 _stdout, stderr, status = Open3.capture3(clean_env, "./scripts/homelab.sh", "invalid-command", chdir: ROOT, unsetenv_others: true)
