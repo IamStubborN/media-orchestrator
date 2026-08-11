@@ -2229,7 +2229,9 @@ impl DurableSearchService {
         if offset > session.results.len() {
             return Err(SearchError::InvalidRequest);
         }
-        if offset == session.results.len() {
+        if offset == session.results.len()
+            && !(offset == 0 && session.provider_continuation.is_none())
+        {
             let continuation = session
                 .provider_continuation
                 .clone()

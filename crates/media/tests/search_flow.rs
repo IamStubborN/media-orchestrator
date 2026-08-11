@@ -1750,6 +1750,26 @@ fn service(pages: HashMap<ProviderDto, Vec<ProviderPage>>) -> DurableSearchServi
 }
 
 #[tokio::test]
+async fn first_empty_provider_page_is_a_successful_search() {
+    let service = service(HashMap::from([(
+        ProviderDto::Prowlarr,
+        vec![ProviderPage {
+            results: vec![],
+            provider_continuation: None,
+        }],
+    )]));
+
+    let page = service
+        .start(PRIMARY_USER_ID, request(ProviderDto::Prowlarr))
+        .await
+        .unwrap();
+
+    assert_eq!(page.source, ProviderDto::Prowlarr);
+    assert!(page.results.is_empty());
+    assert_eq!(page.continuation, None);
+}
+
+#[tokio::test]
 async fn alternative_search_is_owner_scoped_and_uses_the_opposite_provider() {
     let persistence = Arc::new(MemorySearchPersistence::default());
     let jobs = Arc::new(MemoryJobStore::default());
