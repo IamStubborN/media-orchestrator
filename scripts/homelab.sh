@@ -485,11 +485,12 @@ release_host_lock() {
 with_host_lock() {
     acquire_host_lock
     trap 'release_host_lock; exit 130' HUP INT TERM
-    if (set -e; "$@"); then
-        result=0
-    else
-        result=$?
-    fi
+    # Keep the deploy function out of a conditional context so its errexit
+    # behavior remains active, while still releasing the host lock on failure.
+    set +e
+    (set -e; "$@")
+    result=$?
+    set -e
     release_host_lock
     trap - HUP INT TERM
     return "$result"
@@ -799,7 +800,7 @@ replace_hermes_agents() {
     remote sh -s "$hermes_remote_root" "$image_record" <<'REMOTE'
 set -eu
 hermes_root=$1
-image_record=$2
+image_record=${2:-}
 cd "$hermes_root"
 if test -n "$image_record"; then
     test -s "$image_record"

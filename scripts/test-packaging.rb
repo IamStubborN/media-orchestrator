@@ -280,9 +280,58 @@ assert(mutating_dispatch.include?("with_host_lock deploy_service") &&
        mutating_dispatch.include?("with_host_lock rollback_full"),
        "every deploy and rollback entry point must use the host-wide flock")
 
+lock_probe = <<~'SH'
+  set -eu
+  marker=$(mktemp)
+  rm -f "$marker"
+  export marker
+  if sh -c '
+      set -eu
+      acquire_host_lock() { :; }
+      release_host_lock() { :; }
+      with_host_lock() {
+          acquire_host_lock
+          set +e
+          (set -e; "$@")
+          result=$?
+          set -e
+          release_host_lock
+          return "$result"
+      }
+      failing_gate() {
+          false
+          printf marker >"$marker"
+      }
+      with_host_lock failing_gate
+  '; then
+      exit 1
+  fi
+  test ! -e "$marker"
+  rm -f "$marker"
+SH
+_, _, lock_status = Open3.capture3("sh", "-c", lock_probe)
+assert(lock_status.success?, "host lock must preserve errexit and stop after a failing gate")
+
 replace_hermes = homelab.split("replace_hermes_agents() {", 2).fetch(1).split("verify_runner_service_compatibility() {", 2).fetch(0)
 assert(replace_hermes.include?("up -d --no-deps --force-recreate #{hermes_services}"),
        "Hermes replacement must only recreate the intended Hermes and notifier containers")
+assert(replace_hermes.include?("image_record=${2:-}"),
+       "Hermes replacement must accept an empty forward image record and a non-empty rollback record")
+image_record_probe = <<~'SH'
+  set -eu
+  remote_replace() {
+      image_record=${2:-}
+      if test -n "$image_record"; then
+          test "$image_record" = rollback.env
+      else
+          test -z "$image_record"
+      fi
+  }
+  remote_replace /hermes
+  remote_replace /hermes rollback.env
+SH
+_, _, image_record_status = Open3.capture3("sh", "-c", image_record_probe)
+assert(image_record_status.success?, "Hermes replacement image record forwarding must cover empty and rollback values")
 %w[agent-browser-updater vaultwarden-init-primary vaultwarden-broker-primary media-service].each do |service|
   assert(!replace_hermes.include?(service), "Hermes replacement must not touch #{service}")
 end
