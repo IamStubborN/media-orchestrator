@@ -35,6 +35,10 @@ struct MediaAdminMcp {
 struct JobIdInput {
     #[schemars(description = "Public media job ID")]
     job_id: String,
+    #[serde(default)]
+    #[schemars(description = "Expected current notification lifecycle cycle for mutation fencing")]
+    #[schemars(range(min = 1))]
+    expected_lifecycle_cycle: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
@@ -884,7 +888,15 @@ impl MediaAdminMcp {
         let job = self
             .state
             .jobs()
-            .cancel_job(&actor, stable_operation_key("cancel", job_id), job_id)
+            .cancel_job_if_current(
+                &actor,
+                stable_operation_key(
+                    "cancel",
+                    format!("{job_id}:{}", input.expected_lifecycle_cycle.unwrap_or(0)),
+                ),
+                job_id,
+                input.expected_lifecycle_cycle,
+            )
             .await
             .map_err(application_error)?;
         result_json_for(&parts, convert::job(&job))
@@ -906,7 +918,12 @@ impl MediaAdminMcp {
         let job = self
             .state
             .jobs()
-            .retry_job(&actor, unique_operation_key("retry", job_id), job_id)
+            .retry_job_if_current(
+                &actor,
+                unique_operation_key("retry", job_id),
+                job_id,
+                input.expected_lifecycle_cycle,
+            )
             .await
             .map_err(application_error)?;
         result_json_for(&parts, convert::job(&job))
@@ -1108,7 +1125,7 @@ impl MediaAdminMcp {
         name = "media_search",
         description = "Search Rezka/Prowlarr or continue one provider page. Returns explicit results and never downloads.",
         output_schema = object_output_schema(),
-        annotations(title = "Search media providers", read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+        annotations(title = "Search media providers", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
     )]
     async fn search(
         &self,
@@ -1294,7 +1311,7 @@ impl MediaAdminMcp {
             "season": input.season,
             "episode": input.episode,
         });
-        let operation = stable_payload_operation_key("choice-set-download", &operation_payload)?;
+        let operation = choice_set_download_operation_key(owner, &operation_payload)?;
         let value = self
             .state
             .search()
@@ -1981,7 +1998,7 @@ impl MediaAdminMcp {
         name = "media_destructive_prepare",
         description = "Prepare and preview a destructive action. Supported actions: plex_delete, torrent_delete, file_quarantine. Does not execute it.",
         output_schema = object_output_schema(),
-        annotations(title = "Preview destructive media action", read_only_hint = true, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+        annotations(title = "Preview destructive media action", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
     async fn destructive_prepare(
         &self,
@@ -2111,6 +2128,13 @@ fn stable_owner_payload_operation_key<T: serde::Serialize>(
     Ok(media_core::OperationKey::from_bytes(
         digest.finalize().into(),
     ))
+}
+
+fn choice_set_download_operation_key<T: serde::Serialize>(
+    owner: media_core::UserId,
+    value: &T,
+) -> Result<media_core::OperationKey, ErrorData> {
+    stable_owner_payload_operation_key("choice-set-download", owner, value)
 }
 
 fn object_output_schema() -> Arc<rmcp::model::JsonObject> {
@@ -2787,14 +2811,35 @@ fn media_details_error(error: crate::MediaDetailsServiceError) -> ErrorData {
 #[cfg(test)]
 mod tests {
     use super::{
-        PageInput, ReadView, job_list_item, page_bounds, parse_job_id, plex_recent_item,
-        result_json_for, tracking_list_item,
+        PageInput, ReadView, choice_set_download_operation_key, job_list_item, page_bounds,
+        parse_job_id, plex_recent_item, result_json_for, tracking_list_item,
     };
     use axum::http::{HeaderValue, Request};
 
     #[test]
     fn rejects_invalid_job_ids_before_touching_storage() {
         assert!(parse_job_id("not-a-job").is_err());
+    }
+
+    #[test]
+    fn choice_set_download_idempotency_is_stable_per_owner() {
+        let payload = serde_json::json!({
+            "choice_set_id": "shared-family-choice",
+            "source": "rezka",
+            "result_id": "rezka:42",
+            "translation_id": 7,
+            "season": 1,
+            "episode": 2,
+        });
+        let primary =
+            choice_set_download_operation_key(media_core::PRIMARY_USER_ID, &payload).unwrap();
+        let replay =
+            choice_set_download_operation_key(media_core::PRIMARY_USER_ID, &payload).unwrap();
+        let secondary =
+            choice_set_download_operation_key(media_core::SECONDARY_USER_ID, &payload).unwrap();
+
+        assert_eq!(primary, replay);
+        assert_ne!(primary, secondary);
     }
 
     #[test]

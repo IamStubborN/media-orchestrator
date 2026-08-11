@@ -31,6 +31,13 @@ pub struct ProviderPage {
     pub provider_continuation: Option<String>,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct VerifiedSeriesIdentity {
+    pub tmdb_id: u64,
+    pub canonical_title: String,
+    pub legacy_path_titles: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProviderResult {
     pub public: SearchResultDto,
@@ -190,6 +197,18 @@ pub trait SearchProvider: Send + Sync {
         request: &StartSearchRequest,
         continuation: Option<&str>,
     ) -> Result<ProviderPage, SearchError>;
+
+    async fn verify_series_identity(
+        &self,
+        _selected: &SearchResultDto,
+        requested: Option<media_contract::SeriesGroupIdentityDto>,
+    ) -> Result<Option<VerifiedSeriesIdentity>, SearchError> {
+        if requested.is_some() {
+            Err(SearchError::InvalidRequest)
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 pub struct ProviderEpisodeDiscovery {
@@ -746,19 +765,19 @@ fn choice_session_request(
 }
 
 fn rezka_availability_titles(request: &EpisodeAvailabilityRequest<'_>) -> Vec<String> {
-    distinct_titles([
+    with_terminal_series_root_aliases(distinct_titles([
         Some(request.tracking().title()),
         Some(request.discovery().release_title()),
         request.discovery().original_release_title(),
-    ])
+    ]))
 }
 
 fn prowlarr_availability_titles(request: &EpisodeAvailabilityRequest<'_>) -> Vec<String> {
-    distinct_titles([
+    with_terminal_series_root_aliases(distinct_titles([
         request.discovery().original_release_title(),
         Some(request.discovery().release_title()),
         Some(request.tracking().title()),
-    ])
+    ]))
 }
 
 fn prowlarr_availability_title<'a>(request: &'a EpisodeAvailabilityRequest<'a>) -> &'a str {
@@ -781,6 +800,29 @@ fn distinct_titles<const N: usize>(values: [Option<&str>; N]) -> Vec<String> {
         }
     }
     titles
+}
+
+fn with_terminal_series_root_aliases(mut titles: Vec<String>) -> Vec<String> {
+    let originals = titles.clone();
+    for title in originals {
+        let root = normalize_terminal_series_title(&title);
+        if !root.eq_ignore_ascii_case(&title)
+            && !titles
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(&root))
+        {
+            titles.push(root);
+        }
+    }
+    titles
+}
+
+fn normalize_terminal_series_title(value: &str) -> String {
+    if rezka_series_marker(value).is_some() {
+        later_season_release_title(value)
+    } else {
+        value.trim().to_owned()
+    }
 }
 
 pub struct TrackedEpisodeDownloader {
@@ -869,13 +911,33 @@ impl TrackedEpisodeDownloadPort for TrackedEpisodeDownloader {
                 thread_id: None,
             },
         };
+        let verified = self
+            .provider
+            .verify_series_identity(
+                &result.public,
+                tracking.release_identity().map(series_group_identity),
+            )
+            .await
+            .map_err(|_| PortError::Infrastructure)?;
+        let series_group =
+            verified
+                .as_ref()
+                .map(|identity| media_contract::SeriesGroupIdentityDto {
+                    source: media_contract::SeriesGroupSourceDto::Tmdb,
+                    source_id: identity.tmdb_id,
+                });
         let mut execution = execution(
             result,
             &request,
             Some(MediaKindDto::Series),
             None,
-            Some(tracking.title()),
-            tracking.release_identity().map(series_group_identity),
+            Some(verified.as_ref().map_or(tracking.title(), |identity| {
+                identity.canonical_title.as_str()
+            })),
+            series_group,
+            verified
+                .as_ref()
+                .map_or(&[][..], |identity| identity.legacy_path_titles.as_slice()),
         )
         .map_err(|_| PortError::Infrastructure)?;
         if let Some(identity) = self.identity.as_deref() {
@@ -929,7 +991,27 @@ impl ProviderEpisodeDiscovery {
         constrain_to_persisted_identity: bool,
     ) -> Option<(ReleaseIdentity, Option<String>)> {
         let release = self.release.as_ref()?;
-        let mut query = ReleaseQuery::new(title, original_title.map(str::to_owned), year).ok()?;
+        let later_season = rezka_series_marker(title)
+            .or_else(|| original_title.and_then(rezka_series_marker))
+            .is_some_and(|season| season > 1);
+        let release_title = if later_season {
+            later_season_release_title(title)
+        } else {
+            title.to_owned()
+        };
+        let release_original_title = original_title.map(|value| {
+            if later_season {
+                later_season_release_title(value)
+            } else {
+                value.to_owned()
+            }
+        });
+        let mut query = ReleaseQuery::new(
+            release_title,
+            release_original_title,
+            if later_season { None } else { year },
+        )
+        .ok()?;
         if constrain_to_persisted_identity && let Some(identity) = tracking.release_identity() {
             query = query.with_source_id(identity.source_id()).ok()?;
         }
@@ -956,8 +1038,12 @@ impl ProviderEpisodeDiscovery {
         tracking: &TrackingSubscription,
     ) -> Result<EpisodeDiscovery, PortError> {
         let release = self.release.as_ref().ok_or(PortError::Infrastructure)?;
-        let mut query =
-            ReleaseQuery::new(tracking.title(), None, None).map_err(|_| PortError::Conflict)?;
+        let mut query = ReleaseQuery::new(
+            normalize_terminal_series_title(tracking.title()),
+            None,
+            None,
+        )
+        .map_err(|_| PortError::Conflict)?;
         if let Some(identity) = tracking.release_identity() {
             match identity.source() {
                 media_core::ReleaseSource::Tvmaze => {
@@ -1012,6 +1098,7 @@ pub struct ConcreteSearchProvider {
     rezka: Option<tokio::sync::Mutex<crate::composition::PreparedRunnerSession>>,
     prowlarr: Option<media_integrations::prowlarr::ProwlarrClient>,
     tmdb: Option<std::sync::Arc<media_integrations::tmdb::TmdbClient>>,
+    tvmaze: Option<std::sync::Arc<media_integrations::tvmaze::TvmazeClient>>,
 }
 
 impl ConcreteSearchProvider {
@@ -1024,6 +1111,7 @@ impl ConcreteSearchProvider {
             rezka: rezka.map(tokio::sync::Mutex::new),
             prowlarr,
             tmdb: None,
+            tvmaze: None,
         }
     }
 
@@ -1033,6 +1121,15 @@ impl ConcreteSearchProvider {
         tmdb: Option<std::sync::Arc<media_integrations::tmdb::TmdbClient>>,
     ) -> Self {
         self.tmdb = tmdb;
+        self
+    }
+
+    #[must_use]
+    pub fn with_tvmaze(
+        mut self,
+        tvmaze: std::sync::Arc<media_integrations::tvmaze::TvmazeClient>,
+    ) -> Self {
+        self.tvmaze = Some(tvmaze);
         self
     }
 
@@ -1503,6 +1600,261 @@ impl SearchProvider for ConcreteSearchProvider {
             ProviderDto::Prowlarr => self.search_prowlarr(request, continuation).await,
         }
     }
+
+    async fn verify_series_identity(
+        &self,
+        selected: &SearchResultDto,
+        requested: Option<media_contract::SeriesGroupIdentityDto>,
+    ) -> Result<Option<VerifiedSeriesIdentity>, SearchError> {
+        let identity = selected_series_identity(selected)?;
+        let Some(tmdb) = self.tmdb.as_ref() else {
+            return if requested.is_some() {
+                Err(SearchError::ProviderUnavailable)
+            } else {
+                Ok(None)
+            };
+        };
+        let media_type = media_contract::TrendingMediaTypeDto::Tv;
+        let item = match requested {
+            Some(media_contract::SeriesGroupIdentityDto {
+                source: media_contract::SeriesGroupSourceDto::Tmdb,
+                source_id,
+            }) => {
+                let details = tmdb
+                    .details(source_id, media_type)
+                    .await
+                    .map_err(|_| SearchError::ProviderUnavailable)?;
+                if !selected_matches_tmdb(
+                    &identity.aliases,
+                    identity.year,
+                    identity.later_season,
+                    &details.title,
+                    details.original_title.as_deref(),
+                    details.year,
+                ) {
+                    return Err(SearchError::InvalidRequest);
+                }
+                if identity.later_season {
+                    let mut exact_matches = Vec::new();
+                    for alias in &identity.aliases {
+                        exact_matches.extend(
+                            tmdb.find_all(alias, media_type)
+                                .await
+                                .map_err(|_| SearchError::ProviderUnavailable)?,
+                        );
+                    }
+                    exact_matches.sort_by_key(|candidate| candidate.tmdb_id);
+                    exact_matches.dedup_by_key(|candidate| candidate.tmdb_id);
+                    if exact_matches.len() != 1 || exact_matches[0].tmdb_id != details.tmdb_id {
+                        return Err(SearchError::InvalidRequest);
+                    }
+                }
+                return Ok(Some(VerifiedSeriesIdentity {
+                    tmdb_id: details.tmdb_id,
+                    canonical_title: details.title,
+                    legacy_path_titles: vec![format!("rezka-series-tmdb-{}", details.tmdb_id)],
+                }));
+            }
+            Some(media_contract::SeriesGroupIdentityDto {
+                source: media_contract::SeriesGroupSourceDto::Tvmaze,
+                source_id,
+            }) => {
+                let tvmaze = self
+                    .tvmaze
+                    .as_ref()
+                    .ok_or(SearchError::ProviderUnavailable)?;
+                let show = tvmaze
+                    .show_identity(source_id)
+                    .await
+                    .map_err(|_| SearchError::ProviderUnavailable)?;
+                let validates_candidate = |item: &media_contract::TrendingItemDto| {
+                    selected_matches_tmdb(
+                        &identity.aliases,
+                        identity.year,
+                        identity.later_season,
+                        &item.title,
+                        item.original_title.as_deref(),
+                        item.year,
+                    ) && titles_and_year_match(
+                        &show.title,
+                        show.year,
+                        &item.title,
+                        item.original_title.as_deref(),
+                        item.year,
+                    )
+                };
+                let item = if let Some(tvdb_id) = show.tvdb_id {
+                    let tvdb_candidate = tmdb
+                        .find_tv_by_external_id(&tvdb_id.to_string(), "tvdb_id")
+                        .await
+                        .map_err(|_| SearchError::ProviderUnavailable)?;
+                    match tvdb_candidate.filter(|item| validates_candidate(item)) {
+                        Some(item) => item,
+                        None => {
+                            let Some(imdb_id) = show.imdb_id.as_deref() else {
+                                return Err(SearchError::InvalidRequest);
+                            };
+                            tmdb.find_tv_by_external_id(imdb_id, "imdb_id")
+                                .await
+                                .map_err(|_| SearchError::ProviderUnavailable)?
+                                .filter(|item| validates_candidate(item))
+                                .ok_or(SearchError::InvalidRequest)?
+                        }
+                    }
+                } else {
+                    let Some(imdb_id) = show.imdb_id.as_deref() else {
+                        return Err(SearchError::InvalidRequest);
+                    };
+                    tmdb.find_tv_by_external_id(imdb_id, "imdb_id")
+                        .await
+                        .map_err(|_| SearchError::ProviderUnavailable)?
+                        .filter(|item| validates_candidate(item))
+                        .ok_or(SearchError::InvalidRequest)?
+                };
+                return Ok(Some(VerifiedSeriesIdentity {
+                    tmdb_id: item.tmdb_id,
+                    canonical_title: item.title,
+                    legacy_path_titles: vec![
+                        format!("tvmaze-{source_id}"),
+                        format!("rezka-series-tvmaze-{source_id}"),
+                        format!("rezka-series-tmdb-{}", item.tmdb_id),
+                    ],
+                }));
+            }
+            None => {
+                let mut matches = Vec::new();
+                for alias in &identity.aliases {
+                    let candidates = match tmdb.find_all(alias, media_type).await {
+                        Ok(candidates) => candidates,
+                        Err(_) => return Ok(None),
+                    };
+                    matches.extend(candidates.into_iter().filter(|item| {
+                        selected_matches_tmdb(
+                            &identity.aliases,
+                            identity.year,
+                            identity.later_season,
+                            &item.title,
+                            item.original_title.as_deref(),
+                            item.year,
+                        )
+                    }));
+                }
+                matches.sort_by_key(|item| item.tmdb_id);
+                matches.dedup_by_key(|item| item.tmdb_id);
+                if matches.len() != 1 {
+                    return Ok(None);
+                }
+                matches.pop()
+            }
+        };
+        Ok(item.map(|item| VerifiedSeriesIdentity {
+            tmdb_id: item.tmdb_id,
+            canonical_title: item.title,
+            legacy_path_titles: vec![format!("rezka-series-tmdb-{}", item.tmdb_id)],
+        }))
+    }
+}
+
+struct SelectedSeriesIdentity {
+    aliases: Vec<String>,
+    year: Option<u16>,
+    later_season: bool,
+}
+
+fn selected_series_identity(
+    selected: &SearchResultDto,
+) -> Result<SelectedSeriesIdentity, SearchError> {
+    let SearchResultDto::Rezka {
+        title,
+        original_title,
+        year,
+        media_kind: MediaKindDto::Series,
+        ..
+    } = selected
+    else {
+        return Err(SearchError::InvalidRequest);
+    };
+    let marker = rezka_series_marker(title)
+        .or_else(|| original_title.as_deref().and_then(rezka_series_marker));
+    let later_season = marker.is_some_and(|season| season > 1);
+    let mut aliases = title
+        .split(" / ")
+        .chain(original_title.as_deref())
+        .map(strip_rezka_series_marker)
+        .flat_map(|title| {
+            let root = later_season
+                .then(|| title.split_once(':').map(|(root, _)| root.trim()))
+                .flatten();
+            std::iter::once(title).chain(root)
+        })
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    aliases.sort_by_key(|title| canonical_title_key(title));
+    aliases.dedup_by(|left, right| canonical_title_key(left) == canonical_title_key(right));
+    if aliases.is_empty() {
+        return Err(SearchError::InvalidRequest);
+    }
+    Ok(SelectedSeriesIdentity {
+        aliases,
+        year: *year,
+        later_season,
+    })
+}
+
+fn strip_rezka_series_marker(value: &str) -> &str {
+    let value = value.trim();
+    rezka_series_marker(value)
+        .and_then(|_| value.rsplit_once(" [").map(|(title, _)| title))
+        .unwrap_or(value)
+}
+
+fn later_season_release_title(value: &str) -> String {
+    strip_rezka_series_marker(value)
+        .split_once(':')
+        .map_or_else(|| strip_rezka_series_marker(value), |(root, _)| root.trim())
+        .to_owned()
+}
+
+fn rezka_series_marker(value: &str) -> Option<u32> {
+    let (_, marker) = value.trim().strip_suffix(']')?.rsplit_once(" [")?;
+    let season = marker
+        .strip_prefix("ТВ-")
+        .or_else(|| marker.strip_prefix("TV-"))?;
+    season.parse().ok().filter(|season| *season > 0)
+}
+
+fn selected_matches_tmdb(
+    selected_aliases: &[String],
+    selected_year: Option<u16>,
+    later_season: bool,
+    tmdb_title: &str,
+    tmdb_original_title: Option<&str>,
+    tmdb_year: Option<u16>,
+) -> bool {
+    (later_season || (selected_year.is_some() && selected_year == tmdb_year))
+        && selected_aliases.iter().any(|selected| {
+            canonical_title_key(selected) == canonical_title_key(tmdb_title)
+                || tmdb_original_title.is_some_and(|original| {
+                    canonical_title_key(selected) == canonical_title_key(original)
+                })
+        })
+}
+
+fn titles_and_year_match(
+    source_title: &str,
+    source_year: Option<u16>,
+    tmdb_title: &str,
+    tmdb_original_title: Option<&str>,
+    tmdb_year: Option<u16>,
+) -> bool {
+    source_year.is_some()
+        && source_year == tmdb_year
+        && (canonical_title_key(source_title) == canonical_title_key(tmdb_title)
+            || tmdb_original_title.is_some_and(|title| {
+                canonical_title_key(source_title) == canonical_title_key(title)
+            }))
 }
 
 fn union_availability(
@@ -2090,6 +2442,12 @@ impl DurableSearchService {
                     SearchResultDto::Prowlarr { title, .. } => queries.push(title.clone()),
                 }
             }
+            let originals = queries.clone();
+            queries.extend(
+                originals
+                    .iter()
+                    .map(|query| normalize_terminal_series_title(query)),
+            );
             queries.retain(|query| !query.trim().is_empty());
             queries.sort_by_key(|query| query.to_ascii_lowercase());
             queries.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
@@ -2192,13 +2550,39 @@ impl DurableSearchService {
             .iter()
             .find(|result| result.public.result_id() == request.result_id)
             .ok_or(SearchError::NotFound)?;
+        let verified = match &result.public {
+            SearchResultDto::Rezka {
+                media_kind: MediaKindDto::Series,
+                ..
+            } => {
+                self.provider
+                    .verify_series_identity(&result.public, session.request.series_group)
+                    .await?
+            }
+            _ => None,
+        };
+        let series_group =
+            verified
+                .as_ref()
+                .map(|identity| media_contract::SeriesGroupIdentityDto {
+                    source: media_contract::SeriesGroupSourceDto::Tmdb,
+                    source_id: identity.tmdb_id,
+                });
+        let library_title_hint = verified
+            .as_ref()
+            .map_or(session.request.query.as_str(), |identity| {
+                identity.canonical_title.as_str()
+            });
         let mut execution = execution(
             result,
             &request,
             session.request.media_kind,
             session.request.season,
-            Some(&session.request.query),
-            session.request.series_group,
+            Some(library_title_hint),
+            series_group,
+            verified
+                .as_ref()
+                .map_or(&[][..], |identity| identity.legacy_path_titles.as_slice()),
         )?;
         if let Some(identity) = self.identity.as_deref() {
             apply_persisted_episode_mappings(identity, &mut execution).await?;
@@ -2637,6 +3021,7 @@ fn execution(
     searched_season: Option<u16>,
     library_title_hint: Option<&str>,
     series_group: Option<media_contract::SeriesGroupIdentityDto>,
+    library_path_aliases: &[String],
 ) -> Result<ExecutionSelectionDto, SearchError> {
     match (&result.public, &result.private) {
         (
@@ -2814,6 +3199,24 @@ fn execution(
                 })
                 .cloned()
                 .collect();
+            let library_title = if series_group
+                .is_some_and(|group| group.source == media_contract::SeriesGroupSourceDto::Tmdb)
+            {
+                library_title_hint
+                    .map(str::trim)
+                    .filter(|hint| !hint.is_empty())
+                    .map(|hint| hint.nfc().collect())
+            } else {
+                library_title_hint
+                    .and_then(|hint| canonical_rezka_library_title(hint, title, *media_kind))
+            };
+            let mut library_path_aliases = library_path_aliases.to_vec();
+            if *media_kind == MediaKindDto::Series && series_group.is_some() {
+                library_path_aliases.push(format!("rezka-{title_id}"));
+                library_path_aliases.push(legacy_rezka_safe_name(title));
+                library_path_aliases.sort();
+                library_path_aliases.dedup();
+            }
             Ok(ExecutionSelectionDto::Rezka {
                 locator: locator.clone(),
                 title_id: *title_id,
@@ -2829,12 +3232,16 @@ fn execution(
                 episode_mappings: Vec::new(),
                 ambiguous_episodes,
                 release_year: *year,
-                library_title: library_title_hint
-                    .and_then(|hint| canonical_rezka_library_title(hint, title, *media_kind)),
-                library_path_title: Some(canonical_rezka_library_path_title(
-                    *title_id,
-                    series_group,
-                )),
+                library_title: library_title.clone(),
+                library_path_title: Some(match media_kind {
+                    MediaKindDto::Movie => format!("rezka-{title_id}"),
+                    MediaKindDto::Series => canonical_rezka_library_path_title(
+                        library_title.as_deref().unwrap_or(title),
+                        *title_id,
+                        series_group,
+                    ),
+                }),
+                library_path_aliases,
                 thumbnail_url: thumbnail_url.clone(),
                 title: title.clone(),
             })
@@ -2897,19 +3304,22 @@ fn series_group_identity(
 }
 
 fn canonical_rezka_library_path_title(
+    library_title: &str,
     title_id: u64,
     series_group: Option<media_contract::SeriesGroupIdentityDto>,
 ) -> String {
-    series_group.map_or_else(
-        || format!("rezka-{title_id}"),
-        |group| {
-            let source = match group.source {
-                media_contract::SeriesGroupSourceDto::Tmdb => "tmdb",
-                media_contract::SeriesGroupSourceDto::Tvmaze => "tvmaze",
-            };
-            format!("rezka-series-{source}-{}", group.source_id)
-        },
-    )
+    let title: String = library_title.trim().nfc().collect();
+    match series_group {
+        Some(media_contract::SeriesGroupIdentityDto {
+            source: media_contract::SeriesGroupSourceDto::Tmdb,
+            source_id,
+        }) => format!("{title} {{tmdb-{source_id}}}"),
+        Some(media_contract::SeriesGroupIdentityDto {
+            source: media_contract::SeriesGroupSourceDto::Tvmaze,
+            source_id,
+        }) => format!("tvmaze-{source_id}"),
+        None => format!("rezka-{title_id}"),
+    }
 }
 
 fn canonical_title_key(value: &str) -> String {
@@ -2920,6 +3330,27 @@ fn canonical_title_key(value: &str) -> String {
         .collect::<String>()
         .nfc()
         .collect()
+}
+
+fn legacy_rezka_safe_name(value: &str) -> String {
+    let value = value
+        .nfc()
+        .map(|character| {
+            if character.is_alphanumeric() || matches!(character, ' ' | '-' | '_') {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if value.is_empty() {
+        "media".to_owned()
+    } else {
+        value
+    }
 }
 
 fn ambiguous_episode_label(label: &str) -> bool {
@@ -3005,16 +3436,147 @@ fn job_dto(job: &Job) -> JobDto {
         },
         needs_action_reason: None,
         notify_scope: NotifyScopeDto::Initiator,
+        lifecycle_cycle: job.lifecycle_cycle(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ambiguous_episode_label, canonical_rezka_library_path_title, canonical_rezka_library_title,
-        retryable_rezka_auth_error, rezka_translation_available, skippable_title_error,
+        ConcreteSearchProvider, SearchProvider, ambiguous_episode_label,
+        canonical_rezka_library_path_title, canonical_rezka_library_title,
+        retryable_rezka_auth_error, rezka_translation_available, selected_matches_tmdb,
+        selected_series_identity, skippable_title_error,
     };
-    use media_contract::MediaKindDto;
+    use media_contract::{MediaKindDto, SearchResultDto};
+
+    #[test]
+    fn selected_rezka_title_marker_and_year_bind_verified_tmdb_identity() {
+        let selected = SearchResultDto::Rezka {
+            result_id: "sugar-2024".to_owned(),
+            title: "Шугар [ТВ-1]".to_owned(),
+            original_title: Some("Sugar".to_owned()),
+            year: Some(2024),
+            media_kind: MediaKindDto::Series,
+            thumbnail_url: None,
+            translations: Vec::new(),
+            availability: None,
+        };
+        let identity = selected_series_identity(&selected).unwrap();
+
+        assert_eq!(identity.aliases, vec!["Sugar", "Шугар"]);
+        assert!(selected_matches_tmdb(
+            &identity.aliases,
+            identity.year,
+            false,
+            "Шугар",
+            Some("Sugar"),
+            Some(2024),
+        ));
+        assert!(!selected_matches_tmdb(
+            &identity.aliases,
+            identity.year,
+            false,
+            "Шугар",
+            Some("Sugar"),
+            Some(2016),
+        ));
+        assert!(selected_matches_tmdb(
+            &["Cafe\u{301}".to_owned()],
+            Some(2026),
+            false,
+            "Café",
+            None,
+            Some(2026),
+        ));
+    }
+
+    #[test]
+    fn later_season_marker_allows_only_the_exact_root_without_remake_year_binding() {
+        for (title, expected_root) in [
+            (
+                "Магия и мускулы: Экзамен на звание Вестника Бога [ТВ-2]",
+                "Магия и мускулы",
+            ),
+            ("Slow Horses: Season Four [TV-4]", "Slow Horses"),
+        ] {
+            let selected = SearchResultDto::Rezka {
+                result_id: "later-season".to_owned(),
+                title: title.to_owned(),
+                original_title: None,
+                year: Some(2026),
+                media_kind: MediaKindDto::Series,
+                thumbnail_url: None,
+                translations: Vec::new(),
+                availability: None,
+            };
+            let identity = selected_series_identity(&selected).unwrap();
+            assert!(identity.later_season);
+            assert!(identity.aliases.iter().any(|alias| alias == expected_root));
+            assert!(selected_matches_tmdb(
+                &identity.aliases,
+                identity.year,
+                identity.later_season,
+                expected_root,
+                None,
+                Some(2023),
+            ));
+            assert!(!selected_matches_tmdb(
+                &identity.aliases,
+                identity.year,
+                identity.later_season,
+                "Unrelated Show",
+                None,
+                Some(2023),
+            ));
+        }
+
+        let plain = SearchResultDto::Rezka {
+            result_id: "plain-subtitle".to_owned(),
+            title: "Sugar: Dark Season".to_owned(),
+            original_title: None,
+            year: Some(2024),
+            media_kind: MediaKindDto::Series,
+            thumbnail_url: None,
+            translations: Vec::new(),
+            availability: None,
+        };
+        let identity = selected_series_identity(&plain).unwrap();
+        assert!(!identity.later_season);
+        assert_eq!(identity.aliases, ["Sugar: Dark Season"]);
+    }
+
+    #[tokio::test]
+    async fn implicit_identity_outage_falls_back_but_explicit_claim_fails_closed() {
+        let selected = SearchResultDto::Rezka {
+            result_id: "stable-rezka-42".to_owned(),
+            title: "Sugar".to_owned(),
+            original_title: None,
+            year: Some(2024),
+            media_kind: MediaKindDto::Series,
+            thumbnail_url: None,
+            translations: Vec::new(),
+            availability: None,
+        };
+        let provider = ConcreteSearchProvider::new(None, None);
+
+        assert_eq!(
+            provider.verify_series_identity(&selected, None).await,
+            Ok(None),
+        );
+        assert_eq!(
+            provider
+                .verify_series_identity(
+                    &selected,
+                    Some(media_contract::SeriesGroupIdentityDto {
+                        source: media_contract::SeriesGroupSourceDto::Tmdb,
+                        source_id: 123,
+                    }),
+                )
+                .await,
+            Err(media_api::SearchError::ProviderUnavailable),
+        );
+    }
 
     #[test]
     fn season_release_titles_share_an_exact_base_query_as_the_plex_title() {
@@ -3085,40 +3647,40 @@ mod tests {
     }
 
     #[test]
-    fn rezka_path_title_is_stable_across_alias_order_case_and_unicode_forms() {
-        let variants = [
-            "Аватар Аанг / Легенда об Аанге",
-            "легенда ОБ аанге / АВАТАР ААНГ",
-            "Легенда об Аанге / Аватар Аанг",
-            "Cafe\u{301} / Другой фильм",
-            "ДРУГОЙ ФИЛЬМ / CAFÉ",
-        ];
-
-        for _provider in variants {
-            assert_eq!(
-                canonical_rezka_library_path_title(90825, None),
-                "rezka-90825"
-            );
-        }
+    fn unverified_rezka_path_uses_only_the_stable_source_identity() {
+        assert_eq!(
+            canonical_rezka_library_path_title("Cafe\u{301}", 90825, None),
+            "rezka-90825"
+        );
     }
 
     #[test]
     fn rezka_series_path_title_groups_only_by_explicit_stable_identity() {
         use media_contract::{SeriesGroupIdentityDto, SeriesGroupSourceDto};
 
-        assert_eq!(canonical_rezka_library_path_title(101, None), "rezka-101");
-        assert_eq!(canonical_rezka_library_path_title(202, None), "rezka-202");
+        assert_eq!(
+            canonical_rezka_library_path_title("Магия и мускулы", 101, None),
+            "rezka-101"
+        );
         let group = Some(SeriesGroupIdentityDto {
             source: SeriesGroupSourceDto::Tmdb,
             source_id: 94997,
         });
         assert_eq!(
-            canonical_rezka_library_path_title(101, group),
-            "rezka-series-tmdb-94997",
+            canonical_rezka_library_path_title("Магия и мускулы", 101, group),
+            "Магия и мускулы {tmdb-94997}",
         );
         assert_eq!(
-            canonical_rezka_library_path_title(202, group),
-            "rezka-series-tmdb-94997",
+            canonical_rezka_library_path_title("Магия и мускулы", 202, group),
+            "Магия и мускулы {tmdb-94997}",
+        );
+        let group = Some(SeriesGroupIdentityDto {
+            source: SeriesGroupSourceDto::Tvmaze,
+            source_id: 88,
+        });
+        assert_eq!(
+            canonical_rezka_library_path_title("Магия и мускулы", 101, group),
+            "tvmaze-88",
         );
     }
 

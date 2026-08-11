@@ -49,6 +49,7 @@ pub trait JobStore: Send + Sync {
         operation: OperationKey,
         id: JobId,
         owner: UserId,
+        expected_lifecycle_cycle: Option<u64>,
     ) -> Result<Option<Job>, PortError>;
 
     async fn retry(
@@ -56,6 +57,7 @@ pub trait JobStore: Send + Sync {
         _operation: OperationKey,
         _id: JobId,
         _owner: UserId,
+        _expected_lifecycle_cycle: Option<u64>,
     ) -> Result<Option<Job>, PortError> {
         Err(PortError::Conflict)
     }

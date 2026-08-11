@@ -253,7 +253,7 @@ async fn exact_episode_probe_distinguishes_empty_results_from_provider_failure()
 }
 
 #[tokio::test]
-async fn search_rechecks_indexers_once_and_recovers_from_temporary_unavailability() {
+async fn search_retries_read_only_and_recovers_from_temporary_unavailability() {
     let server = MockServer::start().await;
     let attempts = Arc::new(AtomicUsize::new(0));
     let response_attempts = Arc::clone(&attempts);
@@ -270,10 +270,8 @@ async fn search_rechecks_indexers_once_and_recovers_from_temporary_unavailabilit
         .mount(&server)
         .await;
     Mock::given(method("POST"))
-        .and(path("/api/v1/indexer/testall"))
-        .and(header("x-api-key", "prowlarr-secret"))
-        .respond_with(ResponseTemplate::new(202))
-        .expect(1)
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
         .mount(&server)
         .await;
 
@@ -302,9 +300,8 @@ async fn search_reports_temporary_unavailability_after_one_retry() {
         .mount(&server)
         .await;
     Mock::given(method("POST"))
-        .and(path("/api/v1/indexer/testall"))
-        .respond_with(ResponseTemplate::new(202))
-        .expect(1)
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
         .mount(&server)
         .await;
 

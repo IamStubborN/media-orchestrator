@@ -120,7 +120,11 @@ pub trait HttpPort: Send + Sync {
         Ok(())
     }
 
-    async fn probe_video_size(&self, url: &SensitiveUrl) -> Result<u64, RunnerPortError>;
+    async fn probe_video_size(
+        &self,
+        url: &SensitiveUrl,
+        cancellation: &dyn Cancellation,
+    ) -> Result<u64, RunnerPortError>;
 
     async fn download_video(
         &self,

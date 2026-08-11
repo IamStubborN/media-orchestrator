@@ -54,7 +54,9 @@ WORKDIR /var/empty
 FROM runtime-base AS runtime-common
 ARG OCI_CREATED="unknown"
 ARG OCI_REVISION="unknown"
+ARG OCI_RUNNER_BUILD_DIGEST="unknown"
 ARG OCI_SOURCE="https://github.com/iamstubborn/media-orchestrator"
+ARG OCI_SOURCE_TREE_DIGEST="unknown"
 ARG OCI_VERSION="0.1.0-dev"
 LABEL org.opencontainers.image.created=$OCI_CREATED \
       org.opencontainers.image.description="Personal media orchestration runtime" \
@@ -62,7 +64,9 @@ LABEL org.opencontainers.image.created=$OCI_CREATED \
       org.opencontainers.image.revision=$OCI_REVISION \
       org.opencontainers.image.source=$OCI_SOURCE \
       org.opencontainers.image.title="media-orchestrator" \
-      org.opencontainers.image.version=$OCI_VERSION
+      org.opencontainers.image.version=$OCI_VERSION \
+      dev.iamstubborn.media.runner-build-digest=$OCI_RUNNER_BUILD_DIGEST \
+      dev.iamstubborn.media.source-tree-digest=$OCI_SOURCE_TREE_DIGEST
 
 FROM runtime-common AS service
 COPY --from=builder --chown=65532:65532 /out/media /usr/local/bin/media
@@ -99,7 +103,9 @@ RUN apt-get \
 FROM runner-packages AS runner
 ARG OCI_CREATED="unknown"
 ARG OCI_REVISION="unknown"
+ARG OCI_RUNNER_BUILD_DIGEST="unknown"
 ARG OCI_SOURCE="https://github.com/iamstubborn/media-orchestrator"
+ARG OCI_SOURCE_TREE_DIGEST="unknown"
 ARG OCI_VERSION="0.1.0-dev"
 LABEL org.opencontainers.image.created=$OCI_CREATED \
       org.opencontainers.image.description="Personal media orchestration runtime" \
@@ -107,7 +113,9 @@ LABEL org.opencontainers.image.created=$OCI_CREATED \
       org.opencontainers.image.revision=$OCI_REVISION \
       org.opencontainers.image.source=$OCI_SOURCE \
       org.opencontainers.image.title="media-orchestrator" \
-      org.opencontainers.image.version=$OCI_VERSION
+      org.opencontainers.image.version=$OCI_VERSION \
+      dev.iamstubborn.media.runner-build-digest=$OCI_RUNNER_BUILD_DIGEST \
+      dev.iamstubborn.media.source-tree-digest=$OCI_SOURCE_TREE_DIGEST
 COPY --from=builder --chown=65532:65532 /out/media /usr/local/bin/media
 COPY --from=yt-dlp --chown=65532:65532 /usr/local/bin/yt-dlp /usr/local/bin/yt-dlp
 USER 65532:65532

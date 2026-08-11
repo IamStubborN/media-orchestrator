@@ -982,6 +982,9 @@ pub struct TrackingRunResult {
     pub discovered: u32,
     pub failed: u32,
     pub queued: u32,
+    pub release_conflict_failures: u32,
+    pub release_infrastructure_failures: u32,
+    pub source_failures: u32,
 }
 
 pub struct TrackingRuntime {
@@ -1035,6 +1038,9 @@ impl TrackingRuntime {
             discovered: 0,
             failed: 0,
             queued: 0,
+            release_conflict_failures: 0,
+            release_infrastructure_failures: 0,
+            source_failures: 0,
         };
         for tracking in due {
             let default_next_check = if tracking.download().is_some() {
@@ -1063,7 +1069,7 @@ impl TrackingRuntime {
             }
             let discovery = match self.discovery.available_episodes(&tracking).await {
                 Ok(available) => available,
-                Err(_) => {
+                Err(error) => {
                     let _ = self
                         .store
                         .finish_check(
@@ -1074,6 +1080,10 @@ impl TrackingRuntime {
                         )
                         .await;
                     result.failed += 1;
+                    match error {
+                        PortError::Conflict => result.release_conflict_failures += 1,
+                        PortError::Infrastructure => result.release_infrastructure_failures += 1,
+                    }
                     continue;
                 }
             };
@@ -1120,6 +1130,7 @@ impl TrackingRuntime {
                             )
                             .await;
                         result.failed += 1;
+                        result.source_failures += 1;
                         continue;
                     }
                 }
@@ -1169,10 +1180,12 @@ impl TrackingRuntime {
                             .is_err()
                         {
                             result.failed += 1;
+                            result.source_failures += 1;
                             source_error = true;
                             continue;
                         }
                         result.failed += 1;
+                        result.source_failures += 1;
                         pending_availability = true;
                         source_error = true;
                         continue;
@@ -1192,10 +1205,12 @@ impl TrackingRuntime {
                                 .is_err()
                             {
                                 result.failed += 1;
+                                result.source_failures += 1;
                                 source_error = true;
                                 continue;
                             }
                             result.failed += 1;
+                            result.source_failures += 1;
                             pending_availability = true;
                             source_error = true;
                             continue;
@@ -1211,6 +1226,7 @@ impl TrackingRuntime {
                             .is_err()
                         {
                             result.failed += 1;
+                            result.source_failures += 1;
                             source_error = true;
                             continue;
                         }
@@ -1222,6 +1238,7 @@ impl TrackingRuntime {
                 if tracking.download().is_some() {
                     let Some(downloads) = self.downloads.as_deref() else {
                         result.failed += 1;
+                        result.source_failures += 1;
                         source_error = true;
                         continue;
                     };
@@ -1232,6 +1249,7 @@ impl TrackingRuntime {
                         .is_err()
                     {
                         result.failed += 1;
+                        result.source_failures += 1;
                         source_error = true;
                         continue;
                     }
@@ -1241,6 +1259,7 @@ impl TrackingRuntime {
                             .release_episode_download(tracking.id(), claim_token, episode)
                             .await;
                         result.failed += 1;
+                        result.source_failures += 1;
                         source_error = true;
                         continue;
                     }
@@ -1264,6 +1283,7 @@ impl TrackingRuntime {
                     Ok(false) => {}
                     Err(_) => {
                         result.failed += 1;
+                        result.source_failures += 1;
                         source_error = true;
                     }
                 }
@@ -1293,6 +1313,7 @@ impl TrackingRuntime {
                 .is_err()
             {
                 result.failed += 1;
+                result.source_failures += 1;
             }
         }
         Ok(result)

@@ -152,7 +152,7 @@ async fn cancelling_a_queued_job_creates_no_notification() {
         .unwrap();
 
     let cancelled = store
-        .cancel(operation_key(), created.id(), PRIMARY_USER_ID)
+        .cancel(operation_key(), created.id(), PRIMARY_USER_ID, None)
         .await
         .unwrap()
         .unwrap();
@@ -171,6 +171,40 @@ async fn cancelling_a_queued_job_creates_no_notification() {
     let payload: serde_json::Value = rows[0].try_get("", "payload").unwrap();
     assert_eq!(payload["delivery_kind"], "card");
     assert_eq!(payload["state"], "cancelled");
+}
+
+#[tokio::test]
+async fn stale_cancel_lifecycle_cycle_is_rejected_without_mutating_the_job() {
+    let test_db = TestDatabase::start_migrated().await;
+    let store = SeaOrmJobStore::new(test_db.connection().clone());
+    let created = store
+        .create(
+            operation_key(),
+            new_job(PRIMARY_USER_ID, Provider::Rezka, "stale-cancel"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(created.lifecycle_cycle(), 1);
+    assert_eq!(
+        store
+            .cancel(
+                operation_key(),
+                created.id(),
+                PRIMARY_USER_ID,
+                Some(created.lifecycle_cycle() + 1),
+            )
+            .await
+            .unwrap_err(),
+        media_core::PortError::Conflict,
+    );
+    let current = store
+        .find_for_owner(created.id(), PRIMARY_USER_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.state(), JobState::Queued);
+    assert_eq!(current.lifecycle_cycle(), 1);
 }
 
 #[tokio::test]
@@ -195,7 +229,7 @@ async fn cancelling_a_needs_action_job_clears_reason_and_terminalizes_its_card()
         .unwrap();
 
     let cancelled = store
-        .cancel(operation_key(), created.id(), PRIMARY_USER_ID)
+        .cancel(operation_key(), created.id(), PRIMARY_USER_ID, None)
         .await
         .unwrap()
         .unwrap();

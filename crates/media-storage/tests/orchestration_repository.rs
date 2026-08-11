@@ -10,7 +10,7 @@ use media_core::{
     JobEvent, JobEventId, JobId, JobState, JobStore, LeaseStore, NewJob, NotificationDelivery,
     NotificationDeliveryFailure, NotificationDeliveryFence, NotificationDispatcher,
     NotificationEventType, NotificationId, NotificationSink, NotificationSinkOutcome, NotifyScope,
-    Provider, RUNNER_CLIENT_ID, SECONDARY_USER_ID,
+    PortError, Provider, RUNNER_CLIENT_ID, SECONDARY_USER_ID,
 };
 use media_storage::{
     SeaOrmClientStore, SeaOrmJobStore, SeaOrmLeaseStore, SeaOrmNotificationOutbox,
@@ -2331,21 +2331,41 @@ async fn owner_retry_requeues_failed_work_idempotently() {
     }
 
     let operation = operation_key();
+    assert_eq!(
+        jobs.retry(
+            operation_key(),
+            created.id(),
+            PRIMARY_USER_ID,
+            Some(created.lifecycle_cycle() + 1),
+        )
+        .await
+        .unwrap_err(),
+        PortError::Conflict,
+    );
+    let current = jobs
+        .find_for_owner(created.id(), PRIMARY_USER_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.state(), JobState::Failed);
+    assert_eq!(current.lifecycle_cycle(), created.lifecycle_cycle());
     let retried = jobs
-        .retry(operation, created.id(), PRIMARY_USER_ID)
+        .retry(operation, created.id(), PRIMARY_USER_ID, None)
         .await
         .unwrap()
         .unwrap();
     let replay = jobs
-        .retry(operation, created.id(), PRIMARY_USER_ID)
+        .retry(operation, created.id(), PRIMARY_USER_ID, None)
         .await
         .unwrap()
         .unwrap();
 
     assert_eq!(retried.state(), JobState::Queued);
+    assert_eq!(retried.lifecycle_cycle(), 2);
+    assert_eq!(replay.lifecycle_cycle(), 2);
     assert_eq!(replay, retried);
     assert!(
-        jobs.retry(operation_key(), created.id(), SECONDARY_USER_ID)
+        jobs.retry(operation_key(), created.id(), SECONDARY_USER_ID, None)
             .await
             .unwrap()
             .is_none()
@@ -2412,7 +2432,7 @@ async fn owner_retry_requeues_needs_action_work_and_resets_running_task() {
     }
 
     let retried = jobs
-        .retry(operation_key(), created.id(), PRIMARY_USER_ID)
+        .retry(operation_key(), created.id(), PRIMARY_USER_ID, None)
         .await
         .unwrap()
         .unwrap();
@@ -2481,12 +2501,12 @@ async fn owner_retry_requeues_storage_blocked_work_and_resets_pipeline_ledger() 
 
     let operation = operation_key();
     let retried = jobs
-        .retry(operation, created.id(), PRIMARY_USER_ID)
+        .retry(operation, created.id(), PRIMARY_USER_ID, None)
         .await
         .unwrap()
         .unwrap();
     let replay = jobs
-        .retry(operation, created.id(), PRIMARY_USER_ID)
+        .retry(operation, created.id(), PRIMARY_USER_ID, None)
         .await
         .unwrap()
         .unwrap();
@@ -2524,7 +2544,7 @@ async fn owner_retry_requeues_storage_blocked_work_and_resets_pipeline_ledger() 
         );
     }
     assert!(
-        jobs.retry(operation_key(), created.id(), SECONDARY_USER_ID)
+        jobs.retry(operation_key(), created.id(), SECONDARY_USER_ID, None)
             .await
             .unwrap()
             .is_none()
@@ -2560,7 +2580,7 @@ async fn completed_job_retry_is_a_conflict() {
     }
 
     assert_eq!(
-        jobs.retry(operation_key(), created.id(), PRIMARY_USER_ID)
+        jobs.retry(operation_key(), created.id(), PRIMARY_USER_ID, None)
             .await
             .unwrap_err(),
         media_core::PortError::Conflict,
@@ -2891,7 +2911,7 @@ async fn active_cancel_is_cooperative_and_runner_acknowledgement_releases_the_le
         .unwrap();
 
     let requested = jobs
-        .cancel(operation_key(), created.id(), PRIMARY_USER_ID)
+        .cancel(operation_key(), created.id(), PRIMARY_USER_ID, None)
         .await
         .unwrap()
         .unwrap();

@@ -249,7 +249,7 @@ async fn jobs_create_uses_auth_generated_headers_and_stable_json() {
     );
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        "{\"id\":\"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111\",\"notify_scope\":\"initiator\",\"provider\":\"rezka\",\"result_ref\":\"rezka:series:42\",\"state\":\"queued\"}\n",
+        "{\"id\":\"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111\",\"lifecycle_cycle\":1,\"notify_scope\":\"initiator\",\"provider\":\"rezka\",\"result_ref\":\"rezka:series:42\",\"state\":\"queued\"}\n",
     );
     assert!(output.stderr.is_empty());
 }
@@ -547,7 +547,7 @@ async fn jobs_get_and_queue_status_use_the_expected_paths() {
     );
     assert_eq!(
         String::from_utf8(get.stdout).unwrap(),
-        "{\"id\":\"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111\",\"notify_scope\":\"initiator\",\"provider\":\"rezka\",\"result_ref\":\"item\",\"state\":\"queued\"}\n",
+        "{\"id\":\"018f3f86-7b4c-7b4f-9b6a-6d62f45bb111\",\"lifecycle_cycle\":1,\"notify_scope\":\"initiator\",\"provider\":\"rezka\",\"result_ref\":\"item\",\"state\":\"queued\"}\n",
     );
     assert!(
         queue.status.success(),

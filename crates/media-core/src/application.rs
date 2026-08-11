@@ -159,11 +159,21 @@ impl JobApplication {
         operation: OperationKey,
         id: JobId,
     ) -> Result<Job, ApplicationError> {
+        self.cancel_job_if_current(actor, operation, id, None).await
+    }
+
+    pub async fn cancel_job_if_current(
+        &self,
+        actor: &Actor,
+        operation: OperationKey,
+        id: JobId,
+        expected_lifecycle_cycle: Option<u64>,
+    ) -> Result<Job, ApplicationError> {
         let owner_id = actor
             .require_user()
             .map_err(|_| ApplicationError::Forbidden)?;
         self.store
-            .cancel(operation, id, owner_id)
+            .cancel(operation, id, owner_id, expected_lifecycle_cycle)
             .await?
             .ok_or(ApplicationError::NotFound)
     }
@@ -174,11 +184,21 @@ impl JobApplication {
         operation: OperationKey,
         id: JobId,
     ) -> Result<Job, ApplicationError> {
+        self.retry_job_if_current(actor, operation, id, None).await
+    }
+
+    pub async fn retry_job_if_current(
+        &self,
+        actor: &Actor,
+        operation: OperationKey,
+        id: JobId,
+        expected_lifecycle_cycle: Option<u64>,
+    ) -> Result<Job, ApplicationError> {
         let owner_id = actor
             .require_user()
             .map_err(|_| ApplicationError::Forbidden)?;
         self.store
-            .retry(operation, id, owner_id)
+            .retry(operation, id, owner_id, expected_lifecycle_cycle)
             .await?
             .ok_or(ApplicationError::NotFound)
     }
@@ -189,8 +209,19 @@ impl JobApplication {
         operation: OperationKey,
         id: JobId,
     ) -> Result<Job, ApplicationError> {
+        self.retry_job_for_owner_if_current(owner_id, operation, id, None)
+            .await
+    }
+
+    pub async fn retry_job_for_owner_if_current(
+        &self,
+        owner_id: crate::UserId,
+        operation: OperationKey,
+        id: JobId,
+        expected_lifecycle_cycle: Option<u64>,
+    ) -> Result<Job, ApplicationError> {
         self.store
-            .retry(operation, id, owner_id)
+            .retry(operation, id, owner_id, expected_lifecycle_cycle)
             .await?
             .ok_or(ApplicationError::NotFound)
     }
@@ -372,6 +403,7 @@ mod tests {
     struct FakeJobStore {
         created: Mutex<Vec<(OperationKey, NewJob)>>,
         jobs: Mutex<Vec<Job>>,
+        mutation_cycles: Mutex<Vec<(&'static str, Option<u64>)>>,
         status: QueueStatus,
         failure: Option<PortError>,
     }
@@ -381,6 +413,7 @@ mod tests {
             Self {
                 created: Mutex::new(Vec::new()),
                 jobs: Mutex::new(Vec::new()),
+                mutation_cycles: Mutex::new(Vec::new()),
                 status: QueueStatus {
                     queued: 0,
                     active: false,
@@ -445,7 +478,26 @@ mod tests {
             _: OperationKey,
             id: JobId,
             owner: UserId,
+            expected_lifecycle_cycle: Option<u64>,
         ) -> Result<Option<Job>, PortError> {
+            self.mutation_cycles
+                .lock()
+                .unwrap()
+                .push(("cancel", expected_lifecycle_cycle));
+            self.find_for_owner(id, owner).await
+        }
+
+        async fn retry(
+            &self,
+            _: OperationKey,
+            id: JobId,
+            owner: UserId,
+            expected_lifecycle_cycle: Option<u64>,
+        ) -> Result<Option<Job>, PortError> {
+            self.mutation_cycles
+                .lock()
+                .unwrap()
+                .push(("retry", expected_lifecycle_cycle));
             self.find_for_owner(id, owner).await
         }
 
@@ -603,6 +655,25 @@ mod tests {
 
         assert_eq!(job.id(), id);
         assert_eq!(job.owner_id(), PRIMARY_USER_ID);
+    }
+
+    #[test]
+    fn versioned_mutations_forward_the_expected_lifecycle_cycle() {
+        let id = JobId::new();
+        let mut store = FakeJobStore::empty();
+        store.jobs = Mutex::new(vec![persisted_job(id, PRIMARY_USER_ID, JobState::Queued)]);
+        let store = Arc::new(store);
+        let application = JobApplication::new(store.clone());
+
+        block_on(application.cancel_job_if_current(&hermes_actor(), operation_key(6), id, Some(7)))
+            .unwrap();
+        block_on(application.retry_job_if_current(&hermes_actor(), operation_key(7), id, Some(8)))
+            .unwrap();
+
+        assert_eq!(
+            *store.mutation_cycles.lock().unwrap(),
+            [("cancel", Some(7)), ("retry", Some(8))],
+        );
     }
 
     #[test]

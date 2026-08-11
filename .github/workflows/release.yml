@@ -27,6 +27,11 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
+      - id: source-attestation
+        name: Compute build source attestations
+        run: |
+          echo "source-tree-digest=$(./scripts/docker-build.sh --print-source-tree-digest)" >> "$GITHUB_OUTPUT"
+          echo "runner-build-digest=$(./scripts/docker-build.sh --print-runner-build-digest)" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -51,7 +56,9 @@ jobs:
           build-args: |
             OCI_CREATED=${{ fromJSON(steps.metadata.outputs.json).labels['org.opencontainers.image.created'] }}
             OCI_REVISION=${{ github.sha }}
+            OCI_RUNNER_BUILD_DIGEST=${{ steps.source-attestation.outputs.runner-build-digest }}
             OCI_SOURCE=${{ github.server_url }}/${{ github.repository }}
+            OCI_SOURCE_TREE_DIGEST=${{ steps.source-attestation.outputs.source-tree-digest }}
             OCI_VERSION=${{ github.ref_name }}
           cache-from: type=gha,scope=${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=${{ matrix.target }}

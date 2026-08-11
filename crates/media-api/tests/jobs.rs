@@ -216,6 +216,35 @@ async fn list_returns_only_the_authenticated_owners_jobs() {
 }
 
 #[tokio::test]
+async fn list_exposes_the_persisted_lifecycle_cycle() {
+    let own = Job::rehydrate_with_lifecycle_cycle(
+        JobId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        "versioned-selection".to_owned(),
+        JobState::Queued,
+        None,
+        NotifyScope::Initiator,
+        7,
+    )
+    .unwrap();
+    let response = app(FakeJobStore::with_job(own))
+        .oneshot(
+            Request::get("/v1/jobs")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(value["jobs"][0]["lifecycle_cycle"], 7);
+}
+
+#[tokio::test]
 async fn owner_can_cancel_a_queued_job_immediately() {
     let job = Job::rehydrate(
         JobId::new(),

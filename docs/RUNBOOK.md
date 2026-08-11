@@ -130,23 +130,43 @@ mise run homelab-deploy
 ```
 
 It first runs the fail-closed `hermes-home/scripts/check-media-capabilities`
-schema/capability check, builds only the service target, verifies that both
-currently configured image tags still exist, atomically checkpoints their exact
-values together with the deployed MCP schema artifact, OCI revisions, and the
-exact applied database migration version, runs
-migrations, and recreates only `media-service`. It refuses to run while a job is
-active. It does not build or
-recreate `download-runner`, and it does not stop or restart the watcher,
-qBittorrent, or either VPN container. Use `mise run homelab-rollback` for the
-matching service-only rollback.
+schema/capability check and compares the deterministic local runner build inputs
+with the live image's `dev.iamstubborn.media.runner-build-digest` label. The
+guard also normalizes the live and candidate Compose files and compares the
+runner, Gluetun, watcher, networks, and volumes. Any runner-impacting source or
+runtime change fails closed with an explicit `deploy-full` instruction. An old
+image without the runner digest therefore requires one full rollout before
+service-only deployment is available.
 
-The service-only rollback is deliberately one schema step. While the queue is
-idle, the still-current forward image verifies that the live migration is its
-exact latest migration and that the checkpoint is its immediate predecessor,
-then executes that migration's real SeaORM `down` implementation. Only after
+The build stamps the commit, visibly dirty Git version, and a source-tree digest
+of the exact Docker build context into the service image and its local tag.
+The context digest applies `.dockerignore`, includes the Dockerfile and ignore
+file themselves, and includes tracked or untracked configuration and toolchain
+inputs that Docker can send. Deployment verifies those labels, resolves the
+built tag to an immutable image ID, and later checks the running service. Before
+synchronizing Compose, it atomically checkpoints the current image references,
+immutable image IDs and digest labels together with the deployed MCP schema
+artifact, OCI revisions, exact Compose, and applied database migration, then runs
+migrations, and recreates only `media-service`. It refuses to run while a job is
+active. Immediately before mutation it fences idleness again, stops the watcher
+and runner, and keeps them quiesced through success or recovery. It does not
+build or recreate `download-runner`; bounded resume must retain the same runner
+and watcher container IDs and prove the existing runner can reach the new
+service. PostgreSQL, qBittorrent, and both VPN containers remain untouched. Use
+`mise run homelab-rollback` for the matching service-only rollback.
+
+If any service-only step after the checkpoint fails, the same invocation
+restores the checkpointed Compose, service image ID, migration, MCP schema,
+Hermes sources, and Hermes/notifier image IDs before returning failure.
+
+The service-only rollback is deliberately at most one schema step. While the
+queue is idle, the still-current forward image verifies the live migration. If
+the checkpoint is its immediate predecessor, the workflow executes that
+migration's real SeaORM `down` implementation; if both versions are equal, it
+skips migration down and still verifies the checkpointed version. Only after
 the database is verified at the checkpoint does the old service image start and
-the paired Hermes schema return. Missing, malformed, equal, unknown, or
-multi-step version transitions fail closed. If schema rollback, old-service
+the paired Hermes schema return. Missing, malformed, unknown, or multi-step
+version transitions fail closed. If schema rollback, old-service
 startup, or MCP verification fails, the workflow restores the forward schema,
 runs the forward image's migrations back to the captured forward version,
 restarts that image, and verifies the protected container snapshot before
@@ -157,27 +177,47 @@ The checker is discovered through sibling `../hermes-home` by default. Set
 `HERMES_CAPABILITY_CHECKER` for an explicit checker path. A missing checker or
 schema mismatch aborts before any image build or container operation.
 
+The Hermes-only rollout stages the complete source tree and extracted CLI
+off-live, then checkpoints images, Compose, schema, and mounted sources before
+activating mounted sources. If activation, container health, MCP comparison, or
+mount attestation fails, it restores the exact checkpointed Hermes/notifier
+image IDs and sources without recreating media-service or download-runner.
+
 `mise run homelab-deploy-full` and `mise run homelab-rollback-full` are explicit
 operator-only workflows for changes that genuinely require the runner and
 Hermes artifacts to move together. They retain the idle-job guard and the full
-health sequence below.
+health sequence below. Every deploy and rollback command holds a host-wide
+deployment lock for its complete operation.
 
 1. Confirm no job is active before replacing the runner. `queued` is safe;
    `leased`, `running`, `publishing`, `plex_pending`, or `cancel_requested` is not.
-2. Build both immutable image tags.
-3. Extract the Linux `media` binary from the service image and verify its
-   SHA-256. Hermes uses the official image; `hermes-home` synchronizes and
-   mounts the CLI, skills, profile configuration, and notification adapter.
-4. Record the current `MEDIA_SERVICE_IMAGE` and `DOWNLOAD_RUNNER_IMAGE` values.
-5. Update only those two lines in the private root `.env`.
-6. Run the new service image as a one-shot `media migrate` container. Stop the
+2. Build and attest both tags, then resolve them to immutable image IDs.
+3. Extract the Linux `media` binary, verify its SHA-256, and stage the complete
+   Hermes tree and CLI off-live. Pull the staged Compose images without changing
+   mounted live sources or containers.
+4. Checkpoint the old image IDs and digest labels, migration, exact deployed MCP
+   schema, Compose and Hermes source snapshot, plus Hermes and notifier image
+   references and IDs.
+5. Apply a final idle fence, stop the watcher, require lifecycle `ready` with no
+   active job, and stop the runner. Both remain quiesced until the rollout has
+   succeeded or the exact checkpoint has been restored.
+6. Activate the staged Hermes tree and synchronize Compose inside this protected
+   transaction. Update only the two image lines in the private root `.env`.
+7. Run the new service image as a one-shot `media migrate` container. Stop the
    rollout if migration fails.
-7. Recreate `media-service` and wait for health.
-8. Stop `gluetun-rezka-watcher` only while lifecycle is `ready`.
-9. Recreate `download-runner`, wait for health, then start the watcher again.
-10. Pull the official Hermes image, synchronize mounted extensions, recreate
+8. Recreate `media-service` and wait for health.
+9. Recreate `download-runner` and require a new healthy generation or clean exit.
+10. Recreate
     both profiles, and wait for both health checks.
-11. Verify lifecycle `ready`, watcher health, image tags, queue state, and logs.
+11. Verify lifecycle `ready`, watcher health, exact running image attestations,
+    live MCP `tools/list`, mounted Hermes and notifier source hashes, queue state,
+    and a bounded runner iteration window with no `Service` compatibility error.
+
+The bounded watcher-readiness gate remains inside the transaction. A timeout or
+post-resume verification failure re-quiesces watcher and runner before restoring
+the checkpoint or forward snapshot. The protected container set includes
+PostgreSQL, qBittorrent, and both `gluetun` and `gluetun-rezka`; their identities,
+start times, and health must remain unchanged.
 
 Never replace the runner merely to deploy documentation or service-only changes.
 For an active torrent job, qBittorrent can continue independently, but runner
@@ -256,11 +296,19 @@ MCP schema, recreates Hermes/notifier consumers to invalidate cached tool
 schemas, and compares the live `tools/list` response with the restored artifact.
 On any mismatch it automatically restores the forward service and schema. The
 runner, watcher, qBittorrent, and VPN containers must retain identical container
-IDs, start times, and healthy states throughout. Full rollback is explicit and
-restores both images. Do not
-roll back PostgreSQL migrations
-by deleting data. If the old service cannot read the current schema, stop and
-roll forward with a compatible image instead.
+IDs, start times, and healthy states throughout.
+
+Full rollback is explicit and transactional. Before mutation it captures the
+forward service and runner image IDs, migration version, MCP schema, Compose,
+Hermes sources, and exact Hermes/notifier image references. It migrates down by
+at most one version, restores both
+checkpointed images plus the exact Compose and Hermes source snapshot, then
+verifies live `tools/list`, container mounts, and runner compatibility. On
+failure, it automatically restores the forward full stack, migrates back to the
+captured forward version, recreates Hermes consumers, and re-verifies MCP.
+PostgreSQL, both Gluetun containers, and qBittorrent
+container identities and health must remain unchanged through either path. Do
+not roll back PostgreSQL migrations by deleting data.
 
 ## Logs
 

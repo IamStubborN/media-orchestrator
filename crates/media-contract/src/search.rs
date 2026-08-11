@@ -278,6 +278,8 @@ pub enum ExecutionSelectionDto {
         library_title: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         library_path_title: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        library_path_aliases: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thumbnail_url: Option<String>,
         title: String,

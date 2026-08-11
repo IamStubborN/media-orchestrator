@@ -1,5 +1,5 @@
 use media_core::{PortError, UserId};
-use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
+use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
 
 use super::map_database_error;
 
@@ -158,11 +158,39 @@ impl SeaOrmSearchRepository {
         result_ref: &str,
         payload: serde_json::Value,
     ) -> Result<(), PortError> {
-        self.database.execute_raw(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            "INSERT INTO search_executions (result_ref, payload) VALUES ($1, $2) ON CONFLICT (result_ref) DO NOTHING",
-            [result_ref.into(), payload.into()],
-        )).await.map_err(map_database_error).map(|_| ())
+        let transaction = self.database.begin().await.map_err(map_database_error)?;
+        let result = async {
+            transaction
+                .execute_unprepared("LOCK TABLE jobs IN SHARE MODE")
+                .await?;
+            transaction
+                .query_one_raw(Statement::from_sql_and_values(
+                    DatabaseBackend::Postgres,
+                    "SELECT result_ref FROM search_executions WHERE result_ref = $1 FOR UPDATE",
+                    [result_ref.into()],
+                ))
+                .await?;
+            transaction
+                .execute_raw(Statement::from_sql_and_values(
+                    DatabaseBackend::Postgres,
+                    "INSERT INTO search_executions (result_ref, payload) VALUES ($1, $2)
+             ON CONFLICT (result_ref) DO UPDATE SET payload = EXCLUDED.payload
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM jobs WHERE jobs.result_ref = search_executions.result_ref
+             )",
+                    [result_ref.into(), payload.into()],
+                ))
+                .await
+                .map(|_| ())
+        }
+        .await;
+        match result {
+            Ok(()) => transaction.commit().await.map_err(map_database_error),
+            Err(error) => {
+                transaction.rollback().await.map_err(map_database_error)?;
+                Err(map_database_error(error))
+            }
+        }
     }
 
     pub async fn execution_for(

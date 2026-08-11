@@ -85,6 +85,35 @@ async fn maps_weekly_trending_and_limits_output_to_ten_items() {
 }
 
 #[tokio::test]
+async fn external_tv_crosswalk_uses_the_exact_provider_identifier() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/3/find/73739"))
+        .and(query_param("external_source", "tvdb_id"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tv_results": [{
+                "id": 94997,
+                "name": "Магия и мускулы",
+                "original_name": "Mashle: Magic and Muscles",
+                "first_air_date": "2023-04-08"
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let item = TmdbClient::new(config(&server))
+        .unwrap()
+        .find_tv_by_external_id("73739", "tvdb_id")
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(item.tmdb_id, 94997);
+    assert_eq!(item.year, Some(2023));
+}
+
+#[tokio::test]
 async fn finds_first_matching_title_for_a_release_poster() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

@@ -1,12 +1,16 @@
+use secrecy::SecretString;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 use time::OffsetDateTime;
+use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
 
 use media::search::{
-    DurableSearchService, ProviderEpisodeAvailability, ProviderPage, ProviderResult,
-    SearchPersistence, SearchProvider, StoredSearchSession, TrackedEpisodeDownloader,
+    ConcreteSearchProvider, DurableSearchService, ProviderEpisodeAvailability, ProviderPage,
+    ProviderResult, SearchPersistence, SearchProvider, StoredSearchSession,
+    TrackedEpisodeDownloader, VerifiedSeriesIdentity,
 };
 use media_api::{ChoiceSetSelection, SearchError, SearchService};
 use media_contract::{
@@ -20,10 +24,11 @@ use media_core::{
     EpisodeAvailabilityPort, EpisodeAvailabilityRequest, EpisodeDiscovery, EpisodeDiscoveryPort,
     EpisodeId, EpisodeMappingConfirmation, EpisodeProviderMapping, ExternalNamespace,
     IdentityStore, Job, JobApplication, JobId, JobStore, MediaExternalReference, NewJob,
-    NotifyScope, OperationKey, PortError, Provider, QueueStatus, ReleaseCandidate,
+    NotifyScope, OperationKey, PortError, Provider, QueueStatus, ReleaseCandidate, ReleaseIdentity,
     ReleaseLifecycle, ReleaseMetadataPort, ReleaseMetadataResult, ReleasePrecision, ReleaseQuery,
-    ReleaseQueryError, ScheduledEpisode, SourceChoiceAction, TrackedEpisodeDownloadPort,
-    TrackingDownload, TrackingId, TrackingScope, TrackingSubscription, UserId, SECONDARY_USER_ID,
+    ReleaseQueryError, ReleaseSource, ScheduledEpisode, SourceChoiceAction,
+    TrackedEpisodeDownloadPort, TrackingDownload, TrackingId, TrackingScope, TrackingSubscription,
+    UserId, SECONDARY_USER_ID,
 };
 
 #[derive(Default)]
@@ -230,6 +235,102 @@ async fn tracking_discovery_attaches_identity_only_after_an_exact_release_match(
     ));
 }
 
+struct LaterSeasonReleaseProvider;
+
+#[async_trait::async_trait]
+impl ReleaseMetadataPort for LaterSeasonReleaseProvider {
+    async fn query(
+        &self,
+        query: &ReleaseQuery,
+    ) -> Result<ReleaseMetadataResult, ReleaseQueryError> {
+        assert_eq!(query.title, "Slow Horses");
+        assert_eq!(query.original_title, None);
+        assert_eq!(query.year, None);
+        Ok(ReleaseMetadataResult::Matched {
+            source: "tvmaze".to_owned(),
+            fetched_at: "2026-08-10T00:00:00Z".to_owned(),
+            show: ReleaseCandidate {
+                source_id: 95480,
+                title: "Slow Horses".to_owned(),
+                original_title: None,
+                year: Some(2022),
+                poster_url: None,
+                lifecycle: ReleaseLifecycle::Ongoing,
+            },
+            precision: ReleasePrecision::Unknown,
+            lifecycle: ReleaseLifecycle::Ongoing,
+            released_episodes: 1,
+            expected_episodes: None,
+            next_episode: None,
+            schedule: Vec::new(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn manual_tracking_later_season_marker_does_not_bind_tvmaze_to_release_year() {
+    let title = "Slow Horses: Season Four [TV-4]";
+    let provider = Arc::new(FakeProvider {
+        pages: Mutex::new(HashMap::from([(
+            ProviderDto::Rezka,
+            vec![ProviderPage {
+                results: vec![ProviderResult::rezka(
+                    SearchResultDto::Rezka {
+                        result_id: "slow-horses-tv4".to_owned(),
+                        title: title.to_owned(),
+                        original_title: None,
+                        year: Some(2024),
+                        media_kind: MediaKindDto::Series,
+                        thumbnail_url: None,
+                        translations: vec![RezkaTranslationDto {
+                            id: 37,
+                            name: "Original".to_owned(),
+                            premium: false,
+                            director: false,
+                            camrip: false,
+                            has_ads: false,
+                            seasons: Vec::new(),
+                        }],
+                        availability: Some(SeriesAvailabilityDto {
+                            lifecycle_status: media_contract::SeriesLifecycleStatusDto::Ongoing,
+                            incomplete: true,
+                            seasons: vec![SeasonAvailabilityDto {
+                                season: 4,
+                                episodes: vec![1],
+                            }],
+                            tracking_prompt: None,
+                        }),
+                    },
+                    "/slow-horses-tv4.html".to_owned(),
+                    95480,
+                )],
+                provider_continuation: None,
+            }],
+        )])),
+    });
+    let discovery = media::search::ProviderEpisodeDiscovery::with_release(
+        provider,
+        Arc::new(LaterSeasonReleaseProvider),
+    );
+    let tracking = TrackingSubscription::rehydrate(
+        TrackingId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        title.to_owned(),
+        "Original".to_owned(),
+        vec![media_core::EpisodeSnapshot::new(1, 1).unwrap()],
+        TrackingScope::Personal,
+        None,
+    )
+    .unwrap();
+
+    let resolved = discovery.available_episodes(&tracking).await.unwrap();
+    assert_eq!(
+        resolved.release_identity(),
+        Some(ReleaseIdentity::new(ReleaseSource::Tvmaze, 95480).unwrap())
+    );
+}
+
 #[derive(Default)]
 struct SameTitleReleaseProvider {
     queries: Mutex<Vec<ReleaseQuery>>,
@@ -412,6 +513,7 @@ async fn tracking_discovery_resolves_candidates_before_matching_persisted_identi
 
 struct FakeReleaseProvider {
     expected_source_id: Option<u64>,
+    expected_title: &'static str,
 }
 
 #[async_trait::async_trait]
@@ -420,14 +522,14 @@ impl ReleaseMetadataPort for FakeReleaseProvider {
         &self,
         query: &ReleaseQuery,
     ) -> Result<ReleaseMetadataResult, ReleaseQueryError> {
-        assert_eq!(query.title, "Sugar");
+        assert_eq!(query.title, self.expected_title);
         assert_eq!(query.source_id, self.expected_source_id);
         Ok(ReleaseMetadataResult::Matched {
             source: "tvmaze".to_owned(),
             fetched_at: "2026-07-13T14:00:00Z".to_owned(),
             show: ReleaseCandidate {
                 source_id: 7,
-                title: "Sugar".to_owned(),
+                title: self.expected_title.to_owned(),
                 original_title: None,
                 year: Some(2024),
                 poster_url: Some("https://static.tvmaze.com/poster.jpg".to_owned()),
@@ -469,6 +571,7 @@ async fn calendar_tracking_is_independent_of_download_providers() {
         provider,
         Arc::new(FakeReleaseProvider {
             expected_source_id: None,
+            expected_title: "Sugar",
         }),
     );
     let tracking = TrackingSubscription::rehydrate(
@@ -494,6 +597,37 @@ async fn calendar_tracking_is_independent_of_download_providers() {
 }
 
 #[tokio::test]
+async fn calendar_tracking_normalizes_later_season_title_before_release_query() {
+    let provider = Arc::new(FakeProvider {
+        pages: Mutex::new(HashMap::new()),
+    });
+    let discovery = media::search::ProviderEpisodeDiscovery::with_release(
+        provider,
+        Arc::new(FakeReleaseProvider {
+            expected_source_id: None,
+            expected_title: "Slow Horses",
+        }),
+    );
+    let tracking = TrackingSubscription::rehydrate(
+        TrackingId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        "Slow Horses: Season Four [TV-4]".to_owned(),
+        "release-calendar".to_owned(),
+        vec![media_core::EpisodeSnapshot::new(2, 1).unwrap()],
+        TrackingScope::Personal,
+        None,
+    )
+    .unwrap();
+
+    let result = discovery.available_episodes(&tracking).await.unwrap();
+    assert_eq!(
+        result.episodes(),
+        vec![media_core::EpisodeSnapshot::new(1, 1).unwrap()].as_slice()
+    );
+}
+
+#[tokio::test]
 async fn calendar_tracking_uses_persisted_release_identity() {
     let provider = Arc::new(FakeProvider {
         pages: Mutex::new(HashMap::new()),
@@ -502,6 +636,7 @@ async fn calendar_tracking_uses_persisted_release_identity() {
         provider,
         Arc::new(FakeReleaseProvider {
             expected_source_id: Some(7),
+            expected_title: "Sugar",
         }),
     );
     let tracking = TrackingSubscription::rehydrate_with_identity(
@@ -874,6 +1009,94 @@ async fn choice_set_refreshes_empty_source_and_keeps_healthy_provider_after_fail
     );
 }
 
+#[tokio::test]
+async fn choice_set_refresh_matches_rezka_root_for_later_season_query() {
+    let choice_set = uuid::Uuid::new_v4();
+    let session_id = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_URL,
+        format!("choice:{choice_set}:rezka").as_bytes(),
+    )
+    .to_string();
+    let persistence = Arc::new(MemorySearchPersistence::default());
+    persistence.sessions.lock().unwrap().insert(
+        session_id.clone(),
+        StoredSearchSession {
+            id: session_id,
+            owner: PRIMARY_USER_ID,
+            request: StartSearchRequest {
+                scope: SearchScopeDto {
+                    platform: "system".to_owned(),
+                    chat_id: "tracking:calendar".to_owned(),
+                    thread_id: Some("episode:2:1".to_owned()),
+                },
+                source: ProviderDto::Rezka,
+                query: "Sugar: Season Two [TV-2]".to_owned(),
+                media_kind: Some(MediaKindDto::Series),
+                season: None,
+                series_group: None,
+                preferred_qualities: vec![],
+                preferred_languages: vec![],
+                preferred_codecs: vec![],
+                preferred_release_groups: vec![],
+            },
+            expires_at: OffsetDateTime::now_utc() - time::Duration::minutes(1),
+            results: vec![],
+            provider_continuation: None,
+            query_aliases: vec!["Sugar: Season Two [TV-2]".to_owned()],
+        },
+    );
+    let result = SearchResultDto::Rezka {
+        result_id: "rezka-root".to_owned(),
+        title: "Sugar".to_owned(),
+        original_title: None,
+        year: Some(2024),
+        media_kind: MediaKindDto::Series,
+        thumbnail_url: None,
+        translations: vec![RezkaTranslationDto {
+            id: 7,
+            name: "Dub".to_owned(),
+            premium: false,
+            director: false,
+            camrip: false,
+            has_ads: false,
+            seasons: vec![SeasonAvailabilityDto {
+                season: 2,
+                episodes: vec![1],
+            }],
+        }],
+        availability: Some(SeriesAvailabilityDto {
+            lifecycle_status: media_contract::SeriesLifecycleStatusDto::Ongoing,
+            incomplete: false,
+            seasons: vec![SeasonAvailabilityDto {
+                season: 2,
+                episodes: vec![1],
+            }],
+            tracking_prompt: None,
+        }),
+    };
+    let provider = Arc::new(FakeProvider {
+        pages: Mutex::new(HashMap::from([(
+            ProviderDto::Rezka,
+            vec![ProviderPage {
+                results: vec![ProviderResult::rezka(result, "/sugar.html".to_owned(), 42)],
+                provider_continuation: None,
+            }],
+        )])),
+    });
+    let service = DurableSearchService::new(
+        persistence,
+        provider,
+        Arc::new(JobApplication::new(Arc::new(MemoryJobStore::default()))),
+    );
+
+    let refreshed = service
+        .refresh_choice_set(PRIMARY_USER_ID, &choice_set.to_string())
+        .await
+        .unwrap();
+    assert_eq!(refreshed["rezka_count"], 1);
+    assert_eq!(refreshed["status"], "refresh_required");
+}
+
 #[async_trait::async_trait]
 impl SearchPersistence for MemorySearchPersistence {
     async fn insert_session(&self, session: StoredSearchSession) -> Result<(), SearchError> {
@@ -981,6 +1204,40 @@ impl SearchProvider for FakeProvider {
             return Err(SearchError::Provider);
         }
         Ok(pages.remove(0))
+    }
+
+    async fn verify_series_identity(
+        &self,
+        selected: &media_contract::SearchResultDto,
+        requested: Option<SeriesGroupIdentityDto>,
+    ) -> Result<Option<VerifiedSeriesIdentity>, SearchError> {
+        match requested {
+            Some(SeriesGroupIdentityDto {
+                source: SeriesGroupSourceDto::Tmdb,
+                source_id: 94997,
+            }) => Ok(Some(VerifiedSeriesIdentity {
+                tmdb_id: 94997,
+                canonical_title: "Магия и мускулы".to_owned(),
+                legacy_path_titles: vec!["rezka-series-tmdb-94997".to_owned()],
+            })),
+            Some(SeriesGroupIdentityDto {
+                source: SeriesGroupSourceDto::Tvmaze,
+                source_id: 88,
+            }) => Ok(Some(VerifiedSeriesIdentity {
+                tmdb_id: 94997,
+                canonical_title: "Магия и мускулы".to_owned(),
+                legacy_path_titles: vec![
+                    "tvmaze-88".to_owned(),
+                    "rezka-series-tvmaze-88".to_owned(),
+                    "rezka-series-tmdb-94997".to_owned(),
+                ],
+            })),
+            Some(_) => Err(SearchError::InvalidRequest),
+            None => {
+                let _ = selected;
+                Ok(None)
+            }
+        }
     }
 }
 
@@ -1104,6 +1361,82 @@ async fn tracking_prowlarr_single_search_failure_is_unknown() {
     );
 }
 
+#[tokio::test]
+async fn tracking_rezka_availability_matches_later_season_root_title() {
+    let result = SearchResultDto::Rezka {
+        result_id: "rezka-slow-horses".to_owned(),
+        title: "Slow Horses".to_owned(),
+        original_title: None,
+        year: Some(2022),
+        media_kind: MediaKindDto::Series,
+        thumbnail_url: None,
+        translations: vec![RezkaTranslationDto {
+            id: 7,
+            name: "Dub".to_owned(),
+            premium: false,
+            director: false,
+            camrip: false,
+            has_ads: false,
+            seasons: vec![SeasonAvailabilityDto {
+                season: 4,
+                episodes: vec![1],
+            }],
+        }],
+        availability: Some(SeriesAvailabilityDto {
+            lifecycle_status: media_contract::SeriesLifecycleStatusDto::Ongoing,
+            incomplete: false,
+            seasons: vec![SeasonAvailabilityDto {
+                season: 4,
+                episodes: vec![1],
+            }],
+            tracking_prompt: None,
+        }),
+    };
+    let provider = Arc::new(FakeProvider {
+        pages: Mutex::new(HashMap::from([(
+            ProviderDto::Rezka,
+            vec![ProviderPage {
+                results: vec![ProviderResult::rezka(
+                    result,
+                    "/slow-horses.html".to_owned(),
+                    42,
+                )],
+                provider_continuation: None,
+            }],
+        )])),
+    });
+    let availability =
+        ProviderEpisodeAvailability::new(provider, Arc::new(MemorySearchPersistence::default()));
+    let tracking = TrackingSubscription::rehydrate(
+        TrackingId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        "Slow Horses: Season Four [TV-4]".to_owned(),
+        "release-calendar".to_owned(),
+        vec![media_core::EpisodeSnapshot::new(4, 1).unwrap()],
+        TrackingScope::Personal,
+        None,
+    )
+    .unwrap();
+    let discovery = EpisodeDiscovery::new(
+        vec![media_core::EpisodeSnapshot::new(4, 1).unwrap()],
+        "Slow Horses: Season Four [TV-4]".to_owned(),
+        None,
+    )
+    .unwrap();
+
+    let result = availability
+        .probe(EpisodeAvailabilityRequest::new(
+            &tracking,
+            &discovery,
+            media_core::EpisodeSnapshot::new(4, 1).unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(result.actions(), vec![SourceChoiceAction::Rezka]);
+}
+
 #[derive(Default)]
 struct MemoryJobStore {
     jobs: Mutex<Vec<Job>>,
@@ -1144,7 +1477,13 @@ impl JobStore for MemoryJobStore {
             .cloned()
             .collect())
     }
-    async fn cancel(&self, _: OperationKey, _: JobId, _: UserId) -> Result<Option<Job>, PortError> {
+    async fn cancel(
+        &self,
+        _: OperationKey,
+        _: JobId,
+        _: UserId,
+        _: Option<u64>,
+    ) -> Result<Option<Job>, PortError> {
         Ok(None)
     }
     async fn retry(
@@ -1152,6 +1491,7 @@ impl JobStore for MemoryJobStore {
         _: OperationKey,
         id: JobId,
         owner: UserId,
+        _: Option<u64>,
     ) -> Result<Option<Job>, PortError> {
         let mut jobs = self.jobs.lock().unwrap();
         let Some(position) = jobs
@@ -1294,6 +1634,7 @@ async fn ambiguous_episode_is_resolved_persisted_in_execution_and_requeued() {
                 release_year: Some(2016),
                 library_title: None,
                 library_path_title: None,
+                library_path_aliases: Vec::new(),
                 thumbnail_url: None,
                 title: "Separate OVA title".to_owned(),
             },
@@ -1449,6 +1790,7 @@ async fn alternative_search_is_owner_scoped_and_uses_the_opposite_provider() {
                 release_year: Some(2026),
                 library_title: None,
                 library_path_title: None,
+                library_path_aliases: Vec::new(),
                 thumbnail_url: None,
                 title: "Blades of the Guardians".to_owned(),
             },
@@ -1699,23 +2041,36 @@ async fn rezka_series_path_ignores_provider_variants_and_groups_only_by_explicit
             )
             .await
             .unwrap();
-        assert!(matches!(
-            service.execution_for(&job.result_ref).await.unwrap(),
-            media_contract::ExecutionSelectionDto::Rezka {
-                library_path_title: Some(path), ..
-            } if path == "rezka-101"
-        ));
+        let execution = service.execution_for(&job.result_ref).await.unwrap();
+        let media_contract::ExecutionSelectionDto::Rezka {
+            library_path_title: Some(path),
+            ..
+        } = execution
+        else {
+            panic!("Rezka series execution must have a path title");
+        };
+        assert_eq!(path, "rezka-101");
     }
 
-    let group = Some(SeriesGroupIdentityDto {
-        source: SeriesGroupSourceDto::Tmdb,
-        source_id: 94997,
-    });
-    for (index, result_id) in ["season-one", "season-two"].into_iter().enumerate() {
+    let groups = [
+        SeriesGroupIdentityDto {
+            source: SeriesGroupSourceDto::Tmdb,
+            source_id: 94997,
+        },
+        SeriesGroupIdentityDto {
+            source: SeriesGroupSourceDto::Tvmaze,
+            source_id: 88,
+        },
+    ];
+    for (index, (result_id, group)) in ["season-one", "season-two"]
+        .into_iter()
+        .zip(groups)
+        .enumerate()
+    {
         let mut search = request(ProviderDto::Rezka);
         search.query = "Магия и мускулы".to_owned();
         search.media_kind = Some(MediaKindDto::Series);
-        search.series_group = group;
+        search.series_group = Some(group);
         let page = service.start(PRIMARY_USER_ID, search).await.unwrap();
         let job = service
             .select(
@@ -1732,13 +2087,331 @@ async fn rezka_series_path_ignores_provider_variants_and_groups_only_by_explicit
             )
             .await
             .unwrap();
-        assert!(matches!(
-            service.execution_for(&job.result_ref).await.unwrap(),
-            media_contract::ExecutionSelectionDto::Rezka {
-                library_path_title: Some(path), ..
-            } if path == "rezka-series-tmdb-94997"
-        ));
+        let execution = service.execution_for(&job.result_ref).await.unwrap();
+        let media_contract::ExecutionSelectionDto::Rezka {
+            library_path_title: Some(path),
+            library_path_aliases,
+            ..
+        } = execution
+        else {
+            panic!("expected Rezka series execution");
+        };
+        assert_eq!(path, "Магия и мускулы {tmdb-94997}");
+        if index == 0 {
+            assert_eq!(
+                library_path_aliases,
+                [
+                    "rezka-101",
+                    "rezka-series-tmdb-94997",
+                    "Магия и мускулы ТВ-1",
+                ]
+            );
+        } else {
+            assert_eq!(
+                library_path_aliases,
+                [
+                    "rezka-202",
+                    "rezka-series-tmdb-94997",
+                    "rezka-series-tvmaze-88",
+                    "tvmaze-88",
+                    "Магия и мускулы ТВ-2",
+                ],
+            );
+        }
     }
+}
+
+#[tokio::test]
+async fn unverified_tmdb_series_identity_cannot_select_a_physical_path() {
+    let result = ProviderResult::rezka(
+        SearchResultDto::Rezka {
+            result_id: "wrong-id".to_owned(),
+            title: "Verified Show [TV-1]".to_owned(),
+            original_title: Some("Verified Show".to_owned()),
+            year: Some(2026),
+            media_kind: MediaKindDto::Series,
+            thumbnail_url: None,
+            translations: vec![RezkaTranslationDto {
+                id: 7,
+                name: "Dub".to_owned(),
+                premium: false,
+                director: false,
+                camrip: false,
+                has_ads: false,
+                seasons: vec![SeasonAvailabilityDto {
+                    season: 1,
+                    episodes: vec![1],
+                }],
+            }],
+            availability: Some(SeriesAvailabilityDto {
+                lifecycle_status: media_contract::SeriesLifecycleStatusDto::Ongoing,
+                incomplete: true,
+                seasons: vec![SeasonAvailabilityDto {
+                    season: 1,
+                    episodes: vec![1],
+                }],
+                tracking_prompt: None,
+            }),
+        },
+        "/wrong.html".to_owned(),
+        42,
+    );
+    let service = service(HashMap::from([(
+        ProviderDto::Rezka,
+        vec![ProviderPage {
+            results: vec![result],
+            provider_continuation: None,
+        }],
+    )]));
+    let mut search = request(ProviderDto::Rezka);
+    search.query = "Verified Show".to_owned();
+    search.media_kind = Some(MediaKindDto::Series);
+    search.series_group = Some(SeriesGroupIdentityDto {
+        source: SeriesGroupSourceDto::Tmdb,
+        source_id: 999,
+    });
+    let page = service.start(PRIMARY_USER_ID, search).await.unwrap();
+
+    let selected = service
+        .select(
+            PRIMARY_USER_ID,
+            OperationKey::from_bytes([91; 32]),
+            SelectResultRequest {
+                session_id: page.session_id,
+                result_id: "wrong-id".to_owned(),
+                translation_id: Some(7),
+                season: Some(1),
+                episode: Some(1),
+                scope: telegram_scope("default", None),
+            },
+        )
+        .await;
+
+    assert!(matches!(selected, Err(SearchError::InvalidRequest)));
+}
+
+fn concrete_identity_provider(server: &MockServer) -> ConcreteSearchProvider {
+    let config = media_integrations::tmdb::TmdbConfig::new(
+        format!("{}/3/", server.uri()).parse().unwrap(),
+        SecretString::from("test-key"),
+        "ru-RU",
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    ConcreteSearchProvider::new(None, None).with_tmdb(Some(Arc::new(
+        media_integrations::tmdb::TmdbClient::new(config).unwrap(),
+    )))
+}
+
+fn later_season_result(title: &str, year: u16) -> SearchResultDto {
+    SearchResultDto::Rezka {
+        result_id: "selected-rezka-title".to_owned(),
+        title: title.to_owned(),
+        original_title: None,
+        year: Some(year),
+        media_kind: MediaKindDto::Series,
+        thumbnail_url: None,
+        translations: Vec::new(),
+        availability: None,
+    }
+}
+
+#[tokio::test]
+async fn concrete_tmdb_verification_binds_tv2_title_root_but_rejects_wrong_identity() {
+    let server = MockServer::start().await;
+    Mock::given(path("/3/search/tv"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "total_results": 1,
+            "results": [{
+                "id": 94997,
+                "name": "Магия и мускулы",
+                "original_name": "Mashle: Magic and Muscles",
+                "first_air_date": "2023-04-08"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(path("/3/tv/94997"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": 94997,
+            "name": "Магия и мускулы",
+            "original_name": "Mashle: Magic and Muscles",
+            "first_air_date": "2023-04-08"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(path("/3/tv/999"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": 999,
+            "name": "Unrelated Show",
+            "first_air_date": "2023-04-08"
+        })))
+        .mount(&server)
+        .await;
+    let provider = concrete_identity_provider(&server);
+    let selected = later_season_result(
+        "Магия и мускулы: Экзамен на звание Вестника Бога [ТВ-2]",
+        2024,
+    );
+
+    let verified = provider
+        .verify_series_identity(
+            &selected,
+            Some(SeriesGroupIdentityDto {
+                source: SeriesGroupSourceDto::Tmdb,
+                source_id: 94997,
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(verified.tmdb_id, 94997);
+    assert_eq!(
+        provider
+            .verify_series_identity(
+                &selected,
+                Some(SeriesGroupIdentityDto {
+                    source: SeriesGroupSourceDto::Tmdb,
+                    source_id: 999,
+                }),
+            )
+            .await,
+        Err(SearchError::InvalidRequest),
+    );
+}
+
+#[tokio::test]
+async fn concrete_tmdb_verification_rejects_ambiguous_later_season_remake_title() {
+    let server = MockServer::start().await;
+    Mock::given(path("/3/tv/101"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": 101,
+            "name": "The Office",
+            "first_air_date": "2001-07-09"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(path("/3/search/tv"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "total_results": 2,
+            "results": [
+                {"id": 101, "name": "The Office", "first_air_date": "2001-07-09"},
+                {"id": 202, "name": "The Office", "first_air_date": "2005-03-24"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+    let provider = concrete_identity_provider(&server);
+    let selected = later_season_result("The Office: Season Two [TV-2]", 2006);
+
+    assert_eq!(
+        provider
+            .verify_series_identity(
+                &selected,
+                Some(SeriesGroupIdentityDto {
+                    source: SeriesGroupSourceDto::Tmdb,
+                    source_id: 101,
+                }),
+            )
+            .await,
+        Err(SearchError::InvalidRequest),
+    );
+}
+
+#[tokio::test]
+async fn concrete_tmdb_auto_binding_accepts_tv4_later_release_year() {
+    let server = MockServer::start().await;
+    Mock::given(path("/3/search/tv"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "total_results": 1,
+            "results": [{
+                "id": 95480,
+                "name": "Slow Horses",
+                "first_air_date": "2022-04-01"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let provider = concrete_identity_provider(&server);
+    let selected = later_season_result("Slow Horses: Season Four [TV-4]", 2024);
+
+    let verified = provider
+        .verify_series_identity(&selected, None)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(verified.tmdb_id, 95480);
+}
+
+#[tokio::test]
+async fn concrete_tvmaze_identity_uses_imdb_only_after_tvdb_candidate_fails_validation() {
+    let server = MockServer::start().await;
+    Mock::given(path("/shows/88"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": 88,
+            "name": "Show",
+            "premiered": "2024-01-01",
+            "externals": {"thetvdb": 123, "imdb": "tt999"}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(path("/3/find/123"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "tv_results": [{
+                "id": 111,
+                "name": "Unrelated Show",
+                "first_air_date": "2024-01-01"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(path("/3/find/tt999"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "tv_results": [{
+                "id": 94997,
+                "name": "Show",
+                "first_air_date": "2024-01-01"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let tmdb_config = media_integrations::tmdb::TmdbConfig::new(
+        format!("{}/3/", server.uri()).parse().unwrap(),
+        SecretString::from("test-key"),
+        "en-US",
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let tvmaze_config = media_integrations::tvmaze::TvmazeConfig::new(
+        format!("{}/", server.uri()).parse().unwrap(),
+        Duration::from_secs(2),
+        "media-test".to_owned(),
+        0,
+    )
+    .unwrap();
+    let provider = ConcreteSearchProvider::new(None, None)
+        .with_tmdb(Some(Arc::new(
+            media_integrations::tmdb::TmdbClient::new(tmdb_config).unwrap(),
+        )))
+        .with_tvmaze(Arc::new(
+            media_integrations::tvmaze::TvmazeClient::new(tvmaze_config).unwrap(),
+        ));
+
+    let selected = later_season_result("Show: Season Two [TV-2]", 2024);
+    let verified = provider
+        .verify_series_identity(
+            &selected,
+            Some(SeriesGroupIdentityDto {
+                source: SeriesGroupSourceDto::Tvmaze,
+                source_id: 88,
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(verified.tmdb_id, 94997);
 }
 
 #[tokio::test]

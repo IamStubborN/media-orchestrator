@@ -152,6 +152,7 @@ impl FileSystemPort for FakeFs {
 struct FakeHttp {
     video_size: Option<u64>,
     probe_fails: bool,
+    probe_cancelled: bool,
     video_failures: Mutex<VecDeque<RunnerPortError>>,
     video_offsets: Mutex<Vec<u64>>,
     subtitle_failures: Mutex<HashSet<String>>,
@@ -161,7 +162,14 @@ struct FakeHttp {
 
 #[async_trait]
 impl HttpPort for FakeHttp {
-    async fn probe_video_size(&self, _url: &SensitiveUrl) -> Result<u64, RunnerPortError> {
+    async fn probe_video_size(
+        &self,
+        _url: &SensitiveUrl,
+        _cancellation: &dyn Cancellation,
+    ) -> Result<u64, RunnerPortError> {
+        if self.probe_cancelled {
+            return Err(RunnerPortError::Cancelled);
+        }
         if self.probe_fails {
             return Err(RunnerPortError::Http);
         }
@@ -614,6 +622,31 @@ async fn artifact_report_blocked_storage_and_cancelled_work_have_no_artifact() {
         .unwrap();
     assert_eq!(cancelled.outcome, EpisodeOutcome::Cancelled);
     assert_eq!(cancelled.artifact, None);
+}
+
+#[tokio::test]
+async fn cancelled_mp4_size_probe_stops_the_episode_before_transfer() {
+    let work = work();
+    let filesystem = Arc::new(FakeFs::with_available(30 * GIB));
+    let http = Arc::new(FakeHttp {
+        probe_cancelled: true,
+        ..FakeHttp::default()
+    });
+    let process = Arc::new(FakeProcess {
+        probes: Mutex::default(),
+        commands: Mutex::default(),
+        filesystem: filesystem.clone(),
+    });
+    let service = Arc::new(FakeService {
+        checks: Mutex::default(),
+        scans: Mutex::default(),
+    });
+    let pipeline = EpisodePipeline::new(filesystem, http.clone(), http.clone(), process, service);
+
+    let report = pipeline.run(&work, &NeverCancelled, &()).await.unwrap();
+
+    assert_eq!(report.outcome, EpisodeOutcome::Cancelled);
+    assert!(http.video_offsets.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

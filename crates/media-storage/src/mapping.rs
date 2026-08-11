@@ -241,7 +241,9 @@ impl TryFrom<job::Model> for Job {
     type Error = MappingError;
 
     fn try_from(model: job::Model) -> Result<Self, Self::Error> {
-        Job::rehydrate(
+        let lifecycle_cycle =
+            u64::try_from(model.notification_cycle).map_err(|_| MappingError::NumericOverflow)?;
+        Job::rehydrate_with_lifecycle_cycle(
             media_core::JobId::from_uuid(model.id),
             media_core::UserId::from_uuid(model.owner_id),
             parse_provider(&model.provider)?,
@@ -253,6 +255,7 @@ impl TryFrom<job::Model> for Job {
                 .map(parse_needs_action_reason)
                 .transpose()?,
             parse_notify_scope(&model.notify_scope)?,
+            lifecycle_cycle,
         )
         .map_err(|_| MappingError::InvalidPersistedValue)
     }
@@ -268,6 +271,7 @@ pub(crate) fn job_active_model(value: &NewJob) -> job::ActiveModel {
         state: Set(job_state_value(JobState::Queued).to_owned()),
         needs_action_reason: Set(None),
         notify_scope: Set(notify_scope_value(value.notify_scope()).to_owned()),
+        notification_cycle: Set(1),
         request_snapshot: Set(serde_json::json!({})),
         error_snapshot: Set(None),
         attempt_count: Set(0),

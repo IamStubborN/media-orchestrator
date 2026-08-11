@@ -232,7 +232,35 @@ async fn reqwest_adapter_probes_video_size_with_a_single_byte_range() {
     let adapter = ReqwestHttpAdapter::new(std::time::Duration::from_secs(5)).unwrap();
     let url = SensitiveUrl::parse(&format!("{}/video", server.uri()), "video").unwrap();
 
-    assert_eq!(adapter.probe_video_size(&url).await.unwrap(), 734_003_200);
+    assert_eq!(
+        adapter.probe_video_size(&url, &Active).await.unwrap(),
+        734_003_200
+    );
+}
+
+#[tokio::test]
+async fn mp4_size_probe_returns_promptly_when_cancelled() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/video"))
+        .respond_with(ResponseTemplate::new(206).set_delay(std::time::Duration::from_secs(5)))
+        .mount(&server)
+        .await;
+    let adapter = ReqwestHttpAdapter::new(std::time::Duration::from_secs(10)).unwrap();
+    let url = SensitiveUrl::parse(&format!("{}/video", server.uri()), "video").unwrap();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancellation = SwitchableCancellation(cancelled.clone());
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cancelled.store(true, Ordering::SeqCst);
+    });
+
+    let started = tokio::time::Instant::now();
+    assert_eq!(
+        adapter.probe_video_size(&url, &cancellation).await,
+        Err(RunnerPortError::Cancelled)
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
 }
 
 #[tokio::test]
@@ -416,6 +444,62 @@ async fn process_adapter_parses_truthful_ffprobe_dimensions() {
     assert!(arguments.contains("channel_layout"));
     assert!(arguments.contains("-show_packets"));
     assert!(arguments.contains("dts_time"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn process_adapter_cancels_and_kills_a_blocked_ffprobe() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temporary = tempdir().unwrap();
+    let ffprobe = temporary.path().join("blocked-ffprobe");
+    let pid_file = temporary.path().join("ffprobe.pid");
+    std::fs::write(
+        &ffprobe,
+        format!(
+            "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nsleep 30\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&ffprobe, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let adapter = Arc::new(TokioProcessAdapter::new(
+        &ffprobe,
+        "/usr/bin/false",
+        std::time::Duration::from_secs(10),
+    ));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let probe_adapter = adapter.clone();
+    let probe_cancellation = SwitchableCancellation(cancelled.clone());
+    let probe = tokio::spawn(async move {
+        probe_adapter
+            .probe(PathBuf::from("input.mkv").as_path(), &probe_cancellation)
+            .await
+    });
+    for _ in 0..200 {
+        if tokio::fs::try_exists(&pid_file).await.unwrap_or(false) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let pid = std::fs::read_to_string(&pid_file).unwrap();
+    let cancelled_at = tokio::time::Instant::now();
+    cancelled.store(true, Ordering::SeqCst);
+    assert_eq!(probe.await.unwrap(), Err(RunnerPortError::Cancelled));
+    assert!(cancelled_at.elapsed() < std::time::Duration::from_secs(1));
+    for _ in 0..20 {
+        if !std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("cancelled ffprobe child is still running");
 }
 
 #[cfg(unix)]

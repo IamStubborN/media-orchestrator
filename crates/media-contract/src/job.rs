@@ -42,6 +42,12 @@ pub struct JobDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub needs_action_reason: Option<NeedsActionReasonDto>,
     pub notify_scope: NotifyScopeDto,
+    #[serde(default = "default_lifecycle_cycle")]
+    pub lifecycle_cycle: u64,
+}
+
+const fn default_lifecycle_cycle() -> u64 {
+    1
 }
 
 /// The job detail response for `GET /v1/jobs/{id}`. It carries every [`JobDto`]
@@ -213,6 +219,7 @@ mod tests {
             state: JobStateDto::Queued,
             needs_action_reason: None,
             notify_scope: NotifyScopeDto::Family,
+            lifecycle_cycle: 1,
         };
 
         let value = serde_json::to_value(&dto).unwrap();
@@ -223,7 +230,8 @@ mod tests {
                 "provider": "prowlarr",
                 "result_ref": "prowlarr:result:7",
                 "state": "queued",
-                "notify_scope": "family"
+                "notify_scope": "family",
+                "lifecycle_cycle": 1
             }),
         );
         assert_eq!(serde_json::from_value::<JobDto>(value).unwrap(), dto);
@@ -239,6 +247,7 @@ mod tests {
                 state: JobStateDto::Running,
                 needs_action_reason: None,
                 notify_scope: NotifyScopeDto::Initiator,
+                lifecycle_cycle: 1,
             },
             current_stage: Some("transcode".to_owned()),
             progress: None,
@@ -253,6 +262,7 @@ mod tests {
                 "result_ref": "rezka:series:42:season:1",
                 "state": "running",
                 "notify_scope": "initiator",
+                "lifecycle_cycle": 1,
                 "current_stage": "transcode"
             }),
         );
@@ -269,6 +279,7 @@ mod tests {
                 state: JobStateDto::Queued,
                 needs_action_reason: None,
                 notify_scope: NotifyScopeDto::Family,
+                lifecycle_cycle: 1,
             },
             current_stage: None,
             progress: None,
@@ -282,7 +293,8 @@ mod tests {
                 "provider": "prowlarr",
                 "result_ref": "prowlarr:result:7",
                 "state": "queued",
-                "notify_scope": "family"
+                "notify_scope": "family",
+                "lifecycle_cycle": 1
             }),
         );
         assert_eq!(serde_json::from_value::<JobDetailDto>(value).unwrap(), dto);
@@ -298,6 +310,7 @@ mod tests {
                 state: JobStateDto::Running,
                 needs_action_reason: None,
                 notify_scope: NotifyScopeDto::Initiator,
+                lifecycle_cycle: 1,
             },
             current_stage: Some("torrent_monitor".to_owned()),
             progress: Some(TransferProgressDto {

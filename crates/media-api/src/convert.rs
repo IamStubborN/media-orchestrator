@@ -352,6 +352,7 @@ pub(crate) fn job(job: &Job) -> JobDto {
             NotifyScope::Initiator => NotifyScopeDto::Initiator,
             NotifyScope::Family => NotifyScopeDto::Family,
         },
+        lifecycle_cycle: job.lifecycle_cycle(),
     }
 }
 

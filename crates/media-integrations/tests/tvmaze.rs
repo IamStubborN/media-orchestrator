@@ -34,6 +34,31 @@ fn show(id: u64, name: &str, year: &str, status: &str) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn exact_show_identity_exposes_crosswalk_ids_and_year() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/shows/88"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": 88,
+            "name": "Sugar",
+            "premiered": "2024-04-05",
+            "status": "Running",
+            "externals": {"thetvdb": 424731, "imdb": "tt16418808"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let identity = client(&server, 0).show_identity(88).await.unwrap();
+
+    assert_eq!(identity.source_id, 88);
+    assert_eq!(identity.title, "Sugar");
+    assert_eq!(identity.year, Some(2024));
+    assert_eq!(identity.tvdb_id, Some(424731));
+    assert_eq!(identity.imdb_id.as_deref(), Some("tt16418808"));
+}
+
+#[tokio::test]
 async fn ambiguous_search_returns_choices_without_fetching_episodes() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

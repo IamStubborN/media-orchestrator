@@ -11,6 +11,7 @@ pub struct Model {
     pub state: String,
     pub needs_action_reason: Option<String>,
     pub notify_scope: String,
+    pub notification_cycle: i64,
     pub request_snapshot: Json,
     pub error_snapshot: Option<Json>,
     pub attempt_count: i32,

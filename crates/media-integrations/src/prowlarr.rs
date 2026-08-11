@@ -367,7 +367,6 @@ impl ProwlarrClient {
         let mut results = match self.fetch_search_results(&request).await {
             Err(ProwlarrError::TemporarilyUnavailable) => {
                 tokio::time::sleep(self.config.unavailable_retry_delay).await;
-                self.recheck_indexers().await;
                 self.fetch_search_results(&request).await?
             }
             result => result?,
@@ -458,18 +457,6 @@ impl ProwlarrClient {
             .filter(|release| release.seeders.is_none_or(|seeders| seeders > 0))
             .filter_map(|release| ProwlarrResult::from_raw(release, &request.session.query))
             .collect())
-    }
-
-    async fn recheck_indexers(&self) {
-        let Ok(endpoint) = self.config.base_url.join("api/v1/indexer/testall") else {
-            return;
-        };
-        let _ = self
-            .client
-            .post(endpoint)
-            .header("X-Api-Key", self.config.api_key.expose_secret())
-            .send()
-            .await;
     }
 
     pub async fn episode_available(

@@ -19,6 +19,7 @@ use crate::{
 
 const JOB_NOT_RETRYABLE: &str =
     "only blocked-storage, partial, failed, or needs-action jobs can be retried";
+const JOB_LIFECYCLE_CYCLE_STALE: &str = "job lifecycle cycle is stale";
 
 #[derive(Clone)]
 pub struct SeaOrmJobStore {
@@ -166,6 +167,7 @@ impl JobStore for SeaOrmJobStore {
         operation: OperationKey,
         id: JobId,
         owner: UserId,
+        expected_lifecycle_cycle: Option<u64>,
     ) -> Result<Option<Job>, PortError> {
         let transaction = self.database.begin().await.map_err(map_database_error)?;
         let result = async {
@@ -182,7 +184,7 @@ impl JobStore for SeaOrmJobStore {
             let Some(row) = transaction
                 .query_one_raw(Statement::from_sql_and_values(
                     DatabaseBackend::Postgres,
-                    "SELECT state FROM jobs WHERE id = $1 AND owner_id = $2 FOR UPDATE",
+                    "SELECT state, notification_cycle FROM jobs WHERE id = $1 AND owner_id = $2 FOR UPDATE",
                     [id.into_uuid().into(), owner.into_uuid().into()],
                 ))
                 .await?
@@ -196,6 +198,16 @@ impl JobStore for SeaOrmJobStore {
                 .await?;
                 return Ok(None);
             };
+            if expected_lifecycle_cycle.is_some_and(|expected| {
+                row.try_get::<i64>("", "notification_cycle")
+                    .ok()
+                    .and_then(|cycle| u64::try_from(cycle).ok())
+                    != Some(expected)
+            }) {
+                return Err(sea_orm::DbErr::Custom(
+                    JOB_LIFECYCLE_CYCLE_STALE.to_owned(),
+                ));
+            }
             let current = row.try_get::<String>("", "state")?;
             let target = match current.as_str() {
                 "queued" => "cancelled",
@@ -264,6 +276,7 @@ impl JobStore for SeaOrmJobStore {
         operation: OperationKey,
         id: JobId,
         owner: UserId,
+        expected_lifecycle_cycle: Option<u64>,
     ) -> Result<Option<Job>, PortError> {
         let transaction = self.database.begin().await.map_err(map_database_error)?;
         let result = async {
@@ -280,7 +293,7 @@ impl JobStore for SeaOrmJobStore {
             let Some(row) = transaction
                 .query_one_raw(Statement::from_sql_and_values(
                     DatabaseBackend::Postgres,
-                    "SELECT state FROM jobs WHERE id = $1 AND owner_id = $2 FOR UPDATE",
+                    "SELECT state, notification_cycle FROM jobs WHERE id = $1 AND owner_id = $2 FOR UPDATE",
                     [id.into_uuid().into(), owner.into_uuid().into()],
                 ))
                 .await?
@@ -294,6 +307,16 @@ impl JobStore for SeaOrmJobStore {
                 .await?;
                 return Ok(None);
             };
+            if expected_lifecycle_cycle.is_some_and(|expected| {
+                row.try_get::<i64>("", "notification_cycle")
+                    .ok()
+                    .and_then(|cycle| u64::try_from(cycle).ok())
+                    != Some(expected)
+            }) {
+                return Err(sea_orm::DbErr::Custom(
+                    JOB_LIFECYCLE_CYCLE_STALE.to_owned(),
+                ));
+            }
             let state = row.try_get::<String>("", "state")?;
             if !matches!(
                 state.as_str(),
@@ -542,7 +565,12 @@ async fn finish<T>(
         }
         Err(error) => {
             let _ = transaction.rollback().await;
-            Err(map_database_error(error))
+            if matches!(&error, sea_orm::DbErr::Custom(message) if message == JOB_LIFECYCLE_CYCLE_STALE)
+            {
+                Err(PortError::Conflict)
+            } else {
+                Err(map_database_error(error))
+            }
         }
     }
 }

@@ -846,6 +846,10 @@ impl PreparedService {
                             discovered = report.discovered,
                             failed = report.failed,
                             queued = report.queued,
+                            release_conflict_failures = report.release_conflict_failures,
+                            release_infrastructure_failures =
+                                report.release_infrastructure_failures,
+                            source_failures = report.source_failures,
                             "tracking discovery pass completed with failures"
                         ),
                         Ok(_) => {}
@@ -1065,8 +1069,11 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
                     .map_err(|_| ServiceError::Bootstrap)
             })
             .transpose()?;
-        let provider =
-            Arc::new(ConcreteSearchProvider::new(rezka, prowlarr).with_tmdb(search_tmdb));
+        let provider = Arc::new(
+            ConcreteSearchProvider::new(rezka, prowlarr)
+                .with_tmdb(search_tmdb)
+                .with_tvmaze(release_provider.clone()),
+        );
         if rezka_tracking_enabled {
             let downloads = Arc::new(
                 crate::search::TrackedEpisodeDownloader::new(

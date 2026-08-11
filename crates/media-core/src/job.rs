@@ -23,6 +23,7 @@ pub struct Job {
     state: JobState,
     needs_action_reason: Option<NeedsActionReason>,
     notify_scope: NotifyScope,
+    lifecycle_cycle: u64,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -44,6 +45,8 @@ pub enum JobValidationError {
     NeedsActionReasonRequired,
     #[error("job state {state:?} cannot have a NeedsAction reason")]
     UnexpectedNeedsActionReason { state: JobState },
+    #[error("notification lifecycle cycle must be positive")]
+    InvalidLifecycleCycle,
 }
 
 impl NewJob {
@@ -235,7 +238,35 @@ impl Job {
             state,
             needs_action_reason,
             notify_scope,
+            lifecycle_cycle: 1,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn rehydrate_with_lifecycle_cycle(
+        id: JobId,
+        owner_id: UserId,
+        provider: Provider,
+        result_ref: String,
+        state: JobState,
+        needs_action_reason: Option<NeedsActionReason>,
+        notify_scope: NotifyScope,
+        lifecycle_cycle: u64,
+    ) -> Result<Self, JobValidationError> {
+        if lifecycle_cycle == 0 {
+            return Err(JobValidationError::InvalidLifecycleCycle);
+        }
+        let mut job = Self::rehydrate(
+            id,
+            owner_id,
+            provider,
+            result_ref,
+            state,
+            needs_action_reason,
+            notify_scope,
+        )?;
+        job.lifecycle_cycle = lifecycle_cycle;
+        Ok(job)
     }
 
     #[must_use]
@@ -271,6 +302,11 @@ impl Job {
     #[must_use]
     pub const fn notify_scope(&self) -> NotifyScope {
         self.notify_scope
+    }
+
+    #[must_use]
+    pub const fn lifecycle_cycle(&self) -> u64 {
+        self.lifecycle_cycle
     }
 }
 
@@ -638,6 +674,35 @@ mod tests {
             Some(NeedsActionReason::IdentityAmbiguous),
         );
         assert_eq!(job.notify_scope(), NotifyScope::Family);
+    }
+
+    #[test]
+    fn rehydrated_job_exposes_lifecycle_cycle_and_rejects_zero() {
+        let job = Job::rehydrate_with_lifecycle_cycle(
+            JobId::new(),
+            PRIMARY_USER_ID,
+            Provider::Rezka,
+            "result".to_owned(),
+            JobState::Queued,
+            None,
+            NotifyScope::Initiator,
+            7,
+        )
+        .unwrap();
+        assert_eq!(job.lifecycle_cycle(), 7);
+        assert_eq!(
+            Job::rehydrate_with_lifecycle_cycle(
+                JobId::new(),
+                PRIMARY_USER_ID,
+                Provider::Rezka,
+                "result".to_owned(),
+                JobState::Queued,
+                None,
+                NotifyScope::Initiator,
+                0,
+            ),
+            Err(JobValidationError::InvalidLifecycleCycle)
+        );
     }
 
     #[test]

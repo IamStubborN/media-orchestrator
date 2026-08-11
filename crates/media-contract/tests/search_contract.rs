@@ -301,8 +301,9 @@ fn legacy_rezka_execution_payloads_default_to_the_provider_title() {
         ExecutionSelectionDto::Rezka {
             library_title: None,
             library_path_title: None,
+            library_path_aliases,
             title,
             ..
-        } if title == "Example [TV-1]"
+        } if title == "Example [TV-1]" && library_path_aliases.is_empty()
     ));
 }

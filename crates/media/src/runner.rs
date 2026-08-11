@@ -12,6 +12,7 @@ use media_contract::{
     RunnerEventDto, RunnerEventRequest,
 };
 use secrecy::{ExposeSecret as _, SecretString};
+use tokio::io::AsyncWriteExt as _;
 use unicode_normalization::UnicodeNormalization as _;
 
 use crate::config::ClientConfig;
@@ -546,6 +547,7 @@ impl MediaJobExecutor {
                 ambiguous_episodes,
                 library_title,
                 library_path_title,
+                library_path_aliases,
                 title,
                 translation: _,
                 release_year: _,
@@ -570,6 +572,7 @@ impl MediaJobExecutor {
                     episode_mappings,
                     library_title.as_deref(),
                     library_path_title.as_deref(),
+                    library_path_aliases,
                     title,
                 )
                 .await
@@ -657,6 +660,7 @@ impl MediaJobExecutor {
         episode_mappings: &[media_contract::EpisodeCoordinateMappingDto],
         library_title: Option<&str>,
         library_path_title: Option<&str>,
+        library_path_aliases: &[String],
         title: &str,
     ) -> Result<ExecutionOutcome, RunnerError> {
         let mut prepared = self.rezka.lock().await;
@@ -773,6 +777,20 @@ impl MediaJobExecutor {
         };
         drop(prepared);
 
+        let resolved_library_path_title = if media_kind == media_contract::MediaKindDto::Series {
+            let current = library_path_title.unwrap_or(title);
+            Some(
+                resolve_existing_series_path_title(
+                    self.roots.tv(),
+                    &safe_name(current),
+                    library_path_aliases,
+                )
+                .await?,
+            )
+        } else {
+            library_path_title.map(str::to_owned)
+        };
+
         let mut aggregate = ExecutionOutcome::Completed;
         for (task_ordinal, (season, episode, request)) in requests.into_iter().enumerate() {
             let task_ordinal = u32::try_from(task_ordinal).map_err(|_| RunnerError::Execution)?;
@@ -826,7 +844,12 @@ impl MediaJobExecutor {
             let work = self.rezka_work(RezkaWorkRequest {
                 lease,
                 manifest: &manifest,
-                title: rezka_physical_title(library_path_title, mapped_title, library_title, title),
+                title: rezka_physical_title(
+                    resolved_library_path_title.as_deref(),
+                    mapped_title,
+                    library_title,
+                    title,
+                ),
                 release_year: details.release_year(),
                 season,
                 episode,
@@ -834,6 +857,18 @@ impl MediaJobExecutor {
                 expected_duration_seconds,
                 translation: &translation,
             })?;
+            if media_kind == media_contract::MediaKindDto::Series {
+                let tmdb_id = library_path_title.and_then(tmdb_id_from_path_title);
+                let display_title = resolved_library_path_title
+                    .as_deref()
+                    .and_then(|path| tmdb_id.and_then(|id| tmdb_display_title_from_path(path, id)))
+                    .or(library_title)
+                    .or(mapped_title)
+                    .unwrap_or(title);
+                ensure_plex_match(&work.final_video, display_title, tmdb_id)
+                    .await
+                    .map_err(|error| error.at_stage(task_ordinal, "media_pipeline", 1))?;
+            }
             control
                 .stage_started(task_ordinal, "media_pipeline", 1)
                 .await?;
@@ -1642,6 +1677,13 @@ impl JobExecutor for MediaJobExecutor {
 }
 
 fn safe_name(value: &str) -> String {
+    let (value, plex_identity) = value
+        .strip_suffix('}')
+        .and_then(|value| value.rsplit_once(" {tmdb-"))
+        .filter(|(_, id)| {
+            !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()) && id != &"0"
+        })
+        .map_or((value, None), |(title, id)| (title, Some(id)));
     let value = value
         .nfc()
         .map(|character| {
@@ -1655,10 +1697,279 @@ fn safe_name(value: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    if value.is_empty() {
+    let value = if value.is_empty() {
         "media".to_owned()
     } else {
         value
+    };
+    if let Some(id) = plex_identity {
+        format!("{value} {{tmdb-{id}}}")
+    } else {
+        value
+    }
+}
+
+fn tmdb_id_from_path_title(value: &str) -> Option<u64> {
+    value
+        .strip_suffix('}')?
+        .rsplit_once(" {tmdb-")?
+        .1
+        .parse::<u64>()
+        .ok()
+        .filter(|id| *id > 0)
+}
+
+fn tmdb_display_title_from_path(value: &str, tmdb_id: u64) -> Option<&str> {
+    let braced = format!(" {{tmdb-{tmdb_id}}}");
+    let legacy = format!(" tmdb-{tmdb_id}");
+    value
+        .strip_suffix(&braced)
+        .or_else(|| value.strip_suffix(&legacy))
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+}
+
+async fn resolve_existing_series_path_title(
+    shows_root: &std::path::Path,
+    current: &str,
+    legacy: &[String],
+) -> Result<String, RunnerError> {
+    let mut candidates = std::iter::once(current)
+        .chain(legacy.iter().map(String::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if let Some(tmdb_id) = tmdb_id_from_path_title(current) {
+        let mut entries = match tokio::fs::read_dir(shows_root).await {
+            Ok(entries) => Some(entries),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return Err(RunnerError::Execution),
+        };
+        if let Some(entries) = entries.as_mut() {
+            while let Some(entry) = entries
+                .next_entry()
+                .await
+                .map_err(|_| RunnerError::Execution)?
+            {
+                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                if name.ends_with(&format!(" {{tmdb-{tmdb_id}}}"))
+                    || name.ends_with(&format!(" tmdb-{tmdb_id}"))
+                {
+                    candidates.push(name);
+                }
+            }
+        }
+    }
+
+    let mut existing = Vec::new();
+    for candidate in &candidates {
+        if safe_name(candidate) != *candidate || existing.iter().any(|value| value == candidate) {
+            continue;
+        }
+        match tokio::fs::symlink_metadata(shows_root.join(candidate)).await {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                existing.push(candidate.to_owned())
+            }
+            Ok(_) => return Err(RunnerError::Execution),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(RunnerError::Execution),
+        }
+    }
+    match existing.as_slice() {
+        [] => Ok(current.to_owned()),
+        [selected] => Ok(selected.clone()),
+        _ => Err(RunnerError::Execution),
+    }
+}
+
+fn plex_match_matches(
+    contents: &[u8],
+    expected_title: &str,
+    expected_tmdb_id: Option<u64>,
+) -> bool {
+    let Ok(contents) = std::str::from_utf8(contents) else {
+        return false;
+    };
+    let mut fields = BTreeMap::<String, String>::new();
+    for line in contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if line.starts_with('#') {
+            continue;
+        }
+        let Some((raw_key, value)) = line.split_once(':') else {
+            return false;
+        };
+        let key = match raw_key.trim().to_ascii_lowercase().as_str() {
+            "show" => "title".to_owned(),
+            key => key.to_owned(),
+        };
+        let value = value.trim();
+        if !matches!(
+            key.as_str(),
+            "title" | "year" | "guid" | "tmdbid" | "tvdbid" | "imdbid"
+        ) || value.is_empty()
+            || fields.get(&key).is_some_and(|existing| existing != value)
+        {
+            return false;
+        }
+        fields.insert(key, value.to_owned());
+    }
+    let parsed_tmdb_id = fields
+        .get("tmdbid")
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|id| *id > 0);
+    if fields.contains_key("tmdbid") && parsed_tmdb_id.is_none() {
+        return false;
+    }
+    if fields
+        .get("year")
+        .is_some_and(|value| value.len() != 4 || value.parse::<u16>().is_err())
+        || fields
+            .get("tvdbid")
+            .is_some_and(|value| value.parse::<u64>().ok().is_none_or(|id| id == 0))
+        || fields.get("imdbid").is_some_and(|value| {
+            value.strip_prefix("tt").is_none_or(|digits| {
+                digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        })
+    {
+        return false;
+    }
+    let guid_tmdb_id = if let Some(guid) = fields.get("guid") {
+        let Some((namespace, value)) = guid.split_once("://") else {
+            return false;
+        };
+        match namespace.to_ascii_lowercase().as_str() {
+            "tmdb" => {
+                let Some(id) = value.parse::<u64>().ok().filter(|id| *id > 0) else {
+                    return false;
+                };
+                Some(id)
+            }
+            "tvdb" => {
+                if value.parse::<u64>().ok().filter(|id| *id > 0).is_none()
+                    || fields.get("tvdbid").is_some_and(|id| id != value)
+                {
+                    return false;
+                }
+                None
+            }
+            "imdb" => {
+                if !value.starts_with("tt") || fields.get("imdbid").is_some_and(|id| id != value) {
+                    return false;
+                }
+                None
+            }
+            _ => return false,
+        }
+    } else {
+        None
+    };
+    if expected_tmdb_id.is_some()
+        && parsed_tmdb_id
+            .or(guid_tmdb_id)
+            .is_none_or(|id| Some(id) != expected_tmdb_id)
+    {
+        return false;
+    }
+    if parsed_tmdb_id.is_some() && guid_tmdb_id.is_some() && parsed_tmdb_id != guid_tmdb_id {
+        return false;
+    }
+    if expected_tmdb_id.is_some() {
+        true
+    } else {
+        fields.get("title").is_some_and(|title| {
+            title.nfc().collect::<String>() == expected_title.nfc().collect::<String>()
+        })
+    }
+}
+
+async fn ensure_plex_match(
+    final_video: &std::path::Path,
+    display_title: &str,
+    tmdb_id: Option<u64>,
+) -> Result<(), RunnerError> {
+    let show_directory = final_video
+        .parent()
+        .and_then(std::path::Path::parent)
+        .ok_or(RunnerError::Execution)?;
+    tokio::fs::create_dir_all(show_directory)
+        .await
+        .map_err(|_| RunnerError::Execution)?;
+    let title = display_title
+        .trim()
+        .nfc()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if title.is_empty() {
+        return Err(RunnerError::Execution);
+    }
+    let mut contents = format!("# PlexMatch\nTitle: {title}\n");
+    if let Some(tmdb_id) = tmdb_id {
+        contents.push_str(&format!("tmdbid: {tmdb_id}\n"));
+    }
+    let path = show_directory.join(".plexmatch");
+    match tokio::fs::read(&path).await {
+        Ok(existing) => {
+            return if plex_match_matches(&existing, &title, tmdb_id) {
+                Ok(())
+            } else {
+                Err(RunnerError::Execution)
+            };
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(RunnerError::Execution),
+    }
+    let temporary = show_directory.join(format!(".plexmatch.{}.tmp", uuid::Uuid::new_v4()));
+    let mut file = match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .await
+    {
+        Ok(file) => file,
+        Err(_) => return Err(RunnerError::Execution),
+    };
+    if file.write_all(contents.as_bytes()).await.is_err() || file.sync_all().await.is_err() {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(RunnerError::Execution);
+    }
+    drop(file);
+    let published = match tokio::fs::hard_link(&temporary, &path).await {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(_) => {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            return Err(RunnerError::Execution);
+        }
+    };
+    tokio::fs::remove_file(&temporary)
+        .await
+        .map_err(|_| RunnerError::Execution)?;
+    if published {
+        Ok(())
+    } else {
+        let existing = tokio::fs::read(path)
+            .await
+            .map_err(|_| RunnerError::Execution)?;
+        if plex_match_matches(&existing, &title, tmdb_id) {
+            Ok(())
+        } else {
+            Err(RunnerError::Execution)
+        }
     }
 }
 
@@ -2232,15 +2543,22 @@ mod tests {
 
     use super::{
         ExecutionOutcome, ProgressCheckpointGate, artifact_checkpoint, canonical_movie_name,
-        combine_episode_outcome, expected_source_duration_seconds, highest_standard_variant,
-        matching_episode_videos, parse_episode_coordinates, rezka_audio_language,
-        rezka_final_video_path, rezka_physical_title, safe_name, torrent_series_work_items,
+        combine_episode_outcome, ensure_plex_match, expected_source_duration_seconds,
+        highest_standard_variant, matching_episode_videos, parse_episode_coordinates,
+        plex_match_matches, resolve_existing_series_path_title, rezka_audio_language,
+        rezka_final_video_path, rezka_physical_title, safe_name, tmdb_display_title_from_path,
+        torrent_series_work_items,
     };
 
     #[test]
     fn safe_names_normalize_unicode_before_building_library_paths() {
         assert_eq!(safe_name("Cafe\u{301}"), safe_name("Café"));
         assert_eq!(safe_name("и\u{306}ога"), safe_name("йога"));
+        assert_eq!(
+            safe_name("Магия и мускулы {tmdb-94997}"),
+            "Магия и мускулы {tmdb-94997}"
+        );
+        assert_eq!(safe_name("Fake {tmdb-not-id}"), "Fake tmdb-not-id");
     }
 
     #[test]
@@ -2254,6 +2572,175 @@ mod tests {
             ),
             "rezka-90825",
         );
+    }
+
+    #[tokio::test]
+    async fn plex_match_handoff_is_human_readable_and_first_writer_stable() {
+        let root = tempfile::tempdir().unwrap();
+        let video = root
+            .path()
+            .join("rezka-90825/Season 01/rezka-90825 - S01E01.mkv");
+
+        ensure_plex_match(&video, "Cafe\u{301}", None)
+            .await
+            .unwrap();
+        ensure_plex_match(&video, "Cafe\u{301}", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            ensure_plex_match(&video, "Different Alias", None).await,
+            Err(super::RunnerError::Execution),
+        );
+
+        assert_eq!(
+            tokio::fs::read_to_string(root.path().join("rezka-90825/.plexmatch"))
+                .await
+                .unwrap(),
+            "# PlexMatch\nTitle: Café\n",
+        );
+    }
+
+    #[test]
+    fn plex_match_parser_accepts_plex_comments_case_and_whitespace_but_rejects_conflicts() {
+        assert!(plex_match_matches(
+            b"# user comment\n TITLE : Cafe\xcc\x81 \n TmDbId: 94997\n# PlexMatch\n",
+            "Café",
+            Some(94997),
+        ));
+        assert!(!plex_match_matches(
+            b"Title: Cafe\ntmdbid: 94997\ntmdbid: 42\n",
+            "Cafe",
+            Some(94997),
+        ));
+        assert!(plex_match_matches(
+            b"Title: Cafe\ntvdbid: 100\n",
+            "Cafe",
+            None,
+        ));
+        assert!(!plex_match_matches(b"Title: Cafe\n", "Cafe", Some(94997),));
+    }
+
+    #[test]
+    fn plex_match_tmdb_identity_survives_localized_title_drift_and_neutral_hints() {
+        assert!(plex_match_matches(
+            b"# PlexMatch\nTitle: Old Localized Title\nYear: 2023\nGuid: tmdb://94997\nTVDBID: 777\nIMDbID: tt1234567\nTmDbId: 94997\n",
+            "New Localized Title",
+            Some(94997),
+        ));
+        assert!(!plex_match_matches(
+            b"Title: Old Localized Title\nGuid: tmdb://42\ntmdbid: 94997\n",
+            "New Localized Title",
+            Some(94997),
+        ));
+        assert!(!plex_match_matches(
+            b"Title: Old Localized Title\ntmdbid: 94997\ntmdbid: 42\n",
+            "New Localized Title",
+            Some(94997),
+        ));
+        assert!(!plex_match_matches(
+            b"Title: Old Localized Title\ntmdbid: 94997\ntvdbid: 777\nguid: tvdb://888\n",
+            "New Localized Title",
+            Some(94997),
+        ));
+        assert!(!plex_match_matches(
+            b"Title: Old Localized Title\ntmdbid: 94997\nguid: unsupported\n",
+            "New Localized Title",
+            Some(94997),
+        ));
+    }
+
+    #[test]
+    fn plex_match_accepts_show_alias_and_authoritative_tmdb_guid_only() {
+        assert!(plex_match_matches(
+            b"Show: Old Localized Title\nGuid: tmdb://94997\n",
+            "New Localized Title",
+            Some(94997),
+        ));
+        assert!(plex_match_matches(
+            b"Guid: tmdb://94997\n",
+            "New Localized Title",
+            Some(94997),
+        ));
+        assert!(!plex_match_matches(
+            b"Title: One\nShow: Two\nGuid: tmdb://94997\n",
+            "Two",
+            Some(94997),
+        ));
+        assert!(!plex_match_matches(
+            b"Guid: tmdb://94997\ntmdbid: 94998\n",
+            "New Localized Title",
+            Some(94997),
+        ));
+    }
+
+    #[tokio::test]
+    async fn existing_legacy_series_directory_wins_before_new_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let shows = root.path().join("shows");
+        tokio::fs::create_dir_all(shows.join("rezka-series-tmdb-94997"))
+            .await
+            .unwrap();
+
+        let selected = resolve_existing_series_path_title(
+            &shows,
+            "Магия и мускулы {tmdb-94997}",
+            &["rezka-series-tmdb-94997".to_owned()],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(selected, "rezka-series-tmdb-94997");
+    }
+
+    #[tokio::test]
+    async fn existing_unbound_and_historical_tmdb_roots_are_reused_without_cross_identity_merge() {
+        let root = tempfile::tempdir().unwrap();
+        let shows = root.path().join("shows");
+        tokio::fs::create_dir_all(shows.join("rezka-90825"))
+            .await
+            .unwrap();
+        let selected = resolve_existing_series_path_title(
+            &shows,
+            "New Localized Title {tmdb-94997}",
+            &["rezka-90825".to_owned()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected, "rezka-90825");
+
+        tokio::fs::remove_dir(shows.join("rezka-90825"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(shows.join("Old Localized Title tmdb-94997"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(shows.join("Unrelated Show tmdb-94998"))
+            .await
+            .unwrap();
+        let selected =
+            resolve_existing_series_path_title(&shows, "New Localized Title {tmdb-94997}", &[])
+                .await
+                .unwrap();
+        assert_eq!(selected, "Old Localized Title tmdb-94997");
+        assert_eq!(
+            tmdb_display_title_from_path(&selected, 94997),
+            Some("Old Localized Title"),
+        );
+
+        tokio::fs::remove_dir(shows.join("Old Localized Title tmdb-94997"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(shows.join("О моём перерождении в слизь ТВ-4"))
+            .await
+            .unwrap();
+        let selected = resolve_existing_series_path_title(
+            &shows,
+            "О моём перерождении в слизь {tmdb-82684}",
+            &["О моём перерождении в слизь ТВ-4".to_owned()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected, "О моём перерождении в слизь ТВ-4");
     }
 
     #[test]

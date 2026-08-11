@@ -199,7 +199,15 @@ impl EpisodePipeline {
                 .as_ref()
                 .ok_or(RunnerPortError::InvalidWork)?;
             let probed_source_bytes = match work.source_kind {
-                VideoSourceKind::Mp4 => self.http.probe_video_size(source_url).await.ok(),
+                VideoSourceKind::Mp4 => {
+                    match self.http.probe_video_size(source_url, cancellation).await {
+                        Ok(size) => Some(size),
+                        Err(RunnerPortError::Cancelled) => {
+                            return Ok(EpisodeReport::without_artifact(EpisodeOutcome::Cancelled));
+                        }
+                        Err(_) => None,
+                    }
+                }
                 VideoSourceKind::Hls => None,
             };
             let source_bytes = probed_source_bytes

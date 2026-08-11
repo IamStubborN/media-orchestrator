@@ -86,7 +86,13 @@ impl JobStore for NoopJobStore {
         Ok(Vec::new())
     }
 
-    async fn cancel(&self, _: OperationKey, _: JobId, _: UserId) -> Result<Option<Job>, PortError> {
+    async fn cancel(
+        &self,
+        _: OperationKey,
+        _: JobId,
+        _: UserId,
+        _: Option<u64>,
+    ) -> Result<Option<Job>, PortError> {
         Ok(None)
     }
 
@@ -256,6 +262,7 @@ impl JobStore for FakeJobStore {
         _: OperationKey,
         id: JobId,
         owner: UserId,
+        _: Option<u64>,
     ) -> Result<Option<Job>, PortError> {
         let mut jobs = self.jobs.lock().unwrap();
         let Some(index) = jobs
@@ -289,6 +296,7 @@ impl JobStore for FakeJobStore {
         _: OperationKey,
         id: JobId,
         owner: UserId,
+        _: Option<u64>,
     ) -> Result<Option<Job>, PortError> {
         let mut jobs = self.jobs.lock().unwrap();
         let Some(index) = jobs

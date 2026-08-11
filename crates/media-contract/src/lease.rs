@@ -28,6 +28,7 @@ mod tests {
                 state: JobStateDto::NeedsAction,
                 needs_action_reason: Some(NeedsActionReasonDto::IdentityAmbiguous),
                 notify_scope: NotifyScopeDto::Initiator,
+                lifecycle_cycle: 1,
             },
             execution: None,
             completed_task_ordinals: vec![0, 1],
@@ -45,7 +46,8 @@ mod tests {
                     "result_ref": "rezka:series:42:season:1",
                     "state": "needs_action",
                     "needs_action_reason": "identity_ambiguous",
-                    "notify_scope": "initiator"
+                    "notify_scope": "initiator",
+                    "lifecycle_cycle": 1
                 },
                 "completed_task_ordinals": [0, 1],
                 "expires_at": "2026-07-10T18:01:00Z"

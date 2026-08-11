@@ -71,6 +71,7 @@ impl SearchService for FakeSearchService {
             state: JobStateDto::Queued,
             needs_action_reason: None,
             notify_scope: NotifyScopeDto::Initiator,
+            lifecycle_cycle: 1,
         })
     }
 
@@ -110,6 +111,7 @@ impl SearchService for FakeSearchService {
             state: JobStateDto::Queued,
             needs_action_reason: None,
             notify_scope: NotifyScopeDto::Initiator,
+            lifecycle_cycle: 1,
         })
     }
 }

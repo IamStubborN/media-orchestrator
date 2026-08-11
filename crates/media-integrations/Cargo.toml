@@ -24,6 +24,7 @@ tokio = { workspace = true, features = ["sync", "time"] }
 time = { workspace = true, features = ["formatting", "parsing"] }
 url.workspace = true
 uuid.workspace = true
+unicode-normalization.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

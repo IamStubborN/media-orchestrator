@@ -240,6 +240,18 @@ impl EpisodeDiscoveryPort for FailingDiscovery {
     }
 }
 
+struct ConflictingDiscovery;
+
+#[async_trait::async_trait]
+impl EpisodeDiscoveryPort for ConflictingDiscovery {
+    async fn available_episodes(
+        &self,
+        _: &TrackingSubscription,
+    ) -> Result<EpisodeDiscovery, PortError> {
+        Err(PortError::Conflict)
+    }
+}
+
 #[test]
 fn release_failure_cooldown_starts_when_failure_is_observed() {
     block_on(async {
@@ -259,12 +271,35 @@ fn release_failure_cooldown_starts_when_failure_is_observed() {
 
         assert_eq!(result.checked, 1);
         assert_eq!(result.failed, 1);
+        assert_eq!(result.release_infrastructure_failures, 1);
+        assert_eq!(result.release_conflict_failures, 0);
         let finished = store.finished.lock().unwrap();
         assert_eq!(finished[0].1, media_core::TrackingCheckStatus::ReleaseError);
         assert!(
             finished[0].0 >= failure_observed_at + time::Duration::minutes(15),
             "failure cooldown started before the failure was observed"
         );
+    });
+}
+
+#[test]
+fn release_failure_counters_preserve_the_bounded_port_error_class() {
+    block_on(async {
+        let store = Arc::new(ScheduleStore {
+            due: tracking_named("Failed release"),
+            discovered: Mutex::new(Vec::new()),
+            pending: Mutex::new(Vec::new()),
+            finished: Mutex::new(Vec::new()),
+            release_metadata: Mutex::new(Vec::new()),
+        });
+        let result = TrackingRuntime::new(store, Arc::new(ConflictingDiscovery))
+            .run_once(time::OffsetDateTime::now_utc(), 10)
+            .await
+            .unwrap();
+
+        assert_eq!(result.failed, 1);
+        assert_eq!(result.release_conflict_failures, 1);
+        assert_eq!(result.release_infrastructure_failures, 0);
     });
 }
 

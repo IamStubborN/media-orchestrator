@@ -71,6 +71,15 @@ pub struct TvmazeClient {
     max_retries: u8,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct TvmazeShowIdentity {
+    pub source_id: u64,
+    pub title: String,
+    pub year: Option<u16>,
+    pub tvdb_id: Option<u64>,
+    pub imdb_id: Option<String>,
+}
+
 impl TvmazeClient {
     pub fn new(config: TvmazeConfig) -> Result<Self, TvmazeError> {
         let client = reqwest::Client::builder()
@@ -100,6 +109,21 @@ impl TvmazeClient {
             .join(&format!("shows/{show_id}"))
             .map_err(|_| TvmazeError::Configuration)?;
         self.get_json(self.client.get(endpoint)).await
+    }
+
+    pub async fn show_identity(&self, show_id: u64) -> Result<TvmazeShowIdentity, TvmazeError> {
+        let show = self.show(show_id).await?;
+        Ok(TvmazeShowIdentity {
+            source_id: show.id,
+            title: show.name,
+            year: show
+                .premiered
+                .as_deref()
+                .and_then(|value| value.get(..4))
+                .and_then(|value| value.parse().ok()),
+            tvdb_id: show.externals.thetvdb.filter(|id| *id > 0),
+            imdb_id: show.externals.imdb.filter(|id| !id.trim().is_empty()),
+        })
     }
 
     async fn episodes(&self, show_id: u64) -> Result<Vec<EpisodeDto>, TvmazeError> {
@@ -281,6 +305,14 @@ struct ShowDto {
     premiered: Option<String>,
     status: Option<String>,
     image: Option<ShowImageDto>,
+    #[serde(default)]
+    externals: ShowExternalsDto,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ShowExternalsDto {
+    thetvdb: Option<u64>,
+    imdb: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

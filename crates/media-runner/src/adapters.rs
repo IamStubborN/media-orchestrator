@@ -250,14 +250,32 @@ impl HttpPort for ReqwestHttpAdapter {
         }
     }
 
-    async fn probe_video_size(&self, url: &SensitiveUrl) -> Result<u64, RunnerPortError> {
-        let response = self
+    async fn probe_video_size(
+        &self,
+        url: &SensitiveUrl,
+        cancellation: &dyn Cancellation,
+    ) -> Result<u64, RunnerPortError> {
+        if cancellation.is_cancelled() {
+            return Err(RunnerPortError::Cancelled);
+        }
+        let request = self
             .client
             .get(url.as_url().clone())
             .header(reqwest::header::RANGE, "bytes=0-0")
-            .send()
-            .await
-            .map_err(|_| RunnerPortError::SourceTransferTransient)?;
+            .send();
+        tokio::pin!(request);
+        let response = loop {
+            tokio::select! {
+                response = &mut request => {
+                    break response.map_err(|_| RunnerPortError::SourceTransferTransient)?;
+                }
+                () = tokio::time::sleep(Duration::from_millis(50)) => {
+                    if cancellation.is_cancelled() {
+                        return Err(RunnerPortError::Cancelled);
+                    }
+                }
+            }
+        };
         if !response.status().is_success() {
             return Err(classify_source_status(response.status()));
         }
@@ -800,13 +818,22 @@ impl ProcessPort for TokioProcessAdapter {
             .stdin(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
-        let output = tokio::time::timeout(self.timeout, command.output())
-            .await
-            .map_err(|_| RunnerPortError::Process)?
-            .map_err(|_| RunnerPortError::Process)?;
-        if cancellation.is_cancelled() {
-            return Err(RunnerPortError::Cancelled);
-        }
+        let output = command.output();
+        tokio::pin!(output);
+        let started = tokio::time::Instant::now();
+        let output = loop {
+            tokio::select! {
+                output = &mut output => break output.map_err(|_| RunnerPortError::Process)?,
+                () = tokio::time::sleep(Duration::from_millis(50)) => {
+                    if cancellation.is_cancelled() {
+                        return Err(RunnerPortError::Cancelled);
+                    }
+                    if started.elapsed() >= self.timeout {
+                        return Err(RunnerPortError::Process);
+                    }
+                }
+            }
+        };
         if !output.status.success() {
             return Err(RunnerPortError::Process);
         }

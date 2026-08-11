@@ -8,6 +8,7 @@ use media_contract::{
 use reqwest::StatusCode;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, de::DeserializeOwned};
+use unicode_normalization::UnicodeNormalization as _;
 use url::Url;
 
 const MAX_RESULTS: usize = 10;
@@ -289,6 +290,14 @@ impl TmdbClient {
         query: &str,
         media_type: TrendingMediaTypeDto,
     ) -> Result<Option<TrendingItemDto>, TmdbError> {
+        Ok(self.find_all(query, media_type).await?.into_iter().next())
+    }
+
+    pub async fn find_all(
+        &self,
+        query: &str,
+        media_type: TrendingMediaTypeDto,
+    ) -> Result<Vec<TrendingItemDto>, TmdbError> {
         if query.trim().is_empty() {
             return Err(TmdbError::InvalidRequest);
         }
@@ -311,7 +320,35 @@ impl TmdbClient {
             .results
             .into_iter()
             .filter_map(|item| map_item_for_type(item, media_type))
-            .find(|item| tmdb_title_matches(query, item)))
+            .filter(|item| tmdb_title_matches(query, item))
+            .collect())
+    }
+
+    pub async fn find_tv_by_external_id(
+        &self,
+        external_id: &str,
+        external_source: &str,
+    ) -> Result<Option<TrendingItemDto>, TmdbError> {
+        if external_id.trim().is_empty() || !matches!(external_source, "tvdb_id" | "imdb_id") {
+            return Err(TmdbError::InvalidRequest);
+        }
+        let endpoint = self
+            .config
+            .base_url
+            .join(&format!("find/{}", external_id.trim()))
+            .map_err(|_| TmdbError::Configuration)?;
+        let payload: TmdbExternalFindResponse = self
+            .get_json(endpoint, &[("external_source", external_source.to_owned())])
+            .await?;
+        let mut matches = payload
+            .tv_results
+            .into_iter()
+            .filter_map(|item| map_item_for_type(item, TrendingMediaTypeDto::Tv));
+        let first = matches.next();
+        if first.is_some() && matches.next().is_some() {
+            return Ok(None);
+        }
+        Ok(first)
     }
 
     pub async fn details(
@@ -402,7 +439,7 @@ fn tmdb_title_matches(query: &str, item: &TrendingItemDto) -> bool {
 
 fn normalize_title(value: &str) -> String {
     value
-        .chars()
+        .nfc()
         .map(|character| {
             if character.is_alphanumeric() {
                 character.to_lowercase().collect::<String>()
@@ -430,6 +467,12 @@ impl fmt::Debug for TmdbClient {
 struct TrendingResponse {
     total_results: u32,
     results: Vec<TrendingResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TmdbExternalFindResponse {
+    #[serde(default)]
+    tv_results: Vec<TrendingResult>,
 }
 
 #[derive(Debug, Deserialize)]

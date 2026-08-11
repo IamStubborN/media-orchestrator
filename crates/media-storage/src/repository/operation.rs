@@ -207,6 +207,7 @@ fn job_snapshot(job: &Job) -> serde_json::Value {
         "state": job_state_value(job.state()),
         "needs_action_reason": job.needs_action_reason().map(needs_action_reason_value),
         "notify_scope": notify_scope_value(job.notify_scope()),
+        "lifecycle_cycle": job.lifecycle_cycle(),
     })
 }
 
@@ -223,6 +224,13 @@ fn lease_snapshot(lease: &JobLease) -> Result<serde_json::Value, sea_orm::DbErr>
 
 fn job_from_snapshot(snapshot: &serde_json::Value) -> Result<Job, sea_orm::DbErr> {
     let object = object(snapshot)?;
+    let lifecycle_cycle = match object.get("lifecycle_cycle") {
+        None => 1,
+        Some(value) => value
+            .as_i64()
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or_else(invalid_snapshot)?,
+    };
     let needs_action_reason = match object.get("needs_action_reason") {
         Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(value)) => {
@@ -230,7 +238,7 @@ fn job_from_snapshot(snapshot: &serde_json::Value) -> Result<Job, sea_orm::DbErr
         }
         _ => return Err(invalid_snapshot()),
     };
-    Job::rehydrate(
+    Job::rehydrate_with_lifecycle_cycle(
         string(object, "id")?
             .parse::<JobId>()
             .map_err(|_| invalid_snapshot())?,
@@ -242,6 +250,7 @@ fn job_from_snapshot(snapshot: &serde_json::Value) -> Result<Job, sea_orm::DbErr
         parse_job_state(string(object, "state")?).map_err(|_| invalid_snapshot())?,
         needs_action_reason,
         parse_notify_scope(string(object, "notify_scope")?).map_err(|_| invalid_snapshot())?,
+        lifecycle_cycle,
     )
     .map_err(|_| invalid_snapshot())
 }
@@ -302,7 +311,10 @@ mod tests {
         RUNNER_CLIENT_ID,
     };
 
-    use super::{job_from_snapshot, job_snapshot, lease_from_snapshot, lease_snapshot};
+    use super::{
+        OperationKind, OperationResult, decode_result, job_from_snapshot, job_snapshot,
+        lease_from_snapshot, lease_snapshot, result_matches_kind,
+    };
 
     fn job() -> Job {
         Job::rehydrate(
@@ -315,6 +327,82 @@ mod tests {
             NotifyScope::Initiator,
         )
         .unwrap()
+    }
+
+    fn job_with_cycle(lifecycle_cycle: u64) -> Job {
+        Job::rehydrate_with_lifecycle_cycle(
+            JobId::new(),
+            PRIMARY_USER_ID,
+            Provider::Rezka,
+            "receipt-test".to_owned(),
+            JobState::Leased,
+            None,
+            NotifyScope::Initiator,
+            lifecycle_cycle,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn job_receipt_round_trip_preserves_lifecycle_cycle() {
+        let job = job_with_cycle(2);
+        let snapshot = job_snapshot(&job);
+
+        assert_eq!(snapshot["lifecycle_cycle"], 2);
+        assert_eq!(job_from_snapshot(&snapshot).unwrap(), job);
+    }
+
+    #[test]
+    fn legacy_job_and_lease_receipts_default_to_first_lifecycle_cycle() {
+        let job = job();
+        let mut job_snapshot = job_snapshot(&job);
+        job_snapshot
+            .as_object_mut()
+            .unwrap()
+            .remove("lifecycle_cycle");
+        let cancel = decode_result("job", Some(job_snapshot.clone())).unwrap();
+        let retry = decode_result("job", Some(job_snapshot)).unwrap();
+        assert!(result_matches_kind(OperationKind::CancelJob, &cancel));
+        assert!(result_matches_kind(OperationKind::RetryJob, &retry));
+        for result in [cancel, retry] {
+            let OperationResult::Job(job) = result else {
+                panic!("legacy job snapshot must decode as a job result");
+            };
+            assert_eq!(job.lifecycle_cycle(), 1);
+        }
+
+        let lease = JobLease::new(
+            LeaseId::new(),
+            job,
+            RUNNER_CLIENT_ID,
+            time::OffsetDateTime::UNIX_EPOCH,
+        );
+        let mut lease_snapshot = lease_snapshot(&lease).unwrap();
+        lease_snapshot["job"]
+            .as_object_mut()
+            .unwrap()
+            .remove("lifecycle_cycle");
+        let lease_result = decode_result("lease", Some(lease_snapshot)).unwrap();
+        assert!(result_matches_kind(OperationKind::LeaseNext, &lease_result));
+        let OperationResult::Lease(lease) = lease_result else {
+            panic!("legacy lease snapshot must decode as a lease result");
+        };
+        assert_eq!(lease.job().lifecycle_cycle(), 1);
+    }
+
+    #[test]
+    fn invalid_lifecycle_cycles_fail_closed() {
+        for invalid in [
+            serde_json::json!(0),
+            serde_json::json!(9_223_372_036_854_775_808_u64),
+            serde_json::json!("2"),
+            serde_json::json!(-1),
+            serde_json::Value::Null,
+        ] {
+            let mut snapshot = job_snapshot(&job());
+            snapshot["lifecycle_cycle"] = invalid;
+            assert!(job_from_snapshot(&snapshot).is_err());
+        }
     }
 
     #[test]

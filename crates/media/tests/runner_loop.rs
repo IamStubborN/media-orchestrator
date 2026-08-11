@@ -264,6 +264,7 @@ fn lease() -> LeaseDto {
             state: JobStateDto::Leased,
             needs_action_reason: None,
             notify_scope: NotifyScopeDto::Initiator,
+            lifecycle_cycle: 1,
         },
         execution: Some(ExecutionSelectionDto::Prowlarr {
             source_identity: "mock:1".to_owned(),

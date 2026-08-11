@@ -244,6 +244,18 @@ async fn legacy_mcp_session_lists_the_complete_media_toolset() {
         .find(|tool| tool["name"] == "media_job_retry")
         .unwrap();
     assert_eq!(retry["annotations"]["idempotentHint"], false);
+    for mutation in ["media_job_cancel", "media_job_retry"] {
+        let tool = body["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == mutation)
+            .unwrap();
+        assert!(
+            tool["inputSchema"]["properties"]["expected_lifecycle_cycle"].is_object(),
+            "{mutation} must expose the lifecycle fence input"
+        );
+    }
 
     let called = app
         .oneshot(
@@ -315,6 +327,16 @@ async fn stateless_mcp_2026_lists_tools_without_initialize_or_session() {
         .iter()
         .find(|tool| tool["name"] == "media_search")
         .unwrap();
+    assert_eq!(search["annotations"]["readOnlyHint"], false);
+    assert_eq!(search["annotations"]["idempotentHint"], false);
+    let prepare = body["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "media_destructive_prepare")
+        .unwrap();
+    assert_eq!(prepare["annotations"]["readOnlyHint"], false);
+    assert_eq!(prepare["annotations"]["idempotentHint"], false);
     assert_eq!(search["inputSchema"]["properties"]["tmdb_id"]["minimum"], 1);
     assert_eq!(
         search["inputSchema"]["properties"]["tmdb_id"]["format"],
