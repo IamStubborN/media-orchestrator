@@ -203,6 +203,34 @@ pathlib.Path(os.environ["MCP_SCHEMA_SNAPSHOT"]).write_text(
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_repository_and_tag_length_boundaries_for_both_images(self) -> None:
+        digest = f"@sha256:{'4' * 64}"
+        repository = "r" * 255
+        valid = [f"{repository}{digest}", f"{repository}:{'t' * 128}{digest}"]
+        invalid = f"{'r' * 256}{digest}"
+        for index, reference in enumerate(valid):
+            with self.subTest(field="service", kind=f"valid-{index}"):
+                result = self._run(
+                    pathlib.Path(self.temporary.name) / f"boundary-service-{index}",
+                    service_image=reference,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+            with self.subTest(field="runner", kind=f"valid-{index}"):
+                result = self._run(
+                    pathlib.Path(self.temporary.name) / f"boundary-runner-{index}",
+                    runner_image=reference,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+        for field in ("service", "runner"):
+            with self.subTest(field=field, kind="repository-too-long"):
+                arguments = {f"{field}_image": invalid}
+                result = self._run(
+                    pathlib.Path(self.temporary.name) / f"boundary-{field}-invalid",
+                    **arguments,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"{field} image", result.stderr)
+
     def test_rejects_invalid_repository_syntax_for_both_images(self) -> None:
         invalid = [
             "",

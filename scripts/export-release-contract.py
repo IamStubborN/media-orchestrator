@@ -128,7 +128,7 @@ def valid_immutable_image(image: str) -> bool:
     if image.count("@sha256:") != 1:
         return False
     repository, digest = image.split("@sha256:")
-    if len(repository) > 255 or not SHA256.fullmatch(digest):
+    if not SHA256.fullmatch(digest):
         return False
     repository_path, separator, tag = repository.rpartition(":")
     last_slash = repository.rfind("/")
@@ -136,6 +136,8 @@ def valid_immutable_image(image: str) -> bool:
         if not TAG.fullmatch(tag):
             return False
         repository = repository_path
+    if len(repository) > 255:
+        return False
     components = repository.split("/")
     if not components or any(not component for component in components):
         return False
