@@ -124,15 +124,17 @@ cached across normal Rust-only changes.
 ### Export a release contract
 
 From a clean private checkout, export the immutable release metadata after the
-service image, runner image, and Linux CLI have been built:
+service image and runner image have been built. Extract the Linux CLI into the
+repository's ignored `dist/` directory so the clean-worktree gate remains true:
 
 ```sh
+mise run extract-linux-cli
 python3 scripts/export-release-contract.py \
   --service-image 'registry.example/media-service@sha256:<64-lowercase-hex>' \
   --runner-image 'registry.example/media-runner@sha256:<64-lowercase-hex>' \
   --migration-version m20260810_000040_tracking_claims \
-  --cli artifacts/media-linux-amd64 \
-  --cli-checksum artifacts/media-linux-amd64.sha256 \
+  --cli dist/media-linux-amd64 \
+  --cli-checksum dist/media-linux-amd64.sha256 \
   --output /private/path/media-release
 ```
 

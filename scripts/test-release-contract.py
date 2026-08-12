@@ -4,13 +4,18 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
+import io
 import json
 import os
 import pathlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -20,6 +25,15 @@ HEX_B = "b" * 64
 SERVICE_IMAGE = f"registry.example/media-service@sha256:{'1' * 64}"
 RUNNER_IMAGE = f"registry.example/media-runner@sha256:{'2' * 64}"
 MIGRATION = "m20260810_000040_tracking_claims"
+
+
+def load_exporter():
+    sys.dont_write_bytecode = True
+    spec = importlib.util.spec_from_file_location("release_contract_exporter", EXPORTER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class ReleaseContractTest(unittest.TestCase):
@@ -95,6 +109,7 @@ pathlib.Path(os.environ["MCP_SCHEMA_SNAPSHOT"]).write_text(
         output: pathlib.Path,
         *,
         service_image: str = SERVICE_IMAGE,
+        runner_image: str = RUNNER_IMAGE,
         replace: bool = False,
         schema_tools: list[dict[str, object]] | None = None,
     ) -> subprocess.CompletedProcess[str]:
@@ -104,7 +119,7 @@ pathlib.Path(os.environ["MCP_SCHEMA_SNAPSHOT"]).write_text(
             "--service-image",
             service_image,
             "--runner-image",
-            RUNNER_IMAGE,
+            runner_image,
             "--migration-version",
             MIGRATION,
             "--cli",
@@ -169,6 +184,33 @@ pathlib.Path(os.environ["MCP_SCHEMA_SNAPSHOT"]).write_text(
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("immutable", result.stderr)
 
+    def test_rejects_invalid_repository_syntax_for_both_images(self) -> None:
+        invalid = [
+            "",
+            f"@sha256:{'3' * 64}",
+            f"/media@sha256:{'3' * 64}",
+            f"registry.example/@sha256:{'3' * 64}",
+            f"https://registry.example/media@sha256:{'3' * 64}",
+            f"registry.example/Media@sha256:{'3' * 64}",
+            f"registry.example/media!prod@sha256:{'3' * 64}",
+            f"registry.example/media:tag@sha256:{'3' * 64}",
+            f"registry.example/media;touch@sha256:{'3' * 64}",
+            f"registry.example/media value@sha256:{'3' * 64}",
+        ]
+        for index, value in enumerate(invalid):
+            with self.subTest(field="service", value=value):
+                result = self._run(
+                    pathlib.Path(self.temporary.name) / f"service-{index}", service_image=value
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("service image", result.stderr)
+            with self.subTest(field="runner", value=value):
+                result = self._run(
+                    pathlib.Path(self.temporary.name) / f"runner-{index}", runner_image=value
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("runner image", result.stderr)
+
     def test_rejects_dirty_worktree(self) -> None:
         (self.repo / "dirty.txt").write_text("dirty\n", encoding="utf-8")
         result = self._run(pathlib.Path(self.temporary.name) / "bundle")
@@ -220,6 +262,102 @@ pathlib.Path(os.environ["MCP_SCHEMA_SNAPSHOT"]).write_text(
         result = self._run(destination)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--replace", result.stderr)
+
+    def test_ignored_dist_cli_is_compatible_with_clean_worktree_gate(self) -> None:
+        (self.repo / ".gitignore").write_text("/dist/\n", encoding="utf-8")
+        self._git("add", ".gitignore")
+        self._git("commit", "-qm", "ignore release artifacts")
+        distribution = self.repo / "dist"
+        distribution.mkdir()
+        self.cli = distribution / "media-linux-amd64"
+        self.cli.write_bytes(b"ignored release cli\n")
+        self.checksum = distribution / "media-linux-amd64.sha256"
+        self._write_checksum()
+
+        result = self._run(pathlib.Path(self.temporary.name) / "bundle")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class AtomicPublishTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.exporter = load_exporter()
+        self.temporary = tempfile.TemporaryDirectory()
+        self.parent = pathlib.Path(self.temporary.name)
+        self.destination = self.parent / "bundle"
+        self.generation = self.parent / ".bundle.generation"
+        self.destination.mkdir()
+        self.generation.mkdir()
+        (self.destination / "old.txt").write_text("old\n", encoding="utf-8")
+        (self.generation / "new.txt").write_text("new\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_exchange_failure_leaves_prior_destination_untouched(self) -> None:
+        with mock.patch.object(self.exporter, "atomic_exchange", side_effect=OSError("rename fault")):
+            with self.assertRaises(OSError):
+                self.exporter.publish(self.generation, self.destination, True)
+        self.assertTrue((self.destination / "old.txt").is_file())
+        self.assertTrue((self.generation / "new.txt").is_file())
+
+    def test_first_publish_rename_failure_leaves_destination_absent(self) -> None:
+        shutil.rmtree(self.destination)
+        with mock.patch.object(self.exporter.os, "replace", side_effect=OSError("rename fault")):
+            with self.assertRaises(OSError):
+                self.exporter.publish(self.generation, self.destination, False)
+        self.assertFalse(self.destination.exists())
+        self.assertTrue((self.generation / "new.txt").is_file())
+
+    def test_parent_fsync_failure_rolls_back_with_atomic_exchange(self) -> None:
+        real_exchange = self.exporter.atomic_exchange
+        with (
+            mock.patch.object(self.exporter, "atomic_exchange", side_effect=real_exchange),
+            mock.patch.object(self.exporter, "fsync_directory", side_effect=[OSError("fsync fault"), None]),
+        ):
+            with self.assertRaises(OSError):
+                self.exporter.publish(self.generation, self.destination, True)
+        self.assertTrue((self.destination / "old.txt").is_file())
+        self.assertTrue((self.generation / "new.txt").is_file())
+
+    def test_failed_rollback_preserves_prior_bundle_at_generation_path(self) -> None:
+        real_exchange = self.exporter.atomic_exchange
+        exchange_count = 0
+
+        def fail_rollback(source, destination):
+            nonlocal exchange_count
+            exchange_count += 1
+            if exchange_count == 1:
+                return real_exchange(source, destination)
+            raise OSError("rollback rename fault")
+
+        with (
+            mock.patch.object(self.exporter, "atomic_exchange", side_effect=fail_rollback),
+            mock.patch.object(self.exporter, "fsync_directory", side_effect=OSError("fsync fault")),
+        ):
+            with self.assertRaises(self.exporter.PriorBundlePreservedError):
+                self.exporter.publish(self.generation, self.destination, True)
+        self.assertTrue((self.destination / "new.txt").is_file())
+        self.assertTrue((self.generation / "old.txt").is_file())
+
+    def test_first_publish_fsync_failure_restores_absent_destination(self) -> None:
+        shutil.rmtree(self.destination)
+        with mock.patch.object(self.exporter, "fsync_directory", side_effect=[OSError("fault"), None]):
+            with self.assertRaises(OSError):
+                self.exporter.publish(self.generation, self.destination, False)
+        self.assertFalse(self.destination.exists())
+        self.assertTrue((self.generation / "new.txt").is_file())
+
+    def test_cleanup_failure_does_not_turn_committed_exchange_into_failure(self) -> None:
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(self.exporter, "remove_tree", side_effect=OSError("cleanup fault")),
+            redirect_stderr(stderr),
+        ):
+            self.exporter.publish(self.generation, self.destination, True)
+        self.assertTrue((self.destination / "new.txt").is_file())
+        self.assertTrue((self.generation / "old.txt").is_file())
+        self.assertIn("warning: could not remove retired release directory", stderr.getvalue())
 
 
 if __name__ == "__main__":

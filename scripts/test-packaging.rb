@@ -24,6 +24,7 @@ smoke = read("scripts/docker-smoke.sh")
 homelab = read("scripts/homelab.sh")
 docker_build = read("scripts/docker-build.sh")
 dockerignore = read(".dockerignore")
+gitignore = read(".gitignore")
 runbook = read("docs/RUNBOOK.md")
 
 compose = YAML.safe_load(compose_text, aliases: true)
@@ -515,11 +516,15 @@ assert(!normalized_runbook.include?("does not stop or restart the watcher") &&
        normalized_runbook.include?("before activating mounted sources"),
        "runbook must describe service quiescence and transactional Hermes-only staging")
 assert(normalized_runbook.include?("export-release-contract.py") &&
+       normalized_runbook.include?("--cli dist/media-linux-amd64") &&
+       normalized_runbook.include?("--cli-checksum dist/media-linux-amd64.sha256") &&
        normalized_runbook.include?("HOMELAB_ROOT") &&
        normalized_runbook.include?("MEDIA_RELEASE_DIR") &&
        normalized_runbook.include?("does not publish, push, log in, or deploy") &&
        !normalized_runbook.include?("discovered through sibling"),
        "runbook must document the private bundle export and explicit deployment roots")
+assert(gitignore.lines.map(&:strip).include?("/dist/"),
+       "documented release artifacts must remain outside the clean-worktree gate")
 
 clean_env = {
   "PATH" => ENV.fetch("PATH"),

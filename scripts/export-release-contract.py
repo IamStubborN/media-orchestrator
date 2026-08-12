@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
+import ipaddress
 import json
 import os
 import pathlib
@@ -13,15 +15,19 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import uuid
 
 
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
-IMMUTABLE_IMAGE = re.compile(r"^\S+@sha256:[0-9a-f]{64}$")
 MIGRATION = re.compile(r"^m[0-9]{8}_[0-9]{6}_[a-z0-9_]+$")
+PATH_COMPONENT = re.compile(r"^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*$")
+DOMAIN_COMPONENT = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$")
 
 
 class ContractError(RuntimeError):
+    pass
+
+
+class PriorBundlePreservedError(ContractError):
     pass
 
 
@@ -96,26 +102,122 @@ def validate_tool_names(schema_tools: object, capabilities: object) -> None:
         raise ContractError("MCP schema and capability tool names differ")
 
 
+def valid_registry(registry: str) -> bool:
+    if registry.startswith("["):
+        match = re.fullmatch(r"\[([0-9A-Fa-f:.]+)\](?::([0-9]+))?", registry)
+        if match is None:
+            return False
+        try:
+            ipaddress.IPv6Address(match.group(1))
+        except ipaddress.AddressValueError:
+            return False
+        port = match.group(2)
+        return port is None or 1 <= int(port) <= 65535
+
+    host, separator, port = registry.rpartition(":")
+    if separator:
+        if not port.isdigit() or not 1 <= int(port) <= 65535:
+            return False
+    else:
+        host = registry
+    return all(DOMAIN_COMPONENT.fullmatch(component) for component in host.split("."))
+
+
+def valid_immutable_image(image: str) -> bool:
+    if image.count("@sha256:") != 1:
+        return False
+    repository, digest = image.split("@sha256:")
+    if len(repository) > 255 or not SHA256.fullmatch(digest):
+        return False
+    components = repository.split("/")
+    if not components or any(not component for component in components):
+        return False
+    first = components[0]
+    has_registry = len(components) > 1 and (
+        first == "localhost" or "." in first or ":" in first or first.startswith("[")
+    )
+    path = components[1:] if has_registry else components
+    if has_registry and not valid_registry(first):
+        return False
+    return bool(path) and all(PATH_COMPONENT.fullmatch(component) for component in path)
+
+
+def atomic_exchange(source: pathlib.Path, destination: pathlib.Path) -> None:
+    if source.parent != destination.parent:
+        raise ContractError("atomic directory exchange requires sibling paths")
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    if sys.platform == "darwin" and hasattr(libc, "renamex_np"):
+        rename = libc.renamex_np
+        rename.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+        rename.restype = ctypes.c_int
+        result = rename(source_bytes, destination_bytes, 0x00000002)
+    elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+        rename = libc.renameat2
+        rename.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        rename.restype = ctypes.c_int
+        result = rename(-100, source_bytes, -100, destination_bytes, 0x00000002)
+    else:
+        raise ContractError("--replace requires platform support for atomic directory exchange")
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), str(source), None, str(destination))
+
+
+def remove_tree(path: pathlib.Path) -> None:
+    shutil.rmtree(path)
+
+
+def cleanup_tree(path: pathlib.Path) -> None:
+    try:
+        remove_tree(path)
+    except OSError as error:
+        print(f"warning: could not remove retired release directory {path}: {error}", file=sys.stderr)
+
+
 def publish(generation: pathlib.Path, destination: pathlib.Path, replace: bool) -> None:
     if destination.exists() and not replace:
         raise ContractError(f"destination already exists; pass --replace to replace it: {destination}")
     if destination.exists() and not destination.is_dir():
         raise ContractError(f"destination is not a directory: {destination}")
 
-    backup: pathlib.Path | None = None
+    if destination.exists():
+        atomic_exchange(generation, destination)
+        try:
+            fsync_directory(destination.parent)
+        except BaseException as publication_error:
+            try:
+                atomic_exchange(generation, destination)
+            except BaseException as rollback_error:
+                raise PriorBundlePreservedError(
+                    f"release was exchanged but durability failed; prior bundle is preserved at {generation}: "
+                    f"rollback failed: {rollback_error}"
+                ) from publication_error
+            try:
+                fsync_directory(destination.parent)
+            except OSError:
+                pass
+            raise
+        cleanup_tree(generation)
+        return
+
+    os.replace(generation, destination)
     try:
-        if destination.exists():
-            backup = destination.parent / f".{destination.name}.previous.{uuid.uuid4().hex}"
-            os.replace(destination, backup)
-        os.replace(generation, destination)
         fsync_directory(destination.parent)
     except BaseException:
-        if backup is not None and backup.exists() and not destination.exists():
-            os.replace(backup, destination)
+        os.replace(destination, generation)
+        try:
             fsync_directory(destination.parent)
+        except OSError:
+            pass
         raise
-    if backup is not None:
-        shutil.rmtree(backup)
 
 
 def export(args: argparse.Namespace) -> None:
@@ -123,9 +225,9 @@ def export(args: argparse.Namespace) -> None:
     destination = pathlib.Path(args.output).resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
 
-    if not IMMUTABLE_IMAGE.fullmatch(args.service_image):
+    if not valid_immutable_image(args.service_image):
         raise ContractError("service image must be an immutable name@sha256 reference")
-    if not IMMUTABLE_IMAGE.fullmatch(args.runner_image):
+    if not valid_immutable_image(args.runner_image):
         raise ContractError("runner image must be an immutable name@sha256 reference")
     if not MIGRATION.fullmatch(args.migration_version):
         raise ContractError("migration version is missing or invalid")
@@ -161,6 +263,7 @@ def export(args: argparse.Namespace) -> None:
     generation = pathlib.Path(
         tempfile.mkdtemp(prefix=f".{destination.name}.generation.", dir=destination.parent)
     )
+    preserve_generation = False
     try:
         raw_schema = generation / ".MCP_SCHEMA.raw.json"
         environment = os.environ.copy()
@@ -217,10 +320,14 @@ def export(args: argparse.Namespace) -> None:
             if sha256(generation / name) != metadata["sha256"]:
                 raise ContractError(f"bundle hash validation failed: {name}")
         fsync_directory(generation)
-        publish(generation, destination, args.replace)
+        try:
+            publish(generation, destination, args.replace)
+        except PriorBundlePreservedError:
+            preserve_generation = True
+            raise
     finally:
-        if generation.exists():
-            shutil.rmtree(generation)
+        if generation.exists() and not preserve_generation:
+            cleanup_tree(generation)
 
 
 def parse_args() -> argparse.Namespace:
