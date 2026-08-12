@@ -21,6 +21,7 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 MIGRATION = re.compile(r"^m[0-9]{8}_[0-9]{6}_[a-z0-9_]+$")
 PATH_COMPONENT = re.compile(r"^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*$")
 DOMAIN_COMPONENT = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$")
+TAG = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
 
 
 class ContractError(RuntimeError):
@@ -129,6 +130,12 @@ def valid_immutable_image(image: str) -> bool:
     repository, digest = image.split("@sha256:")
     if len(repository) > 255 or not SHA256.fullmatch(digest):
         return False
+    repository_path, separator, tag = repository.rpartition(":")
+    last_slash = repository.rfind("/")
+    if separator and len(repository_path) > last_slash:
+        if not TAG.fullmatch(tag):
+            return False
+        repository = repository_path
     components = repository.split("/")
     if not components or any(not component for component in components):
         return False

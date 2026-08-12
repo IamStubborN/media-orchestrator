@@ -184,6 +184,25 @@ pathlib.Path(os.environ["MCP_SCHEMA_SNAPSHOT"]).write_text(
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("immutable", result.stderr)
 
+    def test_accepts_tagged_and_untagged_digest_refs_for_both_images(self) -> None:
+        references = [
+            f"registry.example/media-service@sha256:{'3' * 64}",
+            f"registry.example/media-service:sha-deadbeef@sha256:{'3' * 64}",
+        ]
+        for index, reference in enumerate(references):
+            with self.subTest(field="service", reference=reference):
+                result = self._run(
+                    pathlib.Path(self.temporary.name) / f"valid-service-{index}",
+                    service_image=reference,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+            with self.subTest(field="runner", reference=reference):
+                result = self._run(
+                    pathlib.Path(self.temporary.name) / f"valid-runner-{index}",
+                    runner_image=reference,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_rejects_invalid_repository_syntax_for_both_images(self) -> None:
         invalid = [
             "",
@@ -193,9 +212,13 @@ pathlib.Path(os.environ["MCP_SCHEMA_SNAPSHOT"]).write_text(
             f"https://registry.example/media@sha256:{'3' * 64}",
             f"registry.example/Media@sha256:{'3' * 64}",
             f"registry.example/media!prod@sha256:{'3' * 64}",
-            f"registry.example/media:tag@sha256:{'3' * 64}",
             f"registry.example/media;touch@sha256:{'3' * 64}",
             f"registry.example/media value@sha256:{'3' * 64}",
+            f"registry.example/media:@sha256:{'3' * 64}",
+            f"registry.example/media:-tag@sha256:{'3' * 64}",
+            f"registry.example/media:bad/tag@sha256:{'3' * 64}",
+            f"registry.example/media:bad!tag@sha256:{'3' * 64}",
+            f"registry.example/media:{'t' * 129}@sha256:{'3' * 64}",
         ]
         for index, value in enumerate(invalid):
             with self.subTest(field="service", value=value):
