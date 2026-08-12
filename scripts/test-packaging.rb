@@ -130,6 +130,13 @@ assert(tasks.include?('./scripts/homelab.sh deploy-service'),
        "the default homelab deploy task must use the service-only path")
 assert(tasks.include?("[tasks.homelab-deploy-full]"),
        "full-stack deployment must remain an explicit task")
+assert(homelab.include?(': "${HOMELAB_ROOT:?HOMELAB_ROOT is required}"') &&
+       homelab.include?(': "${MEDIA_RELEASE_DIR:?MEDIA_RELEASE_DIR is required}"') &&
+       homelab.include?('hermes_root=${HERMES_HOME_ROOT:-$HOMELAB_ROOT/hermes}') &&
+       !homelab.include?("../homelab"),
+       "guarded deployment must require explicit Homelab and release paths without sibling discovery")
+assert(homelab.include?('source=$MEDIA_RELEASE_DIR/MCP_SCHEMA.json'),
+       "guarded deployment must source the MCP schema from the explicit release bundle")
 
 service_deploy = homelab.split("deploy_service() {", 2).fetch(1).split("deploy_full() {", 2).fetch(0)
 service_deploy_attempt = homelab.split("perform_service_deploy() {", 2).fetch(1).split("deploy_service() {", 2).fetch(0)
@@ -507,8 +514,18 @@ assert(!normalized_runbook.include?("does not stop or restart the watcher") &&
        normalized_runbook.include?("Hermes-only rollout stages") &&
        normalized_runbook.include?("before activating mounted sources"),
        "runbook must describe service quiescence and transactional Hermes-only staging")
+assert(normalized_runbook.include?("export-release-contract.py") &&
+       normalized_runbook.include?("HOMELAB_ROOT") &&
+       normalized_runbook.include?("MEDIA_RELEASE_DIR") &&
+       normalized_runbook.include?("does not publish, push, log in, or deploy") &&
+       !normalized_runbook.include?("discovered through sibling"),
+       "runbook must document the private bundle export and explicit deployment roots")
 
-clean_env = { "PATH" => ENV.fetch("PATH") }
+clean_env = {
+  "PATH" => ENV.fetch("PATH"),
+  "HOMELAB_ROOT" => File.join(ROOT, "test-homelab"),
+  "MEDIA_RELEASE_DIR" => File.join(ROOT, "test-release"),
+}
 _stdout, stderr, status = Open3.capture3(clean_env, "./scripts/homelab.sh", "invalid-command", chdir: ROOT, unsetenv_others: true)
 assert(status.exitstatus == 2 && stderr.include?("usage:"),
        "homelab command parsing must work in a clean environment without unbound variables")

@@ -2,15 +2,17 @@
 set -eu
 
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+: "${HOMELAB_ROOT:?HOMELAB_ROOT is required}"
+: "${MEDIA_RELEASE_DIR:?MEDIA_RELEASE_DIR is required}"
 host=${MEDIA_HOMELAB_HOST:host.example.invalid}
 remote_root=${MEDIA_HOMELAB_ROOT:-/srv/homelab}
 compose_file=$remote_root/media/compose.media-orchestrator.yml
 environment_file=$remote_root/.env
 rollback_file=$remote_root/media/.media-orchestrator-images.previous
-hermes_root=${HERMES_HOME_ROOT:-$root/../homelab/hermes}
+hermes_root=${HERMES_HOME_ROOT:-$HOMELAB_ROOT/hermes}
 hermes_remote_root=${HERMES_HOME_REMOTE_ROOT:-/srv/homelab/hermes}
 remote_schema_file=$hermes_remote_root/shared/skills/media/MCP_SCHEMA.json
-homelab_root=${HOMELAB_ROOT:-$root/../homelab}
+homelab_root=$HOMELAB_ROOT
 
 usage() {
     echo "usage: $0 status|verify|deploy|deploy-service|deploy-full|deploy-hermes|rollback|rollback-service|rollback-full" >&2
@@ -213,8 +215,8 @@ REMOTE
 }
 
 sync_hermes_schema() {
-    source=$hermes_root/shared/skills/media/MCP_SCHEMA.json
-    test -s "$source" || { echo "local Hermes MCP schema is missing: $source" >&2; exit 1; }
+    source=$MEDIA_RELEASE_DIR/MCP_SCHEMA.json
+    test -s "$source" || { echo "release bundle MCP schema is missing: $source" >&2; exit 1; }
     scp "$source" "$host:$remote_schema_file.next" >/dev/null
     remote "install -m 0644 '$remote_schema_file.next' '$remote_schema_file'; rm '$remote_schema_file.next'"
 }

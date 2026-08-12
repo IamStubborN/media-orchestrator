@@ -121,6 +121,28 @@ The runner package layer is independent of the application binary, so ffmpeg,
 VAAPI packages, and the pinned checksum-verified `yt-dlp` executable remain
 cached across normal Rust-only changes.
 
+### Export a release contract
+
+From a clean private checkout, export the immutable release metadata after the
+service image, runner image, and Linux CLI have been built:
+
+```sh
+python3 scripts/export-release-contract.py \
+  --service-image 'registry.example/media-service@sha256:<64-lowercase-hex>' \
+  --runner-image 'registry.example/media-runner@sha256:<64-lowercase-hex>' \
+  --migration-version m20260810_000040_tracking_claims \
+  --cli artifacts/media-linux-amd64 \
+  --cli-checksum artifacts/media-linux-amd64.sha256 \
+  --output /private/path/media-release
+```
+
+The exporter regenerates the MCP schema, checks it against
+`config/media-capabilities.json`, verifies the CLI checksum, and writes
+`release.json`, `MCP_SCHEMA.json`, `media-capabilities.json`, and
+`media-linux-amd64.sha256` atomically. The destination must not exist unless
+`--replace` is supplied. Export only creates this local bundle; it does not
+publish, push, log in, or deploy.
+
 ## Safe Deployment
 
 The normal rollout is service-only:
@@ -172,9 +194,11 @@ runs the forward image's migrations back to the captured forward version,
 restarts that image, and verifies the protected container snapshot before
 returning failure.
 
-The checker is discovered through sibling `../homelab/hermes` by default. Set
-`HERMES_HOME_ROOT` for a different checkout root, or
-`HERMES_CAPABILITY_CHECKER` for an explicit checker path. A missing checker or
+Every invocation requires explicit `HOMELAB_ROOT` and `MEDIA_RELEASE_DIR`
+values. `HERMES_HOME_ROOT` defaults only to `$HOMELAB_ROOT/hermes`; set it for a
+different checkout root, or set `HERMES_CAPABILITY_CHECKER` for an explicit
+checker path. The MCP schema synchronized by the guarded deploy comes from
+`$MEDIA_RELEASE_DIR/MCP_SCHEMA.json`. A missing checker, bundle schema, or
 schema mismatch aborts before any image build or container operation.
 
 The Hermes-only rollout stages the complete source tree and extracted CLI
