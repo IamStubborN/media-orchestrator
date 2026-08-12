@@ -172,7 +172,7 @@ runs the forward image's migrations back to the captured forward version,
 restarts that image, and verifies the protected container snapshot before
 returning failure.
 
-The checker is discovered through sibling `../hermes-home` by default. Set
+The checker is discovered through sibling `../homelab/hermes` by default. Set
 `HERMES_HOME_ROOT` for a different checkout root, or
 `HERMES_CAPABILITY_CHECKER` for an explicit checker path. A missing checker or
 schema mismatch aborts before any image build or container operation.

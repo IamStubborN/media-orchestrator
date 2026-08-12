@@ -7,8 +7,8 @@ remote_root=${MEDIA_HOMELAB_ROOT:-/srv/homelab}
 compose_file=$remote_root/media/compose.media-orchestrator.yml
 environment_file=$remote_root/.env
 rollback_file=$remote_root/media/.media-orchestrator-images.previous
-hermes_root=${HERMES_HOME_ROOT:-$root/../hermes-home}
-hermes_remote_root=${HERMES_HOME_REMOTE_ROOT:-/home/operator/hermes-home}
+hermes_root=${HERMES_HOME_ROOT:-$root/../homelab/hermes}
+hermes_remote_root=${HERMES_HOME_REMOTE_ROOT:-/srv/homelab/hermes}
 remote_schema_file=$hermes_remote_root/shared/skills/media/MCP_SCHEMA.json
 homelab_root=${HOMELAB_ROOT:-$root/../homelab}
 

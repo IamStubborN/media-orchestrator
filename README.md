@@ -19,7 +19,7 @@ This repository will contain:
 - PostgreSQL entities and explicit SeaORM migrations.
 - Docker images, API contracts, and tests.
 
-Hermes profiles and skills belong in the separate private `hermes-home` repository. Homelab deployment wiring belongs in the existing `homelab` repository.
+Hermes profiles, skills, and deployment wiring live in the `homelab/hermes` module.
 
 ## Deployment Policy
 
@@ -107,7 +107,7 @@ docker compose --profile runner up --detach runner
 ```
 
 `mise run extract-linux-cli` writes a pinned Linux binary and SHA-256 file to
-`dist/` for consumption by `hermes-home`. `MEDIA_CLI_PLATFORM`,
+`dist/` for consumption by `homelab/hermes`. `MEDIA_CLI_PLATFORM`,
 `MEDIA_CLI_ARCH`, and `MEDIA_CLI_OUTPUT_DIR` control the target and output.
 
 ## Hermes MCP and Human CLI
@@ -187,7 +187,7 @@ mise exec -- cargo run -p media -- queue status --json
 
 By default the CLI prints a concise human-readable view (aligned tables and
 key-value blocks). Pass `--json` for the raw JSON response — the stable
-machine contract consumed by `hermes-home`, unchanged byte-for-byte. Unknown
+machine contract consumed by `homelab/hermes`, unchanged byte-for-byte. Unknown
 or absent fields degrade gracefully, and errors and exit codes are identical
 in both modes.
 
@@ -211,7 +211,7 @@ ffmpeg/VAAPI adapters, Prowlarr/qBittorrent/Plex/Gluetun integrations, signed
 sessions. Tracking is notification-only by default and can explicitly enable
 Rezka auto-download for a fixed result, translation, and season; the scheduler
 then creates episode jobs without an LLM call. Hermes profile wiring and homelab deployment composition are tracked
-separately in the `hermes-home` and `homelab` repositories. See the
+in the `homelab/hermes` module and this repository. See the
 [MVP roadmap](docs/superpowers/plans/2026-07-10-media-orchestrator-mvp-roadmap.md)
 for the phase-by-phase delivery history and executable architecture checks
 that enforce these boundaries.
