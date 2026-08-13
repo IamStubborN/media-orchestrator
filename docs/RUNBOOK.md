@@ -153,8 +153,16 @@ The normal rollout is service-only:
 mise run homelab-deploy
 ```
 
+This command consumes `$MEDIA_RELEASE_DIR/release.json`, pulls its immutable
+service image reference, and preserves the running runner only when its exact
+manifest reference and runner-build digest match. The explicit full rollout
+pulls and deploys both manifest references. Neither path builds local images.
+For an intentional source-checkout build instead, use
+`./scripts/homelab.sh deploy-local-service` or
+`./scripts/homelab.sh deploy-local-full`; these are separate operator commands.
+
 It first runs the fail-closed `hermes-home/scripts/check-media-capabilities`
-schema/capability check and compares the deterministic local runner build inputs
+schema/capability check and compares the release manifest's runner build digest
 with the live image's `dev.iamstubborn.media.runner-build-digest` label. The
 guard also normalizes the live and candidate Compose files and compares the
 runner, Gluetun, watcher, networks, and volumes. Any runner-impacting source or

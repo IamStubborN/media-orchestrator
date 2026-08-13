@@ -15,7 +15,7 @@ remote_schema_file=$hermes_remote_root/shared/skills/media/MCP_SCHEMA.json
 homelab_root=$HOMELAB_ROOT
 
 usage() {
-    echo "usage: $0 status|verify|deploy|deploy-service|deploy-full|deploy-hermes|rollback|rollback-service|rollback-full" >&2
+    echo "usage: $0 status|verify|deploy|deploy-service|deploy-full|deploy-local-service|deploy-local-full|deploy-hermes|rollback|rollback-service|rollback-full" >&2
     exit 2
 }
 
@@ -26,6 +26,31 @@ check_hermes_capabilities() {
         exit 1
     }
     (cd "$hermes_root" && python3 "$checker")
+}
+
+release_value() {
+    field=$1
+    source=$MEDIA_RELEASE_DIR/release.json
+    test -s "$source" || { echo "release manifest is missing: $source" >&2; exit 1; }
+    case $field in
+        service_image | runner_image | runner_build_digest) ;;
+        *) echo "unsupported release manifest field: $field" >&2; exit 2 ;;
+    esac
+    python3 - "$source" "$field" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    value = json.load(source)[sys.argv[2]]
+if not isinstance(value, str) or not value:
+    raise SystemExit(f"release manifest field is missing: {sys.argv[2]}")
+print(value)
+PY
+}
+
+pull_release_image() {
+    image=$1
+    remote "docker pull '$image' >/dev/null"
 }
 
 source_tree_digest() {
@@ -165,12 +190,20 @@ assert_full_protected_unchanged() {
 }
 
 assert_service_only_rollout() {
-    expected_runner_digest=$(runner_build_digest)
+    expected_runner_digest=${1:-$(runner_build_digest)}
+    expected_runner_image=${2:-}
     live_runner_digest=$(remote "docker inspect download-runner --format '{{index .Config.Labels \"dev.iamstubborn.media.runner-build-digest\"}}'")
     test "$live_runner_digest" = "$expected_runner_digest" || {
         echo "live runner build inputs differ from the local source; use ./scripts/homelab.sh deploy-full" >&2
         exit 1
     }
+    if test -n "$expected_runner_image"; then
+        live_runner_image=$(remote "docker inspect download-runner --format '{{.Config.Image}}'")
+        test "$live_runner_image" = "$expected_runner_image" || {
+            echo "live runner image differs from the release bundle; use ./scripts/homelab.sh deploy-full" >&2
+            exit 1
+        }
+    fi
 
     candidate_compose=$compose_file.service-candidate.$$
     scp "$homelab_root/media/compose.media-orchestrator.yml" "$host:$candidate_compose" >/dev/null
@@ -251,6 +284,52 @@ verify_local_backend_attestation() {
     "$hermes_root/scripts/deploy-preflight" --live-attestation "$live_attestation"
     rm -f "$live_attestation"
     trap - EXIT HUP INT TERM
+}
+
+verify_release_image_attestation() {
+    image=$1
+    role=$2
+    attestation=$(mktemp "${TMPDIR:-/tmp}/media-release-image.XXXXXX")
+    trap 'rm -f "$attestation"' EXIT HUP INT TERM
+    remote "docker image inspect '$image'" >"$attestation"
+    python3 - "$MEDIA_RELEASE_DIR/release.json" "$attestation" "$role" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    release = json.load(source)
+with open(sys.argv[2], encoding="utf-8") as source:
+    raw = json.load(source)
+if len(raw) != 1 or not isinstance(raw[0].get("Config", {}).get("Labels"), dict):
+    raise SystemExit("release image OCI attestation is invalid")
+labels = raw[0]["Config"]["Labels"]
+expected = {
+    "revision": release["source_revision"],
+    "version": release["application_version"],
+    "source_tree_digest": release["source_tree_digest"],
+    "runner_build_digest": release["runner_build_digest"],
+}
+actual = {
+    "revision": labels.get("org.opencontainers.image.revision"),
+    "version": labels.get("org.opencontainers.image.version"),
+    "source_tree_digest": labels.get("dev.iamstubborn.media.source-tree-digest"),
+    "runner_build_digest": labels.get("dev.iamstubborn.media.runner-build-digest"),
+}
+if actual != expected:
+    raise SystemExit(f"{sys.argv[3]} release image OCI attestation differs")
+PY
+    rm -f "$attestation"
+    trap - EXIT HUP INT TERM
+}
+
+verify_running_release_refs() {
+    service_image=$1
+    runner_image=$2
+    remote sh -s "$service_image" "$runner_image" <<'REMOTE'
+set -eu
+test "$(docker inspect media-service --format '{{.Config.Image}}')" = "$1" || { echo "deployed service image ref differs from release manifest" >&2; exit 1; }
+test "$(docker inspect download-runner --format '{{.Config.Image}}')" = "$2" || { echo "deployed runner image ref differs from release manifest" >&2; exit 1; }
+REMOTE
 }
 
 verify_image_attestation() {
@@ -754,6 +833,10 @@ stage_hermes_cli() {
     trap - EXIT HUP INT TERM
     chmod 0755 "$artifact"
     artifact_sha256=$(shasum -a 256 "$artifact" | awk '{print $1}')
+    expected_cli_sha256=$(awk 'NF == 2 && $2 == "media-linux-amd64" { print $1 }' "$MEDIA_RELEASE_DIR/media-linux-amd64.sha256")
+    printf '%s\n' "$expected_cli_sha256" | grep -Eq '^[0-9a-f]{64}$' || { echo "release bundle CLI checksum is invalid" >&2; exit 1; }
+    test "$artifact_sha256" = "$expected_cli_sha256" || { echo "staged CLI differs from the release bundle" >&2; exit 1; }
+    "$hermes_root/scripts/deploy-preflight" --staged-cli "$artifact"
     hermes_stage=$remote_root/media/.hermes-stage.$$
     remote "rm -rf '$hermes_stage'; mkdir -p '$hermes_stage/source' '$hermes_stage/artifacts'"
     rsync -az --delete \
@@ -926,27 +1009,39 @@ perform_service_deploy() {
     sync_hermes_schema || return 1
     replace_hermes_agents || return 1
     verify_live_mcp_schema || return 1
-    verify_running_service_attestation || return 1
+    if test "${MEDIA_DEPLOY_RELEASE:-0}" = 1; then
+        verify_local_backend_attestation || return 1
+    else
+        verify_running_service_attestation || return 1
+    fi
     verify_mounted_hermes_sources || return 1
 }
 
 deploy_service() {
     check_hermes_capabilities
     assert_no_active_job
-    assert_service_only_rollout
     verify_mounted_hermes_sources
-    suffix=$(image_suffix)
-    build_source_digest=$(source_tree_digest)
-    build_runner_digest=$(runner_build_digest)
-    service_image=media-orchestrator-service:$suffix
     docker_host=${MEDIA_DOCKER_HOST:-ssh://$host}
-    (
-        cd "$root"
-        DOCKER_HOST=$docker_host MEDIA_SOURCE_TREE_DIGEST=$build_source_digest MEDIA_RUNNER_BUILD_DIGEST=$build_runner_digest MEDIA_BUILD_TARGETS=service MEDIA_SERVICE_IMAGE=$service_image ./scripts/docker-build.sh
-    )
-    remote "docker image inspect '$service_image' >/dev/null"
-    verify_image_attestation "$service_image"
-    service_image=$(immutable_image_id "$service_image")
+    if test "${MEDIA_DEPLOY_RELEASE:-0}" = 1; then
+        runner_image=$(release_value runner_image)
+        assert_service_only_rollout "$(release_value runner_build_digest)" "$runner_image"
+        service_image=$(release_value service_image)
+        pull_release_image "$service_image"
+        verify_release_image_attestation "$service_image" service
+    else
+        assert_service_only_rollout
+        suffix=$(image_suffix)
+        build_source_digest=$(source_tree_digest)
+        build_runner_digest=$(runner_build_digest)
+        service_image=media-orchestrator-service:$suffix
+        (
+            cd "$root"
+            DOCKER_HOST=$docker_host MEDIA_SOURCE_TREE_DIGEST=$build_source_digest MEDIA_RUNNER_BUILD_DIGEST=$build_runner_digest MEDIA_BUILD_TARGETS=service MEDIA_SERVICE_IMAGE=$service_image ./scripts/docker-build.sh
+        )
+        remote "docker image inspect '$service_image' >/dev/null"
+        verify_image_attestation "$service_image"
+    fi
+    service_image_id=$(immutable_image_id "$service_image")
     ensure_deployed_mcp_schema
     checkpoint_images
     protected_before=$(protected_snapshot)
@@ -957,7 +1052,7 @@ deploy_service() {
     if ! (
         perform_service_deploy || exit 1
         resume_runner_watcher_and_wait_ready || exit 1
-        if ! verify_runner_service_compatibility "$runner_container_id" "$service_image" "$runner_image_id" same; then
+        if ! verify_runner_service_compatibility "$runner_container_id" "$service_image_id" "$runner_image_id" same; then
             hold_runner_quiescence
             exit 1
         fi
@@ -993,25 +1088,34 @@ deploy_service() {
 deploy_full() {
     check_hermes_capabilities
     assert_no_active_job
-    suffix=$(image_suffix)
-    build_source_digest=$(source_tree_digest)
-    build_runner_digest=$(runner_build_digest)
-    service_image=media-orchestrator-service:$suffix
-    runner_image=media-orchestrator-runner:$suffix
     docker_host=${MEDIA_DOCKER_HOST:-ssh://$host}
-    (
-        cd "$root"
-        DOCKER_HOST=$docker_host \
-            MEDIA_SOURCE_TREE_DIGEST=$build_source_digest \
-            MEDIA_RUNNER_BUILD_DIGEST=$build_runner_digest \
-            MEDIA_SERVICE_IMAGE=$service_image \
-            MEDIA_RUNNER_IMAGE=$runner_image \
-            ./scripts/docker-build.sh
-    )
-    verify_image_attestation "$service_image"
-    verify_image_attestation "$runner_image"
-    service_image=$(immutable_image_id "$service_image")
-    runner_image=$(immutable_image_id "$runner_image")
+    if test "${MEDIA_DEPLOY_RELEASE:-0}" = 1; then
+        service_image=$(release_value service_image)
+        runner_image=$(release_value runner_image)
+        pull_release_image "$service_image"
+        pull_release_image "$runner_image"
+        verify_release_image_attestation "$service_image" service
+        verify_release_image_attestation "$runner_image" runner
+    else
+        suffix=$(image_suffix)
+        build_source_digest=$(source_tree_digest)
+        build_runner_digest=$(runner_build_digest)
+        service_image=media-orchestrator-service:$suffix
+        runner_image=media-orchestrator-runner:$suffix
+        (
+            cd "$root"
+            DOCKER_HOST=$docker_host \
+                MEDIA_SOURCE_TREE_DIGEST=$build_source_digest \
+                MEDIA_RUNNER_BUILD_DIGEST=$build_runner_digest \
+                MEDIA_SERVICE_IMAGE=$service_image \
+                MEDIA_RUNNER_IMAGE=$runner_image \
+                ./scripts/docker-build.sh
+        )
+        verify_image_attestation "$service_image"
+        verify_image_attestation "$runner_image"
+    fi
+    service_image_id=$(immutable_image_id "$service_image")
+    runner_image_id=$(immutable_image_id "$runner_image")
     ensure_deployed_mcp_schema
     stage_hermes_cli "$service_image" "$docker_host"
     checkpoint_images
@@ -1026,10 +1130,15 @@ deploy_full() {
         replace_hermes_agents || exit 1
         sync_hermes_schema || exit 1
         verify_live_mcp_schema || exit 1
-        verify_running_image_attestations || exit 1
+        if test "${MEDIA_DEPLOY_RELEASE:-0}" = 1; then
+            verify_local_backend_attestation || exit 1
+            verify_running_release_refs "$service_image" "$runner_image" || exit 1
+        else
+            verify_running_image_attestations || exit 1
+        fi
         verify_mounted_hermes_sources || exit 1
         resume_runner_watcher_and_wait_ready || exit 1
-        if ! verify_runner_service_compatibility "$previous_runner_id" "$service_image" "$runner_image"; then
+        if ! verify_runner_service_compatibility "$previous_runner_id" "$service_image_id" "$runner_image_id"; then
             hold_runner_quiescence
             exit 1
         fi
@@ -1343,11 +1452,29 @@ rollback_full() {
     cleanup_forward_deployment_sources "$forward_sources"
 }
 
+deploy_release_service() {
+    MEDIA_DEPLOY_RELEASE=1 deploy_service
+}
+
+deploy_release_full() {
+    MEDIA_DEPLOY_RELEASE=1 deploy_full
+}
+
+deploy_local_service() {
+    MEDIA_DEPLOY_RELEASE=0 deploy_service
+}
+
+deploy_local_full() {
+    MEDIA_DEPLOY_RELEASE=0 deploy_full
+}
+
 case ${1:-} in
     status) status ;;
     verify) verify ;;
-    deploy | deploy-service) with_host_lock deploy_service ;;
-    deploy-full) with_host_lock deploy_full ;;
+    deploy | deploy-service) with_host_lock deploy_release_service ;;
+    deploy-full) with_host_lock deploy_release_full ;;
+    deploy-local-service) with_host_lock deploy_local_service ;;
+    deploy-local-full) with_host_lock deploy_local_full ;;
     deploy-hermes) with_host_lock deploy_hermes ;;
     rollback | rollback-service) with_host_lock rollback_service ;;
     rollback-full) with_host_lock rollback_full ;;

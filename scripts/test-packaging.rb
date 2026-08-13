@@ -138,6 +138,31 @@ assert(homelab.include?(': "${HOMELAB_ROOT:?HOMELAB_ROOT is required}"') &&
        "guarded deployment must require explicit Homelab and release paths without sibling discovery")
 assert(homelab.include?('source=$MEDIA_RELEASE_DIR/MCP_SCHEMA.json'),
        "guarded deployment must source the MCP schema from the explicit release bundle")
+assert(homelab.include?('release_value service_image') &&
+       homelab.include?('release_value runner_image') &&
+       homelab.include?('docker pull') &&
+       homelab.include?('source=$MEDIA_RELEASE_DIR/release.json'),
+       "release deployment must load and pull both immutable manifest image references")
+release_service_deploy = homelab.split("deploy_service() {", 2).fetch(1).split("deploy_full() {", 2).fetch(0)
+release_full_deploy = homelab.split("deploy_full() {", 2).fetch(1).split("deploy_hermes() {", 2).fetch(0)
+release_service_attempt = homelab.split("perform_service_deploy() {", 2).fetch(1).split("deploy_service() {", 2).fetch(0)
+assert(release_service_deploy.include?('if test "${MEDIA_DEPLOY_RELEASE:-0}" = 1') &&
+       release_service_attempt.include?('replace_service_image "$service_image"') &&
+       release_service_attempt.include?('verify_local_backend_attestation') &&
+       release_full_deploy.include?('replace_images "$service_image" "$runner_image"') &&
+       release_full_deploy.include?('verify_running_release_refs "$service_image" "$runner_image"'),
+       "release deployment must deploy manifest refs without local builds and attest the deployed Config.Image")
+assert(release_service_deploy.index('pull_release_image "$service_image"') < release_service_deploy.index("checkpoint_images") &&
+       release_full_deploy.index('pull_release_image "$service_image"') < release_full_deploy.index("checkpoint_images") &&
+       release_full_deploy.index('pull_release_image "$runner_image"') < release_full_deploy.index("checkpoint_images"),
+       "release images must be pulled and attested before the guarded mutation checkpoint")
+assert(homelab.include?('deploy-local-service') && homelab.include?('deploy-local-full'),
+       "local builds must remain explicit separate commands")
+stage_release = homelab.split("stage_hermes_cli() {", 2).fetch(1).split("activate_hermes_stage() {", 2).fetch(0)
+assert(stage_release.include?('media-linux-amd64.sha256') &&
+       stage_release.include?('--staged-cli "$artifact"') &&
+       stage_release.index('test "$artifact_sha256" = "$expected_cli_sha256"') < stage_release.index('--staged-cli "$artifact"'),
+       "Hermes staging must verify the bundle CLI checksum before Homelab staged-CLI preflight")
 
 service_deploy = homelab.split("deploy_service() {", 2).fetch(1).split("deploy_full() {", 2).fetch(0)
 service_deploy_attempt = homelab.split("perform_service_deploy() {", 2).fetch(1).split("deploy_service() {", 2).fetch(0)
@@ -173,7 +198,7 @@ assert(service_deploy.include?("protected_snapshot") && service_deploy.include?(
        "service deployment must prove protected containers were unchanged")
 assert(service_deploy.index('verify_image_attestation "$service_image"') &&
        service_deploy.index('verify_image_attestation "$service_image"') < service_deploy.index("checkpoint_images") &&
-       service_deploy.include?('service_image=$(immutable_image_id "$service_image")') &&
+       service_deploy.include?('service_image_id=$(immutable_image_id "$service_image")') &&
        service_deploy_contract.include?("verify_running_service_attestation") &&
        service_deploy_contract.include?("verify_mounted_hermes_sources"),
        "service deployment must attest the built and running service plus mounted Hermes sources")
@@ -281,8 +306,10 @@ host_lock = homelab.split("acquire_host_lock() {", 2).fetch(1).split("release_ho
 assert(host_lock.include?("flock -n") && host_lock.include?("media-orchestrator.deploy.lock"),
        "deploy and rollback commands must hold one host-wide flock")
 mutating_dispatch = homelab.split("case ${1:-} in", 2).fetch(1)
-assert(mutating_dispatch.include?("with_host_lock deploy_service") &&
-       mutating_dispatch.include?("with_host_lock deploy_full") &&
+assert(mutating_dispatch.include?("with_host_lock deploy_release_service") &&
+       mutating_dispatch.include?("with_host_lock deploy_release_full") &&
+       mutating_dispatch.include?("with_host_lock deploy_local_service") &&
+       mutating_dispatch.include?("with_host_lock deploy_local_full") &&
        mutating_dispatch.include?("with_host_lock deploy_hermes") &&
        mutating_dispatch.include?("with_host_lock rollback_service") &&
        mutating_dispatch.include?("with_host_lock rollback_full"),
@@ -372,9 +399,9 @@ assert(full_deploy.index("stage_hermes_cli") < full_deploy.index("checkpoint_ima
 assert(full_deploy.scan("verify_image_attestation").length == 2 &&
        full_deploy.rindex("verify_image_attestation") < full_deploy.index("checkpoint_images"),
        "full deployment must attest both new images before publishing the rollback checkpoint")
-assert(full_deploy.include?('service_image=$(immutable_image_id "$service_image")') &&
-       full_deploy.include?('runner_image=$(immutable_image_id "$runner_image")'),
-       "full deployment must replace both images by their attested immutable IDs")
+assert(full_deploy.include?('service_image_id=$(immutable_image_id "$service_image")') &&
+       full_deploy.include?('runner_image_id=$(immutable_image_id "$runner_image")'),
+       "full deployment must resolve both refs to IDs for runtime compatibility attestation")
 assert(full_deploy.include?("verify_live_mcp_schema") &&
        full_deploy.include?("verify_running_image_attestations") &&
        full_deploy.include?("verify_mounted_hermes_sources"),
