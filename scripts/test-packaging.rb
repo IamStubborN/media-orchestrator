@@ -154,6 +154,36 @@ assert(!homelab.lines.first(20).join.include?("HOMELAB_ROOT is required") &&
 assert(homelab.include?('expected_migration_version') &&
        homelab.include?('assert_db_migration_version "$expected_migration_version"'),
        "release migration must verify the exact manifest postcondition before activation")
+migration_baseline = "assert_deploy_migration_baseline() {" + homelab.split("assert_deploy_migration_baseline() {", 2).fetch(1).split("checkpoint_images() {", 2).fetch(0)
+assert(migration_baseline.include?("migration_predecessor") &&
+       migration_baseline.include?("read_db_migration_version") &&
+       migration_baseline.include?("current database migration is neither target nor its immediate predecessor"),
+       "deploy baseline must allow only the target or its Migrator-derived immediate predecessor")
+Dir.mktmpdir("media-migration-baseline") do |directory|
+  marker = File.join(directory, "mutation")
+  probe = <<~SH
+    set -eu
+    #{migration_baseline}
+    validate_migration_version() { printf '%s\n' "$1" | grep -Eq '^m[0-9]{8}_[0-9]{6}_[a-z0-9_]+$'; }
+    migration_predecessor() { test "$1" = m20260810_000040_tracking_claims; echo m20260810_000039_tracking_posters; }
+    read_db_migration_version() { echo "$CURRENT_MIGRATION"; }
+    assert_deploy_migration_baseline m20260810_000040_tracking_claims
+    : >"$MUTATION_MARKER"
+  SH
+  environment = { "MUTATION_MARKER" => marker }
+  %w[m20260810_000040_tracking_claims m20260810_000039_tracking_posters].each do |current|
+    FileUtils.rm_f(marker)
+    _out, error, status = Open3.capture3(environment.merge("CURRENT_MIGRATION" => current), "sh", "-c", probe)
+    assert(status.success? && File.exist?(marker), "target and immediate predecessor baselines must be allowed: #{error}")
+  end
+  FileUtils.rm_f(marker)
+  _out, gap_error, gap_status = Open3.capture3(
+    environment.merge("CURRENT_MIGRATION" => "m20260809_000038_source_choice_sets"),
+    "sh", "-c", probe
+  )
+  assert(!gap_status.success? && gap_error.include?("neither target nor its immediate predecessor") && !File.exist?(marker),
+         "multi-step m38 to m40 deploy must fail before mutation")
+end
 assert(homelab.include?('release_value service_image') &&
        homelab.include?('release_value runner_image') &&
        homelab.include?('docker pull') &&
@@ -291,6 +321,7 @@ assert(service_deploy.index("checkpoint_images") < service_deploy.index("perform
        service_deploy_attempt.index("sync_homelab_compose") < service_deploy_attempt.index("replace_service_image"),
        "service deployment must checkpoint the deployed Compose before synchronizing its replacement")
 assert(service_deploy.rindex("assert_no_active_job") < service_deploy.index("checkpoint_images") &&
+       service_deploy.index('assert_deploy_migration_baseline "$expected_migration_version"') < service_deploy.index("checkpoint_images") &&
        service_deploy.index("checkpoint_images") < service_deploy.index("quiesce_runner"),
        "service checkpoint promotion must follow the final idle fence and immediately precede mutation")
 assert(service_deploy.scan("assert_no_active_job").length >= 2 &&
@@ -516,6 +547,7 @@ assert(full_deploy.index("stage_hermes_cli") < full_deploy.index("checkpoint_ima
        full_deploy.index("checkpoint_images") < full_deploy.index("activate_hermes_stage"),
        "full deployment must stage Hermes off-live and checkpoint before activation")
 assert(full_deploy.rindex("assert_no_active_job") < full_deploy.index("checkpoint_images") &&
+       full_deploy.index('assert_deploy_migration_baseline "$expected_migration_version"') < full_deploy.index("checkpoint_images") &&
        full_deploy.index("checkpoint_images") < full_deploy.index("quiesce_runner"),
        "full checkpoint promotion must follow the final idle fence and precede quiescence")
 assert(full_deploy.scan("verify_image_attestation").length == 2 &&

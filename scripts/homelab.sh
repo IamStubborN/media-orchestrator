@@ -94,6 +94,26 @@ latest_migration_version() {
     (cd "$root" && cargo run --quiet --locked -p media-storage --bin latest-migration)
 }
 
+migration_predecessor() {
+    target=$1
+    (cd "$root" && cargo run --quiet --locked -p media-storage --bin latest-migration -- --predecessor-of "$target")
+}
+
+assert_deploy_migration_baseline() {
+    target=$1
+    validate_migration_version "$target"
+    predecessor=$(migration_predecessor "$target")
+    validate_migration_version "$predecessor"
+    current=$(read_db_migration_version)
+    case $current in
+        "$target" | "$predecessor") return 0 ;;
+        *)
+            echo "current database migration is neither target nor its immediate predecessor: current=$current predecessor=$predecessor target=$target" >&2
+            return 1
+            ;;
+    esac
+}
+
 checkpoint_images() {
     remote sh -s "$environment_file" "$rollback_file" "$remote_schema_file" "$compose_file" "$hermes_remote_root" <<'REMOTE'
 set -eu
@@ -1089,6 +1109,7 @@ deploy_service() {
     assert_no_active_job
     runner_container_id=$(remote "docker inspect download-runner --format '{{.Id}}'")
     runner_image_id=$(running_image_id download-runner)
+    assert_deploy_migration_baseline "$expected_migration_version"
     checkpoint_images
     quiesce_runner
     if ! (
@@ -1165,6 +1186,7 @@ deploy_full() {
     protected_before=$(full_protected_snapshot)
     assert_no_active_job
     previous_runner_id=$(remote "docker inspect download-runner --format '{{.Id}}'")
+    assert_deploy_migration_baseline "$expected_migration_version"
     checkpoint_images
     quiesce_runner
     if ! (
