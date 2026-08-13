@@ -1463,6 +1463,10 @@ deploy_release_full() {
     MEDIA_DEPLOY_RELEASE=1 deploy_full
 }
 
+deploy_release_hermes() {
+    MEDIA_DEPLOY_RELEASE=1 deploy_hermes
+}
+
 deploy_local_service() {
     MEDIA_DEPLOY_RELEASE=0 deploy_service
 }
@@ -1478,7 +1482,7 @@ case ${1:-} in
     deploy-full) with_host_lock deploy_release_full ;;
     deploy-local-service) with_host_lock deploy_local_service ;;
     deploy-local-full) with_host_lock deploy_local_full ;;
-    deploy-hermes) with_host_lock deploy_hermes ;;
+    deploy-hermes) with_host_lock deploy_release_hermes ;;
     rollback | rollback-service) with_host_lock rollback_service ;;
     rollback-full) with_host_lock rollback_full ;;
     *) usage ;;

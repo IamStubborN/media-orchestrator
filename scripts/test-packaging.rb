@@ -169,6 +169,7 @@ assert(stage_release.include?('media-linux-amd64.sha256') &&
        "Hermes staging must verify the bundle CLI checksum before Homelab staged-CLI preflight")
 
 stage_function = "stage_hermes_cli() {" + stage_release
+dispatch_contract = "deploy_release_service() {" + homelab.split("deploy_release_service() {", 2).fetch(1)
 Dir.mktmpdir("media-stage-contract") do |directory|
   root = File.join(directory, "hermes")
   bin = File.join(directory, "bin")
@@ -229,6 +230,40 @@ Dir.mktmpdir("media-stage-contract") do |directory|
   _out, local_error, local_status = Open3.capture3(environment.merge("MEDIA_DEPLOY_RELEASE" => "0"), "sh", "-c", probe)
   assert(local_status.success? && !File.exist?(marker),
          "local CLI staging must use its local extraction checksum without pinned-release identity: #{local_error}")
+
+  dispatch_probe = <<~SH
+    set -eu
+    #{stage_function}
+    remote() { :; }
+    with_host_lock() { "$@"; }
+    deploy_service() { stage_hermes_cli image-ref docker-host; }
+    deploy_full() { stage_hermes_cli image-ref docker-host; }
+    deploy_hermes() { stage_hermes_cli image-ref docker-host; }
+    status() { :; }
+    verify() { :; }
+    rollback_service() { :; }
+    rollback_full() { :; }
+    usage() { exit 2; }
+    hermes_root=#{root.shellescape}
+    host=fixture-host
+    remote_root=/remote
+    hermes_remote_root=/remote/hermes
+    MEDIA_RELEASE_DIR=#{release.shellescape}
+    #{dispatch_contract}
+  SH
+  dispatch_probe.gsub!("$hermes_root/scripts/deploy-preflight", "$hermes_root/scripts-preflight")
+  File.write(File.join(release, "media-linux-amd64.sha256"), "#{digest}  media-linux-amd64\n")
+  _out, hermes_error, hermes_status = Open3.capture3(environment, "sh", "-c", dispatch_probe, "probe", "deploy-hermes")
+  assert(hermes_status.success? && File.exist?(marker),
+         "deploy-hermes dispatch must enforce release staged-CLI preflight: #{hermes_error}")
+  FileUtils.rm_f(marker)
+  File.write(File.join(release, "media-linux-amd64.sha256"), "#{'0' * 64}  media-linux-amd64\n")
+  _out, hermes_drift_error, hermes_drift_status = Open3.capture3(environment, "sh", "-c", dispatch_probe, "probe", "deploy-hermes")
+  assert(!hermes_drift_status.success? && hermes_drift_error.include?("staged CLI differs from the release bundle") && !File.exist?(marker),
+         "deploy-hermes dispatch must fail closed on pinned CLI drift")
+  _out, local_dispatch_error, local_dispatch_status = Open3.capture3(environment, "sh", "-c", dispatch_probe, "probe", "deploy-local-full")
+  assert(local_dispatch_status.success? && !File.exist?(marker),
+         "deploy-local-full dispatch must retain local extraction integrity without release identity: #{local_dispatch_error}")
 end
 
 service_deploy = homelab.split("deploy_service() {", 2).fetch(1).split("deploy_full() {", 2).fetch(0)
@@ -377,7 +412,7 @@ assert(mutating_dispatch.include?("with_host_lock deploy_release_service") &&
        mutating_dispatch.include?("with_host_lock deploy_release_full") &&
        mutating_dispatch.include?("with_host_lock deploy_local_service") &&
        mutating_dispatch.include?("with_host_lock deploy_local_full") &&
-       mutating_dispatch.include?("with_host_lock deploy_hermes") &&
+       mutating_dispatch.include?("with_host_lock deploy_release_hermes") &&
        mutating_dispatch.include?("with_host_lock rollback_service") &&
        mutating_dispatch.include?("with_host_lock rollback_full"),
        "every deploy and rollback entry point must use the host-wide flock")
