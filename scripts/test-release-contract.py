@@ -36,6 +36,15 @@ def load_exporter():
     return module
 
 
+class CanonicalCapabilityManifestTest(unittest.TestCase):
+    def test_tool_names_match_the_mcp_registry_order(self) -> None:
+        manifest = json.loads(
+            (ROOT / "config" / "media-capabilities.json").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(manifest["tools"], sorted(manifest["tools"]))
+
+
 class ReleaseContractTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
