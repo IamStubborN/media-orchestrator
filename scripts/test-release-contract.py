@@ -81,6 +81,9 @@ esac
             self.repo / "bin" / "cargo",
             """#!/usr/bin/env python3
 import json, os, pathlib
+if "latest-migration" in os.sys.argv:
+    print("m20260810_000040_tracking_claims")
+    raise SystemExit
 pathlib.Path(os.environ["MCP_SCHEMA_SNAPSHOT"]).write_text(
     os.environ["FAKE_MCP_TOOLS"], encoding="utf-8"
 )
@@ -119,6 +122,7 @@ pathlib.Path(os.environ["MCP_SCHEMA_SNAPSHOT"]).write_text(
         *,
         service_image: str = SERVICE_IMAGE,
         runner_image: str = RUNNER_IMAGE,
+        migration_version: str = MIGRATION,
         replace: bool = False,
         schema_tools: list[dict[str, object]] | None = None,
     ) -> subprocess.CompletedProcess[str]:
@@ -130,7 +134,7 @@ pathlib.Path(os.environ["MCP_SCHEMA_SNAPSHOT"]).write_text(
             "--runner-image",
             runner_image,
             "--migration-version",
-            MIGRATION,
+            migration_version,
             "--cli",
             str(self.cli),
             "--cli-checksum",
@@ -215,8 +219,13 @@ pathlib.Path(os.environ["MCP_SCHEMA_SNAPSHOT"]).write_text(
     def test_repository_and_tag_length_boundaries_for_both_images(self) -> None:
         digest = f"@sha256:{'4' * 64}"
         repository = "r" * 255
-        valid = [f"{repository}{digest}", f"{repository}:{'t' * 128}{digest}"]
-        invalid = f"{'r' * 256}{digest}"
+        valid = [
+            f"{repository}{digest}",
+            f"{repository}:{'t' * 128}{digest}",
+            f"registry.example:5000/{repository}{digest}",
+            f"registry.example:5000/{repository}:{'t' * 128}{digest}",
+        ]
+        invalid = f"registry.example:5000/{'r' * 256}{digest}"
         for index, reference in enumerate(valid):
             with self.subTest(field="service", kind=f"valid-{index}"):
                 result = self._run(
@@ -285,6 +294,14 @@ pathlib.Path(os.environ["MCP_SCHEMA_SNAPSHOT"]).write_text(
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("CLI checksum", result.stderr)
 
+    def test_rejects_operator_migration_that_differs_from_registered_migrator(self) -> None:
+        result = self._run(
+            pathlib.Path(self.temporary.name) / "bundle",
+            migration_version="m20260810_000099_typo",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("registered migration", result.stderr)
+
     def test_rejects_schema_capability_drift(self) -> None:
         result = self._run(
             pathlib.Path(self.temporary.name) / "bundle",
@@ -300,6 +317,28 @@ pathlib.Path(os.environ["MCP_SCHEMA_SNAPSHOT"]).write_text(
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("tool names differ", result.stderr)
+
+    def test_rejects_noncanonical_capability_manifest_shapes(self) -> None:
+        base = {
+            "schema_version": 1,
+            "mcp_server": "media_admin",
+            "description": "fixture",
+            "tools": ["media_jobs_list", "media_queue_status"],
+        }
+        variants = [
+            {**base, "extra": True},
+            {**base, "schema_version": True},
+            {**base, "mcp_server": "other"},
+            {**base, "description": ""},
+            {**base, "tools": ["media_jobs_list", "media_jobs_list"]},
+        ]
+        for index, manifest in enumerate(variants):
+            with self.subTest(index=index):
+                self._write_json(self.repo / "config" / "media-capabilities.json", manifest)
+                self._git("add", "config/media-capabilities.json")
+                self._git("commit", "-qm", f"capability variant {index}")
+                result = self._run(pathlib.Path(self.temporary.name) / f"capability-{index}")
+                self.assertNotEqual(result.returncode, 0)
 
     def test_failure_preserves_existing_destination(self) -> None:
         destination = pathlib.Path(self.temporary.name) / "bundle"

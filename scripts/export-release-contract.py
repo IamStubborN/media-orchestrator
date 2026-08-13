@@ -90,8 +90,16 @@ def validate_tool_names(schema_tools: object, capabilities: object) -> None:
     schema_names = [tool.get("name") for tool in schema_tools]
     if not all(isinstance(name, str) and name for name in schema_names):
         raise ContractError("generated MCP schema contains an invalid tool name")
-    if not isinstance(capabilities, dict) or capabilities.get("schema_version") != 1:
+    if not isinstance(capabilities, dict) or set(capabilities) != {
+        "description", "mcp_server", "schema_version", "tools"
+    }:
+        raise ContractError("media capability manifest fields are missing or unsupported")
+    if capabilities.get("schema_version") != 1 or isinstance(capabilities.get("schema_version"), bool):
         raise ContractError("media capability manifest must use schema version 1")
+    if capabilities.get("mcp_server") != "media_admin":
+        raise ContractError("media capability manifest must target media_admin")
+    if not isinstance(capabilities.get("description"), str) or not capabilities["description"].strip():
+        raise ContractError("media capability manifest description is missing")
     capability_names = capabilities.get("tools")
     if not isinstance(capability_names, list) or not all(
         isinstance(name, str) and name for name in capability_names
@@ -136,8 +144,6 @@ def valid_immutable_image(image: str) -> bool:
         if not TAG.fullmatch(tag):
             return False
         repository = repository_path
-    if len(repository) > 255:
-        return False
     components = repository.split("/")
     if not components or any(not component for component in components):
         return False
@@ -148,7 +154,11 @@ def valid_immutable_image(image: str) -> bool:
     path = components[1:] if has_registry else components
     if has_registry and not valid_registry(first):
         return False
-    return bool(path) and all(PATH_COMPONENT.fullmatch(component) for component in path)
+    return (
+        bool(path)
+        and len("/".join(path)) <= 255
+        and all(PATH_COMPONENT.fullmatch(component) for component in path)
+    )
 
 
 def atomic_exchange(source: pathlib.Path, destination: pathlib.Path) -> None:
@@ -250,6 +260,13 @@ def export(args: argparse.Namespace) -> None:
     source_digest = command(docker_build, "--print-source-tree-digest", root=root)
     application_version = command(docker_build, "--print-source-version", root=root)
     runner_digest = command(docker_build, "--print-runner-build-digest", root=root)
+    registered_migration = command(
+        "cargo", "run", "--quiet", "--locked", "-p", "media-storage", "--bin", "latest-migration", root=root
+    )
+    if args.migration_version != registered_migration:
+        raise ContractError(
+            f"requested migration differs from the registered migration: {registered_migration}"
+        )
     if not SHA256.fullmatch(source_digest) or not SHA256.fullmatch(runner_digest):
         raise ContractError("build scripts returned an invalid SHA-256 digest")
     if not application_version or application_version.endswith("-dirty"):
@@ -315,7 +332,7 @@ def export(args: argparse.Namespace) -> None:
             {
                 "application_version": application_version,
                 "files": files,
-                "migration_version": args.migration_version,
+                "migration_version": registered_migration,
                 "runner_build_digest": runner_digest,
                 "runner_image": args.runner_image,
                 "schema_version": 1,

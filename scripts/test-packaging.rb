@@ -142,6 +142,18 @@ assert(homelab.include?(': "${HOMELAB_ROOT:?HOMELAB_ROOT is required}"') &&
        "guarded deployment must require explicit Homelab and release paths without sibling discovery")
 assert(homelab.include?('source=$MEDIA_RELEASE_DIR/MCP_SCHEMA.json'),
        "guarded deployment must source the MCP schema from the explicit release bundle")
+release_dispatch = homelab.split("case ${1:-} in", 2).fetch(1)
+assert(homelab.include?("with_release_snapshot") &&
+       homelab.include?('MEDIA_RELEASE_DIR=$snapshot') &&
+       homelab.include?('(cd "$source" && cp -R . "$snapshot/")') &&
+       release_dispatch.include?("with_host_lock deploy_release_service"),
+       "release entry points must snapshot the candidate bundle once inside the host lock")
+assert(!homelab.lines.first(20).join.include?("HOMELAB_ROOT is required") &&
+       !homelab.lines.first(20).join.include?("MEDIA_RELEASE_DIR is required"),
+       "status, verify, and rollback parsing must not require candidate paths")
+assert(homelab.include?('expected_migration_version') &&
+       homelab.include?('assert_db_migration_version "$expected_migration_version"'),
+       "release migration must verify the exact manifest postcondition before activation")
 assert(homelab.include?('release_value service_image') &&
        homelab.include?('release_value runner_image') &&
        homelab.include?('docker pull') &&
@@ -236,6 +248,8 @@ Dir.mktmpdir("media-stage-contract") do |directory|
     #{stage_function}
     remote() { :; }
     with_host_lock() { "$@"; }
+    with_release_snapshot() { operation=$1; shift; "$operation" "$@"; }
+    require_homelab_root() { :; }
     deploy_service() { stage_hermes_cli image-ref docker-host; }
     deploy_full() { stage_hermes_cli image-ref docker-host; }
     deploy_hermes() { stage_hermes_cli image-ref docker-host; }
@@ -276,6 +290,9 @@ assert(service_deploy.index("checkpoint_images") < service_deploy.index("replace
 assert(service_deploy.index("checkpoint_images") < service_deploy.index("perform_service_deploy") &&
        service_deploy_attempt.index("sync_homelab_compose") < service_deploy_attempt.index("replace_service_image"),
        "service deployment must checkpoint the deployed Compose before synchronizing its replacement")
+assert(service_deploy.rindex("assert_no_active_job") < service_deploy.index("checkpoint_images") &&
+       service_deploy.index("checkpoint_images") < service_deploy.index("quiesce_runner"),
+       "service checkpoint promotion must follow the final idle fence and immediately precede mutation")
 assert(service_deploy.scan("assert_no_active_job").length >= 2 &&
        service_deploy.include?("quiesce_runner") &&
        service_deploy.index("quiesce_runner") < service_deploy.index("perform_service_deploy") &&
@@ -498,6 +515,9 @@ full_deploy = homelab.split("deploy_full() {", 2).fetch(1).split("deploy_hermes(
 assert(full_deploy.index("stage_hermes_cli") < full_deploy.index("checkpoint_images") &&
        full_deploy.index("checkpoint_images") < full_deploy.index("activate_hermes_stage"),
        "full deployment must stage Hermes off-live and checkpoint before activation")
+assert(full_deploy.rindex("assert_no_active_job") < full_deploy.index("checkpoint_images") &&
+       full_deploy.index("checkpoint_images") < full_deploy.index("quiesce_runner"),
+       "full checkpoint promotion must follow the final idle fence and precede quiescence")
 assert(full_deploy.scan("verify_image_attestation").length == 2 &&
        full_deploy.rindex("verify_image_attestation") < full_deploy.index("checkpoint_images"),
        "full deployment must attest both new images before publishing the rollback checkpoint")
@@ -657,8 +677,6 @@ assert(gitignore.lines.map(&:strip).include?("/dist/"),
 
 clean_env = {
   "PATH" => ENV.fetch("PATH"),
-  "HOMELAB_ROOT" => File.join(ROOT, "test-homelab"),
-  "MEDIA_RELEASE_DIR" => File.join(ROOT, "test-release"),
 }
 _stdout, stderr, status = Open3.capture3(clean_env, "./scripts/homelab.sh", "invalid-command", chdir: ROOT, unsetenv_others: true)
 assert(status.exitstatus == 2 && stderr.include?("usage:"),

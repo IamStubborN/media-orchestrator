@@ -2,17 +2,15 @@
 set -eu
 
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-: "${HOMELAB_ROOT:?HOMELAB_ROOT is required}"
-: "${MEDIA_RELEASE_DIR:?MEDIA_RELEASE_DIR is required}"
 host=${MEDIA_HOMELAB_HOST:host.example.invalid}
 remote_root=${MEDIA_HOMELAB_ROOT:-/srv/homelab}
 compose_file=$remote_root/media/compose.media-orchestrator.yml
 environment_file=$remote_root/.env
 rollback_file=$remote_root/media/.media-orchestrator-images.previous
-hermes_root=${HERMES_HOME_ROOT:-$HOMELAB_ROOT/hermes}
+hermes_root=${HERMES_HOME_ROOT:-${HOMELAB_ROOT:-}/hermes}
 hermes_remote_root=${HERMES_HOME_REMOTE_ROOT:-/srv/homelab/hermes}
 remote_schema_file=$hermes_remote_root/shared/skills/media/MCP_SCHEMA.json
-homelab_root=$HOMELAB_ROOT
+homelab_root=${HOMELAB_ROOT:-}
 
 usage() {
     echo "usage: $0 status|verify|deploy|deploy-service|deploy-full|deploy-local-service|deploy-local-full|deploy-hermes|rollback|rollback-service|rollback-full" >&2
@@ -28,12 +26,39 @@ check_hermes_capabilities() {
     (cd "$hermes_root" && python3 "$checker")
 }
 
+require_homelab_root() {
+    : "${HOMELAB_ROOT:?HOMELAB_ROOT is required}"
+    homelab_root=$HOMELAB_ROOT
+    hermes_root=${HERMES_HOME_ROOT:-$HOMELAB_ROOT/hermes}
+}
+
+with_release_snapshot() {
+    operation=$1
+    shift
+    require_homelab_root
+    : "${MEDIA_RELEASE_DIR:?MEDIA_RELEASE_DIR is required}"
+    source=$MEDIA_RELEASE_DIR
+    test -d "$source" || { echo "release directory is missing: $source" >&2; exit 1; }
+    snapshot=$(mktemp -d "${TMPDIR:-/tmp}/media-release-snapshot.XXXXXX")
+    trap 'rm -rf "$snapshot"' EXIT HUP INT TERM
+    (cd "$source" && cp -R . "$snapshot/")
+    MEDIA_RELEASE_DIR=$snapshot
+    export MEDIA_RELEASE_DIR
+    set +e
+    (set -e; "$operation" "$@")
+    result=$?
+    set -e
+    rm -rf "$snapshot"
+    trap - EXIT HUP INT TERM
+    return "$result"
+}
+
 release_value() {
     field=$1
     source=$MEDIA_RELEASE_DIR/release.json
     test -s "$source" || { echo "release manifest is missing: $source" >&2; exit 1; }
     case $field in
-        service_image | runner_image | runner_build_digest) ;;
+        service_image | runner_image | runner_build_digest | migration_version) ;;
         *) echo "unsupported release manifest field: $field" >&2; exit 2 ;;
     esac
     python3 - "$source" "$field" <<'PY'
@@ -63,6 +88,10 @@ source_version() {
 
 runner_build_digest() {
     "$root/scripts/docker-build.sh" --print-runner-build-digest
+}
+
+latest_migration_version() {
+    (cd "$root" && cargo run --quiet --locked -p media-storage --bin latest-migration)
 }
 
 checkpoint_images() {
@@ -738,18 +767,21 @@ verify_resumed_runtime_or_requiesce() {
 replace_images() {
     service_image=$1
     runner_image=$2
-    remote "set -eu; test \"\$(docker inspect gluetun-rezka-watcher --format '{{.State.Status}}')\" != running; test \"\$(docker inspect download-runner --format '{{.State.Status}}')\" != running; sed -i 's#^MEDIA_SERVICE_IMAGE=.*#MEDIA_SERVICE_IMAGE=$service_image#; s#^DOWNLOAD_RUNNER_IMAGE=.*#DOWNLOAD_RUNNER_IMAGE=$runner_image#' '$environment_file'; cd '$remote_root/media'; docker compose --env-file '$environment_file' -f '$compose_file' run --rm --no-deps media-service migrate; docker compose --env-file '$environment_file' -f '$compose_file' up -d --no-deps --force-recreate media-service; docker compose --env-file '$environment_file' -f '$compose_file' create --force-recreate download-runner"
+    expected_migration_version=${3:-}
+    remote "set -eu; test \"\$(docker inspect gluetun-rezka-watcher --format '{{.State.Status}}')\" != running; test \"\$(docker inspect download-runner --format '{{.State.Status}}')\" != running; sed -i 's#^MEDIA_SERVICE_IMAGE=.*#MEDIA_SERVICE_IMAGE=$service_image#; s#^DOWNLOAD_RUNNER_IMAGE=.*#DOWNLOAD_RUNNER_IMAGE=$runner_image#' '$environment_file'; cd '$remote_root/media'; docker compose --env-file '$environment_file' -f '$compose_file' run --rm --no-deps media-service migrate; if test -n '$expected_migration_version'; then actual=\$(docker exec media-postgres sh -lc 'psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -Atc \"select version from seaql_migrations order by version desc limit 1;\"'); test \"\$actual\" = '$expected_migration_version' || { echo \"database migration differs from release manifest\" >&2; exit 1; }; fi; docker compose --env-file '$environment_file' -f '$compose_file' up -d --no-deps --force-recreate media-service; docker compose --env-file '$environment_file' -f '$compose_file' create --force-recreate download-runner"
     verify_service
 }
 
 replace_service_image() {
     service_image=$1
-    remote sh -s "$environment_file" "$remote_root" "$compose_file" "$service_image" <<'REMOTE'
+    expected_migration_version=${2:-}
+    remote sh -s "$environment_file" "$remote_root" "$compose_file" "$service_image" "$expected_migration_version" <<'REMOTE'
 set -eu
 environment_file=$1
 remote_root=$2
 compose_file=$3
 service_image=$4
+expected_migration_version=$5
 test "$(grep -c '^MEDIA_SERVICE_IMAGE=' "$environment_file" || true)" = 1 || {
     echo "MEDIA_SERVICE_IMAGE must occur exactly once in $environment_file" >&2
     exit 1
@@ -762,6 +794,10 @@ trap 'rm -f "$next"' EXIT HUP INT TERM
 sed "s#^MEDIA_SERVICE_IMAGE=.*#MEDIA_SERVICE_IMAGE=$service_image#" "$environment_file" >"$next"
 cd "$remote_root/media"
 docker compose --env-file "$next" -f "$compose_file" run --rm --no-deps media-service migrate
+if test -n "$expected_migration_version"; then
+    actual=$(docker exec media-postgres sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "select version from seaql_migrations order by version desc limit 1;"')
+    test "$actual" = "$expected_migration_version" || { echo "database migration differs from release manifest" >&2; exit 1; }
+fi
 mv -f "$next" "$environment_file"
 trap - EXIT HUP INT TERM
 docker compose --env-file "$environment_file" -f "$compose_file" up -d --no-deps --force-recreate media-service
@@ -1008,7 +1044,8 @@ image_suffix() {
 
 perform_service_deploy() {
     sync_homelab_compose || return 1
-    replace_service_image "$service_image" || return 1
+    replace_service_image "$service_image" "$expected_migration_version" || return 1
+    assert_db_migration_version "$expected_migration_version" || return 1
     sync_hermes_schema || return 1
     replace_hermes_agents || return 1
     verify_live_mcp_schema || return 1
@@ -1029,6 +1066,7 @@ deploy_service() {
         runner_image=$(release_value runner_image)
         assert_service_only_rollout "$(release_value runner_build_digest)" "$runner_image"
         service_image=$(release_value service_image)
+        expected_migration_version=$(release_value migration_version)
         pull_release_image "$service_image"
         verify_release_image_attestation "$service_image" service
     else
@@ -1043,14 +1081,15 @@ deploy_service() {
         )
         remote "docker image inspect '$service_image' >/dev/null"
         verify_image_attestation "$service_image"
+        expected_migration_version=$(latest_migration_version)
     fi
     service_image_id=$(immutable_image_id "$service_image")
     ensure_deployed_mcp_schema
-    checkpoint_images
     protected_before=$(protected_snapshot)
     assert_no_active_job
     runner_container_id=$(remote "docker inspect download-runner --format '{{.Id}}'")
     runner_image_id=$(running_image_id download-runner)
+    checkpoint_images
     quiesce_runner
     if ! (
         perform_service_deploy || exit 1
@@ -1099,6 +1138,7 @@ deploy_full() {
         pull_release_image "$runner_image"
         verify_release_image_attestation "$service_image" service
         verify_release_image_attestation "$runner_image" runner
+        expected_migration_version=$(release_value migration_version)
     else
         suffix=$(image_suffix)
         build_source_digest=$(source_tree_digest)
@@ -1116,20 +1156,22 @@ deploy_full() {
         )
         verify_image_attestation "$service_image"
         verify_image_attestation "$runner_image"
+        expected_migration_version=$(latest_migration_version)
     fi
     service_image_id=$(immutable_image_id "$service_image")
     runner_image_id=$(immutable_image_id "$runner_image")
     ensure_deployed_mcp_schema
     stage_hermes_cli "$service_image" "$docker_host"
-    checkpoint_images
     protected_before=$(full_protected_snapshot)
     assert_no_active_job
     previous_runner_id=$(remote "docker inspect download-runner --format '{{.Id}}'")
+    checkpoint_images
     quiesce_runner
     if ! (
         activate_hermes_stage || exit 1
         sync_homelab_compose || exit 1
-        replace_images "$service_image" "$runner_image" || exit 1
+        replace_images "$service_image" "$runner_image" "$expected_migration_version" || exit 1
+        assert_db_migration_version "$expected_migration_version" || exit 1
         replace_hermes_agents || exit 1
         sync_hermes_schema || exit 1
         verify_live_mcp_schema || exit 1
@@ -1349,7 +1391,6 @@ perform_service_rollback() {
 }
 
 rollback_service() {
-    check_hermes_capabilities
     assert_no_active_job
     read_rollback_images
     protected_before=$(protected_snapshot)
@@ -1413,7 +1454,6 @@ perform_full_rollback() {
 }
 
 rollback_full() {
-    check_hermes_capabilities
     assert_no_active_job
     read_rollback_images
     protected_before=$(full_protected_snapshot)
@@ -1456,22 +1496,24 @@ rollback_full() {
 }
 
 deploy_release_service() {
-    MEDIA_DEPLOY_RELEASE=1 deploy_service
+    MEDIA_DEPLOY_RELEASE=1 with_release_snapshot deploy_service
 }
 
 deploy_release_full() {
-    MEDIA_DEPLOY_RELEASE=1 deploy_full
+    MEDIA_DEPLOY_RELEASE=1 with_release_snapshot deploy_full
 }
 
 deploy_release_hermes() {
-    MEDIA_DEPLOY_RELEASE=1 deploy_hermes
+    MEDIA_DEPLOY_RELEASE=1 with_release_snapshot deploy_hermes
 }
 
 deploy_local_service() {
+    require_homelab_root
     MEDIA_DEPLOY_RELEASE=0 deploy_service
 }
 
 deploy_local_full() {
+    require_homelab_root
     MEDIA_DEPLOY_RELEASE=0 deploy_full
 }
 

@@ -160,6 +160,13 @@ pulls and deploys both manifest references. Neither path builds local images.
 For an intentional source-checkout build instead, use
 `./scripts/homelab.sh deploy-local-service` or
 `./scripts/homelab.sh deploy-local-full`; these are separate operator commands.
+Release commands copy the four validated candidate files into one private
+snapshot after acquiring the host lock and use only that snapshot through the
+operation, so a concurrent exporter replacement cannot mix bundle generations.
+After migration, the database must report the manifest's exact registered
+migration before the service is activated. Status, verification, and rollback
+do not require a candidate release directory; rollback uses its remote
+checkpointed schema and images.
 
 It first runs the fail-closed `hermes-home/scripts/check-media-capabilities`
 schema/capability check and compares the release manifest's runner build digest
