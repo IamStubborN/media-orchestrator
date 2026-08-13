@@ -833,10 +833,13 @@ stage_hermes_cli() {
     trap - EXIT HUP INT TERM
     chmod 0755 "$artifact"
     artifact_sha256=$(shasum -a 256 "$artifact" | awk '{print $1}')
-    expected_cli_sha256=$(awk 'NF == 2 && $2 == "media-linux-amd64" { print $1 }' "$MEDIA_RELEASE_DIR/media-linux-amd64.sha256")
-    printf '%s\n' "$expected_cli_sha256" | grep -Eq '^[0-9a-f]{64}$' || { echo "release bundle CLI checksum is invalid" >&2; exit 1; }
-    test "$artifact_sha256" = "$expected_cli_sha256" || { echo "staged CLI differs from the release bundle" >&2; exit 1; }
-    "$hermes_root/scripts/deploy-preflight" --staged-cli "$artifact"
+    printf '%s\n' "$artifact_sha256" | grep -Eq '^[0-9a-f]{64}$' || { echo "local extracted CLI checksum is invalid" >&2; exit 1; }
+    if test "${MEDIA_DEPLOY_RELEASE:-0}" = 1; then
+        expected_cli_sha256=$(awk 'NF == 2 && $2 == "media-linux-amd64" { print $1 }' "$MEDIA_RELEASE_DIR/media-linux-amd64.sha256")
+        printf '%s\n' "$expected_cli_sha256" | grep -Eq '^[0-9a-f]{64}$' || { echo "release bundle CLI checksum is invalid" >&2; exit 1; }
+        test "$artifact_sha256" = "$expected_cli_sha256" || { echo "staged CLI differs from the release bundle" >&2; exit 1; }
+        "$hermes_root/scripts/deploy-preflight" --staged-cli "$artifact"
+    fi
     hermes_stage=$remote_root/media/.hermes-stage.$$
     remote "rm -rf '$hermes_stage'; mkdir -p '$hermes_stage/source' '$hermes_stage/artifacts'"
     rsync -az --delete \

@@ -3,6 +3,10 @@
 
 require "yaml"
 require "open3"
+require "tmpdir"
+require "fileutils"
+require "digest"
+require "shellwords"
 
 ROOT = File.expand_path("..", __dir__)
 
@@ -163,6 +167,69 @@ assert(stage_release.include?('media-linux-amd64.sha256') &&
        stage_release.include?('--staged-cli "$artifact"') &&
        stage_release.index('test "$artifact_sha256" = "$expected_cli_sha256"') < stage_release.index('--staged-cli "$artifact"'),
        "Hermes staging must verify the bundle CLI checksum before Homelab staged-CLI preflight")
+
+stage_function = "stage_hermes_cli() {" + stage_release
+Dir.mktmpdir("media-stage-contract") do |directory|
+  root = File.join(directory, "hermes")
+  bin = File.join(directory, "bin")
+  release = File.join(directory, "release")
+  FileUtils.mkdir_p([File.join(root, "artifacts"), bin, release])
+  cli = File.join(directory, "media")
+  File.binwrite(cli, "local extraction\n")
+  digest = Digest::SHA256.file(cli).hexdigest
+  File.write(File.join(release, "media-linux-amd64.sha256"), "#{digest}  media-linux-amd64\n")
+  marker = File.join(directory, "preflight-called")
+  File.write(File.join(root, "scripts-preflight"), <<~'SH')
+    #!/bin/sh
+    set -eu
+    test "$1" = --staged-cli
+    test -f "$2"
+    : >"$PREFLIGHT_MARKER"
+  SH
+  File.chmod(0o755, File.join(root, "scripts-preflight"))
+  File.write(File.join(bin, "docker"), <<~'SH')
+    #!/bin/sh
+    case $1 in
+      create) echo fixture-container ;;
+      cp) cp "$FAKE_CLI" "$3" ;;
+      rm) ;;
+      *) exit 2 ;;
+    esac
+  SH
+  %w[rsync scp].each do |name|
+    File.write(File.join(bin, name), "#!/bin/sh\nexit 0\n")
+    File.chmod(0o755, File.join(bin, name))
+  end
+  File.chmod(0o755, File.join(bin, "docker"))
+  probe = <<~SH
+    set -eu
+    #{stage_function}
+    remote() { :; }
+    hermes_root=#{root.shellescape}
+    host=fixture-host
+    remote_root=/remote
+    hermes_remote_root=/remote/hermes
+    MEDIA_RELEASE_DIR=#{release.shellescape}
+    stage_hermes_cli image-ref docker-host
+  SH
+  environment = {
+    "PATH" => "#{bin}:#{ENV.fetch("PATH")}",
+    "FAKE_CLI" => cli,
+    "PREFLIGHT_MARKER" => marker,
+  }
+  # Match the production path while keeping the test fixture compact.
+  probe.gsub!("$hermes_root/scripts/deploy-preflight", "$hermes_root/scripts-preflight")
+  _out, release_error, release_status = Open3.capture3(environment.merge("MEDIA_DEPLOY_RELEASE" => "1"), "sh", "-c", probe)
+  assert(release_status.success? && File.exist?(marker), "release CLI staging must use the pinned bundle checksum and preflight")
+  FileUtils.rm_f(marker)
+  File.write(File.join(release, "media-linux-amd64.sha256"), "#{'0' * 64}  media-linux-amd64\n")
+  _out, drift_error, drift_status = Open3.capture3(environment.merge("MEDIA_DEPLOY_RELEASE" => "1"), "sh", "-c", probe)
+  assert(!drift_status.success? && drift_error.include?("staged CLI differs from the release bundle") && !File.exist?(marker),
+         "release CLI staging must fail closed on pinned checksum drift")
+  _out, local_error, local_status = Open3.capture3(environment.merge("MEDIA_DEPLOY_RELEASE" => "0"), "sh", "-c", probe)
+  assert(local_status.success? && !File.exist?(marker),
+         "local CLI staging must use its local extraction checksum without pinned-release identity: #{local_error}")
+end
 
 service_deploy = homelab.split("deploy_service() {", 2).fetch(1).split("deploy_full() {", 2).fetch(0)
 service_deploy_attempt = homelab.split("perform_service_deploy() {", 2).fetch(1).split("deploy_service() {", 2).fetch(0)
