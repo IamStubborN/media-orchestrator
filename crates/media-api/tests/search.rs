@@ -96,24 +96,6 @@ impl SearchService for FakeSearchService {
     ) -> Result<JobDto, SearchError> {
         Err(SearchError::NotFound)
     }
-
-    async fn refresh_rezka_session(
-        &self,
-        owner: UserId,
-        _: OperationKey,
-        _: media_contract::RezkaSessionRefreshRequest,
-    ) -> Result<JobDto, SearchError> {
-        self.owners.lock().unwrap().push(owner);
-        Ok(JobDto {
-            id: media_contract::PublicId::parse("018f3f86-7b4c-7b4f-9b6a-6d62f45bb113").unwrap(),
-            provider: ProviderDto::Rezka,
-            result_ref: "selection:018f3f86-refresh".to_owned(),
-            state: JobStateDto::Queued,
-            needs_action_reason: None,
-            notify_scope: NotifyScopeDto::Initiator,
-            lifecycle_cycle: 1,
-        })
-    }
 }
 
 #[tokio::test]
@@ -275,26 +257,6 @@ async fn authenticated_user_searches_continues_and_selects_without_identity_flag
         service.owners.lock().unwrap().as_slice(),
         &[PRIMARY_USER_ID; 3]
     );
-}
-
-#[tokio::test]
-async fn authenticated_user_queues_a_rezka_session_refresh_without_echoing_the_capability() {
-    let service = Arc::new(FakeSearchService::default());
-    let response = app(service.clone())
-        .oneshot(post(
-            "/v1/rezka/session/refresh",
-            VALID_TOKEN,
-            serde_json::json!({"credential_request_id":"request-secret-42"}),
-        ))
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), 201);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let body = String::from_utf8(body.to_vec()).unwrap();
-    assert!(!body.contains("request-secret-42"));
-    assert!(body.contains("selection:018f3f86-refresh"));
-    assert_eq!(service.owners.lock().unwrap().as_slice(), &[PRIMARY_USER_ID]);
 }
 
 #[tokio::test]

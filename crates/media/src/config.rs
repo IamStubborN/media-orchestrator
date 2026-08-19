@@ -33,20 +33,11 @@ const REZKA_MIRRORS: &str = "MEDIA_REZKA_MIRRORS";
 const REZKA_SESSION_PROBE_URL: &str = "MEDIA_REZKA_SESSION_PROBE_URL";
 const REZKA_SESSION_VALID_MARKERS_JSON: &str = "MEDIA_REZKA_SESSION_VALID_MARKERS_JSON";
 const REZKA_SESSION_INVALID_MARKERS_JSON: &str = "MEDIA_REZKA_SESSION_INVALID_MARKERS_JSON";
-const REZKA_USERNAME: &str = "MEDIA_REZKA_USERNAME";
-const REZKA_USERNAME_FILE: &str = "MEDIA_REZKA_USERNAME_FILE";
-const REZKA_PASSWORD: &str = "MEDIA_REZKA_PASSWORD";
-const REZKA_PASSWORD_FILE: &str = "MEDIA_REZKA_PASSWORD_FILE";
 const REZKA_COOKIE_KEY: &str = "MEDIA_REZKA_COOKIE_KEY";
 const REZKA_COOKIE_KEY_FILE: &str = "MEDIA_REZKA_COOKIE_KEY_FILE";
 const REZKA_SESSION_STORE_FILE: &str = "MEDIA_REZKA_SESSION_STORE_FILE";
 const REZKA_USER_AGENT: &str = "MEDIA_REZKA_USER_AGENT";
 const REZKA_PROXY_URL: &str = "MEDIA_REZKA_PROXY_URL";
-const CREDENTIAL_BROKER_URL: &str = "MEDIA_REZKA_CREDENTIAL_BROKER_URL";
-const CREDENTIAL_BROKER_TOKEN: &str = "MEDIA_REZKA_CREDENTIAL_BROKER_TOKEN";
-const CREDENTIAL_BROKER_TOKEN_FILE: &str = "MEDIA_REZKA_CREDENTIAL_BROKER_TOKEN_FILE";
-const CREDENTIAL_BROKER_PRIVATE_HTTP_HOSTS: &str =
-    "MEDIA_REZKA_CREDENTIAL_BROKER_PRIVATE_HTTP_HOSTS";
 const PROWLARR_URL: &str = "MEDIA_PROWLARR_URL";
 const PROWLARR_API_KEY: &str = "MEDIA_PROWLARR_API_KEY";
 const PROWLARR_API_KEY_FILE: &str = "MEDIA_PROWLARR_API_KEY_FILE";
@@ -89,8 +80,6 @@ const MIN_LEASE_TTL_SECONDS: i64 = 30;
 const MAX_LEASE_TTL_SECONDS: i64 = 300;
 const MAX_TOKEN_BYTES: usize = 512;
 const MAX_DATABASE_URL_BYTES: usize = 8 * 1024;
-const MAX_REZKA_USERNAME_BYTES: usize = 256;
-const MAX_REZKA_PASSWORD_BYTES: usize = 1024;
 const MAX_REZKA_COOKIE_KEY_ENCODED_BYTES: usize = 44;
 const MAX_REZKA_MARKERS: usize = 64;
 const MAX_REZKA_MARKER_BYTES: usize = 256;
@@ -545,7 +534,6 @@ pub struct RunnerConfig {
     vaapi_device: PathBuf,
     qbittorrent: Option<QbittorrentCompositionConfig>,
     gluetun: Option<GluetunCompositionConfig>,
-    credential_broker: CredentialBrokerCompositionConfig,
     exit_after_job: bool,
 }
 
@@ -558,7 +546,7 @@ impl RunnerConfig {
         let service = ClientConfig::load_from(source)?;
         Ok(Self {
             service,
-            rezka: load_rezka_runner_config(source)?,
+            rezka: load_rezka_config(source)?,
             storage_roots: media_runner::StorageRoots::new(
                 optional_environment(source, STAGING_ROOT)?
                     .unwrap_or_else(|| "/staging/rezka".to_owned()),
@@ -587,7 +575,6 @@ impl RunnerConfig {
                 .var_os(GLUETUN_URL)
                 .map(|_| load_gluetun_config(source))
                 .transpose()?,
-            credential_broker: load_credential_broker_config(source)?,
             exit_after_job: optional_boolean_environment(source, RUNNER_EXIT_AFTER_JOB, false)?,
         })
     }
@@ -617,29 +604,8 @@ impl RunnerConfig {
     pub const fn gluetun(&self) -> Option<&GluetunCompositionConfig> {
         self.gluetun.as_ref()
     }
-    pub const fn credential_broker(&self) -> &CredentialBrokerCompositionConfig {
-        &self.credential_broker
-    }
     pub const fn exit_after_job(&self) -> bool {
         self.exit_after_job
-    }
-}
-
-pub struct CredentialBrokerCompositionConfig {
-    base_url: url::Url,
-    token: SecretString,
-    private_http_hosts: Vec<String>,
-}
-
-impl CredentialBrokerCompositionConfig {
-    pub const fn base_url(&self) -> &url::Url {
-        &self.base_url
-    }
-    pub const fn token(&self) -> &SecretString {
-        &self.token
-    }
-    pub fn private_http_hosts(&self) -> &[String] {
-        &self.private_http_hosts
     }
 }
 
@@ -948,24 +914,6 @@ fn parse_rezka_proxy_url(value: &str) -> Result<url::Url, ConfigError> {
 }
 
 fn load_rezka_config(source: &impl ConfigSource) -> Result<RezkaCompositionConfig, ConfigError> {
-    load_rezka_config_with_credentials(source, true)
-}
-
-fn load_rezka_runner_config(
-    source: &impl ConfigSource,
-) -> Result<RezkaCompositionConfig, ConfigError> {
-    load_rezka_config_with_credentials(source, false)
-}
-
-fn load_rezka_config_with_credentials(
-    source: &impl ConfigSource,
-    credentials: bool,
-) -> Result<RezkaCompositionConfig, ConfigError> {
-    let credentials = credentials
-        || source.var_os(REZKA_USERNAME).is_some()
-        || source.var_os(REZKA_USERNAME_FILE).is_some()
-        || source.var_os(REZKA_PASSWORD).is_some()
-        || source.var_os(REZKA_PASSWORD_FILE).is_some();
     let mirrors = parse_rezka_mirrors(&required_environment(source, REZKA_MIRRORS)?)?;
     let session_probe_url =
         parse_rezka_probe_url(&required_environment(source, REZKA_SESSION_PROBE_URL)?)?;
@@ -988,26 +936,6 @@ fn load_rezka_config_with_credentials(
             source,
             REZKA_SESSION_INVALID_MARKERS_JSON,
         )?)?,
-        username: credentials
-            .then(|| {
-                read_secret(
-                    source,
-                    REZKA_USERNAME,
-                    REZKA_USERNAME_FILE,
-                    SecretKind::RezkaUsername,
-                )
-            })
-            .transpose()?,
-        password: credentials
-            .then(|| {
-                read_secret(
-                    source,
-                    REZKA_PASSWORD,
-                    REZKA_PASSWORD_FILE,
-                    SecretKind::RezkaPassword,
-                )
-            })
-            .transpose()?,
         cookie_key: read_rezka_cookie_key(source)?,
         session_store_path: required_path_environment(source, REZKA_SESSION_STORE_FILE)?,
         user_agent: optional_environment(source, REZKA_USER_AGENT)?
@@ -1015,36 +943,6 @@ fn load_rezka_config_with_credentials(
         proxy_url: optional_environment(source, REZKA_PROXY_URL)?
             .map(|value| parse_rezka_proxy_url(&value))
             .transpose()?,
-    })
-}
-
-fn load_credential_broker_config(
-    source: &impl ConfigSource,
-) -> Result<CredentialBrokerCompositionConfig, ConfigError> {
-    let base_url = required_environment(source, CREDENTIAL_BROKER_URL)?
-        .parse::<url::Url>()
-        .map_err(|_| ConfigError::InvalidEnvironment {
-            name: CREDENTIAL_BROKER_URL,
-        })?;
-    let private_http_hosts = optional_environment(source, CREDENTIAL_BROKER_PRIVATE_HTTP_HOSTS)?
-        .map(|hosts| {
-            hosts
-                .split(',')
-                .map(str::trim)
-                .filter(|host| !host.is_empty())
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
-    Ok(CredentialBrokerCompositionConfig {
-        base_url,
-        token: read_secret(
-            source,
-            CREDENTIAL_BROKER_TOKEN,
-            CREDENTIAL_BROKER_TOKEN_FILE,
-            SecretKind::Token,
-        )?,
-        private_http_hosts,
     })
 }
 
@@ -1072,8 +970,6 @@ pub struct RezkaCompositionConfig {
     session_probe_url: url::Url,
     session_valid_markers: Vec<String>,
     session_invalid_markers: Vec<String>,
-    username: Option<SecretString>,
-    password: Option<SecretString>,
     cookie_key: SecretBox<[u8; 32]>,
     session_store_path: PathBuf,
     user_agent: String,
@@ -1099,20 +995,6 @@ impl RezkaCompositionConfig {
     #[must_use]
     pub fn session_invalid_markers(&self) -> &[String] {
         &self.session_invalid_markers
-    }
-
-    #[must_use]
-    pub fn username(&self) -> &SecretString {
-        self.username
-            .as_ref()
-            .expect("search Rezka config has credentials")
-    }
-
-    #[must_use]
-    pub fn password(&self) -> &SecretString {
-        self.password
-            .as_ref()
-            .expect("search Rezka config has credentials")
     }
 
     #[must_use]
@@ -1144,8 +1026,6 @@ impl std::fmt::Debug for RezkaCompositionConfig {
             .field("session_probe_url", &"[REDACTED]")
             .field("session_valid_markers", &"[REDACTED]")
             .field("session_invalid_markers", &"[REDACTED]")
-            .field("username", &"[REDACTED]")
-            .field("password", &"[REDACTED]")
             .field("cookie_key", &"[REDACTED]")
             .field("session_store_path", &"[REDACTED]")
             .field("user_agent", &"[REDACTED]")
@@ -1157,8 +1037,6 @@ impl std::fmt::Debug for RezkaCompositionConfig {
 enum SecretKind {
     DatabaseUrl,
     Token,
-    RezkaUsername,
-    RezkaPassword,
 }
 
 fn read_secret(
@@ -1182,16 +1060,6 @@ fn read_secret(
             !contents.is_empty()
                 && contents.len() <= MAX_TOKEN_BYTES
                 && contents.iter().all(|byte| (0x21..=0x7e).contains(byte))
-        }
-        SecretKind::RezkaUsername => {
-            !contents.is_empty()
-                && contents.len() <= MAX_REZKA_USERNAME_BYTES
-                && contents.iter().all(|byte| (0x21..=0x7e).contains(byte))
-        }
-        SecretKind::RezkaPassword => {
-            !contents.is_empty()
-                && contents.len() <= MAX_REZKA_PASSWORD_BYTES
-                && !contents.contains(&0)
         }
     };
     if !valid {
@@ -1421,8 +1289,6 @@ impl SecretKind {
         match self {
             Self::DatabaseUrl => MAX_DATABASE_URL_BYTES,
             Self::Token => MAX_TOKEN_BYTES,
-            Self::RezkaUsername => MAX_REZKA_USERNAME_BYTES,
-            Self::RezkaPassword => MAX_REZKA_PASSWORD_BYTES,
         }
     }
 }

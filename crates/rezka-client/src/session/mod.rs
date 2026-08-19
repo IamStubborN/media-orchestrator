@@ -1,5 +1,4 @@
 use std::{
-    fmt,
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -7,7 +6,6 @@ use std::{
     time::Instant,
 };
 
-use secrecy::SecretString;
 use time::Duration;
 use url::Url;
 
@@ -24,7 +22,6 @@ use crate::{
 
 pub mod anubis;
 pub mod cookie;
-pub mod dle;
 pub mod validation;
 
 pub use validation::{ProbeResponse, SessionValidation, SessionValidationProbe};
@@ -37,17 +34,6 @@ pub struct RezkaClientConfig {
     pub max_retries: u8,
     pub anubis_max_nonce: u64,
     pub proxy_url: Option<Url>,
-}
-
-pub struct RezkaCredentials {
-    pub username: SecretString,
-    pub password: SecretString,
-}
-
-impl fmt::Debug for RezkaCredentials {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("RezkaCredentials { username: [REDACTED], password: [REDACTED] }")
-    }
 }
 
 pub struct RezkaClient {
@@ -78,9 +64,8 @@ impl RezkaClient {
         })
     }
 
-    pub async fn ensure_authenticated(
+    pub async fn ensure_session(
         &mut self,
-        credentials: &RezkaCredentials,
         probe: &SessionValidationProbe,
     ) -> Result<SessionValidation, RezkaError> {
         let mut response = self.fetch_probe(probe).await?;
@@ -103,25 +88,7 @@ impl RezkaClient {
             }
         }
 
-        match Self::classify_probe(probe, &response) {
-            SessionValidation::Valid => return Ok(SessionValidation::Valid),
-            SessionValidation::Inconclusive => return Err(inconclusive_validation()),
-            SessionValidation::Invalid => {}
-        }
-
-        dle::login(&mut self.transport, credentials).await?;
-        let response = self.fetch_probe(probe).await?;
-        if parse_optional_challenge(response.body())?.is_some() {
-            return Err(challenge_failed());
-        }
-
-        match Self::classify_probe(probe, &response) {
-            SessionValidation::Valid => Ok(SessionValidation::Valid),
-            SessionValidation::Invalid => Err(RezkaError::AuthenticationRequired {
-                context: sanitize_provider_text("session remains invalid after login"),
-            }),
-            SessionValidation::Inconclusive => Err(inconclusive_validation()),
-        }
+        Self::ready_session(probe, &response)
     }
 
     pub async fn validate_session(
@@ -129,12 +96,16 @@ impl RezkaClient {
         probe: &SessionValidationProbe,
     ) -> Result<SessionValidation, RezkaError> {
         let response = self.fetch_probe(probe).await?;
-        match Self::classify_probe(probe, &response) {
-            SessionValidation::Valid => Ok(SessionValidation::Valid),
-            SessionValidation::Invalid => Err(RezkaError::AuthenticationRequired {
-                context: sanitize_provider_text("stored session is invalid"),
-            }),
+        Self::ready_session(probe, &response)
+    }
+
+    fn ready_session(
+        probe: &SessionValidationProbe,
+        response: &ProbeResponse,
+    ) -> Result<SessionValidation, RezkaError> {
+        match Self::classify_probe(probe, response) {
             SessionValidation::Inconclusive => Err(inconclusive_validation()),
+            status => Ok(status),
         }
     }
 
@@ -249,53 +220,9 @@ fn inconclusive_validation() -> RezkaError {
 #[cfg(test)]
 mod tests {
     use super::{proof_semaphore, solve_challenge_async};
-    use crate::{
-        RezkaErrorCode,
-        mirror::MirrorSet,
-        session::{RezkaCredentials, anubis::AnubisChallenge, cookie::SessionJar, dle},
-        transport::Transport,
-    };
-    use secrecy::SecretString;
-    use time::Duration;
-    use url::Url;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
-    };
+    use crate::{RezkaErrorCode, session::anubis::AnubisChallenge};
 
     static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    #[tokio::test]
-    async fn dle_login_keeps_rejecting_not_found_statuses() {
-        let server = MockServer::start().await;
-        let origin = Url::parse(&server.uri()).unwrap();
-        Mock::given(method("POST"))
-            .and(path("/ajax/login/"))
-            .respond_with(ResponseTemplate::new(404))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let mut transport = Transport::new(
-            MirrorSet::new(vec![origin]).unwrap(),
-            SessionJar::empty(),
-            "media-orchestrator-test".to_owned(),
-            Duration::seconds(2),
-            0,
-        )
-        .unwrap();
-
-        let error = dle::login(
-            &mut transport,
-            &RezkaCredentials {
-                username: SecretString::from("user"),
-                password: SecretString::from("password"),
-            },
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(error.code(), RezkaErrorCode::ProviderResponseInvalid);
-    }
 
     fn challenge(difficulty: u8) -> AnubisChallenge {
         AnubisChallenge {

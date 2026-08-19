@@ -47,7 +47,6 @@ struct RezkaArgs {
 
 #[derive(Debug, Subcommand)]
 enum RezkaCommand {
-    Session(RezkaSessionArgs),
     Inspect {
         #[arg(long)]
         locator: String,
@@ -71,22 +70,6 @@ enum RezkaCommand {
         json: bool,
         #[arg(long, default_value_t = false)]
         probe_streams: bool,
-    },
-}
-
-#[derive(Debug, Args)]
-struct RezkaSessionArgs {
-    #[command(subcommand)]
-    command: RezkaSessionCommand,
-}
-
-#[derive(Debug, Subcommand)]
-enum RezkaSessionCommand {
-    Refresh {
-        #[arg(long = "credential-request")]
-        credential_request_id: String,
-        #[arg(long)]
-        json: bool,
     },
 }
 
@@ -424,20 +407,6 @@ async fn run(cli: Cli) -> Result<(), RunError> {
 
 async fn run_rezka(args: RezkaArgs) -> Result<(), RunError> {
     match args.command {
-        RezkaCommand::Session(args) => {
-            let client = HttpClient::new(ClientConfig::load()?)?;
-            match args.command {
-                RezkaSessionCommand::Refresh {
-                    credential_request_id,
-                    json,
-                } => {
-                    let output = client.refresh_rezka_session(credential_request_id).await?;
-                    emit(&output, json, |value| {
-                        render::job(value, Some("Queued session refresh"))
-                    });
-                }
-            }
-        }
         RezkaCommand::Inspect {
             locator,
             title_id,

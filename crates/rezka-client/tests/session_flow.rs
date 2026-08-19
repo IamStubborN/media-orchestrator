@@ -7,16 +7,15 @@ use rezka_client::{
     RezkaErrorCode,
     mirror::MirrorSet,
     session::{
-        RezkaClient, RezkaClientConfig, RezkaCredentials, SessionValidation,
-        SessionValidationProbe, cookie::SessionJar,
+        RezkaClient, RezkaClientConfig, SessionValidation, SessionValidationProbe,
+        cookie::SessionJar,
     },
 };
-use secrecy::SecretString;
 use time::Duration;
 use url::Url;
 use wiremock::{
     Match, Mock, MockServer, Request, Respond, ResponseTemplate,
-    matchers::{body_string_contains, header, method, path},
+    matchers::{header, method, path},
 };
 
 fn config(base: Url) -> RezkaClientConfig {
@@ -30,13 +29,6 @@ fn config(base: Url) -> RezkaClientConfig {
     }
 }
 
-fn credentials() -> RezkaCredentials {
-    RezkaCredentials {
-        username: SecretString::from("rezka-user"),
-        password: SecretString::from("rezka-password"),
-    }
-}
-
 fn probe(base: &Url) -> SessionValidationProbe {
     SessionValidationProbe::new(
         base.join("/account/probe").unwrap(),
@@ -46,8 +38,17 @@ fn probe(base: &Url) -> SessionValidationProbe {
     .unwrap()
 }
 
+async fn mount_login_never_called(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/ajax/login/"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(server)
+        .await;
+}
+
 #[tokio::test]
-async fn restored_valid_cookie_jar_skips_anubis_and_dle_login() {
+async fn restored_valid_cookie_jar_skips_anubis() {
     let server = MockServer::start().await;
     let base = Url::parse(&server.uri()).unwrap();
 
@@ -60,22 +61,14 @@ async fn restored_valid_cookie_jar_skips_anubis_and_dle_login() {
         .expect(1)
         .mount(&server)
         .await;
-    Mock::given(method("POST"))
-        .and(path("/ajax/login/"))
-        .respond_with(ResponseTemplate::new(500))
-        .expect(0)
-        .mount(&server)
-        .await;
+    mount_login_never_called(&server).await;
 
     let mut jar = SessionJar::empty();
     jar.store_response_cookies(["PHPSESSID=valid; Path=/; HttpOnly"].iter().copied(), &base);
     let snapshot = jar.export().unwrap();
     let mut restored = RezkaClient::from_snapshot(config(base.clone()), &snapshot).unwrap();
 
-    let result = restored
-        .ensure_authenticated(&credentials(), &probe(&base))
-        .await
-        .unwrap();
+    let result = restored.ensure_session(&probe(&base)).await.unwrap();
 
     assert_eq!(result, SessionValidation::Valid);
 }
@@ -101,13 +94,7 @@ impl Respond for ProbeSequence {
                 assert!(cookie.contains("anubis=opaque"));
                 ResponseTemplate::new(200).set_body_string("<input name=\"login_name\">")
             }
-            2 => {
-                assert!(cookie.contains("anubis=opaque"));
-                assert!(cookie.contains("PHPSESSID=logged-in"));
-                ResponseTemplate::new(200)
-                    .set_body_string("<html data-authenticated=\"true\"></html>")
-            }
-            _ => panic!("probe fetched more than three times"),
+            _ => panic!("probe fetched more than twice"),
         }
     }
 }
@@ -144,7 +131,6 @@ async fn expensive_proof_does_not_block_other_current_thread_tasks() {
     let mut expensive_config = config(base.clone());
     expensive_config.anubis_max_nonce = 1_000_000;
     let mut client = RezkaClient::new(expensive_config).unwrap();
-    let credentials = credentials();
     let probe = probe(&base);
     let ticks = Arc::new(std::sync::Mutex::new(Vec::new()));
     let heartbeat_ticks = Arc::clone(&ticks);
@@ -159,10 +145,7 @@ async fn expensive_proof_does_not_block_other_current_thread_tasks() {
     });
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-    let error = client
-        .ensure_authenticated(&credentials, &probe)
-        .await
-        .unwrap_err();
+    let error = client.ensure_session(&probe).await.unwrap_err();
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     heartbeat.abort();
     assert_eq!(error.code(), RezkaErrorCode::ChallengeFailed);
@@ -199,7 +182,7 @@ impl Match for AnubisPassQuery {
 }
 
 #[tokio::test]
-async fn anubis_then_invalid_session_runs_dle_and_final_probe_using_three_total_fetches() {
+async fn anubis_then_anonymous_session_is_ready_without_login() {
     let server = MockServer::start().await;
     let base = Url::parse(&server.uri()).unwrap();
     let probe_calls = Arc::new(AtomicUsize::new(0));
@@ -210,7 +193,7 @@ async fn anubis_then_invalid_session_runs_dle_and_final_probe_using_three_total_
         .respond_with(ProbeSequence {
             calls: Arc::clone(&probe_calls),
         })
-        .expect(3)
+        .expect(2)
         .mount(&server)
         .await;
 
@@ -228,40 +211,19 @@ async fn anubis_then_invalid_session_runs_dle_and_final_probe_using_three_total_
         .expect(1)
         .mount(&server)
         .await;
-
-    Mock::given(method("POST"))
-        .and(path("/ajax/login/"))
-        .and(header("x-requested-with", "XMLHttpRequest"))
-        .and(header("referer", format!("{}/", server.uri())))
-        .and(header("user-agent", "media-orchestrator-test"))
-        .and(body_string_contains("login_name=rezka-user"))
-        .and(body_string_contains("login_password=rezka-password"))
-        .and(body_string_contains("login_not_save=0"))
-        .and(body_string_contains("login=submit"))
-        .respond_with(
-            ResponseTemplate::new(302)
-                .insert_header("location", "/")
-                .insert_header("set-cookie", "PHPSESSID=logged-in; Path=/; HttpOnly"),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
+    mount_login_never_called(&server).await;
 
     let mut client = RezkaClient::new(config(base.clone())).unwrap();
-    let result = client
-        .ensure_authenticated(&credentials(), &probe(&base))
-        .await
-        .unwrap();
+    let result = client.ensure_session(&probe(&base)).await.unwrap();
 
-    assert_eq!(result, SessionValidation::Valid);
-    assert_eq!(probe_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(result, SessionValidation::Invalid);
+    assert_eq!(probe_calls.load(Ordering::SeqCst), 2);
     let restored = SessionJar::import(&client.export_session().unwrap()).unwrap();
     assert!(restored.contains_cookie_for_url(&base, "anubis"));
-    assert!(restored.contains_cookie_for_url(&base, "PHPSESSID"));
 }
 
 #[tokio::test]
-async fn failed_login_is_sanitized() {
+async fn anonymous_invalid_probe_is_accepted_without_login() {
     let server = MockServer::start().await;
     let base = Url::parse(&server.uri()).unwrap();
 
@@ -271,26 +233,30 @@ async fn failed_login_is_sanitized() {
         .expect(1)
         .mount(&server)
         .await;
-    Mock::given(method("POST"))
-        .and(path("/ajax/login/"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_string(include_str!("fixtures/dle_login_failed.json")),
-        )
+    mount_login_never_called(&server).await;
+
+    let mut client = RezkaClient::new(config(base.clone())).unwrap();
+    let result = client.ensure_session(&probe(&base)).await.unwrap();
+
+    assert_eq!(result, SessionValidation::Invalid);
+}
+
+#[tokio::test]
+async fn validate_session_accepts_anonymous_and_authenticated_markers() {
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<input name=\"login_name\">"))
         .expect(1)
         .mount(&server)
         .await;
 
     let mut client = RezkaClient::new(config(base.clone())).unwrap();
-    let error = client
-        .ensure_authenticated(&credentials(), &probe(&base))
-        .await
-        .unwrap_err();
-    let rendered = format!("{error:?}: {error}");
-
-    assert!(rendered.contains("authentication failed"));
-    assert!(!rendered.contains("rezka-password"));
-    assert!(!rendered.contains("rezka-user"));
+    assert_eq!(
+        client.validate_session(&probe(&base)).await.unwrap(),
+        SessionValidation::Invalid
+    );
 }
 
 #[tokio::test]
@@ -314,308 +280,11 @@ async fn repeated_anubis_after_pass_returns_challenge_failed_without_login_or_lo
         .expect(1)
         .mount(&server)
         .await;
-    Mock::given(method("POST"))
-        .and(path("/ajax/login/"))
-        .respond_with(ResponseTemplate::new(500))
-        .expect(0)
-        .mount(&server)
-        .await;
+    mount_login_never_called(&server).await;
 
     let mut client = RezkaClient::new(config(base.clone())).unwrap();
-    let error = client
-        .ensure_authenticated(&credentials(), &probe(&base))
-        .await
-        .unwrap_err();
+    let error = client.ensure_session(&probe(&base)).await.unwrap_err();
     assert_eq!(error.code(), rezka_client::RezkaErrorCode::ChallengeFailed);
-}
-
-#[tokio::test]
-async fn dle_redirect_without_session_cookie_is_provider_response_invalid() {
-    let server = MockServer::start().await;
-    let base = Url::parse(&server.uri()).unwrap();
-    Mock::given(method("GET"))
-        .and(path("/account/probe"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("<input name=\"login_name\">"))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/ajax/login/"))
-        .respond_with(ResponseTemplate::new(302).insert_header("location", "/"))
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let mut client = RezkaClient::new(config(base.clone())).unwrap();
-    let error = client
-        .ensure_authenticated(&credentials(), &probe(&base))
-        .await
-        .unwrap_err();
-    assert_eq!(
-        error.code(),
-        rezka_client::RezkaErrorCode::ProviderResponseInvalid
-    );
-}
-
-#[test]
-fn credentials_debug_is_fully_redacted() {
-    let rendered = format!("{:?}", credentials());
-
-    assert_eq!(
-        rendered,
-        "RezkaCredentials { username: [REDACTED], password: [REDACTED] }"
-    );
-    assert!(!rendered.contains("rezka-user"));
-    assert!(!rendered.contains("rezka-password"));
-}
-
-#[tokio::test]
-async fn dle_http_200_success_with_session_cookie_reaches_final_valid_probe() {
-    #[derive(Clone)]
-    struct InvalidThenValid {
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl Respond for InvalidThenValid {
-        fn respond(&self, request: &Request) -> ResponseTemplate {
-            match self.calls.fetch_add(1, Ordering::SeqCst) {
-                0 => ResponseTemplate::new(200).set_body_string("<input name=\"login_name\">"),
-                1 => {
-                    let cookie = request.headers.get("cookie").unwrap().to_str().unwrap();
-                    assert!(cookie.contains("PHPSESSID=from-json-success"));
-                    ResponseTemplate::new(200)
-                        .set_body_string("<html data-authenticated=\"true\"></html>")
-                }
-                _ => panic!("probe fetched more than twice"),
-            }
-        }
-    }
-
-    let server = MockServer::start().await;
-    let base = Url::parse(&server.uri()).unwrap();
-    let calls = Arc::new(AtomicUsize::new(0));
-    Mock::given(method("GET"))
-        .and(path("/account/probe"))
-        .respond_with(InvalidThenValid {
-            calls: Arc::clone(&calls),
-        })
-        .expect(2)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/ajax/login/"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header(
-                    "set-cookie",
-                    "PHPSESSID=from-json-success; Path=/; HttpOnly",
-                )
-                .set_body_string(include_str!("fixtures/dle_login_success.json")),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let mut client = RezkaClient::new(config(base.clone())).unwrap();
-    let result = client
-        .ensure_authenticated(&credentials(), &probe(&base))
-        .await
-        .unwrap();
-
-    assert_eq!(result, SessionValidation::Valid);
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
-}
-
-#[tokio::test]
-async fn dle_http_200_redirect_with_session_cookie_reaches_final_valid_probe() {
-    #[derive(Clone)]
-    struct InvalidThenValid {
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl Respond for InvalidThenValid {
-        fn respond(&self, request: &Request) -> ResponseTemplate {
-            match self.calls.fetch_add(1, Ordering::SeqCst) {
-                0 => ResponseTemplate::new(200).set_body_string("<input name=\"login_name\">"),
-                1 => {
-                    let cookie = request.headers.get("cookie").unwrap().to_str().unwrap();
-                    assert!(cookie.contains("PHPSESSID=from-redirect"));
-                    ResponseTemplate::new(200)
-                        .set_body_string("<html data-authenticated=\"true\"></html>")
-                }
-                _ => panic!("probe fetched more than twice"),
-            }
-        }
-    }
-
-    let server = MockServer::start().await;
-    let base = Url::parse(&server.uri()).unwrap();
-    let calls = Arc::new(AtomicUsize::new(0));
-    Mock::given(method("GET"))
-        .and(path("/account/probe"))
-        .respond_with(InvalidThenValid {
-            calls: Arc::clone(&calls),
-        })
-        .expect(2)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/ajax/login/"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("set-cookie", "PHPSESSID=from-redirect; Path=/; HttpOnly")
-                .set_body_string("Redirect"),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let mut client = RezkaClient::new(config(base.clone())).unwrap();
-    let result = client
-        .ensure_authenticated(&credentials(), &probe(&base))
-        .await
-        .unwrap();
-
-    assert_eq!(result, SessionValidation::Valid);
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
-}
-
-#[tokio::test]
-async fn dle_http_200_success_without_session_cookie_is_rejected() {
-    let server = MockServer::start().await;
-    let base = Url::parse(&server.uri()).unwrap();
-    mount_invalid_probe(&server).await;
-    Mock::given(method("POST"))
-        .and(path("/ajax/login/"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_string(include_str!("fixtures/dle_login_success.json")),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let mut client = RezkaClient::new(config(base.clone())).unwrap();
-    let error = client
-        .ensure_authenticated(&credentials(), &probe(&base))
-        .await
-        .unwrap_err();
-
-    assert_eq!(error.code(), RezkaErrorCode::ProviderResponseInvalid);
-}
-
-#[tokio::test]
-async fn dle_credentials_are_never_posted_to_non_ip_loopback_http_origins() {
-    let server = MockServer::start().await;
-    let mut base = Url::parse(&server.uri()).unwrap();
-    base.set_host(Some("localhost")).unwrap();
-    Mock::given(method("GET"))
-        .and(path("/account/probe"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("<input name=\"login_name\">"))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/ajax/login/"))
-        .respond_with(ResponseTemplate::new(200))
-        .expect(0)
-        .mount(&server)
-        .await;
-
-    let mut client = RezkaClient::new(config(base.clone())).unwrap();
-    let error = client
-        .ensure_authenticated(&credentials(), &probe(&base))
-        .await
-        .unwrap_err();
-
-    assert_eq!(error.code(), RezkaErrorCode::Configuration);
-    assert_eq!(
-        error.to_string(),
-        "configuration invalid: Rezka credentials require HTTPS"
-    );
-}
-
-#[tokio::test]
-async fn dle_non_200_success_json_with_current_session_cookie_is_rejected() {
-    let server = MockServer::start().await;
-    let base = Url::parse(&server.uri()).unwrap();
-    Mock::given(method("GET"))
-        .and(path("/account/probe"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("<input name=\"login_name\">"))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/ajax/login/"))
-        .respond_with(
-            ResponseTemplate::new(201)
-                .insert_header("set-cookie", "PHPSESSID=current; Path=/; HttpOnly")
-                .set_body_string(include_str!("fixtures/dle_login_success.json")),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let mut client = RezkaClient::new(config(base.clone())).unwrap();
-    let error = client
-        .ensure_authenticated(&credentials(), &probe(&base))
-        .await
-        .unwrap_err();
-
-    assert_eq!(error.code(), RezkaErrorCode::ProviderResponseInvalid);
-}
-
-#[tokio::test]
-async fn dle_http_200_success_rejects_preexisting_stale_session_cookie() {
-    assert_stale_cookie_does_not_authenticate(
-        ResponseTemplate::new(200).set_body_string(include_str!("fixtures/dle_login_success.json")),
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn dle_http_302_rejects_preexisting_stale_session_cookie() {
-    assert_stale_cookie_does_not_authenticate(
-        ResponseTemplate::new(302).insert_header("location", "/"),
-    )
-    .await;
-}
-
-async fn assert_stale_cookie_does_not_authenticate(login_response: ResponseTemplate) {
-    let server = MockServer::start().await;
-    let base = Url::parse(&server.uri()).unwrap();
-    mount_invalid_probe(&server).await;
-    Mock::given(method("POST"))
-        .and(path("/ajax/login/"))
-        .respond_with(login_response)
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let mut jar = SessionJar::empty();
-    jar.store_response_cookies(
-        ["PHPSESSID=opaque-stale; Path=/; HttpOnly"].iter().copied(),
-        &base,
-    );
-    let snapshot = jar.export().unwrap();
-    let mut client = RezkaClient::from_snapshot(config(base.clone()), &snapshot).unwrap();
-    let error = client
-        .ensure_authenticated(&credentials(), &probe(&base))
-        .await
-        .unwrap_err();
-    let rendered = format!("{error:?}: {error}");
-
-    assert_eq!(error.code(), RezkaErrorCode::ProviderResponseInvalid);
-    assert!(!rendered.contains("opaque-stale"));
-}
-
-async fn mount_invalid_probe(server: &MockServer) {
-    Mock::given(method("GET"))
-        .and(path("/account/probe"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("<input name=\"login_name\">"))
-        .expect(1)
-        .mount(server)
-        .await;
 }
 
 #[test]
@@ -725,15 +394,15 @@ async fn configured_non_selected_probe_origin_is_checked_then_rewritten_once() {
 
 #[tokio::test]
 async fn response_with_both_valid_and_invalid_markers_is_inconclusive() {
-    assert_inconclusive_never_sends_credentials("logged-in logged-out").await;
+    assert_inconclusive_never_posts_login("logged-in logged-out").await;
 }
 
 #[tokio::test]
-async fn response_with_no_markers_is_inconclusive_and_never_sends_credentials() {
-    assert_inconclusive_never_sends_credentials("neutral account page").await;
+async fn response_with_no_markers_is_inconclusive_and_never_posts_login() {
+    assert_inconclusive_never_posts_login("neutral account page").await;
 }
 
-async fn assert_inconclusive_never_sends_credentials(body: &'static str) {
+async fn assert_inconclusive_never_posts_login(body: &'static str) {
     let server = MockServer::start().await;
     let base = Url::parse(&server.uri()).unwrap();
     Mock::given(method("GET"))
@@ -742,12 +411,7 @@ async fn assert_inconclusive_never_sends_credentials(body: &'static str) {
         .expect(1)
         .mount(&server)
         .await;
-    Mock::given(method("POST"))
-        .and(path("/ajax/login/"))
-        .respond_with(ResponseTemplate::new(500))
-        .expect(0)
-        .mount(&server)
-        .await;
+    mount_login_never_called(&server).await;
 
     let probe = SessionValidationProbe::new(
         base.join("/account/probe").unwrap(),
@@ -756,42 +420,9 @@ async fn assert_inconclusive_never_sends_credentials(body: &'static str) {
     )
     .unwrap();
     let mut client = RezkaClient::new(config(base)).unwrap();
-    let error = client
-        .ensure_authenticated(&credentials(), &probe)
-        .await
-        .unwrap_err();
+    let error = client.ensure_session(&probe).await.unwrap_err();
 
     assert_eq!(error.code(), RezkaErrorCode::ProviderResponseInvalid);
-}
-
-#[tokio::test]
-async fn final_invalid_probe_is_authentication_required_with_two_total_probes() {
-    let server = MockServer::start().await;
-    let base = Url::parse(&server.uri()).unwrap();
-    Mock::given(method("GET"))
-        .and(path("/account/probe"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("<input name=\"login_name\">"))
-        .expect(2)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/ajax/login/"))
-        .respond_with(
-            ResponseTemplate::new(302)
-                .insert_header("location", "/")
-                .insert_header("set-cookie", "PHPSESSID=current; Path=/; HttpOnly"),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let mut client = RezkaClient::new(config(base.clone())).unwrap();
-    let error = client
-        .ensure_authenticated(&credentials(), &probe(&base))
-        .await
-        .unwrap_err();
-
-    assert_eq!(error.code(), RezkaErrorCode::AuthenticationRequired);
 }
 
 #[tokio::test]
@@ -813,18 +444,10 @@ async fn anubis_is_attempted_at_most_once() {
         .expect(1)
         .mount(&server)
         .await;
-    Mock::given(method("POST"))
-        .and(path("/ajax/login/"))
-        .respond_with(ResponseTemplate::new(500))
-        .expect(0)
-        .mount(&server)
-        .await;
+    mount_login_never_called(&server).await;
 
     let mut client = RezkaClient::new(config(base.clone())).unwrap();
-    let error = client
-        .ensure_authenticated(&credentials(), &probe(&base))
-        .await
-        .unwrap_err();
+    let error = client.ensure_session(&probe(&base)).await.unwrap_err();
 
     assert_eq!(error.code(), RezkaErrorCode::ChallengeFailed);
 }

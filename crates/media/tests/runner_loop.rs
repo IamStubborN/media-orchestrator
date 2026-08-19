@@ -282,17 +282,6 @@ fn lease() -> LeaseDto {
     }
 }
 
-fn session_refresh_lease() -> LeaseDto {
-    let mut lease = lease();
-    lease.job.provider = ProviderDto::Rezka;
-    lease.job.result_ref =
-        "selection:session-refresh:018f3f86-7b4c-7b4f-9b6a-6d62f45bb113".to_owned();
-    lease.execution = Some(ExecutionSelectionDto::RezkaSessionRefresh {
-        credential_request_id: "one-shot-request".to_owned(),
-    });
-    lease
-}
-
 #[tokio::test]
 async fn loop_leases_heartbeats_reports_stages_and_runs_one_active_job() {
     let api = Arc::new(FakeApi {
@@ -846,35 +835,5 @@ async fn episode_failure_is_reported_against_the_actual_episode_stage() {
             retryable: true,
             error_code,
         } if stage_name == "media_pipeline" && error_code == "source_transfer_transient"
-    )));
-}
-
-#[tokio::test]
-async fn consumed_session_refresh_failure_is_terminal_instead_of_requeued() {
-    let api = Arc::new(FakeApi {
-        lease: Mutex::new(Some(session_refresh_lease())),
-        events: Mutex::default(),
-        heartbeats: AtomicUsize::new(0),
-    });
-
-    assert!(
-        run_single_iteration(
-            api.clone(),
-            Arc::new(FailingExecutor),
-            Duration::from_millis(1),
-        )
-        .await
-        .unwrap()
-    );
-    let events = api.events.lock().unwrap();
-    assert!(events.iter().any(|event| matches!(
-        event,
-        RunnerEventDto::StageFailed {
-            task_ordinal: 2_000_000_000,
-            stage_name,
-            retryable: false,
-            error_code,
-            ..
-        } if stage_name == "execution" && error_code == "execution_failed"
     )));
 }

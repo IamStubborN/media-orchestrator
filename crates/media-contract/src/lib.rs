@@ -44,10 +44,9 @@ pub use search::{
     AlternativeSearchRequest, AmbiguousEpisodeDto, ContinueSearchRequest, EpisodeCoordinateDto,
     EpisodeCoordinateMappingDto, EpisodeMappingActionDto, ExecutionSelectionDto,
     MAX_SEARCH_RESULTS_PER_PAGE, MediaKindDto, ProwlarrRankingDto, ResolveEpisodeMappingRequest,
-    RezkaSessionRefreshRequest, RezkaTranslationDto, SearchPageDto, SearchResultDto,
-    SearchScopeDto, SeasonAvailabilityDto, SelectResultRequest, SeriesAvailabilityDto,
-    SeriesGroupIdentityDto, SeriesGroupSourceDto, SeriesLifecycleStatusDto, StartSearchRequest,
-    TrackingPromptDto,
+    RezkaTranslationDto, SearchPageDto, SearchResultDto, SearchScopeDto, SeasonAvailabilityDto,
+    SelectResultRequest, SeriesAvailabilityDto, SeriesGroupIdentityDto, SeriesGroupSourceDto,
+    SeriesLifecycleStatusDto, StartSearchRequest, TrackingPromptDto,
 };
 pub use tracking::{
     CreateTrackingRequest, EpisodeSnapshotDto, PatchTrackingRequest, SetTrackingBaselineRequest,

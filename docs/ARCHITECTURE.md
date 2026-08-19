@@ -53,39 +53,34 @@ Architecture invariant: `media-core` performs no I/O and has no dependency on Ax
 Owns the independent Rezka protocol implementation:
 
 - Mirror selection.
-- Cookie jar and session lifecycle.
+- Cookie jar and anonymous session lifecycle.
 - Import and export of session state without filesystem ownership.
 - Anubis detection and proof-of-work.
-- DLE authentication.
 - Catalog, translation, season, episode, stream, and subtitle parsing.
 - Provider-specific retry and typed errors.
 
 Architecture invariant: `rezka-client` does not depend on any `media-*` crate. It exposes Rezka-specific models and errors; adapters map them into the media domain.
 
-The crate never reads Docker secrets or writes session files. The composition
-root supplies credentials, and a runner-side adapter encrypts and persists the
-exported cookie state.
+The crate never reads Docker secrets or writes session files. A runner-side
+adapter encrypts and persists the exported cookie state. Sessions are anonymous:
+the client never posts account credentials.
 
-#### Rezka Authentication Contract
+#### Rezka Session Contract
 
-Authentication is a bounded protocol flow, not browser automation:
+Session establishment is a bounded protocol flow, not browser automation:
 
 1. Fetch the configured same-origin probe and classify it from explicit valid
    and invalid markers. A response containing both marker classes or neither is
-   inconclusive and credentials are not sent.
+   inconclusive and is rejected.
 2. Solve at most one detected Anubis challenge and probe again.
-3. If the session is explicitly invalid, post the DLE form to `/ajax/login/`
-   over HTTPS. Exact IP-loopback HTTP is allowed only for tests.
-4. Accept either an HTTP redirect carrying a newly stored `PHPSESSID`, or HTTP
-   200 with a case-insensitive `Redirect` body or `{ "success": true }`. A
-   success-shaped response without the new session cookie is rejected.
-5. Probe once more and require an unambiguous valid marker before exporting the
-   encrypted session snapshot.
+3. Accept either an explicit valid marker or an explicit invalid marker. Invalid
+   is the expected anonymous state (login form present). Do not post a DLE login
+   form or any account credentials.
+4. Export the encrypted cookie snapshot after the probe succeeds.
 
-The DLE response is only evidence that a login attempt was accepted. The final
-probe is authoritative for authenticated state. Cookies are attached only to
-the exact selected Rezka origin and are never exposed through the CLI, jobs,
-notifications, logs, or a browser-cookie import path.
+Cookies are attached only to the exact selected Rezka origin and are never
+exposed through the CLI, jobs, notifications, logs, or a browser-cookie import
+path.
 
 ### `media-storage`
 
@@ -332,9 +327,9 @@ Storage roots are also validated by the composition root. The runner receives
 separate typed paths for Rezka staging, Rezka TV publication, and Rezka movie
 publication. `media-service` receives no writable media root.
 
-The Rezka session-store adapter receives an encryption key separately from the
-Rezka account credentials. It persists only encrypted cookie state; plaintext
-session material exists only in runner memory.
+The Rezka session-store adapter receives an encryption key for the anonymous
+cookie jar. It persists only encrypted cookie state; plaintext session material
+exists only in runner memory.
 
 ## Testing Boundaries
 

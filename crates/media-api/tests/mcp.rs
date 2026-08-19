@@ -473,14 +473,14 @@ async fn stateless_mcp_2026_lists_tools_without_initialize_or_session() {
         std::fs::write(path, &serialized).unwrap();
     }
     assert!(
-        serialized.len() <= 30_500,
+        serialized.len() <= 31_000,
         "tool discovery schema grew unexpectedly: {} bytes",
         serialized.len()
     );
     for tool in body["result"]["tools"].as_array().unwrap() {
         let tool_size = serde_json::to_vec(tool).unwrap().len();
         assert!(
-            tool_size <= 2_000,
+            tool_size <= 2_100,
             "{} schema grew unexpectedly: {tool_size} bytes",
             tool["name"]
         );
@@ -634,39 +634,6 @@ async fn stateless_mcp_2026_discovers_server_without_initialize_or_session() {
     assert!(body["result"]["capabilities"]["tools"].is_object());
     assert_eq!(body["result"]["ttlMs"], 0);
     assert_eq!(body["result"]["cacheScope"], "private");
-}
-
-#[tokio::test]
-async fn rezka_session_refresh_never_echoes_the_credential_request() {
-    let app = router(state(
-        FakeClientStore::new([(
-            VALID_TOKEN,
-            Actor::new(PRIMARY_CLIENT_ID, Some(PRIMARY_USER_ID), ClientRole::Hermes).unwrap(),
-        )]),
-        FakeReadiness::ready(),
-    ));
-    let secret_request_id = "approved-request-secret-42";
-    let body = format!(
-        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"media_rezka_session_refresh","arguments":{{"credential_request_id":"{secret_request_id}"}}}}}}"#
-    );
-    let response = app
-        .oneshot(
-            Request::post("/internal/mcp")
-                .header("authorization", format!("Bearer {VALID_TOKEN}"))
-                .header("host", "media-service")
-                .header("content-type", "application/json")
-                .header("accept", "application/json, text/event-stream")
-                .header("mcp-protocol-version", "2025-03-26")
-                .body(Body::from(body))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), 200);
-    let response = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let response = String::from_utf8(response.to_vec()).unwrap();
-    assert!(!response.contains(secret_request_id));
 }
 
 #[tokio::test]

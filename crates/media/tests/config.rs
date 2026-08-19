@@ -82,13 +82,6 @@ fn valid_runner_source() -> FakeSource {
         "MEDIA_REZKA_SESSION_STORE_FILE",
         "/runner/rezka/session.bin",
     );
-    source.set_secret("MEDIA_REZKA_USERNAME_FILE", b"rezka-user");
-    source.set_secret("MEDIA_REZKA_PASSWORD_FILE", b"rezka-password");
-    source.set_env(
-        "MEDIA_REZKA_CREDENTIAL_BROKER_URL",
-        "https://broker.internal.example",
-    );
-    source.set_secret("MEDIA_REZKA_CREDENTIAL_BROKER_TOKEN_FILE", b"broker-token");
     source.set_secret("MEDIA_REZKA_COOKIE_KEY_FILE", encoded_key.as_bytes());
     source
 }
@@ -107,18 +100,6 @@ fn runner_config_loads_distinct_existing_torrent_categories() {
 
     assert_eq!(qbittorrent.tv_category(), "tv");
     assert_eq!(qbittorrent.movies_category(), "movies");
-}
-
-#[test]
-fn runner_config_does_not_require_static_rezka_credentials() {
-    let mut source = valid_runner_source();
-    source.env.remove("MEDIA_REZKA_USERNAME_FILE");
-    source.env.remove("MEDIA_REZKA_PASSWORD_FILE");
-
-    let config = RunnerConfig::load_from(&source).unwrap();
-    let prepared = media::composition::prepare_runner_session(&config).unwrap();
-
-    assert!(prepared.credentials.is_none());
 }
 
 #[test]
@@ -469,8 +450,6 @@ fn runner_config_loads_rezka_secret_files_getters_defaults_and_redacts_debug() {
         r#"["login-form","login_name"]"#,
     );
     source.set_secret("MEDIA_TOKEN_FILE", b"runner-token\n");
-    source.set_secret("MEDIA_REZKA_USERNAME_FILE", b"rezka-user\r\n");
-    source.set_secret("MEDIA_REZKA_PASSWORD_FILE", b"rezka-password\n");
     source.set_env("MEDIA_RUNNER_EXIT_AFTER_JOB", "true");
 
     let config = RunnerConfig::load_from(&source).unwrap();
@@ -491,8 +470,6 @@ fn runner_config_loads_rezka_secret_files_getters_defaults_and_redacts_debug() {
         config.rezka().session_invalid_markers(),
         ["login-form", "login_name"]
     );
-    assert_eq!(config.rezka().username().expose_secret(), "rezka-user");
-    assert_eq!(config.rezka().password().expose_secret(), "rezka-password");
     assert_eq!(config.rezka().cookie_key().expose_secret(), &[7_u8; 32]);
     assert_eq!(
         config.rezka().session_store_path(),
@@ -511,8 +488,6 @@ fn runner_config_loads_rezka_secret_files_getters_defaults_and_redacts_debug() {
         "account/probe",
         "account-menu",
         "login-form",
-        "rezka-user",
-        "rezka-password",
         encoded_key.as_str(),
         "/runner/rezka/session.bin",
     ] {
@@ -524,87 +499,8 @@ fn runner_config_loads_rezka_secret_files_getters_defaults_and_redacts_debug() {
 }
 
 #[test]
-fn runner_config_enforces_username_byte_content_and_final_newline_limits() {
-    let mut maximum_with_newline = vec![b'u'; 256];
-    maximum_with_newline.push(b'\n');
-    for accepted in [
-        maximum_with_newline,
-        b"rezka-user\n".to_vec(),
-        b"rezka-user\r\n".to_vec(),
-    ] {
-        let mut source = valid_runner_source();
-        source.set_secret("MEDIA_REZKA_USERNAME_FILE", &accepted);
-        RunnerConfig::load_from(&source).unwrap();
-    }
-
-    for rejected in [
-        Vec::new(),
-        vec![b'u'; 257],
-        b"contains space".to_vec(),
-        b"contains\tcontrol".to_vec(),
-        b"rezka-user\n\n".to_vec(),
-        "non-ascii-user-\u{e9}".as_bytes().to_vec(),
-    ] {
-        let mut source = valid_runner_source();
-        source.set_secret("MEDIA_REZKA_USERNAME_FILE", &rejected);
-        assert_eq!(
-            RunnerConfig::load_from(&source).unwrap_err(),
-            ConfigError::InvalidSecret {
-                name: "MEDIA_REZKA_USERNAME_FILE"
-            }
-        );
-    }
-}
-
-#[test]
-fn runner_config_enforces_password_byte_content_and_one_final_newline_trim() {
-    let mut maximum_with_newline = vec![b'p'; 1024];
-    maximum_with_newline.extend_from_slice(b"\r\n");
-    for accepted in [
-        maximum_with_newline,
-        b"rezka-password\n".to_vec(),
-        b"rezka-password\r\n".to_vec(),
-    ] {
-        let mut source = valid_runner_source();
-        source.set_secret("MEDIA_REZKA_PASSWORD_FILE", &accepted);
-        RunnerConfig::load_from(&source).unwrap();
-    }
-
-    let mut one_trim_only = valid_runner_source();
-    one_trim_only.set_secret("MEDIA_REZKA_PASSWORD_FILE", b"rezka-password\n\n");
-    assert_eq!(
-        RunnerConfig::load_from(&one_trim_only)
-            .unwrap()
-            .rezka()
-            .password()
-            .expose_secret(),
-        "rezka-password\n"
-    );
-
-    for rejected in [
-        Vec::new(),
-        vec![b'p'; 1025],
-        b"contains\0nul".to_vec(),
-        vec![0xff],
-    ] {
-        let mut source = valid_runner_source();
-        source.set_secret("MEDIA_REZKA_PASSWORD_FILE", &rejected);
-        assert_eq!(
-            RunnerConfig::load_from(&source).unwrap_err(),
-            ConfigError::InvalidSecret {
-                name: "MEDIA_REZKA_PASSWORD_FILE"
-            }
-        );
-    }
-}
-
-#[test]
-fn runner_config_reads_credentials_and_key_only_from_configured_files() {
-    for name in [
-        "MEDIA_REZKA_USERNAME_FILE",
-        "MEDIA_REZKA_PASSWORD_FILE",
-        "MEDIA_REZKA_COOKIE_KEY_FILE",
-    ] {
+fn runner_config_reads_the_cookie_key_only_from_the_configured_file() {
+    for name in ["MEDIA_REZKA_COOKIE_KEY_FILE"] {
         let mut source = valid_runner_source();
         source.set_env(name, "inline-secret-value");
 

@@ -2,9 +2,9 @@ use rezka_client::{
     SessionSnapshot,
     error::{ProviderFailureReason, RezkaError, RezkaErrorCode},
     redaction::{redact_url, sanitize_provider_text},
-    session::{RezkaCredentials, SessionValidationProbe},
+    session::SessionValidationProbe,
 };
-use secrecy::{SecretBox, SecretString};
+use secrecy::SecretBox;
 use url::Url;
 
 #[test]
@@ -151,10 +151,6 @@ fn provider_failure_reason_display_is_static() {
 
 #[test]
 fn constructed_security_types_never_leak_debug_material() {
-    let credentials = RezkaCredentials {
-        username: SecretString::from("rezka-user"),
-        password: SecretString::from("rezka-password"),
-    };
     let probe = SessionValidationProbe::new(
         Url::parse("https://rezka.invalid/account/probe").unwrap(),
         vec!["opaque-a".to_owned()],
@@ -163,9 +159,9 @@ fn constructed_security_types_never_leak_debug_material() {
     .unwrap();
     let snapshot =
         SessionSnapshot::from_secret_bytes(SecretBox::new(Box::new(b"opaque-a:opaque-b".to_vec())));
-    let debug = format!("{credentials:?} {probe:?} {snapshot:?}");
+    let debug = format!("{probe:?} {snapshot:?}");
 
-    for forbidden in ["rezka-user", "rezka-password", "opaque-a", "opaque-b"] {
+    for forbidden in ["opaque-a", "opaque-b"] {
         assert!(!debug.contains(forbidden), "Debug leaked {forbidden}");
     }
 }

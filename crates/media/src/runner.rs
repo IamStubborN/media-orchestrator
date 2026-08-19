@@ -449,7 +449,6 @@ pub struct MediaJobExecutor {
     torrent_tv_category: String,
     torrent_movies_category: String,
     gluetun: Option<Arc<media_integrations::gluetun::GluetunClient>>,
-    credential_broker: Arc<media_integrations::credential_broker::CredentialBrokerClient>,
     roots: media_runner::StorageRoots,
     vaapi_device: std::path::PathBuf,
 }
@@ -503,7 +502,6 @@ impl MediaJobExecutor {
         pipeline: media_runner::EpisodePipeline,
         torrent: TorrentRouting,
         gluetun: Option<Arc<media_integrations::gluetun::GluetunClient>>,
-        credential_broker: Arc<media_integrations::credential_broker::CredentialBrokerClient>,
         roots: media_runner::StorageRoots,
         vaapi_device: std::path::PathBuf,
     ) -> Self {
@@ -514,7 +512,6 @@ impl MediaJobExecutor {
             torrent_tv_category: torrent.tv_category,
             torrent_movies_category: torrent.movies_category,
             gluetun,
-            credential_broker,
             roots,
             vaapi_device,
         }
@@ -526,12 +523,6 @@ impl MediaJobExecutor {
         control: &RunnerControl,
     ) -> Result<ExecutionOutcome, RunnerError> {
         match lease.execution.as_ref().ok_or(RunnerError::Execution)? {
-            media_contract::ExecutionSelectionDto::RezkaSessionRefresh {
-                credential_request_id,
-            } => {
-                self.execute_rezka_session_refresh(credential_request_id)
-                    .await
-            }
             media_contract::ExecutionSelectionDto::Rezka {
                 locator,
                 title_id,
@@ -601,47 +592,6 @@ impl MediaJobExecutor {
         }
     }
 
-    async fn execute_rezka_session_refresh(
-        &self,
-        credential_request_id: &str,
-    ) -> Result<ExecutionOutcome, RunnerError> {
-        let credentials = self
-            .credential_broker
-            .resolve(credential_request_id)
-            .await
-            .map_err(|error| {
-                tracing::warn!(error = %error, "Rezka credential resolution failed");
-                RunnerError::Execution
-            })?;
-        let credentials = rezka_client::RezkaCredentials {
-            username: secrecy::SecretString::from(credentials.username),
-            password: credentials.password,
-        };
-        let mut prepared = self.rezka.lock().await;
-        let crate::composition::PreparedRunnerSession {
-            client,
-            probe,
-            store,
-            ..
-        } = &mut *prepared;
-        client
-            .ensure_authenticated(&credentials, probe)
-            .await
-            .map_err(|error| {
-                tracing::warn!(error_code = ?error.code(), "Rezka authentication failed");
-                RunnerError::Execution
-            })?;
-        let snapshot = client.export_session().map_err(|error| {
-            tracing::warn!(error_code = ?error.code(), "Rezka session export failed");
-            RunnerError::Execution
-        })?;
-        store.save(&snapshot).map_err(|error| {
-            tracing::warn!(error = %error, "Rezka session persistence failed");
-            RunnerError::Execution
-        })?;
-        Ok(ExecutionOutcome::Completed)
-    }
-
     #[allow(clippy::too_many_arguments)]
     async fn execute_rezka(
         &self,
@@ -664,11 +614,20 @@ impl MediaJobExecutor {
         title: &str,
     ) -> Result<ExecutionOutcome, RunnerError> {
         let mut prepared = self.rezka.lock().await;
-        let crate::composition::PreparedRunnerSession { client, probe, .. } = &mut *prepared;
+        let crate::composition::PreparedRunnerSession {
+            client,
+            probe,
+            store,
+            ..
+        } = &mut *prepared;
         client
-            .validate_session(probe)
+            .ensure_session(probe)
             .await
             .map_err(|_| RunnerError::Execution)?;
+        let snapshot = client
+            .export_session()
+            .map_err(|_| RunnerError::Execution)?;
+        store.save(&snapshot).map_err(|_| RunnerError::Execution)?;
         let locator =
             rezka_client::TitleLocator::new(locator).map_err(|_| RunnerError::Execution)?;
         let details = client
@@ -1509,10 +1468,7 @@ impl JobExecutor for MediaJobExecutor {
         let current_job_id = lease.job.id.to_string();
         let uses_rezka_vpn = matches!(
             &lease.execution,
-            Some(
-                media_contract::ExecutionSelectionDto::Rezka { .. }
-                    | media_contract::ExecutionSelectionDto::RezkaSessionRefresh { .. }
-            )
+            Some(media_contract::ExecutionSelectionDto::Rezka { .. })
         );
         if uses_rezka_vpn {
             // Only create the staging directory here. Stamping it terminal is
@@ -2293,14 +2249,8 @@ pub async fn run_single_iteration(
             outcome
         }
         Err(error) => {
-            let (mut retryable, error_code) = error.stage_failure();
+            let (retryable, error_code) = error.stage_failure();
             let (task_ordinal, stage_name, stage_ordinal) = error.failure_stage();
-            if matches!(
-                lease.execution.as_ref(),
-                Some(media_contract::ExecutionSelectionDto::RezkaSessionRefresh { .. })
-            ) {
-                retryable = false;
-            }
             let job = control
                 .stage_failed(
                     task_ordinal,

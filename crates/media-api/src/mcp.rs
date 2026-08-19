@@ -5,10 +5,10 @@ use media_contract::{
     AlternativeSearchRequest, BestPageDto, BestRankingDto, ContinueSearchRequest,
     CreateTrackingRequest, DiscoverPageDto, EpisodeSnapshotDto, ExecutionSelectionDto,
     GenreListDto, MediaKindDto, PatchTrackingRequest, PremiereFeedDto, PremieresPageDto,
-    ProviderDto, ReleaseQueryRequest, ResolveEpisodeMappingRequest, RezkaSessionRefreshRequest,
-    SearchScopeDto, SelectResultRequest, SeriesGroupIdentityDto, SeriesGroupSourceDto,
-    StartSearchRequest, TrackingDownloadDto, TrackingReleaseIdentityDto, TrackingReleaseSourceDto,
-    TrackingScopeDto, TrendingCategoryDto, TrendingItemDto, TrendingMediaTypeDto,
+    ProviderDto, ReleaseQueryRequest, ResolveEpisodeMappingRequest, SearchScopeDto,
+    SelectResultRequest, SeriesGroupIdentityDto, SeriesGroupSourceDto, StartSearchRequest,
+    TrackingDownloadDto, TrackingReleaseIdentityDto, TrackingReleaseSourceDto, TrackingScopeDto,
+    TrendingCategoryDto, TrendingItemDto, TrendingMediaTypeDto,
 };
 use media_core::{
     Actor, ApplicationError, EpisodeSnapshot, JobId, ReleaseQuery, ReleaseQueryError,
@@ -53,13 +53,33 @@ struct ChoiceSetInput {
     choice_set_id: String,
 }
 
+#[derive(Debug, Copy, Clone, Default, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum SearchSourceInput {
+    #[default]
+    All,
+    Rezka,
+    Prowlarr,
+}
+
+#[derive(Debug, Copy, Clone, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum SearchMediaKindInput {
+    Movie,
+    Series,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct SearchInput {
     query: Option<String>,
     continuation: Option<String>,
-    #[serde(default = "default_source")]
-    source: String,
-    media_kind: Option<String>,
+    #[serde(default)]
+    source: SearchSourceInput,
+    media_kind: Option<SearchMediaKindInput>,
+    #[schemars(
+        description = "Season number; required for series searches (Prowlarr rejects series searches without a season)"
+    )]
+    #[schemars(range(min = 1))]
     season: Option<u16>,
     #[schemars(description = "Stable TMDB series identity for Plex season grouping")]
     #[schemars(range(min = 1))]
@@ -80,17 +100,11 @@ struct ChoiceSetDownloadInput {
     #[schemars(description = "Opaque tracked-episode choice set identifier")]
     choice_set_id: String,
     #[schemars(description = "Explicit provider: rezka or prowlarr")]
-    source: String,
+    source: SearchSourceInput,
     result_id: String,
     translation_id: Option<u64>,
     season: Option<u32>,
     episode: Option<u32>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct RezkaSessionRefreshInput {
-    #[schemars(description = "One-time approved Vaultwarden credential request ID")]
-    credential_request_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -394,7 +408,13 @@ const fn default_page() -> u32 {
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 struct EpisodeInput {
+    #[schemars(description = "Season number, starting at 1")]
+    #[schemars(range(min = 1))]
     season: u32,
+    #[schemars(
+        description = "Episode number, starting at 1; 0 is not allowed (use the first expected episode instead)"
+    )]
+    #[schemars(range(min = 1))]
     episode: u32,
 }
 
@@ -417,24 +437,35 @@ struct TrackingReleaseIdentityInput {
     source_id: u64,
 }
 
+#[derive(Debug, Copy, Clone, Default, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum TrackingProviderInput {
+    #[default]
+    Rezka,
+    Prowlarr,
+}
+
+#[derive(Debug, Copy, Clone, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum TrackingScopeInput {
+    Personal,
+    Family,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct TrackingCreateInput {
-    #[serde(default = "default_tracking_provider")]
-    provider: String,
+    #[serde(default)]
+    provider: TrackingProviderInput,
     title: String,
     #[serde(default = "default_tracking_translation")]
     translation: String,
     known_episodes: Vec<EpisodeInput>,
-    scope: String,
+    scope: TrackingScopeInput,
     #[serde(default = "default_true")]
     series_ongoing: bool,
     poster_url: Option<String>,
     release_identity: Option<TrackingReleaseIdentityInput>,
     download: Option<TrackingDownloadInput>,
-}
-
-fn default_tracking_provider() -> String {
-    "rezka".to_owned()
 }
 
 fn default_tracking_translation() -> String {
@@ -478,10 +509,6 @@ struct ResolveEpisodeInput {
 struct ObjectOutput {
     #[serde(flatten)]
     fields: std::collections::BTreeMap<String, serde_json::Value>,
-}
-
-fn default_source() -> String {
-    "all".to_owned()
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1006,8 +1033,14 @@ impl MediaAdminMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let actor = actor_from_parts(&parts)?;
         let tracking = configured_tracking(&self.state)?;
-        let provider = parse_provider(&input.provider)?;
-        let scope = parse_tracking_scope(&input.scope)?;
+        let provider = match input.provider {
+            TrackingProviderInput::Rezka => ProviderDto::Rezka,
+            TrackingProviderInput::Prowlarr => ProviderDto::Prowlarr,
+        };
+        let scope = match input.scope {
+            TrackingScopeInput::Personal => TrackingScopeDto::Personal,
+            TrackingScopeInput::Family => TrackingScopeDto::Family,
+        };
         let request = CreateTrackingRequest {
             provider,
             title: input.title,
@@ -1160,15 +1193,9 @@ impl MediaAdminMcp {
         let query = input
             .query
             .ok_or_else(|| ErrorData::invalid_params("query or continuation is required", None))?;
-        let media_kind = match input.media_kind.as_deref() {
-            Some("movie") => Some(MediaKindDto::Movie),
-            Some("series") => Some(MediaKindDto::Series),
-            Some(_) => {
-                return Err(ErrorData::invalid_params(
-                    "media_kind must be movie or series",
-                    None,
-                ));
-            }
+        let media_kind = match input.media_kind {
+            Some(SearchMediaKindInput::Movie) => Some(MediaKindDto::Movie),
+            Some(SearchMediaKindInput::Series) => Some(MediaKindDto::Series),
             None => None,
         };
         if input.tmdb_id.is_some_and(|value| value == 0)
@@ -1183,16 +1210,10 @@ impl MediaAdminMcp {
             source: SeriesGroupSourceDto::Tmdb,
             source_id,
         });
-        let providers: &[ProviderDto] = match input.source.as_str() {
-            "all" => &[ProviderDto::Rezka, ProviderDto::Prowlarr],
-            "rezka" => &[ProviderDto::Rezka],
-            "prowlarr" => &[ProviderDto::Prowlarr],
-            _ => {
-                return Err(ErrorData::invalid_params(
-                    "source must be all, rezka, or prowlarr",
-                    None,
-                ));
-            }
+        let providers: &[ProviderDto] = match input.source {
+            SearchSourceInput::All => &[ProviderDto::Rezka, ProviderDto::Prowlarr],
+            SearchSourceInput::Rezka => &[ProviderDto::Rezka],
+            SearchSourceInput::Prowlarr => &[ProviderDto::Prowlarr],
         };
         let mut results = serde_json::Map::new();
         for provider in providers {
@@ -1302,10 +1323,22 @@ impl MediaAdminMcp {
                 None,
             ));
         }
-        let source = parse_provider(&input.source)?;
+        let source = match input.source {
+            SearchSourceInput::Rezka => ProviderDto::Rezka,
+            SearchSourceInput::Prowlarr => ProviderDto::Prowlarr,
+            SearchSourceInput::All => {
+                return Err(ErrorData::invalid_params(
+                    "source must be rezka or prowlarr",
+                    None,
+                ));
+            }
+        };
         let operation_payload = serde_json::json!({
             "choice_set_id": input.choice_set_id,
-            "source": input.source,
+            "source": match source {
+                ProviderDto::Rezka => "rezka",
+                ProviderDto::Prowlarr => "prowlarr",
+            },
             "result_id": input.result_id,
             "translation_id": input.translation_id,
             "season": input.season,
@@ -1360,34 +1393,6 @@ impl MediaAdminMcp {
             .state
             .search()
             .select(owner, operation, request)
-            .await
-            .map_err(search_error)?;
-        result_json_for(&parts, value)
-    }
-
-    #[tool(
-        name = "media_rezka_session_refresh",
-        description = "Queue a Rezka refresh from an approved one-time credential request; credentials are never returned.",
-        output_schema = object_output_schema(),
-        annotations(title = "Refresh Rezka session", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
-    )]
-    async fn refresh_rezka_session(
-        &self,
-        Parameters(input): Parameters<RezkaSessionRefreshInput>,
-        Extension(parts): Extension<Parts>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let actor = actor_from_parts(&parts)?;
-        let owner = actor
-            .require_user()
-            .map_err(|_| ErrorData::invalid_request("operation is forbidden", None))?;
-        let request = RezkaSessionRefreshRequest {
-            credential_request_id: input.credential_request_id,
-        };
-        let operation = stable_payload_operation_key("rezka-session-refresh", &request)?;
-        let value = self
-            .state
-            .search()
-            .refresh_rezka_session(owner, operation, request)
             .await
             .map_err(search_error)?;
         result_json_for(&parts, value)
@@ -2209,28 +2214,6 @@ fn mcp_scope(owner: media_core::UserId) -> SearchScopeDto {
     }
 }
 
-fn parse_provider(value: &str) -> Result<ProviderDto, ErrorData> {
-    match value {
-        "rezka" => Ok(ProviderDto::Rezka),
-        "prowlarr" => Ok(ProviderDto::Prowlarr),
-        _ => Err(ErrorData::invalid_params(
-            "provider must be rezka or prowlarr",
-            None,
-        )),
-    }
-}
-
-fn parse_tracking_scope(value: &str) -> Result<TrackingScopeDto, ErrorData> {
-    match value {
-        "personal" => Ok(TrackingScopeDto::Personal),
-        "family" => Ok(TrackingScopeDto::Family),
-        _ => Err(ErrorData::invalid_params(
-            "scope must be personal or family",
-            None,
-        )),
-    }
-}
-
 fn parse_tracking_id(value: &str) -> Result<TrackingId, ErrorData> {
     value
         .parse::<TrackingId>()
@@ -2628,7 +2611,6 @@ async fn enrich_job_value(state: &ApiState, result_ref: &str, mut value: Value) 
     };
 
     match selection {
-        ExecutionSelectionDto::RezkaSessionRefresh { .. } => {}
         ExecutionSelectionDto::Rezka {
             media_kind,
             translation,

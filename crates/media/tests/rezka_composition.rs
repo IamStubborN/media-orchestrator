@@ -62,13 +62,6 @@ fn composition_constructs_typed_rezka_dependencies_without_network_calls() {
     source.set_env("MEDIA_REZKA_SESSION_STORE_FILE", store_path);
     source.set_env("MEDIA_REZKA_USER_AGENT", "composition-test-agent/1.0");
     source.set_env("MEDIA_REZKA_PROXY_URL", "http://rezka-proxy.internal:8888");
-    source.set_secret("MEDIA_REZKA_USERNAME_FILE", b"rezka-user");
-    source.set_secret("MEDIA_REZKA_PASSWORD_FILE", b"rezka-password");
-    source.set_env(
-        "MEDIA_REZKA_CREDENTIAL_BROKER_URL",
-        "https://broker.internal.example",
-    );
-    source.set_secret("MEDIA_REZKA_CREDENTIAL_BROKER_TOKEN_FILE", b"broker-token");
     source.set_secret("MEDIA_REZKA_COOKIE_KEY_FILE", encoded_key.as_bytes());
 
     let config = RunnerConfig::load_from(&source).unwrap();
@@ -78,7 +71,6 @@ fn composition_constructs_typed_rezka_dependencies_without_network_calls() {
         Some("http://rezka-proxy.internal:8888/")
     );
     let _: &rezka_client::RezkaClient = &prepared.client;
-    assert!(prepared.credentials.is_none());
     let _: &rezka_client::SessionValidationProbe = &prepared.probe;
     let _: &media_runner::EncryptedRezkaSessionStore = &prepared.store;
     let debug = format!("{prepared:?}");
@@ -89,8 +81,6 @@ fn composition_constructs_typed_rezka_dependencies_without_network_calls() {
         probe_url,
         "account-menu",
         "login-form",
-        "rezka-user",
-        "rezka-password",
         encoded_key.as_str(),
         store_path,
         "rezka-proxy.internal",
@@ -128,13 +118,6 @@ fn composition_reads_the_encrypted_session_before_building_the_client() {
     );
     source.set_env("MEDIA_REZKA_SESSION_STORE_FILE", store_path.as_os_str());
     source.set_env("MEDIA_REZKA_USER_AGENT", "composition-test-agent/1.0");
-    source.set_secret("MEDIA_REZKA_USERNAME_FILE", b"rezka-user");
-    source.set_secret("MEDIA_REZKA_PASSWORD_FILE", b"rezka-password");
-    source.set_env(
-        "MEDIA_REZKA_CREDENTIAL_BROKER_URL",
-        "https://broker.internal.example",
-    );
-    source.set_secret("MEDIA_REZKA_CREDENTIAL_BROKER_TOKEN_FILE", b"broker-token");
     source.set_secret("MEDIA_REZKA_COOKIE_KEY_FILE", encoded_key.as_bytes());
 
     let config = RunnerConfig::load_from(&source).unwrap();
