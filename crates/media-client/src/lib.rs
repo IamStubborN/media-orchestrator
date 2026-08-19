@@ -274,6 +274,19 @@ impl MediaClient {
         self.post_idempotent("v1/selections", &request).await
     }
 
+    pub async fn refresh_rezka_session(
+        &self,
+        credential_request_id: String,
+    ) -> Result<JobDto, ClientError> {
+        self.post_idempotent(
+            "v1/rezka/session/refresh",
+            &media_contract::RezkaSessionRefreshRequest {
+                credential_request_id,
+            },
+        )
+        .await
+    }
+
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
         self.execute(self.request(reqwest::Method::GET, path)?)
             .await

@@ -1,4 +1,5 @@
 use std::{
+    fmt,
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -6,6 +7,7 @@ use std::{
     time::Instant,
 };
 
+use secrecy::SecretString;
 use time::Duration;
 use url::Url;
 
@@ -22,6 +24,7 @@ use crate::{
 
 pub mod anubis;
 pub mod cookie;
+pub mod dle;
 pub mod validation;
 
 pub use validation::{ProbeResponse, SessionValidation, SessionValidationProbe};
@@ -34,6 +37,17 @@ pub struct RezkaClientConfig {
     pub max_retries: u8,
     pub anubis_max_nonce: u64,
     pub proxy_url: Option<Url>,
+}
+
+pub struct RezkaCredentials {
+    pub username: SecretString,
+    pub password: SecretString,
+}
+
+impl fmt::Debug for RezkaCredentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RezkaCredentials { username: [REDACTED], password: [REDACTED] }")
+    }
 }
 
 pub struct RezkaClient {
@@ -62,6 +76,52 @@ impl RezkaClient {
             transport,
             anubis_max_nonce: config.anubis_max_nonce,
         })
+    }
+
+    pub async fn ensure_authenticated(
+        &mut self,
+        credentials: &RezkaCredentials,
+        probe: &SessionValidationProbe,
+    ) -> Result<SessionValidation, RezkaError> {
+        let mut response = self.fetch_probe(probe).await?;
+
+        if let Some(challenge) = parse_optional_challenge(response.body())? {
+            let started = Instant::now();
+            let proof = solve_challenge_async(challenge.clone(), self.anubis_max_nonce).await?;
+            submit_challenge(
+                &mut self.transport,
+                &challenge,
+                &proof,
+                response.url.clone(),
+                started.elapsed().as_millis(),
+            )
+            .await?;
+
+            response = self.fetch_probe(probe).await?;
+            if parse_optional_challenge(response.body())?.is_some() {
+                return Err(challenge_failed());
+            }
+        }
+
+        match Self::classify_probe(probe, &response) {
+            SessionValidation::Valid => return Ok(SessionValidation::Valid),
+            SessionValidation::Inconclusive => return Err(inconclusive_validation()),
+            SessionValidation::Invalid => {}
+        }
+
+        dle::login(&mut self.transport, credentials).await?;
+        let response = self.fetch_probe(probe).await?;
+        if parse_optional_challenge(response.body())?.is_some() {
+            return Err(challenge_failed());
+        }
+
+        match Self::classify_probe(probe, &response) {
+            SessionValidation::Valid => Ok(SessionValidation::Valid),
+            SessionValidation::Invalid => Err(RezkaError::AuthenticationRequired {
+                context: sanitize_provider_text("session remains invalid after login"),
+            }),
+            SessionValidation::Inconclusive => Err(inconclusive_validation()),
+        }
     }
 
     pub async fn ensure_session(

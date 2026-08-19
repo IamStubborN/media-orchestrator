@@ -32,8 +32,8 @@ pub use quality::{
 };
 pub use secret_url::{PublicImageUrl, SecretMediaUrl, SecretSubtitleUrl};
 pub use session::{
-    ProbeResponse, RezkaClient, RezkaClientConfig, SessionValidation, SessionValidationProbe,
-    cookie::SessionSnapshot,
+    ProbeResponse, RezkaClient, RezkaClientConfig, RezkaCredentials, SessionValidation,
+    SessionValidationProbe, cookie::SessionSnapshot,
 };
 pub use subtitles::{SubtitleLanguage, SubtitleTrack, SubtitleTrackId, parse_subtitle_fields};
 pub use trailer::Trailer;

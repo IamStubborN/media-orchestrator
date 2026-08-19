@@ -5,7 +5,8 @@ use media_contract::{
     AlternativeSearchRequest, BestPageDto, BestRankingDto, ContinueSearchRequest,
     CreateTrackingRequest, DiscoverPageDto, EpisodeSnapshotDto, ExecutionSelectionDto,
     GenreListDto, MediaKindDto, PatchTrackingRequest, PremiereFeedDto, PremieresPageDto,
-    ProviderDto, ReleaseQueryRequest, ResolveEpisodeMappingRequest, SearchScopeDto,
+    ProviderDto, ReleaseQueryRequest, ResolveEpisodeMappingRequest, RezkaSessionRefreshRequest,
+    SearchScopeDto,
     SelectResultRequest, SeriesGroupIdentityDto, SeriesGroupSourceDto, StartSearchRequest,
     TrackingDownloadDto, TrackingReleaseIdentityDto, TrackingReleaseSourceDto, TrackingScopeDto,
     TrendingCategoryDto, TrendingItemDto, TrendingMediaTypeDto,
@@ -84,6 +85,12 @@ struct SearchInput {
     #[schemars(description = "Stable TMDB series identity for Plex season grouping")]
     #[schemars(range(min = 1))]
     tmdb_id: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct RezkaSessionRefreshInput {
+    #[schemars(description = "One-time approved Vaultwarden credential request ID")]
+    credential_request_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1399,6 +1406,34 @@ impl MediaAdminMcp {
     }
 
     #[tool(
+        name = "media_rezka_session_refresh",
+        description = "Queue a Rezka refresh from an approved one-time credential request; credentials are never returned.",
+        output_schema = object_output_schema(),
+        annotations(title = "Refresh Rezka session", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn refresh_rezka_session(
+        &self,
+        Parameters(input): Parameters<RezkaSessionRefreshInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = actor_from_parts(&parts)?;
+        let owner = actor
+            .require_user()
+            .map_err(|_| ErrorData::invalid_request("operation is forbidden", None))?;
+        let request = RezkaSessionRefreshRequest {
+            credential_request_id: input.credential_request_id,
+        };
+        let operation = stable_payload_operation_key("rezka-session-refresh", &request)?;
+        let value = self
+            .state
+            .search()
+            .refresh_rezka_session(owner, operation, request)
+            .await
+            .map_err(search_error)?;
+        result_json_for(&parts, value)
+    }
+
+    #[tool(
         name = "media_release_schedule",
         description = "Query the release calendar for episode counts, lifecycle, schedule, and next episode. Read-only and never starts a download.",
         output_schema = object_output_schema(),
@@ -2611,6 +2646,7 @@ async fn enrich_job_value(state: &ApiState, result_ref: &str, mut value: Value) 
     };
 
     match selection {
+        ExecutionSelectionDto::RezkaSessionRefresh { .. } => {}
         ExecutionSelectionDto::Rezka {
             media_kind,
             translation,

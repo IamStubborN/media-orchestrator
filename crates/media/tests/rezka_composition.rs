@@ -63,6 +63,15 @@ fn composition_constructs_typed_rezka_dependencies_without_network_calls() {
     source.set_env("MEDIA_REZKA_USER_AGENT", "composition-test-agent/1.0");
     source.set_env("MEDIA_REZKA_PROXY_URL", "http://rezka-proxy.internal:8888");
     source.set_secret("MEDIA_REZKA_COOKIE_KEY_FILE", encoded_key.as_bytes());
+    source.set_env(
+        "MEDIA_REZKA_CREDENTIAL_BROKER_URL",
+        "http://vaultwarden-broker-primary:8787",
+    );
+    source.set_secret("MEDIA_REZKA_CREDENTIAL_BROKER_TOKEN_FILE", b"broker-token");
+    source.set_env(
+        "MEDIA_REZKA_CREDENTIAL_BROKER_PRIVATE_HTTP_HOSTS",
+        "vaultwarden-broker-primary",
+    );
 
     let config = RunnerConfig::load_from(&source).unwrap();
     let prepared = media::composition::prepare_runner_session(&config).unwrap();
@@ -119,6 +128,15 @@ fn composition_reads_the_encrypted_session_before_building_the_client() {
     source.set_env("MEDIA_REZKA_SESSION_STORE_FILE", store_path.as_os_str());
     source.set_env("MEDIA_REZKA_USER_AGENT", "composition-test-agent/1.0");
     source.set_secret("MEDIA_REZKA_COOKIE_KEY_FILE", encoded_key.as_bytes());
+    source.set_env(
+        "MEDIA_REZKA_CREDENTIAL_BROKER_URL",
+        "http://vaultwarden-broker-primary:8787",
+    );
+    source.set_secret("MEDIA_REZKA_CREDENTIAL_BROKER_TOKEN_FILE", b"broker-token");
+    source.set_env(
+        "MEDIA_REZKA_CREDENTIAL_BROKER_PRIVATE_HTTP_HOSTS",
+        "vaultwarden-broker-primary",
+    );
 
     let config = RunnerConfig::load_from(&source).unwrap();
     assert!(matches!(

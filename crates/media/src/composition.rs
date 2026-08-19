@@ -276,6 +276,17 @@ pub async fn run_runner(config: RunnerConfig) -> Result<(), RunnerError> {
                 .map_err(|_| RunnerError::Configuration)
         })
         .transpose()?;
+    let broker_config = media_integrations::credential_broker::CredentialBrokerConfig::new(
+        config.credential_broker().base_url().clone(),
+        config.credential_broker().token().clone(),
+        Duration::from_secs(15),
+        config.credential_broker().private_http_hosts(),
+    )
+    .map_err(|_| RunnerError::Configuration)?;
+    let credential_broker = Arc::new(
+        media_integrations::credential_broker::CredentialBrokerClient::new(broker_config)
+            .map_err(|_| RunnerError::Configuration)?,
+    );
     let executor = Arc::new(crate::runner::MediaJobExecutor::new(
         rezka,
         pipeline,
@@ -290,6 +301,7 @@ pub async fn run_runner(config: RunnerConfig) -> Result<(), RunnerError> {
             ),
         ),
         gluetun,
+        credential_broker,
         config.storage_roots().clone(),
         config.vaapi_device().to_owned(),
     ));

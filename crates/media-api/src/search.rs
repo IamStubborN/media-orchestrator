@@ -1,6 +1,7 @@
 use media_contract::{
     AlternativeSearchRequest, ContinueSearchRequest, EpisodeMappingActionDto,
-    ExecutionSelectionDto, JobDto, ProviderDto, ResolveEpisodeMappingRequest, SearchPageDto,
+    ExecutionSelectionDto, JobDto, ProviderDto, ResolveEpisodeMappingRequest,
+    RezkaSessionRefreshRequest, SearchPageDto,
     SelectResultRequest, StartSearchRequest,
 };
 use media_core::{JobId, OperationKey, UserId};
@@ -75,6 +76,15 @@ pub trait SearchService: Send + Sync {
         _job_id: JobId,
         _request: AlternativeSearchRequest,
     ) -> Result<SearchPageDto, SearchError> {
+        Err(SearchError::NotFound)
+    }
+
+    async fn refresh_rezka_session(
+        &self,
+        _owner: UserId,
+        _operation: OperationKey,
+        _request: RezkaSessionRefreshRequest,
+    ) -> Result<JobDto, SearchError> {
         Err(SearchError::NotFound)
     }
 

@@ -83,6 +83,15 @@ fn valid_runner_source() -> FakeSource {
         "/runner/rezka/session.bin",
     );
     source.set_secret("MEDIA_REZKA_COOKIE_KEY_FILE", encoded_key.as_bytes());
+    source.set_env(
+        "MEDIA_REZKA_CREDENTIAL_BROKER_URL",
+        "http://vaultwarden-broker-primary:8787",
+    );
+    source.set_secret("MEDIA_REZKA_CREDENTIAL_BROKER_TOKEN_FILE", b"broker-token");
+    source.set_env(
+        "MEDIA_REZKA_CREDENTIAL_BROKER_PRIVATE_HTTP_HOSTS",
+        "vaultwarden-broker-primary",
+    );
     source
 }
 

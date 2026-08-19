@@ -2613,6 +2613,43 @@ impl DurableSearchService {
 
 #[async_trait::async_trait]
 impl SearchService for DurableSearchService {
+    async fn refresh_rezka_session(
+        &self,
+        owner: UserId,
+        operation: OperationKey,
+        request: media_contract::RezkaSessionRefreshRequest,
+    ) -> Result<JobDto, SearchError> {
+        if request.credential_request_id.trim().is_empty()
+            || request.credential_request_id.len() > 256
+            || request.credential_request_id.chars().any(char::is_control)
+        {
+            return Err(SearchError::InvalidRequest);
+        }
+        let result_ref = format!("selection:session-refresh:{}", uuid::Uuid::new_v4());
+        self.persistence
+            .insert_execution(
+                result_ref.clone(),
+                ExecutionSelectionDto::RezkaSessionRefresh {
+                    credential_request_id: request.credential_request_id,
+                },
+            )
+            .await?;
+        let job = self
+            .jobs
+            .create_job_for_owner(
+                owner,
+                operation,
+                NewJobCommand {
+                    provider: Provider::Rezka,
+                    result_ref,
+                    notify_scope: NotifyScope::Initiator,
+                },
+            )
+            .await
+            .map_err(application_error)?;
+        Ok(job_dto(&job))
+    }
+
     async fn start(
         &self,
         owner: UserId,
@@ -2709,6 +2746,9 @@ impl SearchService for DurableSearchService {
                 title,
                 ..
             } => (ProviderDto::Rezka, title, media_kind, season),
+            ExecutionSelectionDto::RezkaSessionRefresh { .. } => {
+                return Err(SearchError::Conflict);
+            }
         };
         self.start(
             owner,

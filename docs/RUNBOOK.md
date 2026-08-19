@@ -70,21 +70,23 @@ blocked runner both have no active lease, but require different operator action.
 
 ## Rezka Session
 
-Rezka sessions are anonymous cookie jars owned by `rezka-client`. The client
-does not use Chromium, Playwright, Obscura, copied browser cookies, or a DLE
-login. Search and download establish a session automatically:
+Rezka search and download use anonymous cookie jars owned by `rezka-client`.
+They do not use Chromium, Playwright, Obscura, or copied browser cookies.
+Session setup for those paths:
 
 1. The configured probe contains exactly one marker class: valid or invalid.
    Invalid (login form present) is the expected anonymous state.
 2. Anubis, when present, is solved at most once before the next probe.
-3. The encrypted cookie snapshot is saved after a conclusive probe. No account
-   credentials are sent.
+3. The encrypted cookie snapshot is saved after a conclusive probe.
+
+Authenticated refresh is a separate job. Hermes approves a one-time Vaultwarden
+request, then `media_rezka_session_refresh` queues a runner job. The runner
+resolves username/password from `vaultwarden-broker-primary` and performs DLE
+login. Static Rezka password files are not mounted into `media-service`.
 
 The deployed default probe is the Rezka root, with `logout` as the valid marker
 and `login` as the invalid marker. If the provider changes either marker, expect
-a sanitized `provider_response_invalid` result. Inspect the runner error code
-and refresh the fixtures and parser together; do not add a manual browser-cookie
-fallback or a login path.
+a sanitized `provider_response_invalid` result.
 
 ## Local Build
 
