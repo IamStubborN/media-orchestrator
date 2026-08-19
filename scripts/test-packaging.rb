@@ -252,6 +252,8 @@ Dir.mktmpdir("media-stage-contract") do |directory|
     host=fixture-host
     remote_root=/remote
     hermes_remote_root=/remote/hermes
+    compose_project=homelab
+    environment_file=/dev/null
     MEDIA_RELEASE_DIR=#{release.shellescape}
     stage_hermes_cli image-ref docker-host
   SH
@@ -292,6 +294,8 @@ Dir.mktmpdir("media-stage-contract") do |directory|
     host=fixture-host
     remote_root=/remote
     hermes_remote_root=/remote/hermes
+    compose_project=homelab
+    environment_file=/dev/null
     MEDIA_RELEASE_DIR=#{release.shellescape}
     #{dispatch_contract}
   SH
@@ -389,6 +393,21 @@ assert(service_only_guard.include?("docker compose") &&
        !service_only_guard.include?("YAML.safe_load") &&
        service_only_guard.include?("deploy-full"),
        "service-only guard must safely compare the full effective runner boundary and name the full rollout command")
+replace_images = homelab.split("replace_images() {", 2).fetch(1).split("replace_service_image() {", 2).fetch(0)
+replace_service = homelab.split("replace_service_image() {", 2).fetch(1).split("migrate_down_one_with_image() {", 2).fetch(0)
+replace_hermes = homelab.split("replace_hermes_agents() {", 2).fetch(1).split("verify_runner_service_compatibility() {", 2).fetch(0)
+assert(replace_images.include?("--project-name '$compose_project'") &&
+       replace_images.include?("cd '$remote_root'") &&
+       !replace_images.include?("/media'; docker compose"),
+       "runtime image replacement must use the root homelab Compose project")
+assert(replace_service.include?("--project-name homelab") &&
+       replace_service.include?('cd "$remote_root"') &&
+       !replace_service.include?('cd "$remote_root/media"'),
+       "service image replacement must use the root homelab Compose project")
+assert(replace_hermes.include?("--project-name homelab") &&
+       replace_hermes.include?('cd "$remote_root"') &&
+       !replace_hermes.include?('cd "$hermes_root"'),
+       "Hermes recreate must use the root homelab Compose project")
 assert(homelab.include?("verify_live_mcp_schema") && homelab.include?("MCP_SCHEMA_SHA256"),
        "deployment rollback must preserve and verify the exact MCP schema")
 schema_bootstrap = homelab.split("ensure_deployed_mcp_schema() {", 2).fetch(1).split("remote() {", 2).fetch(0)
@@ -449,7 +468,7 @@ assert(service_rollback.include?("perform_service_rollback") &&
 
 prepare_hermes = homelab.split("prepare_hermes_cli() {", 2).fetch(1).split("sync_homelab_compose() {", 2).fetch(0)
 hermes_services = "media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary"
-assert(prepare_hermes.include?("docker compose --env-file .env pull #{hermes_services}"),
+assert(prepare_hermes.include?("docker compose --project-name '$compose_project' --env-file '$environment_file' pull #{hermes_services}"),
        "Hermes deployment must only pull the intended Hermes and notifier images")
 
 host_lock = homelab.split("acquire_host_lock() {", 2).fetch(1).split("release_host_lock() {", 2).fetch(0)
@@ -500,7 +519,7 @@ assert(lock_status.success?, "host lock must preserve errexit and stop after a f
 replace_hermes = homelab.split("replace_hermes_agents() {", 2).fetch(1).split("verify_runner_service_compatibility() {", 2).fetch(0)
 assert(replace_hermes.include?("up -d --no-deps --force-recreate #{hermes_services}"),
        "Hermes replacement must only recreate the intended Hermes and notifier containers")
-assert(replace_hermes.include?("image_record=${2:-}"),
+assert(replace_hermes.include?("image_record=${3:-}"),
        "Hermes replacement must accept an empty forward image record and a non-empty rollback record")
 image_record_probe = <<~'SH'
   set -eu
@@ -633,7 +652,8 @@ assert(compatibility.include?("expected_service_image") &&
        "runner compatibility must attest exact images and prove current-generation service interaction")
 replace_images = homelab.split("replace_images() {", 2).fetch(1).split("replace_service_image() {", 2).fetch(0)
 resume_runner = homelab.split("resume_runner_watcher_and_wait_ready() {", 2).fetch(1).split("hold_runner_quiescence() {", 2).fetch(0)
-assert(replace_images.include?("docker compose") && replace_images.include?("create --force-recreate download-runner") &&
+assert(replace_images.include?("docker compose") &&
+       replace_images.include?("create --no-deps --force-recreate download-runner") &&
        !replace_images.include?("up -d --no-deps --force-recreate download-runner") &&
        resume_runner.include?("docker start download-runner"),
        "full replacement must create the runner stopped and start it only during guarded resume")
@@ -691,6 +711,10 @@ assert(normalized_runbook.include?("both `gluetun` and `gluetun-rezka`") &&
        normalized_runbook.include?("bounded watcher-readiness") &&
        normalized_runbook.include?("re-quiesces"),
        "runbook must name the protected Gluetun set and bounded watcher rollback behavior")
+assert(normalized_runbook.include?("project: homelab") &&
+       normalized_runbook.include?("--project-name homelab") &&
+       normalized_runbook.include?("Do not invoke Compose from `media/` or `hermes/`"),
+       "runbook must document the root homelab Compose project")
 assert(!normalized_runbook.include?("does not stop or restart the watcher") &&
        normalized_runbook.include?("same runner and watcher container IDs") &&
        normalized_runbook.include?("Hermes-only rollout stages") &&

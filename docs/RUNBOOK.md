@@ -7,10 +7,16 @@ does not contain credentials, cookies, signed URLs, or Telegram tokens.
 
 ```text
 homelab root: /srv/homelab
-compose file: /srv/homelab/media/compose.media-orchestrator.yml
+root compose: /srv/homelab/compose.yml
+media compose: /srv/homelab/media/compose.media-orchestrator.yml
 environment: /srv/homelab/.env
-project: media-orchestrator
+project: homelab
 ```
+
+The media stack is an include of the root Compose project. Deploy, migrate, and
+recreate run from `/srv/homelab` with `--project-name homelab`. Do
+not invoke Compose from `media/` or `hermes/`; those directories would create a
+second project and miss the live networks.
 
 `media-service` remains outside VPN namespaces. `download-runner` shares the
 dedicated `gluetun-rezka` namespace and exits after one job. The

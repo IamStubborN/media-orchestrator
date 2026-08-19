@@ -4,8 +4,11 @@ set -eu
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 host=${MEDIA_HOMELAB_HOST:host.example.invalid}
 remote_root=${MEDIA_HOMELAB_ROOT:-/srv/homelab}
+# Included by $remote_root/compose.yml. Runtime operations use the root `homelab`
+# project; do not `cd media` or Compose will create a second project.
 compose_file=$remote_root/media/compose.media-orchestrator.yml
 environment_file=$remote_root/.env
+compose_project=homelab
 rollback_file=$remote_root/media/.media-orchestrator-images.previous
 hermes_root=${HERMES_HOME_ROOT:-${HOMELAB_ROOT:-}/hermes}
 hermes_remote_root=${HERMES_HOME_REMOTE_ROOT:-/srv/homelab/hermes}
@@ -788,7 +791,7 @@ replace_images() {
     service_image=$1
     runner_image=$2
     expected_migration_version=${3:-}
-    remote "set -eu; test \"\$(docker inspect gluetun-rezka-watcher --format '{{.State.Status}}')\" != running; test \"\$(docker inspect download-runner --format '{{.State.Status}}')\" != running; sed -i 's#^MEDIA_SERVICE_IMAGE=.*#MEDIA_SERVICE_IMAGE=$service_image#; s#^DOWNLOAD_RUNNER_IMAGE=.*#DOWNLOAD_RUNNER_IMAGE=$runner_image#' '$environment_file'; cd '$remote_root/media'; docker compose --env-file '$environment_file' -f '$compose_file' run --rm --no-deps media-service migrate; if test -n '$expected_migration_version'; then actual=\$(docker exec media-postgres sh -lc 'psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -Atc \"select version from seaql_migrations order by version desc limit 1;\"'); test \"\$actual\" = '$expected_migration_version' || { echo \"database migration differs from release manifest\" >&2; exit 1; }; fi; docker compose --env-file '$environment_file' -f '$compose_file' up -d --no-deps --force-recreate media-service; docker compose --env-file '$environment_file' -f '$compose_file' create --force-recreate download-runner"
+    remote "set -eu; test \"\$(docker inspect gluetun-rezka-watcher --format '{{.State.Status}}')\" != running; test \"\$(docker inspect download-runner --format '{{.State.Status}}')\" != running; sed -i 's#^MEDIA_SERVICE_IMAGE=.*#MEDIA_SERVICE_IMAGE=$service_image#; s#^DOWNLOAD_RUNNER_IMAGE=.*#DOWNLOAD_RUNNER_IMAGE=$runner_image#' '$environment_file'; cd '$remote_root'; docker compose --project-name '$compose_project' --env-file '$environment_file' run --rm --no-deps media-service migrate; if test -n '$expected_migration_version'; then actual=\$(docker exec media-postgres sh -lc 'psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -Atc \"select version from seaql_migrations order by version desc limit 1;\"'); test \"\$actual\" = '$expected_migration_version' || { echo \"database migration differs from release manifest\" >&2; exit 1; }; fi; docker compose --project-name '$compose_project' --env-file '$environment_file' up -d --no-deps --force-recreate media-service; docker compose --project-name '$compose_project' --env-file '$environment_file' create --no-deps --force-recreate download-runner"
     verify_service
 }
 
@@ -812,15 +815,15 @@ umask 077
 next=$(mktemp "${environment_file}.next.XXXXXX")
 trap 'rm -f "$next"' EXIT HUP INT TERM
 sed "s#^MEDIA_SERVICE_IMAGE=.*#MEDIA_SERVICE_IMAGE=$service_image#" "$environment_file" >"$next"
-cd "$remote_root/media"
-docker compose --env-file "$next" -f "$compose_file" run --rm --no-deps media-service migrate
+cd "$remote_root"
+docker compose --project-name homelab --env-file "$next" run --rm --no-deps media-service migrate
 if test -n "$expected_migration_version"; then
     actual=$(docker exec media-postgres sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "select version from seaql_migrations order by version desc limit 1;"')
     test "$actual" = "$expected_migration_version" || { echo "database migration differs from release manifest" >&2; exit 1; }
 fi
 mv -f "$next" "$environment_file"
 trap - EXIT HUP INT TERM
-docker compose --env-file "$environment_file" -f "$compose_file" up -d --no-deps --force-recreate media-service
+docker compose --project-name homelab --env-file "$environment_file" up -d --no-deps --force-recreate media-service
 REMOTE
     verify_service
 }
@@ -848,8 +851,8 @@ umask 077
 rollback_env=$(mktemp "${environment_file}.rollback.XXXXXX")
 trap 'rm -f "$rollback_env"' EXIT HUP INT TERM
 sed "s#^MEDIA_SERVICE_IMAGE=.*#MEDIA_SERVICE_IMAGE=$service_image#" "$environment_file" >"$rollback_env"
-cd "$remote_root/media"
-docker compose --env-file "$rollback_env" -f "$compose_file" run --rm --no-deps media-service \
+cd "$remote_root"
+docker compose --project-name homelab --env-file "$rollback_env" run --rm --no-deps media-service \
     migrate-down-one --expected-current "$expected_current" --expected-target "$expected_target"
 REMOTE
     assert_db_migration_version "$expected_target"
@@ -860,6 +863,7 @@ prepare_hermes_cli() {
     docker_host=$2
     media_version=0.1.0
     artifact=$hermes_root/artifacts/media-$media_version-linux-amd64
+    mkdir -p "$(dirname "$artifact")"
     container=$(DOCKER_HOST=$docker_host docker create "$service_image")
     trap 'DOCKER_HOST=$docker_host docker rm -f "$container" >/dev/null 2>&1 || true' EXIT HUP INT TERM
     DOCKER_HOST=$docker_host docker cp "$container:/usr/local/bin/media" "$artifact"
@@ -874,7 +878,7 @@ prepare_hermes_cli() {
         --exclude secrets/ \
         "$hermes_root/" "$host:$hermes_remote_root/"
     scp "$artifact" "$host:$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next" >/dev/null
-    remote "set -eu; install -m 0755 '$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next' '$hermes_remote_root/artifacts/media-$media_version-linux-amd64'; rm '$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next'; sed -i '/^HERMES_HOME_IMAGE=/d; /^MEDIA_CLI_SHA256=/d' '$hermes_remote_root/.env'; cd '$hermes_remote_root'; attempts=0; until docker compose --env-file .env pull media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary; do attempts=\$((attempts + 1)); test \"\$attempts\" -lt 5 || exit 1; sleep 5; done"
+    remote "set -eu; mkdir -p '$hermes_remote_root/artifacts'; install -m 0755 '$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next' '$hermes_remote_root/artifacts/media-$media_version-linux-amd64'; rm '$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next'; sed -i '/^HERMES_HOME_IMAGE=/d; /^MEDIA_CLI_SHA256=/d' '$hermes_remote_root/.env'; cd '$remote_root'; attempts=0; until docker compose --project-name '$compose_project' --env-file '$environment_file' pull media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary; do attempts=\$((attempts + 1)); test \"\$attempts\" -lt 5 || exit 1; sleep 5; done"
 }
 
 stage_hermes_cli() {
@@ -882,6 +886,7 @@ stage_hermes_cli() {
     docker_host=$2
     media_version=0.1.0
     artifact=$hermes_root/artifacts/media-$media_version-linux-amd64
+    mkdir -p "$(dirname "$artifact")"
     container=$(DOCKER_HOST=$docker_host docker create "$service_image")
     trap 'DOCKER_HOST=$docker_host docker rm -f "$container" >/dev/null 2>&1 || true' EXIT HUP INT TERM
     DOCKER_HOST=$docker_host docker cp "$container:/usr/local/bin/media" "$artifact"
@@ -906,7 +911,7 @@ stage_hermes_cli() {
         --exclude secrets/ \
         "$hermes_root/" "$host:$hermes_stage/source/"
     scp "$artifact" "$host:$hermes_stage/artifacts/media-$media_version-linux-amd64" >/dev/null
-    remote "set -eu; test \"\$(sha256sum '$hermes_stage/artifacts/media-$media_version-linux-amd64' | awk '{print \$1}')\" = '$artifact_sha256'; cd '$hermes_stage/source'; attempts=0; until docker compose --env-file '$hermes_remote_root/.env' -f compose.yaml pull media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary; do attempts=\$((attempts + 1)); test \"\$attempts\" -lt 5 || exit 1; sleep 5; done"
+    remote "set -eu; test \"\$(sha256sum '$hermes_stage/artifacts/media-$media_version-linux-amd64' | awk '{print \$1}')\" = '$artifact_sha256'; cd '$remote_root'; attempts=0; until docker compose --project-name '$compose_project' --env-file '$environment_file' pull media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary; do attempts=\$((attempts + 1)); test \"\$attempts\" -lt 5 || exit 1; sleep 5; done"
 }
 
 activate_hermes_stage() {
@@ -923,6 +928,7 @@ rsync -a --delete \
     --exclude artifacts/ \
     --exclude secrets/ \
     "$stage/source/" "$hermes_root/"
+mkdir -p "$hermes_root/artifacts"
 install -m 0755 "$stage/artifacts/media-0.1.0-linux-amd64" "$hermes_root/artifacts/media-0.1.0-linux-amd64.next"
 mv -f "$hermes_root/artifacts/media-0.1.0-linux-amd64.next" "$hermes_root/artifacts/media-0.1.0-linux-amd64"
 sed -i '/^HERMES_HOME_IMAGE=/d; /^MEDIA_CLI_SHA256=/d' "$hermes_root/.env"
@@ -941,11 +947,14 @@ sync_homelab_compose() {
 
 replace_hermes_agents() {
     image_record=${1:-}
-    remote sh -s "$hermes_remote_root" "$image_record" <<'REMOTE'
+    remote sh -s "$remote_root" "$environment_file" "$image_record" <<'REMOTE'
 set -eu
-hermes_root=$1
-image_record=${2:-}
-cd "$hermes_root"
+remote_root=$1
+environment_file=$2
+image_record=${3:-}
+cd "$remote_root"
+compose_files="-f compose.yml"
+test -f compose.override.yml && compose_files="$compose_files -f compose.override.yml"
 if test -n "$image_record"; then
     test -s "$image_record"
     override=$(mktemp)
@@ -972,9 +981,12 @@ if any(not re.fullmatch(r"sha256:[0-9a-f]{64}", value or "") for value in servic
 with open(sys.argv[2], "w", encoding="utf-8") as destination:
     json.dump({"services": {name: {"image": image} for name, image in services.items()}}, destination)
 PY
-    docker compose --env-file .env -f compose.yaml -f "$override" up -d --no-deps --force-recreate media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary
+    # shellcheck disable=SC2086
+    docker compose --project-name homelab --env-file "$environment_file" $compose_files -f "$override" \
+        up -d --no-deps --force-recreate media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary
 else
-    docker compose --env-file .env up -d --no-deps --force-recreate media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary
+    docker compose --project-name homelab --env-file "$environment_file" \
+        up -d --no-deps --force-recreate media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary
 fi
 REMOTE
     remote sh -s <<'REMOTE'
