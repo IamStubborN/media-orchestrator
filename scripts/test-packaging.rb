@@ -519,7 +519,8 @@ assert(lock_status.success?, "host lock must preserve errexit and stop after a f
 replace_hermes = homelab.split("replace_hermes_agents() {", 2).fetch(1).split("verify_runner_service_compatibility() {", 2).fetch(0)
 assert(replace_hermes.include?("up -d --no-deps --force-recreate #{hermes_services}"),
        "Hermes replacement must only recreate the intended Hermes and notifier containers")
-assert(replace_hermes.include?("image_record=${3:-}"),
+assert(replace_hermes.include?('if test "$#" -ge 3; then') &&
+       replace_hermes.include?("image_record=\$3"),
        "Hermes replacement must accept an empty forward image record and a non-empty rollback record")
 image_record_probe = <<~'SH'
   set -eu
@@ -653,7 +654,7 @@ assert(compatibility.include?("expected_service_image") &&
 replace_images = homelab.split("replace_images() {", 2).fetch(1).split("replace_service_image() {", 2).fetch(0)
 resume_runner = homelab.split("resume_runner_watcher_and_wait_ready() {", 2).fetch(1).split("hold_runner_quiescence() {", 2).fetch(0)
 assert(replace_images.include?("docker compose") &&
-       replace_images.include?("create --no-deps --force-recreate download-runner") &&
+       replace_images.include?("up --no-deps --force-recreate --no-start download-runner") &&
        !replace_images.include?("up -d --no-deps --force-recreate download-runner") &&
        resume_runner.include?("docker start download-runner"),
        "full replacement must create the runner stopped and start it only during guarded resume")

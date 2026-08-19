@@ -791,7 +791,7 @@ replace_images() {
     service_image=$1
     runner_image=$2
     expected_migration_version=${3:-}
-    remote "set -eu; test \"\$(docker inspect gluetun-rezka-watcher --format '{{.State.Status}}')\" != running; test \"\$(docker inspect download-runner --format '{{.State.Status}}')\" != running; sed -i 's#^MEDIA_SERVICE_IMAGE=.*#MEDIA_SERVICE_IMAGE=$service_image#; s#^DOWNLOAD_RUNNER_IMAGE=.*#DOWNLOAD_RUNNER_IMAGE=$runner_image#' '$environment_file'; cd '$remote_root'; docker compose --project-name '$compose_project' --env-file '$environment_file' run --rm --no-deps media-service migrate; if test -n '$expected_migration_version'; then actual=\$(docker exec media-postgres sh -lc 'psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -Atc \"select version from seaql_migrations order by version desc limit 1;\"'); test \"\$actual\" = '$expected_migration_version' || { echo \"database migration differs from release manifest\" >&2; exit 1; }; fi; docker compose --project-name '$compose_project' --env-file '$environment_file' up -d --no-deps --force-recreate media-service; docker compose --project-name '$compose_project' --env-file '$environment_file' create --no-deps --force-recreate download-runner"
+    remote "set -eu; test \"\$(docker inspect gluetun-rezka-watcher --format '{{.State.Status}}')\" != running; test \"\$(docker inspect download-runner --format '{{.State.Status}}')\" != running; sed -i 's#^MEDIA_SERVICE_IMAGE=.*#MEDIA_SERVICE_IMAGE=$service_image#; s#^DOWNLOAD_RUNNER_IMAGE=.*#DOWNLOAD_RUNNER_IMAGE=$runner_image#' '$environment_file'; cd '$remote_root'; docker compose --project-name '$compose_project' --env-file '$environment_file' run --rm --no-deps media-service migrate; if test -n '$expected_migration_version'; then actual=\$(docker exec media-postgres sh -lc 'psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -Atc \"select version from seaql_migrations order by version desc limit 1;\"'); test \"\$actual\" = '$expected_migration_version' || { echo \"database migration differs from release manifest\" >&2; exit 1; }; fi; docker compose --project-name '$compose_project' --env-file '$environment_file' up -d --no-deps --force-recreate media-service; docker compose --project-name '$compose_project' --env-file '$environment_file' up --no-deps --force-recreate --no-start download-runner"
     verify_service
 }
 
@@ -951,7 +951,10 @@ replace_hermes_agents() {
 set -eu
 remote_root=$1
 environment_file=$2
-image_record=${3:-}
+image_record=
+if test "$#" -ge 3; then
+    image_record=$3
+fi
 cd "$remote_root"
 compose_files="-f compose.yml"
 test -f compose.override.yml && compose_files="$compose_files -f compose.override.yml"
