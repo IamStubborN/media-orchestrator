@@ -406,7 +406,9 @@ impl JobStore for SeaOrmJobStore {
                 transaction.commit().await.map_err(map_database_error)?;
                 Ok(value)
             }
-            Err(sea_orm::DbErr::Custom(message)) if message == JOB_NOT_RETRYABLE => {
+            Err(sea_orm::DbErr::Custom(message))
+                if message == JOB_NOT_RETRYABLE || message == JOB_LIFECYCLE_CYCLE_STALE =>
+            {
                 transaction.rollback().await.map_err(map_database_error)?;
                 Err(PortError::Conflict)
             }

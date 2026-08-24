@@ -38,11 +38,8 @@ const REZKA_COOKIE_KEY_FILE: &str = "MEDIA_REZKA_COOKIE_KEY_FILE";
 const REZKA_SESSION_STORE_FILE: &str = "MEDIA_REZKA_SESSION_STORE_FILE";
 const REZKA_USER_AGENT: &str = "MEDIA_REZKA_USER_AGENT";
 const REZKA_PROXY_URL: &str = "MEDIA_REZKA_PROXY_URL";
-const CREDENTIAL_BROKER_URL: &str = "MEDIA_REZKA_CREDENTIAL_BROKER_URL";
-const CREDENTIAL_BROKER_TOKEN: &str = "MEDIA_REZKA_CREDENTIAL_BROKER_TOKEN";
-const CREDENTIAL_BROKER_TOKEN_FILE: &str = "MEDIA_REZKA_CREDENTIAL_BROKER_TOKEN_FILE";
-const CREDENTIAL_BROKER_PRIVATE_HTTP_HOSTS: &str =
-    "MEDIA_REZKA_CREDENTIAL_BROKER_PRIVATE_HTTP_HOSTS";
+const REZKA_BROWSER_HELPER: &str = "MEDIA_REZKA_BROWSER_HELPER";
+const DEFAULT_REZKA_BROWSER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const PROWLARR_URL: &str = "MEDIA_PROWLARR_URL";
 const PROWLARR_API_KEY: &str = "MEDIA_PROWLARR_API_KEY";
 const PROWLARR_API_KEY_FILE: &str = "MEDIA_PROWLARR_API_KEY_FILE";
@@ -539,7 +536,6 @@ pub struct RunnerConfig {
     vaapi_device: PathBuf,
     qbittorrent: Option<QbittorrentCompositionConfig>,
     gluetun: Option<GluetunCompositionConfig>,
-    credential_broker: CredentialBrokerCompositionConfig,
     exit_after_job: bool,
 }
 
@@ -581,7 +577,6 @@ impl RunnerConfig {
                 .var_os(GLUETUN_URL)
                 .map(|_| load_gluetun_config(source))
                 .transpose()?,
-            credential_broker: load_credential_broker_config(source)?,
             exit_after_job: optional_boolean_environment(source, RUNNER_EXIT_AFTER_JOB, false)?,
         })
     }
@@ -611,29 +606,8 @@ impl RunnerConfig {
     pub const fn gluetun(&self) -> Option<&GluetunCompositionConfig> {
         self.gluetun.as_ref()
     }
-    pub const fn credential_broker(&self) -> &CredentialBrokerCompositionConfig {
-        &self.credential_broker
-    }
     pub const fn exit_after_job(&self) -> bool {
         self.exit_after_job
-    }
-}
-
-pub struct CredentialBrokerCompositionConfig {
-    base_url: url::Url,
-    token: SecretString,
-    private_http_hosts: Vec<String>,
-}
-
-impl CredentialBrokerCompositionConfig {
-    pub const fn base_url(&self) -> &url::Url {
-        &self.base_url
-    }
-    pub const fn token(&self) -> &SecretString {
-        &self.token
-    }
-    pub fn private_http_hosts(&self) -> &[String] {
-        &self.private_http_hosts
     }
 }
 
@@ -971,37 +945,54 @@ fn load_rezka_config(source: &impl ConfigSource) -> Result<RezkaCompositionConfi
         proxy_url: optional_environment(source, REZKA_PROXY_URL)?
             .map(|value| parse_rezka_proxy_url(&value))
             .transpose()?,
+        browser_fallback: load_browser_fallback_config(source)?,
     })
 }
 
-fn load_credential_broker_config(
+fn load_browser_fallback_config(
     source: &impl ConfigSource,
-) -> Result<CredentialBrokerCompositionConfig, ConfigError> {
-    let base_url = required_environment(source, CREDENTIAL_BROKER_URL)?
-        .parse::<url::Url>()
-        .map_err(|_| ConfigError::InvalidEnvironment {
-            name: CREDENTIAL_BROKER_URL,
-        })?;
-    let private_http_hosts = optional_environment(source, CREDENTIAL_BROKER_PRIVATE_HTTP_HOSTS)?
-        .map(|hosts| {
-            hosts
-                .split(',')
-                .map(str::trim)
-                .filter(|host| !host.is_empty())
-                .map(str::to_owned)
-                .collect()
+) -> Result<Option<BrowserFallbackConfig>, ConfigError> {
+    let helper = optional_absolute_path(source, REZKA_BROWSER_HELPER)?;
+    if let Some(path) = helper.as_ref() {
+        require_existing_file(path, REZKA_BROWSER_HELPER)?;
+        return Ok(Some(BrowserFallbackConfig {
+            helper,
+            chromium_bin: None,
+            timeout: DEFAULT_REZKA_BROWSER_TIMEOUT,
+        }));
+    }
+    let chromium_bin = PathBuf::from(crate::anubis_browser::default_chromium_bin());
+    if chromium_bin.is_file() {
+        return Ok(Some(BrowserFallbackConfig {
+            helper: None,
+            chromium_bin: Some(chromium_bin),
+            timeout: DEFAULT_REZKA_BROWSER_TIMEOUT,
+        }));
+    }
+    Ok(None)
+}
+
+fn optional_absolute_path(
+    source: &impl ConfigSource,
+    name: &'static str,
+) -> Result<Option<PathBuf>, ConfigError> {
+    optional_environment(source, name)?
+        .map(|value| {
+            let path = PathBuf::from(value);
+            if !path.is_absolute() {
+                return Err(ConfigError::InvalidEnvironment { name });
+            }
+            Ok(path)
         })
-        .unwrap_or_default();
-    Ok(CredentialBrokerCompositionConfig {
-        base_url,
-        token: read_secret(
-            source,
-            CREDENTIAL_BROKER_TOKEN,
-            CREDENTIAL_BROKER_TOKEN_FILE,
-            SecretKind::Token,
-        )?,
-        private_http_hosts,
-    })
+        .transpose()
+}
+
+fn require_existing_file(path: &Path, name: &'static str) -> Result<(), ConfigError> {
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(ConfigError::InvalidEnvironment { name })
+    }
 }
 
 impl std::fmt::Debug for RunnerConfig {
@@ -1018,7 +1009,6 @@ impl std::fmt::Debug for RunnerConfig {
                 &self.qbittorrent.as_ref().map(|_| "[REDACTED]"),
             )
             .field("gluetun", &self.gluetun.as_ref().map(|_| "[REDACTED]"))
-            .field("credential_broker", &"[REDACTED]")
             .field("exit_after_job", &self.exit_after_job)
             .finish()
     }
@@ -1033,6 +1023,14 @@ pub struct RezkaCompositionConfig {
     session_store_path: PathBuf,
     user_agent: String,
     proxy_url: Option<url::Url>,
+    browser_fallback: Option<BrowserFallbackConfig>,
+}
+
+#[derive(Clone)]
+pub struct BrowserFallbackConfig {
+    helper: Option<PathBuf>,
+    chromium_bin: Option<PathBuf>,
+    timeout: std::time::Duration,
 }
 
 impl RezkaCompositionConfig {
@@ -1075,6 +1073,28 @@ impl RezkaCompositionConfig {
     pub const fn proxy_url(&self) -> Option<&url::Url> {
         self.proxy_url.as_ref()
     }
+
+    #[must_use]
+    pub const fn browser_fallback(&self) -> Option<&BrowserFallbackConfig> {
+        self.browser_fallback.as_ref()
+    }
+}
+
+impl BrowserFallbackConfig {
+    #[must_use]
+    pub fn helper(&self) -> Option<&Path> {
+        self.helper.as_deref()
+    }
+
+    #[must_use]
+    pub fn chromium_bin(&self) -> Option<&Path> {
+        self.chromium_bin.as_deref()
+    }
+
+    #[must_use]
+    pub const fn timeout(&self) -> std::time::Duration {
+        self.timeout
+    }
 }
 
 impl std::fmt::Debug for RezkaCompositionConfig {
@@ -1088,6 +1108,22 @@ impl std::fmt::Debug for RezkaCompositionConfig {
             .field("cookie_key", &"[REDACTED]")
             .field("session_store_path", &"[REDACTED]")
             .field("user_agent", &"[REDACTED]")
+            .field("proxy_url", &"[REDACTED]")
+            .field(
+                "browser_fallback",
+                &self.browser_fallback.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for BrowserFallbackConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BrowserFallbackConfig")
+            .field("helper", &"[REDACTED]")
+            .field("chromium_bin", &"[REDACTED]")
+            .field("timeout_ms", &self.timeout.as_millis())
             .finish()
     }
 }

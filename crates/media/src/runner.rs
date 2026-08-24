@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicU8, Ordering},
     },
     time::Duration,
 };
@@ -16,6 +16,34 @@ use tokio::io::AsyncWriteExt as _;
 use unicode_normalization::UnicodeNormalization as _;
 
 use crate::config::ClientConfig;
+
+#[repr(u8)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+enum CancellationReason {
+    None = 0,
+    User = 1,
+    VpnUnstable = 2,
+    VpnFatal = 3,
+    /// Preserve the old non-zero cancellation semantics if the atomic value
+    /// is ever corrupted, without treating an unknown value as a VPN event.
+    Unknown = u8::MAX,
+}
+
+impl CancellationReason {
+    const fn from_raw(raw: u8) -> Self {
+        match raw {
+            0 => Self::None,
+            1 => Self::User,
+            2 => Self::VpnUnstable,
+            3 => Self::VpnFatal,
+            _ => Self::Unknown,
+        }
+    }
+
+    const fn as_raw(self) -> u8 {
+        self as u8
+    }
+}
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, thiserror::Error)]
 pub enum RunnerError {
@@ -35,6 +63,11 @@ pub enum RunnerError {
     SourceTransferRejected,
     #[error("Rezka translation requires premium access")]
     RezkaPremiumRequired,
+    #[error("Rezka provider diagnostic: {category:?}")]
+    RezkaDiagnostic {
+        category: rezka_client::RezkaDiagnosticCategory,
+        retryable: bool,
+    },
     #[error("runner task stage failed")]
     TaskStage {
         task_ordinal: u32,
@@ -51,6 +84,10 @@ pub enum RunnerFailureKind {
     SourceTransferTransient,
     SourceTransferRejected,
     RezkaPremiumRequired,
+    RezkaDiagnostic {
+        category: rezka_client::RezkaDiagnosticCategory,
+        retryable: bool,
+    },
 }
 
 impl RunnerError {
@@ -64,6 +101,10 @@ impl RunnerError {
             Self::SourceTransferTransient => (true, "source_transfer_transient"),
             Self::SourceTransferRejected => (false, "source_transfer_rejected"),
             Self::RezkaPremiumRequired => (false, "rezka_premium_required"),
+            Self::RezkaDiagnostic {
+                category,
+                retryable,
+            } => (retryable, rezka_diagnostic_code(category)),
             Self::TaskStage { failure, .. } => failure.stage_failure(),
         }
     }
@@ -80,6 +121,13 @@ impl RunnerError {
             Self::SourceTransferTransient => RunnerFailureKind::SourceTransferTransient,
             Self::SourceTransferRejected => RunnerFailureKind::SourceTransferRejected,
             Self::RezkaPremiumRequired => RunnerFailureKind::RezkaPremiumRequired,
+            Self::RezkaDiagnostic {
+                category,
+                retryable,
+            } => RunnerFailureKind::RezkaDiagnostic {
+                category,
+                retryable,
+            },
             _ => RunnerFailureKind::Execution,
         };
         Self::TaskStage {
@@ -111,7 +159,24 @@ impl RunnerFailureKind {
             Self::SourceTransferTransient => (true, "source_transfer_transient"),
             Self::SourceTransferRejected => (false, "source_transfer_rejected"),
             Self::RezkaPremiumRequired => (false, "rezka_premium_required"),
+            Self::RezkaDiagnostic {
+                category,
+                retryable,
+            } => (retryable, rezka_diagnostic_code(category)),
         }
+    }
+}
+
+const fn rezka_diagnostic_code(category: rezka_client::RezkaDiagnosticCategory) -> &'static str {
+    match category {
+        rezka_client::RezkaDiagnosticCategory::RezkaReachable => "rezka_reachable",
+        rezka_client::RezkaDiagnosticCategory::AnubisChallengeRequired => {
+            "anubis_challenge_required"
+        }
+        rezka_client::RezkaDiagnosticCategory::AnubisChallengeFailed => "anubis_challenge_failed",
+        rezka_client::RezkaDiagnosticCategory::RezkaProviderRejected => "rezka_provider_rejected",
+        rezka_client::RezkaDiagnosticCategory::RezkaParserInvalid => "rezka_parser_invalid",
+        rezka_client::RezkaDiagnosticCategory::SessionStoreError => "session_store_error",
     }
 }
 
@@ -166,13 +231,62 @@ pub trait JobExecutor: Send + Sync {
 pub struct RunnerControl {
     api: Arc<dyn RunnerApi>,
     lease: LeaseDto,
-    cancelled: Arc<AtomicBool>,
+    cancel_reason: Arc<AtomicU8>,
 }
 
 impl RunnerControl {
+    fn cancellation_reason(&self) -> CancellationReason {
+        CancellationReason::from_raw(self.cancel_reason.load(Ordering::SeqCst))
+    }
+
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
+        self.cancellation_reason() != CancellationReason::None
+    }
+
+    #[must_use]
+    pub fn is_vpn_unstable(&self) -> bool {
+        self.cancellation_reason() == CancellationReason::VpnUnstable
+    }
+
+    #[must_use]
+    pub fn is_vpn_fatal(&self) -> bool {
+        self.cancellation_reason() == CancellationReason::VpnFatal
+    }
+
+    /// Cancel active work because the VPN lease can no longer be trusted.
+    /// The separate reason lets the iteration report a retryable transfer
+    /// failure instead of turning an IP change into a user cancellation.
+    pub fn request_retryable_vpn_cancel(&self) {
+        // Keep the reason and cancellation flag in one atomic state. Two
+        // independent flags permit a user cancellation to be observed between
+        // the VPN flag store and the cancellation CAS, making the final reason
+        // depend on which writer happened to run last rather than on a clear
+        // winner of the race.
+        let _ = self.cancel_reason.compare_exchange(
+            CancellationReason::None.as_raw(),
+            CancellationReason::VpnUnstable.as_raw(),
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+    }
+
+    fn request_fatal_vpn_cancel(&self) {
+        let _ = self.cancel_reason.compare_exchange(
+            CancellationReason::None.as_raw(),
+            CancellationReason::VpnFatal.as_raw(),
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+    }
+
+    fn request_non_vpn_cancel(&self) {
+        let _ = self.cancel_reason.compare_exchange(
+            CancellationReason::None.as_raw(),
+            CancellationReason::User.as_raw(),
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
     }
 
     /// Reports a stage start. Progress events are best-effort: a transient
@@ -348,6 +462,7 @@ const _: () = assert!(EXECUTION_STAGE_ORDINAL > 3);
 /// for the same window. The window is far longer than any job can run, so an
 /// in-progress download or transcode is never mistaken for an orphan.
 const STAGING_RETENTION_WINDOW: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const REZKA_VPN_IP_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const PROGRESS_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
@@ -449,7 +564,6 @@ pub struct MediaJobExecutor {
     torrent_tv_category: String,
     torrent_movies_category: String,
     gluetun: Option<Arc<media_integrations::gluetun::GluetunClient>>,
-    credential_broker: Arc<media_integrations::credential_broker::CredentialBrokerClient>,
     roots: media_runner::StorageRoots,
     vaapi_device: std::path::PathBuf,
 }
@@ -491,7 +605,6 @@ struct RezkaWorkRequest<'a> {
     release_year: Option<u16>,
     season: Option<u32>,
     episode: Option<u32>,
-    premium_status: rezka_client::PremiumStatus,
     expected_duration_seconds: Option<f64>,
     translation: &'a str,
 }
@@ -503,7 +616,6 @@ impl MediaJobExecutor {
         pipeline: media_runner::EpisodePipeline,
         torrent: TorrentRouting,
         gluetun: Option<Arc<media_integrations::gluetun::GluetunClient>>,
-        credential_broker: Arc<media_integrations::credential_broker::CredentialBrokerClient>,
         roots: media_runner::StorageRoots,
         vaapi_device: std::path::PathBuf,
     ) -> Self {
@@ -514,7 +626,6 @@ impl MediaJobExecutor {
             torrent_tv_category: torrent.tv_category,
             torrent_movies_category: torrent.movies_category,
             gluetun,
-            credential_broker,
             roots,
             vaapi_device,
         }
@@ -526,12 +637,6 @@ impl MediaJobExecutor {
         control: &RunnerControl,
     ) -> Result<ExecutionOutcome, RunnerError> {
         match lease.execution.as_ref().ok_or(RunnerError::Execution)? {
-            media_contract::ExecutionSelectionDto::RezkaSessionRefresh {
-                credential_request_id,
-            } => {
-                self.execute_rezka_session_refresh(credential_request_id)
-                    .await
-            }
             media_contract::ExecutionSelectionDto::Rezka {
                 locator,
                 title_id,
@@ -601,45 +706,32 @@ impl MediaJobExecutor {
         }
     }
 
-    async fn execute_rezka_session_refresh(
-        &self,
-        credential_request_id: &str,
-    ) -> Result<ExecutionOutcome, RunnerError> {
-        let credentials = self
-            .credential_broker
-            .resolve(credential_request_id)
-            .await
-            .map_err(|error| {
-                tracing::warn!(error = %error, "Rezka credential resolution failed");
-                RunnerError::Execution
-            })?;
-        let credentials = rezka_client::RezkaCredentials {
-            username: secrecy::SecretString::from(credentials.username),
-            password: credentials.password,
-        };
-        let mut prepared = self.rezka.lock().await;
-        let crate::composition::PreparedRunnerSession {
-            client,
-            probe,
-            store,
-            ..
-        } = &mut *prepared;
-        client
-            .ensure_authenticated(&credentials, probe)
-            .await
-            .map_err(|error| {
-                tracing::warn!(error_code = ?error.code(), "Rezka authentication failed");
-                RunnerError::Execution
-            })?;
-        let snapshot = client.export_session().map_err(|error| {
-            tracing::warn!(error_code = ?error.code(), "Rezka session export failed");
-            RunnerError::Execution
-        })?;
-        store.save(&snapshot).map_err(|error| {
-            tracing::warn!(error = %error, "Rezka session persistence failed");
-            RunnerError::Execution
-        })?;
-        Ok(ExecutionOutcome::Completed)
+    async fn monitor_rezka_vpn_lease(
+        client: Arc<media_integrations::gluetun::GluetunClient>,
+        lease: media_integrations::gluetun::StickyJobLease,
+        control: RunnerControl,
+        interval: Duration,
+        mut stop: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        loop {
+            tokio::select! {
+                () = tokio::time::sleep(interval) => {
+                    if let Err(error) = client.verify_job_ip(&lease).await {
+                        tracing::warn!(
+                            error_code = ?error.code(),
+                            "Rezka VPN lease changed during active work"
+                        );
+                        if error.is_retryable() {
+                            control.request_retryable_vpn_cancel();
+                        } else {
+                            control.request_fatal_vpn_cancel();
+                        }
+                        return;
+                    }
+                }
+                _ = &mut stop => return,
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -664,6 +756,13 @@ impl MediaJobExecutor {
         title: &str,
     ) -> Result<ExecutionOutcome, RunnerError> {
         let mut prepared = self.rezka.lock().await;
+        let session_guard = prepared
+            .acquire_session_lock()
+            .await
+            .map_err(|_| rezka_session_store_error())?;
+        prepared
+            .reload_session()
+            .map_err(|_| rezka_session_store_error())?;
         let crate::composition::PreparedRunnerSession {
             client,
             probe,
@@ -673,25 +772,17 @@ impl MediaJobExecutor {
         client
             .ensure_session(probe)
             .await
-            .map_err(|_| RunnerError::Execution)?;
-        let snapshot = client
-            .export_session()
-            .map_err(|_| RunnerError::Execution)?;
-        store.save(&snapshot).map_err(|_| RunnerError::Execution)?;
+            .map_err(map_rezka_error)?;
+        let snapshot = client.export_session().map_err(map_rezka_error)?;
+        store
+            .save(&snapshot)
+            .map_err(|_| rezka_session_store_error())?;
         let locator =
             rezka_client::TitleLocator::new(locator).map_err(|_| RunnerError::Execution)?;
-        let details = client
-            .title(&locator)
-            .await
-            .map_err(|_| RunnerError::Execution)?;
+        let details = client.title(&locator).await.map_err(map_rezka_error)?;
         if details.id().get() != title_id {
             return Err(RunnerError::Execution);
         }
-        let premium_status = client
-            .premium_status()
-            .await
-            .map_err(|_| RunnerError::Execution)?;
-        tracing::info!(premium = ?premium_status, "resolved Rezka account status");
         let expected_duration_seconds =
             expected_source_duration_seconds(media_kind, details.duration_minutes());
         let translation_id =
@@ -707,15 +798,11 @@ impl MediaJobExecutor {
                 rezka_client::TranslationKey::Series { id: translation_id }
             }
         };
-        let selection = details
-            .select_translation(&key)
-            .map_err(|_| RunnerError::Execution)?;
-        if selection.translation().is_premium()
-            && premium_status != rezka_client::PremiumStatus::Active
-        {
+        let selection = details.select_translation(&key).map_err(map_rezka_error)?;
+        if selection.translation().is_premium() {
             tracing::warn!(
                 translation_id = translation_id.get(),
-                "refusing premium Rezka translation for a non-premium account"
+                "refusing premium Rezka translation in anonymous mode"
             );
             return Err(RunnerError::RezkaPremiumRequired);
         }
@@ -724,15 +811,13 @@ impl MediaJobExecutor {
             media_contract::MediaKindDto::Movie => vec![(
                 None,
                 None,
-                selection
-                    .movie_request()
-                    .map_err(|_| RunnerError::Execution)?,
+                selection.movie_request().map_err(map_rezka_error)?,
             )],
             media_contract::MediaKindDto::Series => {
                 let availability = client
                     .series_availability(&selection)
                     .await
-                    .map_err(|_| RunnerError::Execution)?;
+                    .map_err(map_rezka_error)?;
                 let targets = if !episodes.is_empty() {
                     episodes
                         .iter()
@@ -775,7 +860,7 @@ impl MediaJobExecutor {
                                     selection.playback_request(),
                                 )
                             })
-                            .map_err(|_| RunnerError::Execution)
+                            .map_err(map_rezka_error)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 if requests.is_empty() {
@@ -784,6 +869,11 @@ impl MediaJobExecutor {
                 requests
             }
         };
+        let snapshot = client.export_session().map_err(map_rezka_error)?;
+        store
+            .save(&snapshot)
+            .map_err(|_| rezka_session_store_error())?;
+        drop(session_guard);
         drop(prepared);
 
         let resolved_library_path_title = if media_kind == media_contract::MediaKindDto::Series {
@@ -816,6 +906,13 @@ impl MediaJobExecutor {
                 .stage_started(task_ordinal, "resolve_manifest", 0)
                 .await?;
             let mut prepared = self.rezka.lock().await;
+            let session_guard = prepared
+                .acquire_session_lock()
+                .await
+                .map_err(|_| rezka_session_store_error())?;
+            prepared
+                .reload_session()
+                .map_err(|_| rezka_session_store_error())?;
             let manifest = prepared
                 .client
                 .resolve(request)
@@ -826,17 +923,15 @@ impl MediaJobExecutor {
                         error = %error,
                         "Rezka playback resolve failed"
                     );
-                    RunnerError::Execution
+                    map_rezka_error(error)
                 })
                 .map_err(|error| error.at_stage(task_ordinal, "resolve_manifest", 0))?;
-            let snapshot = prepared
-                .client
-                .export_session()
-                .map_err(|_| RunnerError::Execution)?;
+            let snapshot = prepared.client.export_session().map_err(map_rezka_error)?;
             prepared
                 .store
                 .save(&snapshot)
-                .map_err(|_| RunnerError::Execution)?;
+                .map_err(|_| rezka_session_store_error())?;
+            drop(session_guard);
             drop(prepared);
             control
                 .stage_completed(task_ordinal, "resolve_manifest", 0)
@@ -862,7 +957,6 @@ impl MediaJobExecutor {
                 release_year: details.release_year(),
                 season,
                 episode,
-                premium_status,
                 expected_duration_seconds,
                 translation: &translation,
             })?;
@@ -929,7 +1023,6 @@ impl MediaJobExecutor {
             release_year,
             season,
             episode,
-            premium_status,
             expected_duration_seconds,
             translation,
         } = request;
@@ -944,16 +1037,11 @@ impl MediaJobExecutor {
             .join(&episode_id);
         let final_video =
             rezka_final_video_path(&self.roots, &safe_title, release_year, season, episode);
-        let variant = match premium_status {
-            rezka_client::PremiumStatus::Active => manifest.preferred_variant(),
-            rezka_client::PremiumStatus::Inactive => {
-                highest_standard_variant(manifest.variants()).ok_or(RunnerError::Execution)?
-            }
-        };
+        let variant =
+            highest_standard_variant(manifest.variants()).ok_or(RunnerError::Execution)?;
         tracing::info!(
             advertised_height = variant.advertised_quality().vertical_hint(),
-            premium = ?premium_status,
-            "selected Rezka stream quality"
+            "selected anonymous Rezka stream quality"
         );
         let endpoint = variant
             .endpoints()
@@ -1518,10 +1606,7 @@ impl JobExecutor for MediaJobExecutor {
         let current_job_id = lease.job.id.to_string();
         let uses_rezka_vpn = matches!(
             &lease.execution,
-            Some(
-                media_contract::ExecutionSelectionDto::Rezka { .. }
-                    | media_contract::ExecutionSelectionDto::RezkaSessionRefresh { .. },
-            )
+            Some(media_contract::ExecutionSelectionDto::Rezka { .. })
         );
         if uses_rezka_vpn {
             // Only create the staging directory here. Stamping it terminal is
@@ -1571,21 +1656,39 @@ impl JobExecutor for MediaJobExecutor {
         }
         let sticky = match (&self.gluetun, uses_rezka_vpn) {
             (Some(client), true) => Some((
-                client,
+                Arc::clone(client),
                 client
                     .begin_job(lease.job.id.to_string())
                     .await
-                    .map_err(|_| RunnerError::Execution)?,
+                    .map_err(map_gluetun_begin_error)?,
             )),
             _ => None,
         };
+        let monitor = sticky.as_ref().map(|(client, sticky)| {
+            let (stop, stopped) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(Self::monitor_rezka_vpn_lease(
+                Arc::clone(client),
+                sticky.clone(),
+                control.clone(),
+                REZKA_VPN_IP_CHECK_INTERVAL,
+                stopped,
+            ));
+            (stop, task)
+        });
         let result = self.execute_inner(lease, control).await;
-        if let Some((client, sticky)) = sticky {
-            if client.end_job(sticky).await.is_err() {
-                tracing::warn!("failed to end the sticky Rezka VPN job");
-            }
-            if client.rotate_between_jobs().await.is_err() {
-                tracing::warn!("failed to rotate the Rezka VPN between jobs");
+        if let Some((stop, task)) = monitor {
+            let _ = stop.send(());
+            let _ = task.await;
+        }
+        if let Some((client, sticky)) = sticky
+            && let Err(error) = client.end_job(sticky).await
+        {
+            tracing::warn!(
+                error_code = ?error.code(),
+                "Rezka VPN lease was not stable for the whole job"
+            );
+            if !matches!(&result, Ok(ExecutionOutcome::Cancelled)) {
+                return Err(RunnerError::SourceTransferTransient);
             }
         }
         result
@@ -2135,6 +2238,35 @@ fn map_pipeline_error(error: media_runner::RunnerPortError) -> RunnerError {
     }
 }
 
+fn map_rezka_error(error: rezka_client::RezkaError) -> RunnerError {
+    let retryable = matches!(
+        error.code(),
+        rezka_client::RezkaErrorCode::Transport
+            | rezka_client::RezkaErrorCode::ChallengeFailed
+            | rezka_client::RezkaErrorCode::AnubisTimeout
+            | rezka_client::RezkaErrorCode::AnubisRejected
+    );
+    RunnerError::RezkaDiagnostic {
+        category: error.diagnostic_category(),
+        retryable,
+    }
+}
+
+fn rezka_session_store_error() -> RunnerError {
+    RunnerError::RezkaDiagnostic {
+        category: rezka_client::RezkaDiagnosticCategory::SessionStoreError,
+        retryable: true,
+    }
+}
+
+fn map_gluetun_begin_error(error: media_integrations::gluetun::GluetunError) -> RunnerError {
+    if error.is_retryable() {
+        RunnerError::SourceTransferTransient
+    } else {
+        RunnerError::Configuration
+    }
+}
+
 fn combine_episode_outcome(
     aggregate: ExecutionOutcome,
     current: ExecutionOutcome,
@@ -2199,14 +2331,25 @@ pub async fn run_single_iteration(
         return Err(RunnerError::Execution);
     }
     let _ = api.report(&lease, RunnerEventDto::Started).await?;
-    let cancelled = Arc::new(AtomicBool::new(matches!(
-        lease.job.state,
-        JobStateDto::CancelRequested | JobStateDto::Cancelled
-    )));
+    let cancel_reason = Arc::new(AtomicU8::new(
+        if matches!(
+            lease.job.state,
+            JobStateDto::CancelRequested | JobStateDto::Cancelled
+        ) {
+            CancellationReason::User.as_raw()
+        } else {
+            CancellationReason::None.as_raw()
+        },
+    ));
+    let control = RunnerControl {
+        api: api.clone(),
+        lease: lease.clone(),
+        cancel_reason,
+    };
     let finished = Arc::new(tokio::sync::Notify::new());
     let heartbeat_api = api.clone();
     let heartbeat_lease = lease.clone();
-    let heartbeat_cancelled = cancelled.clone();
+    let heartbeat_control = control.clone();
     let heartbeat_finished = finished.clone();
     let lease_ttl = lease_remaining_ttl(&lease).unwrap_or(FALLBACK_LEASE_TTL);
     let heartbeat_attempt_timeout = (heartbeat_interval / 2).max(Duration::from_millis(1));
@@ -2224,7 +2367,7 @@ pub async fn run_single_iteration(
         let mut consecutive_failures: u32 = 0;
         loop {
             if last_success.elapsed() >= cancel_after {
-                heartbeat_cancelled.store(true, Ordering::SeqCst);
+                heartbeat_control.request_non_vpn_cancel();
                 break;
             }
             match tokio::time::timeout(
@@ -2240,7 +2383,7 @@ pub async fn run_single_iteration(
                         current.job.state,
                         JobStateDto::CancelRequested | JobStateDto::Cancelled
                     ) {
-                        heartbeat_cancelled.store(true, Ordering::SeqCst);
+                        heartbeat_control.request_non_vpn_cancel();
                     }
                 }
                 // A failed or timed-out attempt keeps the lease unrenewed; retry
@@ -2264,11 +2407,6 @@ pub async fn run_single_iteration(
             }
         }
     });
-    let control = RunnerControl {
-        api: api.clone(),
-        lease: lease.clone(),
-        cancelled,
-    };
     control
         .stage_started(EXECUTION_TASK_ORDINAL, "execution", EXECUTION_STAGE_ORDINAL)
         .await?;
@@ -2281,13 +2419,19 @@ pub async fn run_single_iteration(
             JobStateDto::CancelRequested | JobStateDto::Cancelled
         )
     {
-        control.cancelled.store(true, Ordering::SeqCst);
+        control.request_non_vpn_cancel();
     }
     if control.is_cancelled() {
         if executor.cleanup_cancelled(&lease).await.is_err() {
             tracing::warn!("failed to clean up a cancelled job");
         }
-        outcome = Ok(ExecutionOutcome::Cancelled);
+        outcome = if control.is_vpn_unstable() {
+            Err(RunnerError::SourceTransferTransient)
+        } else if control.is_vpn_fatal() {
+            Err(RunnerError::Configuration)
+        } else {
+            Ok(ExecutionOutcome::Cancelled)
+        };
     }
     // Wake the heartbeat task immediately instead of waiting out its sleep.
     finished.notify_one();

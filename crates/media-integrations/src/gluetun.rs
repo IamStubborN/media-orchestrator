@@ -20,6 +20,7 @@ pub enum GluetunErrorCode {
     InvalidJob,
     StickyJobActive,
     LeaseMismatch,
+    LeaseIpChanged,
     Transport,
     Unauthorized,
     ProviderResponse,
@@ -36,6 +37,8 @@ pub enum GluetunError {
     StickyJobActive,
     #[error("sticky job lease does not match the active job")]
     LeaseMismatch,
+    #[error("VPN public IP changed while the sticky job was active")]
+    LeaseIpChanged,
     #[error("Gluetun request failed")]
     Transport,
     #[error("Gluetun authentication failed")]
@@ -54,11 +57,21 @@ impl GluetunError {
             Self::InvalidJob => GluetunErrorCode::InvalidJob,
             Self::StickyJobActive => GluetunErrorCode::StickyJobActive,
             Self::LeaseMismatch => GluetunErrorCode::LeaseMismatch,
+            Self::LeaseIpChanged => GluetunErrorCode::LeaseIpChanged,
             Self::Transport => GluetunErrorCode::Transport,
             Self::Unauthorized => GluetunErrorCode::Unauthorized,
             Self::ProviderResponse { .. } => GluetunErrorCode::ProviderResponse,
             Self::UnexpectedVpnState => GluetunErrorCode::UnexpectedVpnState,
         }
+    }
+
+    /// Whether a failed control-plane observation can plausibly recover on a
+    /// bounded retry. Authentication, malformed responses, and local state
+    /// mismatches are deterministic and must not turn an active job into an
+    /// endless retry loop.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        is_transient(self) || matches!(self, Self::LeaseIpChanged | Self::UnexpectedVpnState)
     }
 }
 
@@ -125,6 +138,7 @@ impl fmt::Debug for GluetunConfig {
 pub struct StickyJobLease {
     job_id: String,
     generation: u64,
+    public_ip: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -173,10 +187,12 @@ impl GluetunClient {
         if state.active.is_some() {
             return Err(GluetunError::StickyJobActive);
         }
+        let public_ip = self.public_ip().await?;
         state.generation = state.generation.wrapping_add(1);
         let lease = StickyJobLease {
             job_id,
             generation: state.generation,
+            public_ip,
         };
         state.active = Some(lease.clone());
         Ok(lease)
@@ -188,6 +204,25 @@ impl GluetunClient {
             return Err(GluetunError::LeaseMismatch);
         }
         state.active = None;
+        let current_public_ip = self.public_ip().await?;
+        if current_public_ip != lease.public_ip {
+            return Err(GluetunError::LeaseIpChanged);
+        }
+        Ok(())
+    }
+
+    /// Verify that an active lease still uses the IP captured at job start.
+    /// This never rotates or clears the lease; callers decide how to cancel
+    /// the active work when verification fails.
+    pub async fn verify_job_ip(&self, lease: &StickyJobLease) -> Result<(), GluetunError> {
+        let state = self.sticky.lock().await;
+        if state.active.as_ref() != Some(lease) {
+            return Err(GluetunError::LeaseMismatch);
+        }
+        let current_public_ip = self.public_ip().await?;
+        if current_public_ip != lease.public_ip {
+            return Err(GluetunError::LeaseIpChanged);
+        }
         Ok(())
     }
 
@@ -264,8 +299,11 @@ impl GluetunClient {
         let start = Instant::now();
         let mut delay = ROTATION_POLL_INITIAL;
         loop {
-            if self.status().await? == VpnStatusReport::Running {
-                return Ok(());
+            match self.status().await {
+                Ok(VpnStatusReport::Running) => return Ok(()),
+                Ok(_) => {}
+                Err(error) if !is_transient(&error) => return Err(error),
+                Err(_) => {}
             }
             if start.elapsed() + delay >= deadline {
                 return Err(GluetunError::UnexpectedVpnState);

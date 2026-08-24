@@ -537,60 +537,6 @@ async fn partial_completion_creates_plex_and_partial_notifications_once() {
 }
 
 #[tokio::test]
-async fn successful_session_refresh_is_silent() {
-    let (test_db, jobs, leases) = setup().await;
-    jobs.create(
-        operation_key(),
-        new_job("selection:session-refresh:018f3f86-7b4c-7b4f-9b6a-6d62f45bb111"),
-    )
-    .await
-    .unwrap();
-    let lease = leases
-        .lease_next(
-            operation_key(),
-            RUNNER_CLIENT_ID,
-            time::Duration::seconds(60),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    for event in [
-        JobEvent::started(JobEventId::new()),
-        JobEvent::stage_started(JobEventId::new(), 0, "execution".to_owned(), 1).unwrap(),
-        JobEvent::stage_completed(
-            JobEventId::new(),
-            0,
-            "execution".to_owned(),
-            1,
-            Default::default(),
-        )
-        .unwrap(),
-        JobEvent::transition(JobEventId::new(), JobState::Publishing, None).unwrap(),
-        JobEvent::transition(JobEventId::new(), JobState::PlexPending, None).unwrap(),
-        JobEvent::transition(JobEventId::new(), JobState::Completed, None).unwrap(),
-    ] {
-        leases
-            .report_event(operation_key(), lease.lease_id(), RUNNER_CLIENT_ID, event)
-            .await
-            .unwrap();
-    }
-
-    let notifications = notification_rows(&test_db).await;
-    assert!(notifications.is_empty());
-
-    let deliveries = SeaOrmNotificationOutbox::new(test_db.connection().clone())
-        .lease_pending(
-            NotificationId::new(),
-            time::OffsetDateTime::now_utc() + time::Duration::seconds(1),
-            time::Duration::seconds(30),
-            10,
-        )
-        .await
-        .unwrap();
-    assert!(deliveries.is_empty());
-}
-
-#[tokio::test]
 async fn different_source_events_keep_only_the_latest_non_terminal_status() {
     let (test_db, jobs, leases) = setup().await;
     jobs.create(operation_key(), new_job("semantic-notification-dedupe"))

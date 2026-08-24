@@ -26,9 +26,9 @@ use media_core::{
     IdentityStore, Job, JobApplication, JobId, JobStore, MediaExternalReference, NewJob,
     NotifyScope, OperationKey, PortError, Provider, QueueStatus, ReleaseCandidate, ReleaseIdentity,
     ReleaseLifecycle, ReleaseMetadataPort, ReleaseMetadataResult, ReleasePrecision, ReleaseQuery,
-    ReleaseQueryError, ReleaseSource, ScheduledEpisode, SourceChoiceAction,
-    TrackedEpisodeDownloadPort, TrackingDownload, TrackingId, TrackingScope, TrackingSubscription,
-    UserId, SECONDARY_USER_ID,
+    ReleaseQueryError, ReleaseSource, RunnerLifecycle, RunnerLifecycleState, RunnerLifecycleStore,
+    RunnerLifecycleUpdate, ScheduledEpisode, SourceChoiceAction, TrackedEpisodeDownloadPort,
+    TrackingDownload, TrackingId, TrackingScope, TrackingSubscription, UserId, SECONDARY_USER_ID,
 };
 
 #[derive(Default)]
@@ -933,7 +933,7 @@ async fn choice_set_download_selects_the_exact_cached_result_without_generic_sco
 }
 
 #[tokio::test]
-async fn choice_set_refreshes_empty_source_and_keeps_healthy_provider_after_failure() {
+async fn choice_set_refresh_skips_rezka_during_vpn_rotation_and_keeps_healthy_provider() {
     let choice_set = uuid::Uuid::new_v4();
     let persistence = Arc::new(MemorySearchPersistence::default());
     let expired = OffsetDateTime::now_utc() - time::Duration::minutes(1);
@@ -980,20 +980,33 @@ async fn choice_set_refreshes_empty_source_and_keeps_healthy_provider_after_fail
         *title = "Tracked Show [S03E05]".to_owned();
     }
     let provider = Arc::new(FakeProvider {
-        // Rezka deliberately has no page and fails; Prowlarr remains healthy.
-        pages: Mutex::new(HashMap::from([(
-            ProviderDto::Prowlarr,
-            vec![ProviderPage {
-                results: vec![exact],
-                provider_continuation: None,
-            }],
-        )])),
+        // The Rezka page must remain untouched while its VPN rotates;
+        // Prowlarr remains healthy and is still refreshed.
+        pages: Mutex::new(HashMap::from([
+            (
+                ProviderDto::Rezka,
+                vec![ProviderPage {
+                    results: Vec::new(),
+                    provider_continuation: None,
+                }],
+            ),
+            (
+                ProviderDto::Prowlarr,
+                vec![ProviderPage {
+                    results: vec![exact],
+                    provider_continuation: None,
+                }],
+            ),
+        ])),
     });
     let service = DurableSearchService::new(
         persistence,
-        provider,
+        provider.clone(),
         Arc::new(JobApplication::new(Arc::new(MemoryJobStore::default()))),
-    );
+    )
+    .with_lifecycle(Arc::new(FakeLifecycleStore::new(
+        RunnerLifecycleState::Rotating,
+    )));
 
     let refreshed = service
         .refresh_choice_set(PRIMARY_USER_ID, &choice_set.to_string())
@@ -1007,6 +1020,7 @@ async fn choice_set_refreshes_empty_source_and_keeps_healthy_provider_after_fail
             .as_array()
             .is_some_and(|results| results.len() == 1)
     );
+    assert_eq!(provider.pages.lock().unwrap()[&ProviderDto::Rezka].len(), 1);
 }
 
 #[tokio::test]
@@ -1187,6 +1201,36 @@ impl SearchPersistence for MemorySearchPersistence {
 
 struct FakeProvider {
     pages: Mutex<HashMap<ProviderDto, Vec<ProviderPage>>>,
+}
+
+struct FakeLifecycleStore {
+    state: Mutex<RunnerLifecycleState>,
+}
+
+impl FakeLifecycleStore {
+    fn new(state: RunnerLifecycleState) -> Self {
+        Self {
+            state: Mutex::new(state),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RunnerLifecycleStore for FakeLifecycleStore {
+    async fn get(&self) -> Result<RunnerLifecycle, PortError> {
+        Ok(RunnerLifecycle {
+            state: *self.state.lock().unwrap(),
+            reason: None,
+            previous_ip: None,
+            current_ip: None,
+            updated_at: time::OffsetDateTime::UNIX_EPOCH,
+        })
+    }
+
+    async fn update(&self, update: RunnerLifecycleUpdate) -> Result<RunnerLifecycle, PortError> {
+        *self.state.lock().unwrap() = update.state;
+        self.get().await
+    }
 }
 
 #[async_trait::async_trait]
@@ -1767,6 +1811,144 @@ async fn first_empty_provider_page_is_a_successful_search() {
     assert_eq!(page.source, ProviderDto::Prowlarr);
     assert!(page.results.is_empty());
     assert_eq!(page.continuation, None);
+}
+
+#[tokio::test]
+async fn rezka_search_is_rejected_before_provider_call_during_vpn_rotation() {
+    let provider = Arc::new(FakeProvider {
+        pages: Mutex::new(HashMap::from([(
+            ProviderDto::Rezka,
+            vec![ProviderPage {
+                results: Vec::new(),
+                provider_continuation: None,
+            }],
+        )])),
+    });
+    let service = DurableSearchService::new(
+        Arc::new(MemorySearchPersistence::default()),
+        provider.clone(),
+        Arc::new(JobApplication::new(Arc::new(MemoryJobStore::default()))),
+    )
+    .with_lifecycle(Arc::new(FakeLifecycleStore::new(
+        RunnerLifecycleState::Rotating,
+    )));
+
+    assert_eq!(
+        service
+            .start(PRIMARY_USER_ID, request(ProviderDto::Rezka))
+            .await,
+        Err(SearchError::VpnRotationRequired)
+    );
+    assert_eq!(provider.pages.lock().unwrap()[&ProviderDto::Rezka].len(), 1);
+}
+
+#[tokio::test]
+async fn rezka_continuation_is_rejected_before_provider_call_during_vpn_rotation() {
+    let public = SearchResultDto::Rezka {
+        result_id: "rezka:42".to_owned(),
+        title: "Example".to_owned(),
+        original_title: None,
+        year: Some(2026),
+        media_kind: MediaKindDto::Movie,
+        thumbnail_url: None,
+        translations: Vec::new(),
+        availability: None,
+    };
+    let provider = Arc::new(FakeProvider {
+        pages: Mutex::new(HashMap::from([(
+            ProviderDto::Rezka,
+            vec![
+                ProviderPage {
+                    results: vec![ProviderResult::rezka(
+                        public,
+                        "/example.html".to_owned(),
+                        42,
+                    )],
+                    provider_continuation: Some("next".to_owned()),
+                },
+                ProviderPage {
+                    results: Vec::new(),
+                    provider_continuation: None,
+                },
+            ],
+        )])),
+    });
+    let lifecycle = Arc::new(FakeLifecycleStore::new(RunnerLifecycleState::Ready));
+    let service = DurableSearchService::new(
+        Arc::new(MemorySearchPersistence::default()),
+        provider.clone(),
+        Arc::new(JobApplication::new(Arc::new(MemoryJobStore::default()))),
+    )
+    .with_lifecycle(lifecycle.clone());
+    let request = request(ProviderDto::Rezka);
+    let page = service
+        .start(PRIMARY_USER_ID, request.clone())
+        .await
+        .unwrap();
+    let continuation = page.continuation.expect("provider continuation");
+    *lifecycle.state.lock().unwrap() = RunnerLifecycleState::Rotating;
+
+    assert_eq!(
+        service
+            .continue_search(
+                PRIMARY_USER_ID,
+                media_contract::ContinueSearchRequest {
+                    continuation,
+                    scope: request.scope,
+                },
+            )
+            .await,
+        Err(SearchError::VpnRotationRequired)
+    );
+    assert_eq!(provider.pages.lock().unwrap()[&ProviderDto::Rezka].len(), 1);
+}
+
+#[tokio::test]
+async fn source_all_semantics_reject_rezka_but_keep_prowlarr_available() {
+    let provider = Arc::new(FakeProvider {
+        pages: Mutex::new(HashMap::from([
+            (
+                ProviderDto::Rezka,
+                vec![ProviderPage {
+                    results: Vec::new(),
+                    provider_continuation: None,
+                }],
+            ),
+            (
+                ProviderDto::Prowlarr,
+                vec![ProviderPage {
+                    results: Vec::new(),
+                    provider_continuation: None,
+                }],
+            ),
+        ])),
+    });
+    let service = DurableSearchService::new(
+        Arc::new(MemorySearchPersistence::default()),
+        provider.clone(),
+        Arc::new(JobApplication::new(Arc::new(MemoryJobStore::default()))),
+    )
+    .with_lifecycle(Arc::new(FakeLifecycleStore::new(
+        RunnerLifecycleState::Rotating,
+    )));
+
+    assert_eq!(
+        service
+            .start(PRIMARY_USER_ID, request(ProviderDto::Rezka))
+            .await,
+        Err(SearchError::VpnRotationRequired)
+    );
+    let prowlarr = service
+        .start(PRIMARY_USER_ID, request(ProviderDto::Prowlarr))
+        .await
+        .expect("Prowlarr must remain available during Rezka VPN rotation");
+    assert_eq!(prowlarr.source, ProviderDto::Prowlarr);
+    assert!(prowlarr.results.is_empty());
+    assert_eq!(provider.pages.lock().unwrap()[&ProviderDto::Rezka].len(), 1);
+    assert_eq!(
+        provider.pages.lock().unwrap()[&ProviderDto::Prowlarr].len(),
+        0
+    );
 }
 
 #[tokio::test]

@@ -13,8 +13,9 @@ use media_core::{
     EpisodeDiscoveryPort, EpisodeMappingConfirmation, EpisodeSnapshot, IdentityStore, Job,
     JobApplication, JobId, JobState, NeedsActionReason, NewJobCommand, NotifyScope, OperationKey,
     PortError, Provider, ProviderAvailability, ReleaseIdentity, ReleaseMetadataPort,
-    ReleaseMetadataResult, ReleasePrecision, ReleaseQuery, ReleaseSource, ScheduledEpisode,
-    TrackedEpisodeDownloadPort, TrackingSubscription, UserId,
+    ReleaseMetadataResult, ReleasePrecision, ReleaseQuery, ReleaseSource, RunnerLifecycleState,
+    RunnerLifecycleStore, ScheduledEpisode, TrackedEpisodeDownloadPort, TrackingSubscription,
+    UserId,
 };
 use sha2::{Digest as _, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -22,8 +23,8 @@ use unicode_normalization::UnicodeNormalization;
 
 const SEARCH_TTL: time::Duration = time::Duration::hours(24);
 const REZKA_CATALOG_CONTINUATION_PREFIX: &str = "catalog:";
-const REZKA_AUTH_ATTEMPTS: usize = 3;
-const REZKA_AUTH_RETRY_DELAY: Duration = Duration::from_millis(500);
+const REZKA_SESSION_ATTEMPTS: usize = 3;
+const REZKA_SESSION_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone)]
 pub struct ProviderPage {
@@ -1141,31 +1142,37 @@ impl ConcreteSearchProvider {
         let state = self.rezka.as_ref().ok_or(SearchError::Provider)?;
         let mut state = state.lock().await;
         let prepared = &mut *state;
+        // The lock covers load, challenge solving, validation, and atomic save. It is acquired on a
+        // blocking worker so inter-process contention never stalls an async executor thread.
+        let _session_guard = prepared
+            .acquire_session_lock()
+            .await
+            .map_err(|_| SearchError::RezkaDiagnostic(Self::session_store_diagnostic()))?;
         prepared
             .reload_session()
-            .map_err(|_| SearchError::Infrastructure)?;
-        for attempt in 1..=REZKA_AUTH_ATTEMPTS {
+            .map_err(|_| SearchError::RezkaDiagnostic(Self::session_store_diagnostic()))?;
+        for attempt in 1..=REZKA_SESSION_ATTEMPTS {
             let result = prepared.client.ensure_session(&prepared.probe).await;
             match result {
                 Ok(_) => break,
                 Err(error)
-                    if retryable_rezka_auth_error(error.code())
-                        && attempt < REZKA_AUTH_ATTEMPTS =>
+                    if retryable_rezka_session_error(error.code())
+                        && attempt < REZKA_SESSION_ATTEMPTS =>
                 {
                     tracing::warn!(
-                        stage = "authentication",
+                        stage = "anubis",
                         attempt,
                         error_code = ?error.code(),
-                        "temporary Rezka authentication failure; retrying with a fresh session"
+                        "temporary Rezka challenge failure; retrying with a fresh clearance"
                     );
-                    tokio::time::sleep(REZKA_AUTH_RETRY_DELAY).await;
-                    prepared
-                        .reload_session()
-                        .map_err(|_| SearchError::Infrastructure)?;
+                    tokio::time::sleep(REZKA_SESSION_RETRY_DELAY).await;
+                    prepared.reload_session().map_err(|_| {
+                        SearchError::RezkaDiagnostic(Self::session_store_diagnostic())
+                    })?;
                 }
                 Err(error) => {
-                    tracing::warn!(stage = "authentication", error_code = ?error.code(), error = %error, "Rezka search failed");
-                    return Err(SearchError::Provider);
+                    tracing::warn!(stage = "session", error_code = ?error.code(), error = %error, "Rezka search failed");
+                    return Err(Self::rezka_search_error(error));
                 }
             }
         }
@@ -1174,12 +1181,12 @@ impl ConcreteSearchProvider {
             .export_session()
             .map_err(|error| {
                 tracing::warn!(stage = "session_export", error_code = ?error.code(), error = %error, "Rezka search failed");
-                SearchError::Provider
+                Self::rezka_search_error(error)
             })?;
         prepared
             .store
             .save(&snapshot)
-            .map_err(|_| SearchError::Infrastructure)?;
+            .map_err(|_| SearchError::RezkaDiagnostic(Self::session_store_diagnostic()))?;
         let (offset, current_target) = continuation.map_or(Ok((0, None)), |value| {
             decode_rezka_catalog_continuation(value)
         })?;
@@ -1195,7 +1202,7 @@ impl ConcreteSearchProvider {
         }
         .map_err(|error| {
             tracing::warn!(stage = "catalog_search", error_code = ?error.code(), error = %error, "Rezka search failed");
-            SearchError::Provider
+            Self::rezka_search_error(error)
         })?;
         let entries = page.entries();
         if offset > entries.len() {
@@ -1205,6 +1212,7 @@ impl ConcreteSearchProvider {
         let mut cursor = offset;
         let mut title_failures = 0_usize;
         let mut usable_titles = 0_usize;
+        let mut last_title_diagnostic = None;
         'entries: while cursor < entries.len() && results.len() < MAX_SEARCH_RESULTS_PER_PAGE {
             let entry = &entries[cursor];
             cursor += 1;
@@ -1212,6 +1220,7 @@ impl ConcreteSearchProvider {
                 Ok(details) => details,
                 Err(error) if skippable_title_error(error.code()) => {
                     title_failures += 1;
+                    last_title_diagnostic = Some(Self::rezka_search_diagnostic(&error));
                     tracing::warn!(
                         stage = "title",
                         error_code = ?error.code(),
@@ -1222,7 +1231,7 @@ impl ConcreteSearchProvider {
                 }
                 Err(error) => {
                     tracing::warn!(stage = "title", error_code = ?error.code(), error = %error, "Rezka search failed");
-                    return Err(SearchError::Provider);
+                    return Err(Self::rezka_search_error(error));
                 }
             };
             usable_titles += 1;
@@ -1267,7 +1276,7 @@ impl ConcreteSearchProvider {
                 for (translation_id, selection) in selections {
                     let selection = selection.map_err(|error| {
                         tracing::warn!(stage = "translation", error_code = ?error.code(), error = %error, "Rezka search failed");
-                        SearchError::Provider
+                        Self::rezka_search_error(error)
                     })?;
                     let availability = match prepared.client.series_availability(&selection).await {
                         Ok(availability) => availability,
@@ -1408,7 +1417,14 @@ impl ConcreteSearchProvider {
             ));
         }
         if results.is_empty() && title_failures > 0 && usable_titles == 0 {
-            return Err(SearchError::Provider);
+            // Do not collapse an all-invalid page into the generic provider
+            // error: callers still need to distinguish a genuine parser
+            // failure from a transport/provider rejection, without receiving
+            // any provider body or challenge payload.
+            return Err(SearchError::RezkaDiagnostic(
+                last_title_diagnostic
+                    .unwrap_or(media_contract::RezkaDiagnosticCategoryDto::RezkaParserInvalid),
+            ));
         }
         let provider_continuation = if cursor < entries.len() {
             Some(encode_rezka_catalog_continuation(
@@ -1420,10 +1436,56 @@ impl ConcreteSearchProvider {
                 encode_rezka_catalog_continuation(0, Some(continuation.as_str()))
             })
         };
+        let snapshot = prepared.client.export_session().map_err(|error| {
+            tracing::warn!(
+                stage = "session_export",
+                error_code = ?error.code(),
+                error = %error,
+                "Rezka search failed"
+            );
+            Self::rezka_search_error(error)
+        })?;
+        prepared
+            .store
+            .save(&snapshot)
+            .map_err(|_| SearchError::RezkaDiagnostic(Self::session_store_diagnostic()))?;
         Ok(ProviderPage {
             results,
             provider_continuation,
         })
+    }
+
+    fn rezka_search_error(error: rezka_client::RezkaError) -> SearchError {
+        SearchError::RezkaDiagnostic(Self::rezka_search_diagnostic(&error))
+    }
+
+    fn rezka_search_diagnostic(
+        error: &rezka_client::RezkaError,
+    ) -> media_contract::RezkaDiagnosticCategoryDto {
+        match error.diagnostic_category() {
+            rezka_client::RezkaDiagnosticCategory::RezkaReachable => {
+                media_contract::RezkaDiagnosticCategoryDto::RezkaReachable
+            }
+            rezka_client::RezkaDiagnosticCategory::AnubisChallengeRequired => {
+                media_contract::RezkaDiagnosticCategoryDto::AnubisChallengeRequired
+            }
+            rezka_client::RezkaDiagnosticCategory::AnubisChallengeFailed => {
+                media_contract::RezkaDiagnosticCategoryDto::AnubisChallengeFailed
+            }
+            rezka_client::RezkaDiagnosticCategory::RezkaProviderRejected => {
+                media_contract::RezkaDiagnosticCategoryDto::RezkaProviderRejected
+            }
+            rezka_client::RezkaDiagnosticCategory::RezkaParserInvalid => {
+                media_contract::RezkaDiagnosticCategoryDto::RezkaParserInvalid
+            }
+            rezka_client::RezkaDiagnosticCategory::SessionStoreError => {
+                media_contract::RezkaDiagnosticCategoryDto::SessionStoreError
+            }
+        }
+    }
+
+    const fn session_store_diagnostic() -> media_contract::RezkaDiagnosticCategoryDto {
+        media_contract::RezkaDiagnosticCategoryDto::SessionStoreError
     }
 
     async fn search_prowlarr(
@@ -1551,8 +1613,14 @@ fn skippable_title_error(code: rezka_client::RezkaErrorCode) -> bool {
     )
 }
 
-fn retryable_rezka_auth_error(code: rezka_client::RezkaErrorCode) -> bool {
-    code == rezka_client::RezkaErrorCode::Transport
+fn retryable_rezka_session_error(code: rezka_client::RezkaErrorCode) -> bool {
+    matches!(
+        code,
+        rezka_client::RezkaErrorCode::Transport
+            | rezka_client::RezkaErrorCode::ChallengeFailed
+            | rezka_client::RezkaErrorCode::AnubisTimeout
+            | rezka_client::RezkaErrorCode::AnubisRejected
+    )
 }
 
 fn encode_rezka_catalog_continuation(offset: usize, target: Option<&str>) -> String {
@@ -2160,6 +2228,7 @@ pub struct DurableSearchService {
     provider: Arc<dyn SearchProvider>,
     jobs: Arc<JobApplication>,
     identity: Option<Arc<dyn IdentityStore>>,
+    lifecycle: Option<Arc<dyn RunnerLifecycleStore>>,
 }
 
 impl DurableSearchService {
@@ -2182,6 +2251,7 @@ impl DurableSearchService {
             provider,
             jobs,
             identity: None,
+            lifecycle: None,
         }
     }
 
@@ -2189,6 +2259,29 @@ impl DurableSearchService {
     pub fn with_identity(mut self, identity: Arc<dyn IdentityStore>) -> Self {
         self.identity = Some(identity);
         self
+    }
+
+    #[must_use]
+    pub fn with_lifecycle(mut self, lifecycle: Arc<dyn RunnerLifecycleStore>) -> Self {
+        self.lifecycle = Some(lifecycle);
+        self
+    }
+
+    async fn ensure_rezka_search_allowed(&self, source: ProviderDto) -> Result<(), SearchError> {
+        if source != ProviderDto::Rezka {
+            return Ok(());
+        }
+        let Some(lifecycle) = self.lifecycle.as_ref() else {
+            return Ok(());
+        };
+        let status = lifecycle
+            .get()
+            .await
+            .map_err(|_| SearchError::Infrastructure)?;
+        if status.state == RunnerLifecycleState::Rotating {
+            return Err(SearchError::VpnRotationRequired);
+        }
+        Ok(())
     }
 
     fn validate_request(request: &StartSearchRequest) -> Result<(), SearchError> {
@@ -2414,6 +2507,17 @@ impl DurableSearchService {
             else {
                 continue;
             };
+            // Refresh is a partial-provider operation: while the dedicated
+            // Rezka VPN is rotating, leave that source stale and continue
+            // refreshing healthy providers such as Prowlarr.
+            if source_name == "rezka"
+                && self
+                    .ensure_rezka_search_allowed(ProviderDto::Rezka)
+                    .await
+                    .is_err()
+            {
+                continue;
+            }
             // A refresh repeats the canonical title and aliases retained in
             // the previous public results. Search every provider page and
             // apply the exact episode filter to each candidate; stale release
@@ -2613,49 +2717,13 @@ impl DurableSearchService {
 
 #[async_trait::async_trait]
 impl SearchService for DurableSearchService {
-    async fn refresh_rezka_session(
-        &self,
-        owner: UserId,
-        operation: OperationKey,
-        request: media_contract::RezkaSessionRefreshRequest,
-    ) -> Result<JobDto, SearchError> {
-        if request.credential_request_id.trim().is_empty()
-            || request.credential_request_id.len() > 256
-            || request.credential_request_id.chars().any(char::is_control)
-        {
-            return Err(SearchError::InvalidRequest);
-        }
-        let result_ref = format!("selection:session-refresh:{}", uuid::Uuid::new_v4());
-        self.persistence
-            .insert_execution(
-                result_ref.clone(),
-                ExecutionSelectionDto::RezkaSessionRefresh {
-                    credential_request_id: request.credential_request_id,
-                },
-            )
-            .await?;
-        let job = self
-            .jobs
-            .create_job_for_owner(
-                owner,
-                operation,
-                NewJobCommand {
-                    provider: Provider::Rezka,
-                    result_ref,
-                    notify_scope: NotifyScope::Initiator,
-                },
-            )
-            .await
-            .map_err(application_error)?;
-        Ok(job_dto(&job))
-    }
-
     async fn start(
         &self,
         owner: UserId,
         request: StartSearchRequest,
     ) -> Result<SearchPageDto, SearchError> {
         Self::validate_request(&request)?;
+        self.ensure_rezka_search_allowed(request.source).await?;
         let provider_page = self.provider.search(&request, None).await?;
         let session = StoredSearchSession {
             id: uuid::Uuid::new_v4().to_string(),
@@ -2692,6 +2760,8 @@ impl SearchService for DurableSearchService {
         if session.request.scope != request.scope {
             return Err(SearchError::Forbidden);
         }
+        self.ensure_rezka_search_allowed(session.request.source)
+            .await?;
         self.page(session, offset).await
     }
 
@@ -2746,9 +2816,6 @@ impl SearchService for DurableSearchService {
                 title,
                 ..
             } => (ProviderDto::Rezka, title, media_kind, season),
-            ExecutionSelectionDto::RezkaSessionRefresh { .. } => {
-                return Err(SearchError::Conflict);
-            }
         };
         self.start(
             owner,
@@ -3432,7 +3499,7 @@ mod tests {
     use super::{
         ConcreteSearchProvider, SearchProvider, ambiguous_episode_label,
         canonical_rezka_library_path_title, canonical_rezka_library_title,
-        retryable_rezka_auth_error, rezka_translation_available, selected_matches_tmdb,
+        retryable_rezka_session_error, rezka_translation_available, selected_matches_tmdb,
         selected_series_identity, skippable_title_error,
     };
     use media_contract::{MediaKindDto, SearchResultDto};
@@ -3701,18 +3768,24 @@ mod tests {
     }
 
     #[test]
-    fn only_transport_failures_retry_rezka_authentication() {
-        assert!(retryable_rezka_auth_error(
-            rezka_client::RezkaErrorCode::Transport
-        ));
+    fn transient_transport_and_anubis_failures_retry_rezka_session() {
+        for retryable in [
+            rezka_client::RezkaErrorCode::Transport,
+            rezka_client::RezkaErrorCode::ChallengeFailed,
+            rezka_client::RezkaErrorCode::AnubisTimeout,
+            rezka_client::RezkaErrorCode::AnubisRejected,
+        ] {
+            assert!(retryable_rezka_session_error(retryable));
+        }
         for terminal in [
             rezka_client::RezkaErrorCode::AuthenticationRequired,
             rezka_client::RezkaErrorCode::AuthenticationFailed,
-            rezka_client::RezkaErrorCode::ChallengeFailed,
+            rezka_client::RezkaErrorCode::AnubisUnsupportedAlgorithm,
+            rezka_client::RezkaErrorCode::AnubisExcessiveDifficulty,
             rezka_client::RezkaErrorCode::RateLimited,
             rezka_client::RezkaErrorCode::ProviderResponseInvalid,
         ] {
-            assert!(!retryable_rezka_auth_error(terminal));
+            assert!(!retryable_rezka_session_error(terminal));
         }
     }
 

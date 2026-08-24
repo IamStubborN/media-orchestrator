@@ -32,6 +32,14 @@ fn help_keeps_existing_commands_and_exposes_runtime_commands() {
     ] {
         assert!(stdout.contains(command), "help did not include {command}");
     }
+    assert!(
+        !stdout.contains("anubis-browser-challenge"),
+        "browser helper must stay a hidden command"
+    );
+    assert!(
+        !stdout.contains("anubis-exec-chromium"),
+        "chromium exec wrapper must stay a hidden command"
+    );
 }
 
 #[test]

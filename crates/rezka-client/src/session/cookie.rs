@@ -11,6 +11,11 @@ pub(crate) const MAX_SESSION_SNAPSHOT_BYTES: usize = 128 * 1024;
 const MAX_SET_COOKIE_HEADERS: usize = 64;
 const MAX_SET_COOKIE_HEADER_BYTES: usize = 8 * 1024;
 const MAX_SESSION_COOKIES: usize = 64;
+const CURRENT_SESSION_FORMAT: u8 = 2;
+// The former DLE login flow only bound authentication state to this exact
+// cookie.  Do not broaden this list: PHPSESSID may be present alongside
+// anonymous Anubis and provider cookies, all of which must remain reusable.
+const DLE_AUTHENTICATION_COOKIE: &str = "PHPSESSID";
 
 pub struct SessionSnapshot {
     bytes: SecretBox<Vec<u8>>,
@@ -41,6 +46,7 @@ impl fmt::Debug for SessionSnapshot {
 pub struct SessionJar {
     origin: Option<OriginBinding>,
     store: CookieStore,
+    anonymous_migrated: bool,
 }
 
 impl fmt::Debug for SessionJar {
@@ -55,6 +61,7 @@ impl SessionJar {
         Self {
             origin: None,
             store: CookieStore::default(),
+            anonymous_migrated: true,
         }
     }
 
@@ -76,6 +83,7 @@ impl SessionJar {
             Ok(Self {
                 origin: Some(snapshot.origin),
                 store,
+                anonymous_migrated: snapshot.session_format >= CURRENT_SESSION_FORMAT,
             })
         })
     }
@@ -89,6 +97,69 @@ impl SessionJar {
         Ok(SessionSnapshot::from_secret_bytes(SecretBox::new(
             Box::new(bytes),
         )))
+    }
+
+    /// Remove only the Anubis clearance cookie. All other anonymous provider cookies remain intact.
+    pub fn invalidate_anubis_clearance(&mut self) -> bool {
+        let host_only_domain = self.origin.as_ref().map(|origin| origin.host.as_str());
+        let locations = self
+            .store
+            .iter_any()
+            .filter(|cookie| cookie.name() == crate::session::anubis::CLEARANCE_COOKIE)
+            .map(|cookie| {
+                (
+                    cookie
+                        .domain()
+                        .or(host_only_domain)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    cookie.path().unwrap_or("/").to_owned(),
+                    cookie.name().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut removed = false;
+        for (domain, path, name) in locations {
+            removed |= self.store.remove(&domain, &path, &name).is_some();
+        }
+        removed
+    }
+
+    /// Remove the one cookie owned by the retired DLE authentication flow.
+    /// This is an idempotent anonymous migration; Anubis and unrelated
+    /// provider cookies are deliberately preserved.
+    pub fn remove_dle_authentication_cookie(&mut self) -> bool {
+        if self.anonymous_migrated {
+            return false;
+        }
+        self.anonymous_migrated = true;
+        let host_only_domain = self.origin.as_ref().map(|origin| origin.host.as_str());
+        let locations = self
+            .store
+            .iter_any()
+            .filter(|cookie| {
+                cookie.name() == DLE_AUTHENTICATION_COOKIE
+                    && cookie.domain().is_none_or(|domain| {
+                        host_only_domain.is_some_and(|host| domain.trim_start_matches('.') == host)
+                    })
+            })
+            .map(|cookie| {
+                (
+                    cookie
+                        .domain()
+                        .or(host_only_domain)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    cookie.path().unwrap_or("/").to_owned(),
+                    cookie.name().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut removed = false;
+        for (domain, path, name) in locations {
+            removed |= self.store.remove(&domain, &path, &name).is_some();
+        }
+        removed
     }
 
     pub fn store_response_cookies<'a>(
@@ -107,6 +178,11 @@ impl SessionJar {
         self.store
             .get_request_values(url)
             .any(|(cookie_name, _)| cookie_name == name)
+    }
+
+    #[must_use]
+    pub fn has_cookies(&self) -> bool {
+        self.store.iter_any().next().is_some()
     }
 
     pub(crate) fn store_response_cookies_with_names<'a>(
@@ -175,6 +251,7 @@ impl SessionJar {
         Ok(Self {
             origin: Some(OriginBinding::from_url(url)?),
             store: CookieStore::default(),
+            anonymous_migrated: true,
         })
     }
 
@@ -204,6 +281,8 @@ impl SessionJar {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SnapshotDocument {
+    #[serde(default)]
+    session_format: u8,
     origin: OriginBinding,
     cookies: serde_json::Value,
 }
@@ -261,6 +340,7 @@ fn serialize_snapshot(origin: &OriginBinding, store: &CookieStore) -> Result<Vec
         .map_err(|_| invalid_snapshot())?;
     let cookies = serde_json::from_slice(&cookie_bytes).map_err(|_| invalid_snapshot())?;
     serde_json::to_vec(&SnapshotDocument {
+        session_format: CURRENT_SESSION_FORMAT,
         origin: origin.clone(),
         cookies,
     })

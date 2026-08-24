@@ -11,7 +11,7 @@ live result keeps the goal open even when its code and deployment are complete.
 
 | Workstream | Implemented | Deployed | Live-verified | Evidence |
 | --- | --- | --- | --- | --- |
-| 1. VPN lifecycle | Yes | Yes | Yes | [session refresh and rotation](evidence/2026-07-12-session-refresh-vpn-lifecycle.md), [blocked lifecycle](evidence/2026-07-13-runner-availability.md) |
+| 1. VPN lifecycle | Yes | Yes | Yes | [historical rotation evidence](evidence/2026-07-12-session-refresh-vpn-lifecycle.md), [blocked lifecycle](evidence/2026-07-13-runner-availability.md) |
 | 2. Rezka episode | Yes | Yes | Yes | [episode E2E](evidence/2026-07-13-rezka-episode-e2e.md), [final yt-dlp verification](evidence/2026-07-21-final-live-verification.md) |
 | 3. Subtitle recovery | Yes | Yes | Yes | [subtitle-only retry](evidence/2026-07-13-subtitle-only-retry.md), [natural partial recovery](evidence/2026-07-13-natural-subtitle-partial-recovery.md) |
 | 4. Prowlarr and qBittorrent | Yes | Yes | Yes | [TV E2E](evidence/2026-07-13-prowlarr-tv-e2e.md), [movie E2E](evidence/2026-07-13-prowlarr-movie-e2e.md) |

@@ -1,32 +1,16 @@
-use std::{
-    fmt,
-    sync::{
-        Arc, OnceLock,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Instant,
-};
-
-use secrecy::SecretString;
 use time::Duration;
 use url::Url;
 
 use crate::{
-    RezkaError,
-    mirror::MirrorSet,
-    redaction::sanitize_provider_text,
-    session::{
-        anubis::{parse_optional_challenge, solve_challenge_with_cancellation, submit_challenge},
-        cookie::{SessionJar, SessionSnapshot},
-    },
-    transport::Transport,
+    RezkaError, mirror::MirrorSet, redaction::sanitize_provider_text,
+    session::cookie::SessionSnapshot, transport::Transport,
 };
 
 pub mod anubis;
 pub mod cookie;
-pub mod dle;
 pub mod validation;
 
+pub use cookie::SessionJar;
 pub use validation::{ProbeResponse, SessionValidation, SessionValidationProbe};
 
 #[derive(Clone)]
@@ -39,20 +23,8 @@ pub struct RezkaClientConfig {
     pub proxy_url: Option<Url>,
 }
 
-pub struct RezkaCredentials {
-    pub username: SecretString,
-    pub password: SecretString,
-}
-
-impl fmt::Debug for RezkaCredentials {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("RezkaCredentials { username: [REDACTED], password: [REDACTED] }")
-    }
-}
-
 pub struct RezkaClient {
     transport: Transport,
-    anubis_max_nonce: u64,
 }
 
 impl RezkaClient {
@@ -64,89 +36,23 @@ impl RezkaClient {
         config: RezkaClientConfig,
         snapshot: &SessionSnapshot,
     ) -> Result<Self, RezkaError> {
-        let transport = Transport::from_snapshot_with_proxy(
+        let transport = Transport::from_snapshot_with_proxy_and_anubis(
             config.mirrors,
             snapshot,
             config.user_agent,
             config.request_timeout,
             config.max_retries,
             config.proxy_url,
+            config.anubis_max_nonce,
         )?;
-        Ok(Self {
-            transport,
-            anubis_max_nonce: config.anubis_max_nonce,
-        })
-    }
-
-    pub async fn ensure_authenticated(
-        &mut self,
-        credentials: &RezkaCredentials,
-        probe: &SessionValidationProbe,
-    ) -> Result<SessionValidation, RezkaError> {
-        let mut response = self.fetch_probe(probe).await?;
-
-        if let Some(challenge) = parse_optional_challenge(response.body())? {
-            let started = Instant::now();
-            let proof = solve_challenge_async(challenge.clone(), self.anubis_max_nonce).await?;
-            submit_challenge(
-                &mut self.transport,
-                &challenge,
-                &proof,
-                response.url.clone(),
-                started.elapsed().as_millis(),
-            )
-            .await?;
-
-            response = self.fetch_probe(probe).await?;
-            if parse_optional_challenge(response.body())?.is_some() {
-                return Err(challenge_failed());
-            }
-        }
-
-        match Self::classify_probe(probe, &response) {
-            SessionValidation::Valid => return Ok(SessionValidation::Valid),
-            SessionValidation::Inconclusive => return Err(inconclusive_validation()),
-            SessionValidation::Invalid => {}
-        }
-
-        dle::login(&mut self.transport, credentials).await?;
-        let response = self.fetch_probe(probe).await?;
-        if parse_optional_challenge(response.body())?.is_some() {
-            return Err(challenge_failed());
-        }
-
-        match Self::classify_probe(probe, &response) {
-            SessionValidation::Valid => Ok(SessionValidation::Valid),
-            SessionValidation::Invalid => Err(RezkaError::AuthenticationRequired {
-                context: sanitize_provider_text("session remains invalid after login"),
-            }),
-            SessionValidation::Inconclusive => Err(inconclusive_validation()),
-        }
+        Ok(Self { transport })
     }
 
     pub async fn ensure_session(
         &mut self,
         probe: &SessionValidationProbe,
     ) -> Result<SessionValidation, RezkaError> {
-        let mut response = self.fetch_probe(probe).await?;
-
-        if let Some(challenge) = parse_optional_challenge(response.body())? {
-            let started = Instant::now();
-            let proof = solve_challenge_async(challenge.clone(), self.anubis_max_nonce).await?;
-            submit_challenge(
-                &mut self.transport,
-                &challenge,
-                &proof,
-                response.url.clone(),
-                started.elapsed().as_millis(),
-            )
-            .await?;
-
-            response = self.fetch_probe(probe).await?;
-            if parse_optional_challenge(response.body())?.is_some() {
-                return Err(challenge_failed());
-            }
-        }
+        let response = self.fetch_probe(probe).await?;
 
         Self::ready_session(probe, &response)
     }
@@ -202,131 +108,45 @@ impl RezkaClient {
         self.transport.export_session()
     }
 
+    /// Remove only the retired DLE authentication cookie during anonymous
+    /// session migration. The encrypted snapshot remains otherwise intact.
+    pub fn remove_dle_authentication_cookie(&mut self) -> bool {
+        self.transport.remove_dle_authentication_cookie()
+    }
+
+    /// Drop only the Anubis clearance, preserving every other anonymous cookie.
+    pub fn invalidate_anubis_clearance(&mut self) -> bool {
+        self.transport.invalidate_anubis_clearance()
+    }
+
+    pub fn with_browser_fallback(
+        mut self,
+        fallback: Box<dyn anubis::BrowserChallengeFallback>,
+    ) -> Self {
+        self.transport = self.transport.with_browser_fallback(fallback);
+        self
+    }
+
     pub(crate) fn transport_mut(&mut self) -> &mut Transport {
         &mut self.transport
     }
 
     fn with_jar(config: RezkaClientConfig, jar: SessionJar) -> Result<Self, RezkaError> {
-        let transport = Transport::new_with_proxy(
+        let transport = Transport::new_with_proxy_and_anubis(
             config.mirrors,
             jar,
             config.user_agent,
             config.request_timeout,
             config.max_retries,
             config.proxy_url,
+            config.anubis_max_nonce,
         )?;
-        Ok(Self {
-            transport,
-            anubis_max_nonce: config.anubis_max_nonce,
-        })
-    }
-}
-
-fn challenge_failed() -> RezkaError {
-    RezkaError::ChallengeFailed {
-        context: sanitize_provider_text("challenge remained after one pass"),
-    }
-}
-
-fn challenge_solver_join_failed() -> RezkaError {
-    RezkaError::ChallengeFailed {
-        context: sanitize_provider_text("challenge solver task failed"),
-    }
-}
-
-async fn solve_challenge_async(
-    challenge: anubis::AnubisChallenge,
-    max_nonce: u64,
-) -> Result<anubis::AnubisProof, RezkaError> {
-    let permit = proof_semaphore()
-        .acquire_owned()
-        .await
-        .map_err(|_| challenge_solver_join_failed())?;
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let cancellation_guard = ProofCancellationGuard {
-        cancelled: Arc::clone(&cancelled),
-    };
-    let result = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        solve_challenge_with_cancellation(&challenge, max_nonce, Some(&cancelled))
-    })
-    .await
-    .map_err(|_| challenge_solver_join_failed())?;
-    drop(cancellation_guard);
-    result
-}
-
-fn proof_semaphore() -> Arc<tokio::sync::Semaphore> {
-    static SEMAPHORE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
-    Arc::clone(SEMAPHORE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1))))
-}
-
-struct ProofCancellationGuard {
-    cancelled: Arc<AtomicBool>,
-}
-
-impl Drop for ProofCancellationGuard {
-    fn drop(&mut self) {
-        self.cancelled.store(true, Ordering::Relaxed);
+        Ok(Self { transport })
     }
 }
 
 fn inconclusive_validation() -> RezkaError {
     RezkaError::ProviderResponseInvalid {
         context: sanitize_provider_text("session validation inconclusive"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{proof_semaphore, solve_challenge_async};
-    use crate::{RezkaErrorCode, session::anubis::AnubisChallenge};
-
-    static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    fn challenge(difficulty: u8) -> AnubisChallenge {
-        AnubisChallenge {
-            id: "test".to_owned(),
-            random_data: "deterministic-test-proof".to_owned(),
-            difficulty,
-        }
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn global_proof_budget_serializes_without_timing_assumptions() {
-        let _test_guard = TEST_LOCK.lock().await;
-        let held_permit = proof_semaphore().acquire_owned().await.unwrap();
-        let proof = tokio::spawn(solve_challenge_async(challenge(33), 0));
-
-        tokio::task::yield_now().await;
-        assert!(!proof.is_finished());
-
-        drop(held_permit);
-        let error = proof.await.unwrap().unwrap_err();
-        assert_eq!(error.code(), RezkaErrorCode::ChallengeFailed);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn abort_cancels_blocking_proof_and_releases_permit_without_timers() {
-        let _test_guard = TEST_LOCK.lock().await;
-        let proof = tokio::spawn(solve_challenge_async(challenge(32), u64::MAX));
-        wait_for_available_permits(0).await;
-
-        proof.abort();
-        let _ = proof.await;
-        wait_for_available_permits(1).await;
-
-        let error = solve_challenge_async(challenge(33), 0).await.unwrap_err();
-        assert_eq!(error.code(), RezkaErrorCode::ChallengeFailed);
-    }
-
-    async fn wait_for_available_permits(expected: usize) {
-        for _ in 0..100_000 {
-            if proof_semaphore().available_permits() == expected {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-        panic!("proof permit did not reach {expected}");
     }
 }

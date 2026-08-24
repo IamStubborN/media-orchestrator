@@ -2,6 +2,8 @@ use std::{io::Write as _, path::PathBuf};
 
 #[cfg(unix)]
 use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::{sync::mpsc, thread};
 
 use aes_gcm::{
     Aes256Gcm,
@@ -223,6 +225,46 @@ fn wrong_key_and_corrupt_envelope_return_only_sanitized_errors() {
     assert_eq!(
         format!("{corrupt:?}: {corrupt}"),
         "InvalidEnvelope: encrypted Rezka session envelope is invalid"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"{not-an-envelope");
+}
+
+#[cfg(unix)]
+#[test]
+fn independent_service_and_runner_handles_serialize_anonymous_session_updates() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("rezka-session.bin");
+    let service = store(path.clone(), 7);
+    let runner = store(path.clone(), 7);
+    service.save(&snapshot(0x10)).unwrap();
+    let service_guard = service.lock().unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (acquired_tx, acquired_rx) = mpsc::channel();
+
+    let waiter = thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let _runner_guard = runner.lock().unwrap();
+        assert!(runner.load().unwrap().unwrap().secret_eq(&snapshot(0x20)));
+        runner.save(&snapshot(0x30)).unwrap();
+        acquired_tx.send(()).unwrap();
+    });
+
+    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!(
+        acquired_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err()
+    );
+    service.save(&snapshot(0x20)).unwrap();
+    drop(service_guard);
+    acquired_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    waiter.join().unwrap();
+    assert!(
+        store(path, 7)
+            .load()
+            .unwrap()
+            .unwrap()
+            .secret_eq(&snapshot(0x30))
     );
 }
 

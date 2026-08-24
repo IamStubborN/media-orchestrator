@@ -13,18 +13,21 @@ const PROVIDER_RESPONSE_BODY_OVERFLOW_BYTES: usize = MAX_PROVIDER_RESPONSE_BODY_
 const X_REQUESTED_WITH: HeaderName = HeaderName::from_static("x-requested-with");
 const XML_HTTP_REQUEST: HeaderValue = HeaderValue::from_static("XMLHttpRequest");
 const TITLE_ACCEPTED_TERMINAL_STATUSES: [StatusCode; 2] = [StatusCode::NOT_FOUND, StatusCode::GONE];
-// Mirrors the DLE session cookie (`session::dle`): its presence on the selected origin is what marks
-// the jar as carrying an authenticated session. Kept here because the failover export guard lives in
-// this module and must not clear on an anonymous (cookie-less) success after a failover.
-const DLE_SESSION_COOKIE: &str = "PHPSESSID";
+const DEFAULT_ANUBIS_MAX_NONCE: u64 = 5_000_000;
+const ANUBIS_SOLVER_TIMEOUT: StdDuration = StdDuration::from_secs(30);
 use time::Duration;
 use url::Url;
 
 use crate::{
-    RezkaError,
+    RezkaError, RezkaErrorCode,
     mirror::{MirrorSet, same_origin},
     redaction::{redact_url, sanitize_http_status, sanitize_provider_text},
-    session::cookie::{SessionJar, SessionSnapshot},
+    session::{
+        anubis::{
+            self, BrowserChallengeFallback, CLEARANCE_COOKIE, detect_challenge, parse_challenge,
+        },
+        cookie::{SessionJar, SessionSnapshot},
+    },
 };
 
 pub struct TransportResponse {
@@ -66,15 +69,13 @@ pub struct Transport {
     mirrors: MirrorSet,
     jar: SessionJar,
     max_retries: u8,
+    anubis_max_nonce: u64,
+    browser_fallback: Option<Box<dyn BrowserChallengeFallback>>,
     // Set when a failover replaces the jar with an empty one bound to a new origin. Cleared only when
-    // the selected origin is safely confirmed (see `confirm_current_origin`): while set, the current
-    // jar is a transient failover artifact, so exporting it would overwrite a previously persisted
-    // session. An anonymous (e.g. pre-login probe) success on the new origin does not clear it.
+    // the selected origin is safely confirmed; while set, the current jar is a transient failover
+    // artifact, so exporting it would overwrite a previously persisted session.
     session_reset_by_failover: bool,
-    // Latches true once an authenticated jar (DLE session cookie on the selected origin) has been
-    // held. A failover empties the jar but this memory persists, so an anonymous success on the new
-    // origin cannot lift the export guard until the session is re-authenticated.
-    held_authenticated_session: bool,
+    held_session: bool,
 }
 
 #[derive(Copy, Clone)]
@@ -102,12 +103,32 @@ impl Transport {
     }
 
     pub fn new_with_proxy(
+        mirrors: MirrorSet,
+        jar: SessionJar,
+        user_agent: String,
+        request_timeout: Duration,
+        max_retries: u8,
+        proxy_url: Option<Url>,
+    ) -> Result<Self, RezkaError> {
+        Self::new_with_proxy_and_anubis(
+            mirrors,
+            jar,
+            user_agent,
+            request_timeout,
+            max_retries,
+            proxy_url,
+            DEFAULT_ANUBIS_MAX_NONCE,
+        )
+    }
+
+    pub(crate) fn new_with_proxy_and_anubis(
         mut mirrors: MirrorSet,
         mut jar: SessionJar,
         user_agent: String,
         request_timeout: Duration,
         max_retries: u8,
         proxy_url: Option<Url>,
+        anubis_max_nonce: u64,
     ) -> Result<Self, RezkaError> {
         let request_timeout =
             StdDuration::try_from(request_timeout).map_err(|_| RezkaError::Configuration {
@@ -129,10 +150,7 @@ impl Transport {
             jar.bind_to(mirrors.selected_origin())?;
         }
 
-        // An imported snapshot may already carry an authenticated session that a later failover must
-        // protect from being overwritten by an anonymous jar.
-        let held_authenticated_session =
-            jar.contains_cookie_for_url(mirrors.selected_origin(), DLE_SESSION_COOKIE);
+        let held_session = jar.has_cookies();
 
         let mut client = Client::builder()
             .redirect(Policy::none())
@@ -154,8 +172,10 @@ impl Transport {
             mirrors,
             jar,
             max_retries,
+            anubis_max_nonce,
+            browser_fallback: None,
             session_reset_by_failover: false,
-            held_authenticated_session,
+            held_session,
         })
     }
 
@@ -184,13 +204,34 @@ impl Transport {
         max_retries: u8,
         proxy_url: Option<Url>,
     ) -> Result<Self, RezkaError> {
-        Self::new_with_proxy(
+        Self::from_snapshot_with_proxy_and_anubis(
+            mirrors,
+            snapshot,
+            user_agent,
+            request_timeout,
+            max_retries,
+            proxy_url,
+            DEFAULT_ANUBIS_MAX_NONCE,
+        )
+    }
+
+    pub(crate) fn from_snapshot_with_proxy_and_anubis(
+        mirrors: MirrorSet,
+        snapshot: &SessionSnapshot,
+        user_agent: String,
+        request_timeout: Duration,
+        max_retries: u8,
+        proxy_url: Option<Url>,
+        anubis_max_nonce: u64,
+    ) -> Result<Self, RezkaError> {
+        Self::new_with_proxy_and_anubis(
             mirrors,
             SessionJar::import(snapshot)?,
             user_agent,
             request_timeout,
             max_retries,
             proxy_url,
+            anubis_max_nonce,
         )
     }
 
@@ -263,6 +304,22 @@ impl Transport {
             ResponseStatusPolicy::Default,
         )
         .await
+    }
+
+    pub(crate) async fn get_first_without_challenge(
+        &mut self,
+        url: Url,
+        referer: Option<Url>,
+    ) -> Result<TransportResponse, RezkaError> {
+        self.send_first_raw(
+            Method::GET,
+            url,
+            referer,
+            None,
+            ResponseStatusPolicy::Default,
+        )
+        .await
+        .map_err(|failure| failure.error)
     }
 
     async fn send_idempotent_with_failover(
@@ -381,7 +438,47 @@ impl Transport {
         self.jar.export()
     }
 
+    pub(crate) fn invalidate_anubis_clearance(&mut self) -> bool {
+        self.jar.invalidate_anubis_clearance()
+    }
+
+    pub(crate) fn remove_dle_authentication_cookie(&mut self) -> bool {
+        self.jar.remove_dle_authentication_cookie()
+    }
+
+    /// Attach the private-runner browser helper for unsupported or rejected native challenges.
+    pub fn with_browser_fallback(mut self, fallback: Box<dyn BrowserChallengeFallback>) -> Self {
+        self.browser_fallback = Some(fallback);
+        self
+    }
+
     async fn send_first(
+        &mut self,
+        method: Method,
+        url: Url,
+        referer: Option<Url>,
+        form: Option<&[(&str, &str)]>,
+        status_policy: ResponseStatusPolicy,
+    ) -> Result<TransportResponse, AttemptFailure> {
+        let response = self
+            .send_first_raw(
+                method.clone(),
+                url.clone(),
+                referer.clone(),
+                form,
+                status_policy,
+            )
+            .await?;
+        if detect_challenge(&response.body) {
+            return self
+                .solve_and_retry_challenge(method, url, referer, form, status_policy, response)
+                .await;
+        }
+        self.confirm_current_origin();
+        Ok(response)
+    }
+
+    async fn send_first_raw(
         &mut self,
         method: Method,
         url: Url,
@@ -392,8 +489,8 @@ impl Transport {
         self.guard_selected_origin(&url)
             .map_err(AttemptFailure::terminal)?;
 
-        let mut request = self.client.request(method, url.clone());
-        if let Some(referer) = referer {
+        let mut request = self.client.request(method.clone(), url.clone());
+        if let Some(ref referer) = referer {
             request = request.header(REFERER, referer.as_str());
         }
         if let Some(cookie) = self.jar.request_cookie_header(&url) {
@@ -409,9 +506,180 @@ impl Transport {
             eligible: eligible_request_failure(&error),
             error: transport_error(),
         })?;
-        let response = self.process_response(response, status_policy).await?;
+        self.process_response(response, status_policy).await
+    }
+
+    async fn solve_and_retry_challenge(
+        &mut self,
+        method: Method,
+        url: Url,
+        referer: Option<Url>,
+        form: Option<&[(&str, &str)]>,
+        status_policy: ResponseStatusPolicy,
+        challenge_response: TransportResponse,
+    ) -> Result<TransportResponse, AttemptFailure> {
+        // A challenge response means the existing clearance is no longer accepted for this IP.
+        // Replace only that cookie; unrelated anonymous provider state remains in the jar.
+        self.invalidate_anubis_clearance();
+        let challenge = match parse_challenge(&challenge_response.body) {
+            Ok(challenge) => challenge,
+            Err(error @ RezkaError::AnubisUnsupportedAlgorithm { .. }) => {
+                let challenge = anubis::parse_challenge_for_fallback(&challenge_response.body)
+                    .map_err(AttemptFailure::terminal)?;
+                if !self
+                    .run_browser_fallback(&challenge, challenge_response.url.clone())
+                    .await?
+                {
+                    return Err(AttemptFailure::terminal(error));
+                }
+                let retry = self
+                    .send_first_raw(method, url, referer, form, status_policy)
+                    .await?;
+                if detect_challenge(&retry.body) {
+                    return Err(AttemptFailure::terminal(RezkaError::AnubisRejected {
+                        context: sanitize_provider_text("browser challenge clearance was rejected"),
+                    }));
+                }
+                self.held_session = true;
+                self.confirm_current_origin();
+                return Ok(retry);
+            }
+            Err(RezkaError::ProviderResponseInvalid { .. }) => {
+                return Err(AttemptFailure::terminal(RezkaError::ChallengeRequired {
+                    context: sanitize_provider_text("Anubis challenge requires handling"),
+                }));
+            }
+            Err(error) => return Err(AttemptFailure::terminal(error)),
+        };
+        let started = std::time::Instant::now();
+        let proof = anubis::solve_challenge_bounded(
+            challenge.clone(),
+            self.anubis_max_nonce,
+            ANUBIS_SOLVER_TIMEOUT,
+        )
+        .await
+        .map_err(AttemptFailure::terminal)?;
+        let mut browser_fallback_used = false;
+        let pass_result = anubis::submit_challenge(
+            self,
+            &challenge,
+            &proof,
+            challenge_response.url.clone(),
+            started.elapsed().as_millis(),
+        )
+        .await;
+        if let Err(error) = pass_result {
+            let mapped = match error {
+                RezkaError::ProviderResponseInvalid { .. } | RezkaError::ChallengeFailed { .. } => {
+                    RezkaError::AnubisRejected {
+                        context: sanitize_provider_text(
+                            "Anubis pass endpoint rejected the solution",
+                        ),
+                    }
+                }
+                other => other,
+            };
+            if !matches!(&mapped, RezkaError::AnubisRejected { .. }) {
+                return Err(AttemptFailure::terminal(mapped));
+            }
+            browser_fallback_used = true;
+            if !self
+                .run_browser_fallback(&challenge, challenge_response.url.clone())
+                .await?
+            {
+                return Err(AttemptFailure::terminal(mapped));
+            }
+        }
+        if !self
+            .jar
+            .contains_cookie_for_url(self.selected_origin(), CLEARANCE_COOKIE)
+        {
+            if browser_fallback_used {
+                return Err(AttemptFailure::terminal(RezkaError::AnubisRejected {
+                    context: sanitize_provider_text(
+                        "Anubis pass endpoint did not return clearance",
+                    ),
+                }));
+            }
+            browser_fallback_used = true;
+            if !self
+                .run_browser_fallback(&challenge, challenge_response.url.clone())
+                .await?
+            {
+                return Err(AttemptFailure::terminal(RezkaError::AnubisRejected {
+                    context: sanitize_provider_text(
+                        "Anubis pass endpoint did not return clearance",
+                    ),
+                }));
+            }
+        }
+
+        let retry = self
+            .send_first_raw(
+                method.clone(),
+                url.clone(),
+                referer.clone(),
+                form,
+                status_policy,
+            )
+            .await?;
+        if detect_challenge(&retry.body) {
+            if !browser_fallback_used {
+                // Native clearance was rejected. Give the optional browser
+                // seam exactly one opportunity, then perform one final raw
+                // retry; no challenge recursion is allowed.
+                self.invalidate_anubis_clearance();
+                if self
+                    .run_browser_fallback(&challenge, challenge_response.url.clone())
+                    .await?
+                {
+                    let fallback_retry = self
+                        .send_first_raw(method, url, referer, form, status_policy)
+                        .await?;
+                    if !detect_challenge(&fallback_retry.body) {
+                        self.held_session = true;
+                        self.confirm_current_origin();
+                        return Ok(fallback_retry);
+                    }
+                }
+            }
+            return Err(AttemptFailure::terminal(RezkaError::AnubisRejected {
+                context: sanitize_provider_text("Anubis clearance was rejected after one retry"),
+            }));
+        }
+        self.held_session = true;
         self.confirm_current_origin();
-        Ok(response)
+        Ok(retry)
+    }
+
+    async fn run_browser_fallback(
+        &mut self,
+        challenge: &anubis::AnubisChallenge,
+        origin: Url,
+    ) -> Result<bool, AttemptFailure> {
+        let Some(fallback) = self.browser_fallback.take() else {
+            return Ok(false);
+        };
+        let mut guard = BrowserFallbackGuard {
+            slot: &mut self.browser_fallback,
+            fallback: Some(fallback),
+        };
+        let result = guard
+            .fallback
+            .as_mut()
+            .expect("browser fallback guard owns the adapter")
+            .solve(challenge, &origin)
+            .await;
+        let cookie_headers = result.map_err(AttemptFailure::terminal)?;
+        self.jar
+            .store_response_cookies_with_names(cookie_headers.iter().map(String::as_bytes), &origin)
+            .map_err(AttemptFailure::terminal)?;
+        if !self.jar.contains_cookie_for_url(&origin, CLEARANCE_COOKIE) {
+            return Err(AttemptFailure::terminal(RezkaError::AnubisRejected {
+                context: sanitize_provider_text("browser challenge clearance was missing"),
+            }));
+        }
+        Ok(true)
     }
 
     async fn process_response(
@@ -440,10 +708,36 @@ impl Transport {
             .jar
             .store_response_cookies_with_names(cookie_headers, &url)
             .map_err(AttemptFailure::terminal)?;
-        if !self.held_authenticated_session && self.jar_is_authenticated() {
-            self.held_authenticated_session = true;
-        }
 
+        // Anubis may use an access-denied status for its interstitial. Read the
+        // bounded body for those statuses so challenge markers win over the
+        // generic HTTP-status classification and can enter the same solver path
+        // as a 200 interstitial. Other terminal statuses retain the existing
+        // short-circuit behavior (in particular, do not read an unbounded 404
+        // body just to look for a challenge).
+        if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+            let body = match read_provider_body(&mut response).await {
+                Ok(body) => body,
+                // A truncated terminal response is still a provider status,
+                // not a transport retry. Preserve the established typed
+                // status error while allowing complete 401/403 bodies to
+                // enter challenge handling above.
+                Err(failure) if failure.error.code() == RezkaErrorCode::Transport => {
+                    return Err(AttemptFailure::terminal(invalid_http_status(status, &url)));
+                }
+                Err(failure) => return Err(failure),
+            };
+            if detect_challenge(&body) {
+                return Ok(TransportResponse {
+                    status,
+                    url,
+                    body,
+                    location,
+                    stored_cookie_names,
+                });
+            }
+            return Err(AttemptFailure::terminal(invalid_http_status(status, &url)));
+        }
         if status == StatusCode::TOO_MANY_REQUESTS {
             return Err(AttemptFailure::terminal(RezkaError::RateLimited {
                 retry_after_seconds,
@@ -465,34 +759,7 @@ impl Transport {
             return Err(AttemptFailure::terminal(invalid_http_status(status, &url)));
         }
 
-        let declared_length = response
-            .headers()
-            .get(CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok());
-        if declared_length.is_some_and(|length| length > MAX_PROVIDER_RESPONSE_BODY_BYTES as u64) {
-            return Err(AttemptFailure::terminal(oversized_response_body()));
-        }
-
-        let initial_capacity = declared_length
-            .and_then(|length| usize::try_from(length).ok())
-            .unwrap_or_default()
-            .min(MAX_PROVIDER_RESPONSE_BODY_BYTES);
-        let mut body = Vec::with_capacity(initial_capacity);
-        while let Some(chunk) = response.chunk().await.map_err(|_| AttemptFailure {
-            error: transport_error(),
-            eligible: true,
-        })? {
-            let cumulative_length = body
-                .len()
-                .checked_add(chunk.len())
-                .ok_or_else(|| AttemptFailure::terminal(oversized_response_body()))?;
-            if cumulative_length >= PROVIDER_RESPONSE_BODY_OVERFLOW_BYTES {
-                return Err(AttemptFailure::terminal(oversized_response_body()));
-            }
-            body.extend_from_slice(&chunk);
-        }
-        let body = decode_provider_body(body);
+        let body = read_provider_body(&mut response).await?;
 
         Ok(TransportResponse {
             status,
@@ -503,18 +770,24 @@ impl Transport {
         })
     }
 
-    fn jar_is_authenticated(&self) -> bool {
-        self.jar
-            .contains_cookie_for_url(self.mirrors.selected_origin(), DLE_SESSION_COOKIE)
-    }
-
     fn confirm_current_origin(&mut self) {
         // The selected origin answered. Clear the failover guard only when the resulting jar is safe
         // to persist: either it is authenticated again on this origin, or no authenticated session
         // was ever held (so there is nothing an anonymous jar could overwrite). Otherwise a partial
         // failover (old origin down, new one serving anonymous pages) would drop the guard on the
         // pre-login probe success and let a later export overwrite a saved authenticated snapshot.
-        if self.jar_is_authenticated() || !self.held_authenticated_session {
+        if self
+            .jar
+            .contains_cookie_for_url(self.mirrors.selected_origin(), CLEARANCE_COOKIE)
+            // PHPSESSID is retained here only as a narrowly recognized legacy
+            // re-authentication signal for snapshots created before the
+            // anonymous migration. Arbitrary provider cookies must not lift
+            // the guard after a cross-origin failover.
+            || self
+                .jar
+                .contains_cookie_for_url(self.mirrors.selected_origin(), "PHPSESSID")
+            || !self.held_session
+        {
             self.session_reset_by_failover = false;
         }
     }
@@ -529,9 +802,53 @@ impl Transport {
     }
 }
 
+async fn read_provider_body(response: &mut reqwest::Response) -> Result<String, AttemptFailure> {
+    let declared_length = response
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    if declared_length.is_some_and(|length| length > MAX_PROVIDER_RESPONSE_BODY_BYTES as u64) {
+        return Err(AttemptFailure::terminal(oversized_response_body()));
+    }
+
+    let initial_capacity = declared_length
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or_default()
+        .min(MAX_PROVIDER_RESPONSE_BODY_BYTES);
+    let mut body = Vec::with_capacity(initial_capacity);
+    while let Some(chunk) = response.chunk().await.map_err(|_| AttemptFailure {
+        error: transport_error(),
+        eligible: true,
+    })? {
+        let cumulative_length = body
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| AttemptFailure::terminal(oversized_response_body()))?;
+        if cumulative_length >= PROVIDER_RESPONSE_BODY_OVERFLOW_BYTES {
+            return Err(AttemptFailure::terminal(oversized_response_body()));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(decode_provider_body(body))
+}
+
 fn decode_provider_body(body: Vec<u8>) -> String {
     String::from_utf8(body)
         .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
+}
+
+struct BrowserFallbackGuard<'a> {
+    slot: &'a mut Option<Box<dyn BrowserChallengeFallback>>,
+    fallback: Option<Box<dyn BrowserChallengeFallback>>,
+}
+
+impl Drop for BrowserFallbackGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(fallback) = self.fallback.take() {
+            *self.slot = Some(fallback);
+        }
+    }
 }
 
 struct AttemptFailure {

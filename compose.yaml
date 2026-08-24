@@ -58,6 +58,9 @@ services:
     <<: *runtime-security
     profiles: [runner]
     image: ${MEDIA_RUNNER_IMAGE:-media-orchestrator-runner:local}
+    shm_size: 256mb
+    tmpfs:
+      - /tmp:size=512m,mode=1777
     environment:
       MEDIA_SERVICE_URL: http://service:8080
       MEDIA_TOKEN: ${MEDIA_RUNNER_TOKEN}

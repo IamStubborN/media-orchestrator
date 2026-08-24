@@ -29,8 +29,10 @@ use secrecy::{ExposeSecret, SecretBox};
 use sha2::{Digest, Sha256};
 
 use crate::{
+    anubis_browser::{BrowserFallbackSettings, ChromiumChallengeFallback},
     config::{
-        DatabaseConfig, NotificationConfig, RezkaCompositionConfig, RunnerConfig, ServerConfig,
+        BrowserFallbackConfig, DatabaseConfig, NotificationConfig, RezkaCompositionConfig,
+        RunnerConfig, ServerConfig,
     },
     search::{ConcreteSearchProvider, DurableSearchService, StorageSearchPersistence},
 };
@@ -200,6 +202,8 @@ pub enum RunnerCompositionError {
     Client,
     #[error("Rezka validation probe construction failed")]
     Probe,
+    #[error("Rezka encrypted session snapshot could not be restored")]
+    SessionStore,
     #[error("Rezka session store construction failed")]
     Store,
 }
@@ -276,17 +280,6 @@ pub async fn run_runner(config: RunnerConfig) -> Result<(), RunnerError> {
                 .map_err(|_| RunnerError::Configuration)
         })
         .transpose()?;
-    let broker_config = media_integrations::credential_broker::CredentialBrokerConfig::new(
-        config.credential_broker().base_url().clone(),
-        config.credential_broker().token().clone(),
-        Duration::from_secs(15),
-        config.credential_broker().private_http_hosts(),
-    )
-    .map_err(|_| RunnerError::Configuration)?;
-    let credential_broker = Arc::new(
-        media_integrations::credential_broker::CredentialBrokerClient::new(broker_config)
-            .map_err(|_| RunnerError::Configuration)?,
-    );
     let executor = Arc::new(crate::runner::MediaJobExecutor::new(
         rezka,
         pipeline,
@@ -301,7 +294,6 @@ pub async fn run_runner(config: RunnerConfig) -> Result<(), RunnerError> {
             ),
         ),
         gluetun,
-        credential_broker,
         config.storage_roots().clone(),
         config.vaapi_device().to_owned(),
     ));
@@ -343,11 +335,35 @@ async fn connect_qbittorrent(
 pub struct PreparedRunnerSession {
     pub client: rezka_client::RezkaClient,
     client_config: rezka_client::RezkaClientConfig,
+    browser_fallback: Option<BrowserFallbackSettings>,
     pub probe: rezka_client::SessionValidationProbe,
     pub store: media_runner::EncryptedRezkaSessionStore,
 }
 
 impl PreparedRunnerSession {
+    #[must_use]
+    pub fn session_store_path(&self) -> std::path::PathBuf {
+        self.store.path().to_owned()
+    }
+
+    /// Acquire the cross-process session lock on a blocking worker. Callers
+    /// keep the guard across reload, validation/challenge solving and atomic
+    /// save, then release it before long media transfer work.
+    pub fn acquire_session_lock(
+        &self,
+    ) -> impl std::future::Future<
+        Output = Result<media_runner::RezkaSessionStoreGuard, RunnerCompositionError>,
+    > + Send
+    + 'static {
+        let path = self.session_store_path();
+        async move {
+            tokio::task::spawn_blocking(move || media_runner::acquire_rezka_session_lock(&path))
+                .await
+                .map_err(|_| RunnerCompositionError::Store)?
+                .map_err(|_| RunnerCompositionError::Store)
+        }
+    }
+
     pub fn reload_session(&mut self) -> Result<(), RunnerCompositionError> {
         let Some(snapshot) = self
             .store
@@ -356,9 +372,20 @@ impl PreparedRunnerSession {
         else {
             return Ok(());
         };
-        self.client =
+        let mut client =
             rezka_client::RezkaClient::from_snapshot(self.client_config.clone(), &snapshot)
-                .map_err(|_| RunnerCompositionError::Client)?;
+                .map_err(|_| RunnerCompositionError::SessionStore)?;
+        if client.remove_dle_authentication_cookie() {
+            // reload_session is called while the caller owns the inter-process
+            // guard. The store keeps temp+fsync+rename atomic semantics.
+            let migrated = client
+                .export_session()
+                .map_err(|_| RunnerCompositionError::Store)?;
+            self.store
+                .save(&migrated)
+                .map_err(|_| RunnerCompositionError::Store)?;
+        }
+        self.client = attach_browser_fallback(client, self.browser_fallback.as_ref());
         Ok(())
     }
 }
@@ -380,6 +407,22 @@ pub fn prepare_runner_session(
     prepare_rezka_session(config.rezka())
 }
 
+/// Build only the encrypted anonymous session store. This deliberately does
+/// not load the snapshot, so an operator can explicitly quarantine a corrupt
+/// snapshot without triggering normal runner startup behavior.
+pub fn prepare_rezka_session_store(
+    config: &RezkaCompositionConfig,
+) -> Result<media_runner::EncryptedRezkaSessionStore, RunnerCompositionError> {
+    let key = SecretBox::<[u8; 32]>::init_with_mut(|key| {
+        key.copy_from_slice(config.cookie_key().expose_secret());
+    });
+    media_runner::EncryptedRezkaSessionStore::new(media_runner::RezkaSessionStoreConfig {
+        path: config.session_store_path().to_owned(),
+        key,
+    })
+    .map_err(|_| RunnerCompositionError::Store)
+}
+
 pub fn prepare_rezka_session(
     config: &RezkaCompositionConfig,
 ) -> Result<PreparedRunnerSession, RunnerCompositionError> {
@@ -399,28 +442,59 @@ pub fn prepare_rezka_session(
         config.session_invalid_markers().to_vec(),
     )
     .map_err(|_| RunnerCompositionError::Probe)?;
-    let key = SecretBox::<[u8; 32]>::init_with_mut(|key| {
-        key.copy_from_slice(config.cookie_key().expose_secret());
-    });
-    let store =
-        media_runner::EncryptedRezkaSessionStore::new(media_runner::RezkaSessionStoreConfig {
-            path: config.session_store_path().to_owned(),
-            key,
-        })
-        .map_err(|_| RunnerCompositionError::Store)?;
+    let store = prepare_rezka_session_store(config)?;
+    // The initial read participates in the same inter-process lifecycle lock as
+    // later reload/refresh operations. Operational callers reload again while
+    // holding this lock, but taking it here prevents a service/runner startup
+    // from constructing a client from a snapshot that is being replaced.
+    let session_guard = store.lock().map_err(|_| RunnerCompositionError::Store)?;
     let snapshot = store.load().map_err(|_| RunnerCompositionError::Store)?;
-    let client = match snapshot.as_ref() {
-        Some(snapshot) => rezka_client::RezkaClient::from_snapshot(client_config.clone(), snapshot),
-        None => rezka_client::RezkaClient::new(client_config.clone()),
-    }
-    .map_err(|_| RunnerCompositionError::Client)?;
+    drop(session_guard);
+    let client = if let Some(snapshot) = snapshot.as_ref() {
+        rezka_client::RezkaClient::from_snapshot(client_config.clone(), snapshot)
+            .map_err(|_| RunnerCompositionError::SessionStore)?
+    } else {
+        rezka_client::RezkaClient::new(client_config.clone())
+            .map_err(|_| RunnerCompositionError::Client)?
+    };
+    let browser_fallback = config.browser_fallback().map(|fallback| {
+        browser_settings(fallback, config.user_agent(), config.proxy_url().cloned())
+    });
+    let client = attach_browser_fallback(client, browser_fallback.as_ref());
 
     Ok(PreparedRunnerSession {
         client,
         client_config,
+        browser_fallback,
         probe,
         store,
     })
+}
+
+fn browser_settings(
+    config: &BrowserFallbackConfig,
+    user_agent: &str,
+    proxy_url: Option<url::Url>,
+) -> BrowserFallbackSettings {
+    BrowserFallbackSettings::new(
+        config.helper().map(ToOwned::to_owned),
+        config.chromium_bin().map(ToOwned::to_owned),
+        user_agent.to_owned(),
+        proxy_url,
+        config.timeout(),
+    )
+}
+
+fn attach_browser_fallback(
+    client: rezka_client::RezkaClient,
+    settings: Option<&BrowserFallbackSettings>,
+) -> rezka_client::RezkaClient {
+    match settings {
+        Some(settings) => {
+            client.with_browser_fallback(Box::new(ChromiumChallengeFallback::new(settings.clone())))
+        }
+        None => client,
+    }
 }
 
 /// Composition-local bridge between the API's idempotency port and SeaORM storage.
@@ -966,6 +1040,7 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
     let operations = Arc::new(StorageOperationCompletionAdapter::new(
         SeaOrmOperationReceiptRepository::new(database.clone()),
     ));
+    let lifecycle_store = Arc::new(SeaOrmRunnerLifecycleStore::new(database.clone()));
     let release_provider = Arc::new(
         media_integrations::tvmaze::TvmazeClient::new(
             media_integrations::tvmaze::TvmazeConfig::new(
@@ -1006,9 +1081,9 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
     .with_release_metadata(Arc::new(media_core::ReleaseMetadataService::new(
         release_provider.clone(),
     )))
-    .with_lifecycle(Arc::new(RunnerLifecycleApplication::new(Arc::new(
-        SeaOrmRunnerLifecycleStore::new(database.clone()),
-    ))))
+    .with_lifecycle(Arc::new(RunnerLifecycleApplication::new(
+        lifecycle_store.clone(),
+    )))
     .with_metrics_source(Arc::new(SeaOrmMetricsSource::new(database.clone())));
     if let Some(trending) = trending {
         state = state
@@ -1083,7 +1158,9 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
             ));
         }
         state = state.with_search(Arc::new(
-            DurableSearchService::new(persistence, provider, jobs).with_identity(identity),
+            DurableSearchService::new(persistence, provider, jobs)
+                .with_identity(identity)
+                .with_lifecycle(lifecycle_store),
         ));
     }
     let mut admin_plex = None;

@@ -18,16 +18,151 @@ fn config(server: &MockServer) -> GluetunConfig {
 }
 
 #[tokio::test]
-async fn rotation_is_rejected_without_http_while_a_sticky_job_is_active() {
+async fn rotation_is_rejected_without_control_writes_while_a_sticky_job_is_active() {
     let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/publicip/ip"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "public_ip": "203.0.113.5"
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
     let client = GluetunClient::new(config(&server)).unwrap();
     let lease = client.begin_job("job-1").await.unwrap();
 
     let error = client.rotate_between_jobs().await.unwrap_err();
     assert_eq!(error.code(), GluetunErrorCode::StickyJobActive);
-    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.method.as_str() == "GET")
+    );
 
     client.end_job(lease).await.unwrap();
+}
+
+#[tokio::test]
+async fn sticky_job_reports_an_unexpected_public_ip_change() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/publicip/ip"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "public_ip": "203.0.113.20"
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/publicip/ip"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "public_ip": "203.0.113.21"
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    let client = GluetunClient::new(config(&server)).unwrap();
+    let lease = client.begin_job("job-ip-change").await.unwrap();
+    let error = client.end_job(lease).await.unwrap_err();
+
+    assert_eq!(error.code(), GluetunErrorCode::LeaseIpChanged);
+}
+
+#[tokio::test]
+async fn active_job_ip_verification_accepts_an_unchanged_lease() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/publicip/ip"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "public_ip": "203.0.113.22"
+        })))
+        .expect(3)
+        .mount(&server)
+        .await;
+
+    let client = GluetunClient::new(config(&server)).unwrap();
+    let lease = client.begin_job("job-stable-ip").await.unwrap();
+
+    client.verify_job_ip(&lease).await.unwrap();
+    client.end_job(lease).await.unwrap();
+}
+
+#[tokio::test]
+async fn active_job_ip_verification_detects_change_without_releasing_or_rotating() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/publicip/ip"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "public_ip": "203.0.113.30"
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/publicip/ip"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "public_ip": "203.0.113.31"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GluetunClient::new(config(&server)).unwrap();
+    let lease = client.begin_job("job-changed-ip").await.unwrap();
+
+    assert_eq!(
+        client.verify_job_ip(&lease).await.unwrap_err().code(),
+        GluetunErrorCode::LeaseIpChanged
+    );
+    assert_eq!(
+        client.rotate_between_jobs().await.unwrap_err().code(),
+        GluetunErrorCode::StickyJobActive
+    );
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.method.as_str() == "GET")
+    );
+    assert_eq!(
+        client.end_job(lease).await.unwrap_err().code(),
+        GluetunErrorCode::LeaseIpChanged
+    );
+}
+
+#[tokio::test]
+async fn active_job_ip_verification_fails_closed_on_control_api_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/publicip/ip"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "public_ip": "203.0.113.40"
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/publicip/ip"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+
+    let client = GluetunClient::new(config(&server)).unwrap();
+    let lease = client.begin_job("job-unverifiable-ip").await.unwrap();
+
+    assert_eq!(
+        client.verify_job_ip(&lease).await.unwrap_err().code(),
+        GluetunErrorCode::Unauthorized
+    );
+    assert_eq!(
+        client.rotate_between_jobs().await.unwrap_err().code(),
+        GluetunErrorCode::StickyJobActive
+    );
 }
 
 #[tokio::test]
@@ -220,6 +355,50 @@ async fn rotation_retries_a_transient_control_error_during_restart() {
         running_puts, 2,
         "the transient 502 on start is retried until the tunnel accepts running"
     );
+}
+
+#[tokio::test]
+async fn rotation_retries_a_transient_status_poll_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/publicip/ip"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "public_ip": "203.0.113.50"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/v1/vpn/status"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/vpn/status"))
+        .respond_with(ResponseTemplate::new(502))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/vpn/status"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "running"})),
+        )
+        .mount(&server)
+        .await;
+
+    let client = GluetunClient::new(config(&server)).unwrap();
+    client.rotate_between_jobs().await.unwrap();
+
+    let status_reads = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| {
+            request.method.as_str() == "GET" && request.url.path() == "/v1/vpn/status"
+        })
+        .count();
+    assert_eq!(status_reads, 2);
 }
 
 #[tokio::test]

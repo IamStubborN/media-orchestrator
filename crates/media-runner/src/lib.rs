@@ -37,6 +37,7 @@ pub use retention::{
 };
 pub use rezka_session_store::{
     EncryptedRezkaSessionStore, RezkaSessionStoreConfig, RezkaSessionStoreError,
+    RezkaSessionStoreGuard, acquire_rezka_session_lock,
 };
 pub use storage::{
     GIB, PeakEstimate, StorageBlocked, StoragePreflight, StorageRoots, StorageRootsError,

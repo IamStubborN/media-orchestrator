@@ -29,6 +29,30 @@ enum Command {
     MigrateDownOne(MigrateDownOneArgs),
     Serve,
     Runner,
+    #[command(hide = true)]
+    AnubisBrowserChallenge(AnubisBrowserChallengeArgs),
+    #[command(hide = true)]
+    AnubisExecChromium(AnubisExecChromiumArgs),
+}
+
+#[derive(Debug, Args)]
+struct AnubisBrowserChallengeArgs {
+    #[arg(long)]
+    url: url::Url,
+    #[arg(long)]
+    chromium_bin: std::path::PathBuf,
+    #[arg(long)]
+    user_agent: String,
+    #[arg(long)]
+    proxy: Option<url::Url>,
+    #[arg(long)]
+    timeout_ms: u64,
+}
+
+#[derive(Debug, Args)]
+struct AnubisExecChromiumArgs {
+    #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -47,7 +71,20 @@ struct RezkaArgs {
 
 #[derive(Debug, Subcommand)]
 enum RezkaCommand {
-    Session(RezkaSessionArgs),
+    /// Validate Rezka reachability through the same anonymous jar/proxy used by the runner.
+    Probe {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Explicitly move a corrupt encrypted anonymous snapshot to a timestamped sibling path.
+    #[command(
+        name = "quarantine-corrupt-session",
+        visible_alias = "quarantine-corrupt"
+    )]
+    QuarantineCorruptSession {
+        #[arg(long)]
+        json: bool,
+    },
     Inspect {
         #[arg(long)]
         locator: String,
@@ -71,22 +108,6 @@ enum RezkaCommand {
         json: bool,
         #[arg(long, default_value_t = false)]
         probe_streams: bool,
-    },
-}
-
-#[derive(Debug, Args)]
-struct RezkaSessionArgs {
-    #[command(subcommand)]
-    command: RezkaSessionCommand,
-}
-
-#[derive(Debug, Subcommand)]
-enum RezkaSessionCommand {
-    Refresh {
-        #[arg(long = "credential-request")]
-        credential_request_id: String,
-        #[arg(long)]
-        json: bool,
     },
 }
 
@@ -377,12 +398,20 @@ enum RunError {
     Runner(#[from] composition::RunnerError),
     #[error(transparent)]
     Diagnostic(#[from] media::diagnostic::DiagnosticError),
+    #[error(transparent)]
+    SessionStore(#[from] media_runner::RezkaSessionStoreError),
 }
 
 #[tokio::main]
 async fn main() {
-    initialize_tracing();
-    if let Err(error) = run(Cli::parse()).await {
+    let cli = Cli::parse();
+    if !matches!(
+        cli.command,
+        Command::AnubisBrowserChallenge(_) | Command::AnubisExecChromium(_)
+    ) {
+        initialize_tracing();
+    }
+    if let Err(error) = run(cli).await {
         eprintln!("{error}");
         std::process::exit(1);
     }
@@ -419,24 +448,30 @@ async fn run(cli: Cli) -> Result<(), RunError> {
             composition::run_runner(RunnerConfig::load()?).await?;
             Ok(())
         }
+        Command::AnubisBrowserChallenge(args) => {
+            let code = media::anubis_browser::run_challenge_helper(
+                media::anubis_browser::ChallengeHelperRequest {
+                    url: args.url,
+                    chromium_bin: args.chromium_bin,
+                    user_agent: args.user_agent,
+                    proxy: args.proxy,
+                    timeout: std::time::Duration::from_millis(args.timeout_ms.max(1)),
+                },
+            )
+            .await;
+            std::process::exit(code);
+        }
+        Command::AnubisExecChromium(args) => {
+            std::process::exit(media::anubis_browser::exec_chromium(args.args));
+        }
     }
 }
 
 async fn run_rezka(args: RezkaArgs) -> Result<(), RunError> {
     match args.command {
-        RezkaCommand::Session(args) => {
-            let client = HttpClient::new(ClientConfig::load()?)?;
-            match args.command {
-                RezkaSessionCommand::Refresh {
-                    credential_request_id,
-                    json,
-                } => {
-                    let output = client.refresh_rezka_session(credential_request_id).await?;
-                    emit(&output, json, |value| {
-                        render::job(value, Some("Queued session refresh"))
-                    });
-                }
-            }
+        RezkaCommand::Probe { json } => run_rezka_probe(json).await?,
+        RezkaCommand::QuarantineCorruptSession { json } => {
+            run_rezka_quarantine_corrupt_session(json).await?
         }
         RezkaCommand::Inspect {
             locator,
@@ -486,6 +521,29 @@ async fn run_rezka(args: RezkaArgs) -> Result<(), RunError> {
     Ok(())
 }
 
+async fn run_rezka_quarantine_corrupt_session(json: bool) -> Result<(), RunError> {
+    let config = RunnerConfig::load()?;
+    let store = composition::prepare_rezka_session_store(config.rezka())
+        .map_err(|_| RunError::Healthcheck)?;
+    let destination = store.quarantine_corrupt_snapshot()?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "action": "quarantine_corrupt_session",
+                "status": "quarantined",
+                "destination": destination,
+            })
+        );
+    } else {
+        println!(
+            "quarantined corrupt Rezka session snapshot to {}",
+            destination.display()
+        );
+    }
+    Ok(())
+}
+
 async fn run_healthcheck(args: HealthcheckArgs) -> Result<(), RunError> {
     let response = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -499,6 +557,77 @@ async fn run_healthcheck(args: HealthcheckArgs) -> Result<(), RunError> {
         return Err(RunError::Healthcheck);
     }
     Ok(())
+}
+
+async fn run_rezka_probe(json: bool) -> Result<(), RunError> {
+    let config = RunnerConfig::load().map_err(RunError::Config)?;
+    let mut prepared = match composition::prepare_runner_session(&config) {
+        Ok(prepared) => prepared,
+        Err(
+            composition::RunnerCompositionError::Store
+            | composition::RunnerCompositionError::SessionStore,
+        ) => {
+            emit_rezka_probe_category("SessionStoreError", json, false);
+            return Err(RunError::Healthcheck);
+        }
+        Err(_) => return Err(RunError::Healthcheck),
+    };
+    let guard = match prepared.acquire_session_lock().await {
+        Ok(guard) => guard,
+        Err(_) => {
+            emit_rezka_probe_category("SessionStoreError", json, false);
+            return Err(RunError::Healthcheck);
+        }
+    };
+    if prepared.reload_session().is_err() {
+        emit_rezka_probe_category("SessionStoreError", json, false);
+        return Err(RunError::Healthcheck);
+    }
+    let result = prepared.client.ensure_session(&prepared.probe).await;
+    match result {
+        Ok(_) => {
+            let snapshot = prepared
+                .client
+                .export_session()
+                .map_err(|_| RunError::Healthcheck)?;
+            if prepared.store.save(&snapshot).is_err() {
+                emit_rezka_probe_category("SessionStoreError", json, false);
+                return Err(RunError::Healthcheck);
+            }
+            drop(guard);
+            emit_rezka_probe_category("RezkaReachable", json, true);
+            Ok(())
+        }
+        Err(error) => {
+            drop(guard);
+            let category = match error.diagnostic_category() {
+                rezka_client::RezkaDiagnosticCategory::AnubisChallengeRequired => {
+                    "AnubisChallengeRequired"
+                }
+                rezka_client::RezkaDiagnosticCategory::AnubisChallengeFailed => {
+                    "AnubisChallengeFailed"
+                }
+                rezka_client::RezkaDiagnosticCategory::RezkaProviderRejected => {
+                    "RezkaProviderRejected"
+                }
+                rezka_client::RezkaDiagnosticCategory::RezkaParserInvalid => "RezkaParserInvalid",
+                rezka_client::RezkaDiagnosticCategory::RezkaReachable => "RezkaReachable",
+                rezka_client::RezkaDiagnosticCategory::SessionStoreError => "SessionStoreError",
+            };
+            emit_rezka_probe_category(category, json, false);
+            Err(RunError::Healthcheck)
+        }
+    }
+}
+
+fn emit_rezka_probe_category(category: &str, json: bool, success: bool) {
+    if json {
+        println!(r#"{{"category":"{category}"}}"#);
+    } else if success {
+        println!("{category}");
+    } else {
+        eprintln!("{category}");
+    }
 }
 
 /// Emit a command result. With `--json` the raw service response is printed

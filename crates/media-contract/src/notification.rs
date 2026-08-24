@@ -10,7 +10,6 @@ pub enum NotificationEventTypeDto {
     EncodingComplete,
     PlexAdded,
     Completed,
-    SessionRefreshed,
     Partial,
     BlockedStorage,
     Failed,

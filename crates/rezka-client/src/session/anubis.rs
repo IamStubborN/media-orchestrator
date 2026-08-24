@@ -1,6 +1,12 @@
 use std::{
     fmt,
-    sync::atomic::{AtomicBool, Ordering},
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
 
 use scraper::{Html, Selector};
@@ -14,6 +20,20 @@ use crate::{
 
 const CHALLENGE_SELECTOR: &str = "#anubis_challenge";
 const PASS_CHALLENGE_PATH: &str = "/.within.website/x/cmd/anubis/api/pass-challenge";
+pub const CLEARANCE_COOKIE: &str = "techaro.lol-anubis-auth";
+
+/// Optional escape hatch for future Anubis algorithms that cannot be solved natively.
+///
+/// The application deliberately ships with no implementation and never enables this path from a
+/// public route. Implementations must return only `Set-Cookie` values; challenge HTML and browser
+/// state stay inside the isolated challenge context.
+pub trait BrowserChallengeFallback: Send {
+    fn solve<'a>(
+        &'a mut self,
+        challenge: &'a AnubisChallenge,
+        origin: &'a Url,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, RezkaError>> + Send + 'a>>;
+}
 const MAX_DIFFICULTY: u8 = 32;
 // Difficulty counts leading zero *nibbles* (see `has_leading_zero_nibbles`), so difficulty D needs
 // ~2^(4D) expected SHA-256 hashes. The production `anubis_max_nonce` is 5_000_000 (~2^22), so only
@@ -73,6 +93,8 @@ struct ChallengeFields {
 #[derive(Deserialize)]
 struct ChallengeRules {
     difficulty: u8,
+    #[serde(default)]
+    algorithm: Option<String>,
 }
 
 #[must_use]
@@ -91,6 +113,31 @@ pub fn parse_challenge(html: &str) -> Result<AnubisChallenge, RezkaError> {
     parse_optional_challenge(html)?.ok_or_else(|| invalid_challenge("challenge element missing"))
 }
 
+pub(crate) fn parse_challenge_for_fallback(html: &str) -> Result<AnubisChallenge, RezkaError> {
+    let selector = Selector::parse(CHALLENGE_SELECTOR)
+        .map_err(|_| invalid_challenge("challenge selector invalid"))?;
+    let document = Html::parse_document(html);
+    let Some(element) = document.select(&selector).next() else {
+        return Err(invalid_challenge("challenge element missing"));
+    };
+    let payload = element.text().collect::<String>();
+    let parsed: ChallengeDocument = serde_json::from_str(&payload)
+        .map_err(|_| invalid_challenge("challenge payload invalid"))?;
+    if parsed.challenge.id.trim().is_empty()
+        || parsed.challenge.random_data.trim().is_empty()
+        || parsed.challenge.id.len() > MAX_CHALLENGE_ID_BYTES
+        || parsed.challenge.random_data.len() > MAX_RANDOM_DATA_BYTES
+        || !(1..=MAX_DIFFICULTY).contains(&parsed.rules.difficulty)
+    {
+        return Err(invalid_challenge("challenge fields invalid"));
+    }
+    Ok(AnubisChallenge {
+        id: parsed.challenge.id,
+        random_data: parsed.challenge.random_data,
+        difficulty: parsed.rules.difficulty,
+    })
+}
+
 pub(crate) fn parse_optional_challenge(html: &str) -> Result<Option<AnubisChallenge>, RezkaError> {
     let selector = Selector::parse(CHALLENGE_SELECTOR)
         .map_err(|_| invalid_challenge("challenge selector invalid"))?;
@@ -102,13 +149,26 @@ pub(crate) fn parse_optional_challenge(html: &str) -> Result<Option<AnubisChalle
     let parsed: ChallengeDocument = serde_json::from_str(&payload)
         .map_err(|_| invalid_challenge("challenge payload invalid"))?;
 
+    if parsed
+        .rules
+        .algorithm
+        .as_deref()
+        .is_some_and(|algorithm| algorithm != "fast")
+    {
+        return Err(unsupported_algorithm());
+    }
+
     if parsed.challenge.id.trim().is_empty()
         || parsed.challenge.random_data.trim().is_empty()
         || parsed.challenge.id.len() > MAX_CHALLENGE_ID_BYTES
         || parsed.challenge.random_data.len() > MAX_RANDOM_DATA_BYTES
-        || !(1..=MAX_ACCEPTED_DIFFICULTY).contains(&parsed.rules.difficulty)
+        || parsed.rules.difficulty == 0
     {
         return Err(invalid_challenge("challenge fields invalid"));
+    }
+
+    if parsed.rules.difficulty > MAX_ACCEPTED_DIFFICULTY {
+        return Err(excessive_difficulty());
     }
 
     Ok(Some(AnubisChallenge {
@@ -123,6 +183,48 @@ pub fn solve_challenge(
     max_nonce: u64,
 ) -> Result<AnubisProof, RezkaError> {
     solve_challenge_with_cancellation(challenge, max_nonce, None)
+}
+
+/// Solve one proof on a blocking worker with a process-wide budget and deadline.
+pub(crate) async fn solve_challenge_bounded(
+    challenge: AnubisChallenge,
+    max_nonce: u64,
+    timeout: Duration,
+) -> Result<AnubisProof, RezkaError> {
+    let permit = proof_semaphore()
+        .acquire_owned()
+        .await
+        .map_err(|_| timeout_challenge())?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancellation_guard = CancellationGuard {
+        cancelled: Arc::clone(&cancelled),
+    };
+    let task = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        solve_challenge_with_cancellation(&challenge, max_nonce, Some(&cancelled))
+    });
+    let result = tokio::time::timeout(timeout, task).await;
+    drop(cancellation_guard);
+    match result {
+        Ok(Ok(Ok(proof))) => Ok(proof),
+        Ok(Ok(Err(error))) => Err(error),
+        Ok(Err(_)) | Err(_) => Err(timeout_challenge()),
+    }
+}
+
+fn proof_semaphore() -> Arc<tokio::sync::Semaphore> {
+    static SEMAPHORE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    Arc::clone(SEMAPHORE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1))))
+}
+
+struct CancellationGuard {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Drop for CancellationGuard {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
 }
 
 pub(crate) fn solve_challenge_with_cancellation(
@@ -197,12 +299,14 @@ pub async fn submit_challenge(
     let elapsed_ms = elapsed_ms.to_string();
     url.query_pairs_mut()
         .append_pair("id", &challenge.id)
-        .append_pair("nonce", &nonce)
         .append_pair("response", &proof.response_hex)
+        .append_pair("nonce", &nonce)
         .append_pair("redir", redir.as_str())
         .append_pair("elapsedTime", &elapsed_ms);
 
-    let response = transport.get_first(url, Some(redir)).await?;
+    let response = transport
+        .get_first_without_challenge(url, Some(redir))
+        .await?;
     if !response.status.is_redirection() {
         return Err(invalid_challenge("challenge pass response invalid"));
     }
@@ -216,6 +320,18 @@ fn invalid_challenge(reason: &str) -> RezkaError {
     }
 }
 
+fn unsupported_algorithm() -> RezkaError {
+    RezkaError::AnubisUnsupportedAlgorithm {
+        context: sanitize_provider_text("Anubis algorithm is not supported"),
+    }
+}
+
+fn excessive_difficulty() -> RezkaError {
+    RezkaError::AnubisExcessiveDifficulty {
+        context: sanitize_provider_text("Anubis proof difficulty exceeds the configured bound"),
+    }
+}
+
 fn challenge_failed() -> RezkaError {
     RezkaError::ChallengeFailed {
         context: sanitize_provider_text("bounded proof of work exhausted"),
@@ -223,7 +339,37 @@ fn challenge_failed() -> RezkaError {
 }
 
 fn cancelled_challenge() -> RezkaError {
-    RezkaError::ChallengeFailed {
+    RezkaError::AnubisTimeout {
         context: sanitize_provider_text("proof of work cancelled"),
+    }
+}
+
+fn timeout_challenge() -> RezkaError {
+    RezkaError::AnubisTimeout {
+        context: sanitize_provider_text("proof of work timed out"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AnubisChallenge, solve_challenge_bounded};
+    use crate::RezkaErrorCode;
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bounded_solver_reports_timeout_without_blocking_the_runtime() {
+        let error = solve_challenge_bounded(
+            AnubisChallenge {
+                id: "test".to_owned(),
+                random_data: "deterministic-timeout".to_owned(),
+                difficulty: 32,
+            },
+            u64::MAX,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.code(), RezkaErrorCode::AnubisTimeout);
     }
 }

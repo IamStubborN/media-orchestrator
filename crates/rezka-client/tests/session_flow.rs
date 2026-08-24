@@ -48,29 +48,74 @@ async fn mount_login_never_called(server: &MockServer) {
 }
 
 #[tokio::test]
-async fn restored_valid_cookie_jar_skips_anubis() {
+async fn existing_clearance_accepted_after_ip_change_reuses_anonymous_jar() {
     let server = MockServer::start().await;
     let base = Url::parse(&server.uri()).unwrap();
 
     Mock::given(method("GET"))
         .and(path("/account/probe"))
-        .and(header("cookie", "PHPSESSID=valid"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string("<html data-authenticated=\"true\"></html>"),
-        )
+        .respond_with(|request: &Request| {
+            let cookie = request
+                .headers
+                .get("cookie")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            assert!(cookie.contains("provider_state=valid"));
+            assert!(cookie.contains("techaro.lol-anubis-auth=accepted"));
+            ResponseTemplate::new(200).set_body_string("<input name=\"login_name\">")
+        })
         .expect(1)
         .mount(&server)
         .await;
     mount_login_never_called(&server).await;
 
     let mut jar = SessionJar::empty();
-    jar.store_response_cookies(["PHPSESSID=valid; Path=/; HttpOnly"].iter().copied(), &base);
+    jar.store_response_cookies(
+        ["provider_state=valid; Path=/; HttpOnly"].iter().copied(),
+        &base,
+    );
+    jar.store_response_cookies(
+        ["techaro.lol-anubis-auth=accepted; Path=/; HttpOnly"]
+            .iter()
+            .copied(),
+        &base,
+    );
     let snapshot = jar.export().unwrap();
     let mut restored = RezkaClient::from_snapshot(config(base.clone()), &snapshot).unwrap();
 
     let result = restored.ensure_session(&probe(&base)).await.unwrap();
 
-    assert_eq!(result, SessionValidation::Valid);
+    assert_eq!(result, SessionValidation::Invalid);
+}
+
+#[derive(Clone)]
+struct RejectedIpChangeSequence {
+    calls: Arc<AtomicUsize>,
+}
+
+impl Respond for RejectedIpChangeSequence {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let cookie = request
+            .headers
+            .get("cookie")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(cookie.contains("provider_state=preserved"));
+        match call {
+            0 => {
+                assert!(cookie.contains("techaro.lol-anubis-auth=stale"));
+                ResponseTemplate::new(200)
+                    .set_body_string(include_str!("fixtures/anubis_challenge.html"))
+            }
+            1 => {
+                assert!(cookie.contains("techaro.lol-anubis-auth=fresh"));
+                assert!(!cookie.contains("techaro.lol-anubis-auth=stale"));
+                ResponseTemplate::new(200).set_body_string("<input name=\"login_name\">")
+            }
+            _ => panic!("probe fetched more than twice"),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -91,7 +136,7 @@ impl Respond for ProbeSequence {
             0 => ResponseTemplate::new(200)
                 .set_body_string(include_str!("fixtures/anubis_challenge.html")),
             1 => {
-                assert!(cookie.contains("anubis=opaque"));
+                assert!(cookie.contains("techaro.lol-anubis-auth=opaque"));
                 ResponseTemplate::new(200).set_body_string("<input name=\"login_name\">")
             }
             _ => panic!("probe fetched more than twice"),
@@ -206,7 +251,10 @@ async fn anubis_then_anonymous_session_is_ready_without_login() {
         .respond_with(
             ResponseTemplate::new(302)
                 .insert_header("location", "/must-not-follow")
-                .insert_header("set-cookie", "anubis=opaque; Path=/; HttpOnly"),
+                .insert_header(
+                    "set-cookie",
+                    "techaro.lol-anubis-auth=opaque; Path=/; HttpOnly",
+                ),
         )
         .expect(1)
         .mount(&server)
@@ -219,7 +267,60 @@ async fn anubis_then_anonymous_session_is_ready_without_login() {
     assert_eq!(result, SessionValidation::Invalid);
     assert_eq!(probe_calls.load(Ordering::SeqCst), 2);
     let restored = SessionJar::import(&client.export_session().unwrap()).unwrap();
-    assert!(restored.contains_cookie_for_url(&base, "anubis"));
+    assert!(restored.contains_cookie_for_url(&base, "techaro.lol-anubis-auth"));
+}
+
+#[tokio::test]
+async fn rejected_clearance_after_ip_change_is_selectively_replaced() {
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    let probe_calls = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .respond_with(RejectedIpChangeSequence {
+            calls: Arc::clone(&probe_calls),
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/.within.website/x/cmd/anubis/api/pass-challenge"))
+        .and(AnubisPassQuery {
+            redir: base.join("/account/probe").unwrap().to_string(),
+        })
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", "/must-not-follow")
+                .insert_header(
+                    "set-cookie",
+                    "techaro.lol-anubis-auth=fresh; Path=/; HttpOnly",
+                ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    mount_login_never_called(&server).await;
+
+    let mut jar = SessionJar::empty();
+    jar.store_response_cookies(
+        [
+            "provider_state=preserved; Path=/; HttpOnly",
+            "techaro.lol-anubis-auth=stale; Path=/; HttpOnly",
+        ]
+        .iter()
+        .copied(),
+        &base,
+    );
+    let mut client =
+        RezkaClient::from_snapshot(config(base.clone()), &jar.export().unwrap()).unwrap();
+
+    let result = client.ensure_session(&probe(&base)).await.unwrap();
+
+    assert_eq!(result, SessionValidation::Invalid);
+    assert_eq!(probe_calls.load(Ordering::SeqCst), 2);
+    let restored = SessionJar::import(&client.export_session().unwrap()).unwrap();
+    assert!(restored.contains_cookie_for_url(&base, "provider_state"));
+    assert!(restored.contains_cookie_for_url(&base, "techaro.lol-anubis-auth"));
 }
 
 #[tokio::test]
@@ -242,7 +343,7 @@ async fn anonymous_invalid_probe_is_accepted_without_login() {
 }
 
 #[tokio::test]
-async fn validate_session_accepts_anonymous_and_authenticated_markers() {
+async fn validate_session_accepts_the_anonymous_marker() {
     let server = MockServer::start().await;
     let base = Url::parse(&server.uri()).unwrap();
     Mock::given(method("GET"))
@@ -275,7 +376,8 @@ async fn repeated_anubis_after_pass_returns_challenge_failed_without_login_or_lo
     Mock::given(method("GET"))
         .and(path("/.within.website/x/cmd/anubis/api/pass-challenge"))
         .respond_with(
-            ResponseTemplate::new(302).insert_header("set-cookie", "anubis=opaque; Path=/"),
+            ResponseTemplate::new(302)
+                .insert_header("set-cookie", "techaro.lol-anubis-auth=opaque; Path=/"),
         )
         .expect(1)
         .mount(&server)
@@ -284,7 +386,7 @@ async fn repeated_anubis_after_pass_returns_challenge_failed_without_login_or_lo
 
     let mut client = RezkaClient::new(config(base.clone())).unwrap();
     let error = client.ensure_session(&probe(&base)).await.unwrap_err();
-    assert_eq!(error.code(), rezka_client::RezkaErrorCode::ChallengeFailed);
+    assert_eq!(error.code(), rezka_client::RezkaErrorCode::AnubisRejected);
 }
 
 #[test]
@@ -435,7 +537,7 @@ async fn anubis_is_attempted_at_most_once() {
             ResponseTemplate::new(200)
                 .set_body_string(include_str!("fixtures/anubis_challenge.html")),
         )
-        .expect(2)
+        .expect(1)
         .mount(&server)
         .await;
     Mock::given(method("GET"))
@@ -449,5 +551,5 @@ async fn anubis_is_attempted_at_most_once() {
     let mut client = RezkaClient::new(config(base.clone())).unwrap();
     let error = client.ensure_session(&probe(&base)).await.unwrap_err();
 
-    assert_eq!(error.code(), RezkaErrorCode::ChallengeFailed);
+    assert_eq!(error.code(), RezkaErrorCode::AnubisRejected);
 }

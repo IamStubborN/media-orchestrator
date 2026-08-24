@@ -20,7 +20,7 @@ pub use catalog::{
     TranslationKey,
 };
 pub use discovery::{PremiumStatus, QuickSearchEntry, QuickSearchQuery};
-pub use error::{ProviderFailureReason, RezkaError, RezkaErrorCode};
+pub use error::{ProviderFailureReason, RezkaDiagnosticCategory, RezkaError, RezkaErrorCode};
 pub use mirror::MirrorSet;
 pub use playback::{
     EpisodeAvailability, PlaybackManifest, PlaybackRequest, ResolvedTarget, SeasonAvailability,
@@ -32,8 +32,8 @@ pub use quality::{
 };
 pub use secret_url::{PublicImageUrl, SecretMediaUrl, SecretSubtitleUrl};
 pub use session::{
-    ProbeResponse, RezkaClient, RezkaClientConfig, RezkaCredentials, SessionValidation,
-    SessionValidationProbe, cookie::SessionSnapshot,
+    ProbeResponse, RezkaClient, RezkaClientConfig, SessionValidation, SessionValidationProbe,
+    cookie::SessionSnapshot,
 };
 pub use subtitles::{SubtitleLanguage, SubtitleTrack, SubtitleTrackId, parse_subtitle_fields};
 pub use trailer::Trailer;

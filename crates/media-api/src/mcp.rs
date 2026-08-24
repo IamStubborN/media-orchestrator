@@ -5,8 +5,7 @@ use media_contract::{
     AlternativeSearchRequest, BestPageDto, BestRankingDto, ContinueSearchRequest,
     CreateTrackingRequest, DiscoverPageDto, EpisodeSnapshotDto, ExecutionSelectionDto,
     GenreListDto, MediaKindDto, PatchTrackingRequest, PremiereFeedDto, PremieresPageDto,
-    ProviderDto, ReleaseQueryRequest, ResolveEpisodeMappingRequest, RezkaSessionRefreshRequest,
-    SearchScopeDto,
+    ProviderDto, ReleaseQueryRequest, ResolveEpisodeMappingRequest, SearchScopeDto,
     SelectResultRequest, SeriesGroupIdentityDto, SeriesGroupSourceDto, StartSearchRequest,
     TrackingDownloadDto, TrackingReleaseIdentityDto, TrackingReleaseSourceDto, TrackingScopeDto,
     TrendingCategoryDto, TrendingItemDto, TrendingMediaTypeDto,
@@ -85,12 +84,6 @@ struct SearchInput {
     #[schemars(description = "Stable TMDB series identity for Plex season grouping")]
     #[schemars(range(min = 1))]
     tmdb_id: Option<u64>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct RezkaSessionRefreshInput {
-    #[schemars(description = "One-time approved Vaultwarden credential request ID")]
-    credential_request_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1406,34 +1399,6 @@ impl MediaAdminMcp {
     }
 
     #[tool(
-        name = "media_rezka_session_refresh",
-        description = "Queue a Rezka refresh from an approved one-time credential request; credentials are never returned.",
-        output_schema = object_output_schema(),
-        annotations(title = "Refresh Rezka session", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
-    )]
-    async fn refresh_rezka_session(
-        &self,
-        Parameters(input): Parameters<RezkaSessionRefreshInput>,
-        Extension(parts): Extension<Parts>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let actor = actor_from_parts(&parts)?;
-        let owner = actor
-            .require_user()
-            .map_err(|_| ErrorData::invalid_request("operation is forbidden", None))?;
-        let request = RezkaSessionRefreshRequest {
-            credential_request_id: input.credential_request_id,
-        };
-        let operation = stable_payload_operation_key("rezka-session-refresh", &request)?;
-        let value = self
-            .state
-            .search()
-            .refresh_rezka_session(owner, operation, request)
-            .await
-            .map_err(search_error)?;
-        result_json_for(&parts, value)
-    }
-
-    #[tool(
         name = "media_release_schedule",
         description = "Query the release calendar for episode counts, lifecycle, schedule, and next episode. Read-only and never starts a download.",
         output_schema = object_output_schema(),
@@ -2646,7 +2611,6 @@ async fn enrich_job_value(state: &ApiState, result_ref: &str, mut value: Value) 
     };
 
     match selection {
-        ExecutionSelectionDto::RezkaSessionRefresh { .. } => {}
         ExecutionSelectionDto::Rezka {
             media_kind,
             translation,
@@ -2751,6 +2715,8 @@ fn search_error_code(error: crate::SearchError) -> &'static str {
         crate::SearchError::Conflict => "conflict",
         crate::SearchError::Provider => "provider_failed",
         crate::SearchError::ProviderUnavailable => "provider_unavailable",
+        crate::SearchError::VpnRotationRequired => "vpn_rotation_required",
+        crate::SearchError::RezkaDiagnostic(diagnostic) => rezka_diagnostic_wire_label(diagnostic),
         crate::SearchError::Infrastructure => "infrastructure_failed",
     }
 }
@@ -2770,9 +2736,34 @@ fn search_error(error: crate::SearchError) -> ErrorData {
         crate::SearchError::ProviderUnavailable => {
             ErrorData::internal_error("media provider is temporarily unavailable", None)
         }
+        crate::SearchError::VpnRotationRequired => {
+            ErrorData::internal_error("VPN rotation is required before another Rezka search", None)
+        }
+        crate::SearchError::RezkaDiagnostic(diagnostic) => {
+            ErrorData::internal_error(rezka_diagnostic_wire_label(diagnostic), None)
+        }
         crate::SearchError::Provider | crate::SearchError::Infrastructure => {
             ErrorData::internal_error("media search failed", None)
         }
+    }
+}
+
+fn rezka_diagnostic_wire_label(
+    diagnostic: media_contract::RezkaDiagnosticCategoryDto,
+) -> &'static str {
+    match diagnostic {
+        media_contract::RezkaDiagnosticCategoryDto::RezkaReachable => "RezkaReachable",
+        media_contract::RezkaDiagnosticCategoryDto::AnubisChallengeRequired => {
+            "AnubisChallengeRequired"
+        }
+        media_contract::RezkaDiagnosticCategoryDto::AnubisChallengeFailed => {
+            "AnubisChallengeFailed"
+        }
+        media_contract::RezkaDiagnosticCategoryDto::RezkaProviderRejected => {
+            "RezkaProviderRejected"
+        }
+        media_contract::RezkaDiagnosticCategoryDto::RezkaParserInvalid => "RezkaParserInvalid",
+        media_contract::RezkaDiagnosticCategoryDto::SessionStoreError => "SessionStoreError",
     }
 }
 
@@ -2830,13 +2821,45 @@ fn media_details_error(error: crate::MediaDetailsServiceError) -> ErrorData {
 mod tests {
     use super::{
         PageInput, ReadView, choice_set_download_operation_key, job_list_item, page_bounds,
-        parse_job_id, plex_recent_item, result_json_for, tracking_list_item,
+        parse_job_id, plex_recent_item, result_json_for, rezka_diagnostic_wire_label,
+        search_error_code, tracking_list_item,
     };
     use axum::http::{HeaderValue, Request};
 
     #[test]
     fn rejects_invalid_job_ids_before_touching_storage() {
         assert!(parse_job_id("not-a-job").is_err());
+    }
+
+    #[test]
+    fn rezka_diagnostics_keep_exact_safe_categories_at_the_mcp_boundary() {
+        use media_contract::RezkaDiagnosticCategoryDto as Diagnostic;
+
+        for (diagnostic, expected) in [
+            (Diagnostic::RezkaReachable, "RezkaReachable"),
+            (
+                Diagnostic::AnubisChallengeRequired,
+                "AnubisChallengeRequired",
+            ),
+            (Diagnostic::AnubisChallengeFailed, "AnubisChallengeFailed"),
+            (Diagnostic::RezkaProviderRejected, "RezkaProviderRejected"),
+            (Diagnostic::RezkaParserInvalid, "RezkaParserInvalid"),
+            (Diagnostic::SessionStoreError, "SessionStoreError"),
+        ] {
+            assert_eq!(
+                search_error_code(crate::SearchError::RezkaDiagnostic(diagnostic)),
+                expected
+            );
+            assert_eq!(rezka_diagnostic_wire_label(diagnostic), expected);
+        }
+    }
+
+    #[test]
+    fn vpn_rotation_keeps_a_stable_search_error_code_at_the_mcp_boundary() {
+        assert_eq!(
+            search_error_code(crate::SearchError::VpnRotationRequired),
+            "vpn_rotation_required"
+        );
     }
 
     #[test]

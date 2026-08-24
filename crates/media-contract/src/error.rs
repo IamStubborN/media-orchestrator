@@ -18,16 +18,32 @@ pub enum ApiErrorCode {
     Internal,
 }
 
+/// Safe, provider-independent diagnostic categories exposed at delivery
+/// boundaries.  Keep this enum intentionally small: provider response bodies,
+/// challenge payloads, cookies and credentials must never cross the API.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum RezkaDiagnosticCategoryDto {
+    RezkaReachable,
+    AnubisChallengeRequired,
+    AnubisChallengeFailed,
+    RezkaProviderRejected,
+    RezkaParserInvalid,
+    SessionStoreError,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ApiError {
     pub code: ApiErrorCode,
     pub message: String,
     pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<RezkaDiagnosticCategoryDto>,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ApiError, ApiErrorCode};
+    use super::{ApiError, ApiErrorCode, RezkaDiagnosticCategoryDto};
 
     #[test]
     fn api_error_has_a_stable_public_shape() {
@@ -35,6 +51,7 @@ mod tests {
             code: ApiErrorCode::IdentityAmbiguous,
             message: "Episode numbering needs confirmation".to_owned(),
             request_id: "req-123".to_owned(),
+            diagnostic: None,
         };
 
         let value = serde_json::to_value(&error).unwrap();
@@ -46,6 +63,20 @@ mod tests {
                 "request_id": "req-123"
             }),
         );
+        assert_eq!(serde_json::from_value::<ApiError>(value).unwrap(), error);
+    }
+
+    #[test]
+    fn rezka_diagnostic_has_the_exact_safe_public_category() {
+        let error = ApiError {
+            code: ApiErrorCode::ProviderUnavailable,
+            message: "media provider diagnostic".to_owned(),
+            request_id: "req-456".to_owned(),
+            diagnostic: Some(RezkaDiagnosticCategoryDto::AnubisChallengeRequired),
+        };
+
+        let value = serde_json::to_value(&error).unwrap();
+        assert_eq!(value["diagnostic"], "AnubisChallengeRequired");
         assert_eq!(serde_json::from_value::<ApiError>(value).unwrap(), error);
     }
 

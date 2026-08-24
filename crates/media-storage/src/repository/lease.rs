@@ -266,9 +266,6 @@ async fn project_notification(
     job: &Job,
     event: &JobEvent,
 ) -> Result<Option<ProjectedNotification>, sea_orm::DbErr> {
-    if job.result_ref().starts_with("selection:session-refresh:") {
-        return Ok(None);
-    }
     let (event_type, state, terminal, stage, next_step, issue, actions) = match event.kind() {
         JobEventKind::Started => (
             "started",

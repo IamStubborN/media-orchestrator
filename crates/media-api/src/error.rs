@@ -8,7 +8,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use media_contract::{ApiError as ErrorBody, ApiErrorCode};
+use media_contract::{ApiError as ErrorBody, ApiErrorCode, RezkaDiagnosticCategoryDto};
 
 use crate::{
     MAX_REQUEST_BODY_BYTES, MAX_REQUEST_HEADER_BYTES, MAX_REQUEST_HEADER_COUNT, RequestId,
@@ -33,8 +33,33 @@ impl ApiError {
                 code,
                 message: message.to_owned(),
                 request_id: request_id.as_str().to_owned(),
+                diagnostic: None,
             },
         }
+    }
+
+    pub(crate) fn rezka_diagnostic(
+        request_id: &RequestId,
+        diagnostic: RezkaDiagnosticCategoryDto,
+    ) -> Self {
+        let (status, code) = match diagnostic {
+            RezkaDiagnosticCategoryDto::SessionStoreError => {
+                (StatusCode::INTERNAL_SERVER_ERROR, ApiErrorCode::Internal)
+            }
+            RezkaDiagnosticCategoryDto::AnubisChallengeRequired => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                ApiErrorCode::ProviderUnavailable,
+            ),
+            RezkaDiagnosticCategoryDto::RezkaReachable
+            | RezkaDiagnosticCategoryDto::AnubisChallengeFailed
+            | RezkaDiagnosticCategoryDto::RezkaProviderRejected
+            | RezkaDiagnosticCategoryDto::RezkaParserInvalid => {
+                (StatusCode::BAD_GATEWAY, ApiErrorCode::Internal)
+            }
+        };
+        let mut error = Self::new(status, code, "media provider diagnostic", request_id);
+        error.body.diagnostic = Some(diagnostic);
+        error
     }
 
     #[must_use]

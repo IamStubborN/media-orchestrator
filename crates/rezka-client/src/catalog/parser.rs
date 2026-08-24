@@ -583,13 +583,14 @@ fn parse_translations(
     let mut translations = Vec::new();
     let mut identities = HashSet::new();
     for element in elements {
-        if translations.len() == MAX_TRANSLATIONS {
-            return Err(invalid_catalog("translation limit exceeded"));
-        }
         let id = element
             .attr("data-translator_id")
             .ok_or_else(|| invalid_catalog("translation missing ID"))?;
         let id = TranslationId::new(parse_positive_decimal(id, "invalid translation ID")?)?;
+        let series_key = (kind == RezkaMediaKind::Series).then_some(TranslationKey::Series { id });
+        if series_key.is_some_and(|key| identities.contains(&key)) {
+            continue;
+        }
         let name = normalized_text(element.text())?
             .ok_or_else(|| invalid_catalog("translation missing name"))?;
         let is_camrip = parse_flag(element.attr("data-camrip"))?;
@@ -610,6 +611,9 @@ fn parse_translations(
         };
         if !identities.insert(key) {
             return Err(invalid_catalog("duplicate translation identity"));
+        }
+        if translations.len() == MAX_TRANSLATIONS {
+            return Err(invalid_catalog("translation limit exceeded"));
         }
         translations.push(Translation::new(
             key,

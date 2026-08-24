@@ -45,6 +45,38 @@ RUN case "${TARGETARCH}" in \
     echo "${checksum}  /usr/local/bin/yt-dlp" | sha256sum --check --strict && \
     chmod 0755 /usr/local/bin/yt-dlp
 
+FROM ${RUNTIME_IMAGE} AS chrome-headless-shell
+ARG TARGETARCH
+RUN apt-get \
+      -o Acquire::Retries=3 \
+      -o Acquire::http::Timeout=20 \
+      -o Acquire::https::Timeout=20 \
+      update && \
+    apt-get \
+      -o Acquire::Retries=3 \
+      -o Acquire::http::Timeout=20 \
+      -o Acquire::https::Timeout=20 \
+      install --yes --no-install-recommends ca-certificates curl unzip && \
+    mkdir -p /usr/local/lib/chrome-headless-shell && \
+    case "${TARGETARCH}" in \
+      amd64) \
+        version=152.0.7977.54; platform=linux64; checksum=11cedb5568cd374a76eb738e40bd434cd0c9956820fb406b8bd9edca53428d3e; \
+        archive="chrome-headless-shell-${platform}.zip"; \
+        curl --fail --location --retry 3 \
+          --output "/tmp/${archive}" \
+          "https://storage.googleapis.com/chrome-for-testing-public/${version}/${platform}/${archive}" && \
+        echo "${checksum}  /tmp/${archive}" | sha256sum --check --strict && \
+        unzip -q "/tmp/${archive}" -d /tmp && \
+        rm -rf /usr/local/lib/chrome-headless-shell && \
+        mv "/tmp/chrome-headless-shell-${platform}" /usr/local/lib/chrome-headless-shell && \
+        chmod 0755 /usr/local/lib/chrome-headless-shell/chrome-headless-shell && \
+        rm -f "/tmp/${archive}" ;; \
+      arm64) \
+        echo "chrome-headless-shell is amd64-only; Anubis browser fallback stays native on arm64" ;; \
+      *) echo "unsupported chrome-headless-shell architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac && \
+    rm -rf /var/lib/apt/lists/*
+
 FROM ${RUNTIME_IMAGE} AS runtime-base
 COPY --from=certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 RUN groupadd --gid 65532 media && \
@@ -97,7 +129,32 @@ RUN apt-get \
       ffmpeg=7:5.1.9-0+deb12u1 \
       libva-drm2=2.17.0-1 \
       libva2=2.17.0-1 \
-      ${vaapi_driver} && \
+      ${vaapi_driver} \
+      fonts-liberation \
+      libasound2 \
+      libatk-bridge2.0-0 \
+      libatk1.0-0 \
+      libatspi2.0-0 \
+      libcairo2 \
+      libcups2 \
+      libdbus-1-3 \
+      libdrm2 \
+      libexpat1 \
+      libgbm1 \
+      libglib2.0-0 \
+      libnspr4 \
+      libnss3 \
+      libpango-1.0-0 \
+      libudev1 \
+      libx11-6 \
+      libx11-xcb1 \
+      libxcb1 \
+      libxcomposite1 \
+      libxdamage1 \
+      libxext6 \
+      libxfixes3 \
+      libxkbcommon0 \
+      libxrandr2 && \
     rm -rf /var/lib/apt/lists/*
 
 FROM runner-packages AS runner
@@ -118,6 +175,7 @@ LABEL org.opencontainers.image.created=$OCI_CREATED \
       dev.iamstubborn.media.source-tree-digest=$OCI_SOURCE_TREE_DIGEST
 COPY --from=builder --chown=65532:65532 /out/media /usr/local/bin/media
 COPY --from=yt-dlp --chown=65532:65532 /usr/local/bin/yt-dlp /usr/local/bin/yt-dlp
+COPY --from=chrome-headless-shell --chown=65532:65532 /usr/local/lib/chrome-headless-shell /usr/local/lib/chrome-headless-shell
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/media"]
 CMD ["runner"]

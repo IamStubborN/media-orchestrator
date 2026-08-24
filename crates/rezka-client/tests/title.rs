@@ -433,7 +433,7 @@ fn player_initialization_requires_positive_decimal_u64_literals() {
 }
 
 #[test]
-fn duplicate_translation_identity_is_rejected_by_media_kind() {
+fn duplicate_movie_translation_identity_is_rejected() {
     let duplicate_movie = movie_page(
         r#"<li class="b-translator__item" data-translator_id="7" data-camrip="1">A</li>
         <li class="b-translator__item" data-translator_id="7" data-camrip="1">B</li>"#,
@@ -443,15 +443,41 @@ fn duplicate_translation_identity_is_rejected_by_media_kind() {
         parse(&duplicate_movie, "/films/55-movie.html"),
         RezkaErrorCode::ProviderResponseInvalid,
     );
+}
 
+#[test]
+fn duplicate_series_translation_entries_are_collapsed_by_identity() {
     let duplicate_series = r#"<html><head><title>Series</title><meta property="og:type" content="video.tv_series"></head>
         <body><input id="post_id" value="56"><h1 class="b-post__title">Series</h1>
-        <ul><li class="b-translator__item" data-translator_id="7">A</li>
-        <li class="b-translator__item" data-translator_id="7" data-ads="1">B</li></ul></body></html>"#;
-    assert_code(
-        parse(duplicate_series, "/series/56-series.html"),
-        RezkaErrorCode::ProviderResponseInvalid,
+        <ul id="translators-list"><li class="b-translator__item" data-translator_id="7">Studio</li>
+        <li class="b-translator__item" data-translator_id="7" data-ads="1">Studio (mobile)</li>
+        <li class="b-translator__item" data-translator_id="8">Other Studio</li></ul>
+        <script>sof.tv.initCDNSeriesEvents(56, 7, {}, {});</script></body></html>"#;
+    let title = parse(&duplicate_series, "/series/56-series.html").unwrap();
+
+    assert_eq!(title.translations().len(), 2);
+    assert_eq!(title.translations()[0].id().get(), 7);
+    assert_eq!(title.translations()[0].name(), "Studio");
+    assert_eq!(title.translations()[1].id().get(), 8);
+    assert_eq!(
+        title.default_translation(),
+        Some(title.translations()[0].key())
     );
+}
+
+#[test]
+fn duplicate_series_translation_with_missing_name_is_ignored() {
+    let duplicate_series = r#"<html><head><title>Series</title><meta property="og:type" content="video.tv_series"></head>
+        <body><input id="post_id" value="56"><h1 class="b-post__title">Series</h1>
+        <ul id="translators-list"><li class="b-translator__item" data-translator_id="7">Studio</li>
+        <li class="b-translator__item" data-translator_id="7"></li>
+        <li class="b-translator__item" data-translator_id="8">Other Studio</li></ul>
+        <script>sof.tv.initCDNSeriesEvents(56, 7, {}, {});</script></body></html>"#;
+    let title = parse(&duplicate_series, "/series/56-series.html").unwrap();
+
+    assert_eq!(title.translations().len(), 2);
+    assert_eq!(title.translations()[0].id().get(), 7);
+    assert_eq!(title.translations()[1].id().get(), 8);
 }
 
 #[test]

@@ -1,4 +1,85 @@
 use rezka_client::session::anubis::{detect_challenge, parse_challenge, solve_challenge};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
+struct StaticBrowserFallback;
+
+impl rezka_client::session::anubis::BrowserChallengeFallback for StaticBrowserFallback {
+    fn solve<'a>(
+        &'a mut self,
+        _challenge: &'a rezka_client::session::anubis::AnubisChallenge,
+        _origin: &'a url::Url,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<String>, rezka_client::RezkaError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async {
+            Ok(vec![
+                "techaro.lol-anubis-auth=browser-clearance; Path=/; HttpOnly".to_owned(),
+            ])
+        })
+    }
+}
+
+struct CountingBrowserFallback(Arc<AtomicUsize>);
+
+impl rezka_client::session::anubis::BrowserChallengeFallback for CountingBrowserFallback {
+    fn solve<'a>(
+        &'a mut self,
+        _challenge: &'a rezka_client::session::anubis::AnubisChallenge,
+        _origin: &'a url::Url,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<String>, rezka_client::RezkaError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async {
+            Ok(vec![
+                "techaro.lol-anubis-auth=browser-clearance; Path=/; HttpOnly".to_owned(),
+            ])
+        })
+    }
+}
+
+#[derive(Clone)]
+struct RepeatedChallengeSequence {
+    calls: Arc<AtomicUsize>,
+    challenge: String,
+}
+
+impl wiremock::Respond for RepeatedChallengeSequence {
+    fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let cookie = request
+            .headers
+            .get("cookie")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        match call {
+            0 => {
+                assert!(cookie.is_empty());
+                wiremock::ResponseTemplate::new(200).set_body_string(self.challenge.clone())
+            }
+            1 => {
+                assert!(cookie.contains("techaro.lol-anubis-auth=native"));
+                wiremock::ResponseTemplate::new(200).set_body_string(self.challenge.clone())
+            }
+            2 => {
+                assert!(cookie.contains("techaro.lol-anubis-auth=browser-clearance"));
+                wiremock::ResponseTemplate::new(200).set_body_string("provider-content")
+            }
+            _ => panic!("original request retried more than twice"),
+        }
+    }
+}
 
 fn challenge_html(id: &str, random_data: &str, difficulty: u8) -> String {
     format!(
@@ -82,8 +163,6 @@ fn rejects_empty_values_and_out_of_range_difficulties_without_raw_json() {
         r#"{"challenge":{"id":"","randomData":"secret-random-data"},"rules":{"difficulty":3}}"#,
         r#"{"challenge":{"id":"secret-id","randomData":""},"rules":{"difficulty":3}}"#,
         r#"{"challenge":{"id":"secret-id","randomData":"secret-random-data"},"rules":{"difficulty":0}}"#,
-        r#"{"challenge":{"id":"secret-id","randomData":"secret-random-data"},"rules":{"difficulty":6}}"#,
-        r#"{"challenge":{"id":"secret-id","randomData":"secret-random-data"},"rules":{"difficulty":33}}"#,
     ] {
         let html = format!(r#"<script id="anubis_challenge">{raw_json}</script>"#);
         let error = parse_challenge(&html).unwrap_err();
@@ -105,8 +184,356 @@ fn rejects_empty_values_and_out_of_range_difficulties_without_raw_json() {
     let above_ceiling = r#"<script id="anubis_challenge">{"challenge":{"id":"id","randomData":"data"},"rules":{"difficulty":6}}</script>"#;
     assert_eq!(
         parse_challenge(above_ceiling).unwrap_err().code(),
-        rezka_client::RezkaErrorCode::ProviderResponseInvalid
+        rezka_client::RezkaErrorCode::AnubisExcessiveDifficulty
     );
+}
+
+#[test]
+fn unsupported_algorithm_and_excessive_difficulty_are_typed() {
+    let unsupported = r#"<script id="anubis_challenge">{"challenge":{"id":"id","randomData":"data"},"rules":{"algorithm":"preact","difficulty":2}}</script>"#;
+    let excessive = r#"<script id="anubis_challenge">{"challenge":{"id":"id","randomData":"data"},"rules":{"algorithm":"fast","difficulty":6}}</script>"#;
+    let excessive_without_algorithm = r#"<script id="anubis_challenge">{"challenge":{"id":"id","randomData":"data"},"rules":{"difficulty":6}}</script>"#;
+
+    assert_eq!(
+        parse_challenge(unsupported).unwrap_err().code(),
+        rezka_client::RezkaErrorCode::AnubisUnsupportedAlgorithm
+    );
+    assert_eq!(
+        parse_challenge(excessive).unwrap_err().code(),
+        rezka_client::RezkaErrorCode::AnubisExcessiveDifficulty
+    );
+    assert_eq!(
+        parse_challenge(excessive_without_algorithm)
+            .unwrap_err()
+            .code(),
+        rezka_client::RezkaErrorCode::AnubisExcessiveDifficulty
+    );
+}
+
+#[tokio::test]
+async fn browser_fallback_handles_known_and_future_unsupported_algorithms_before_one_retry() {
+    use rezka_client::{mirror::MirrorSet, session::cookie::SessionJar, transport::Transport};
+    use url::Url;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
+
+    for algorithm in ["preact", "metarefresh", "future-v99"] {
+        let server = MockServer::start().await;
+        let base = Url::parse(&server.uri()).unwrap();
+        let unsupported = format!(
+            r#"<script id="anubis_challenge">{{"challenge":{{"id":"id","randomData":"data"}},"rules":{{"algorithm":"{algorithm}","difficulty":2}}}}</script>"#
+        );
+        Mock::given(method("GET"))
+            .and(path("/title"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(unsupported))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/title"))
+            .and(header(
+                "cookie",
+                "techaro.lol-anubis-auth=browser-clearance",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string("provider-content"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut transport = Transport::new(
+            MirrorSet::new(vec![base.clone()]).unwrap(),
+            SessionJar::empty(),
+            "media-orchestrator-test".to_owned(),
+            time::Duration::seconds(10),
+            0,
+        )
+        .unwrap()
+        .with_browser_fallback(Box::new(StaticBrowserFallback));
+
+        let response = transport
+            .get_first(base.join("/title").unwrap(), None)
+            .await
+            .unwrap();
+        assert_eq!(response.body, "provider-content");
+    }
+}
+
+#[tokio::test]
+async fn access_denied_challenge_is_solved_before_http_status_classification() {
+    use rezka_client::{mirror::MirrorSet, session::cookie::SessionJar, transport::Transport};
+    use url::Url;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
+
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/title"))
+        .respond_with(ResponseTemplate::new(403).set_body_string(challenge_html("id", "data", 1)))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/.within.website/x/cmd/anubis/api/pass-challenge"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", "/title")
+                .insert_header(
+                    "set-cookie",
+                    "techaro.lol-anubis-auth=accepted; Path=/; HttpOnly",
+                ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/title"))
+        .and(header("cookie", "techaro.lol-anubis-auth=accepted"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("provider-content"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![base.clone()]).unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        time::Duration::seconds(10),
+        0,
+    )
+    .unwrap();
+
+    let response = transport
+        .get_first(base.join("/title").unwrap(), None)
+        .await
+        .unwrap();
+    assert_eq!(response.body, "provider-content");
+}
+
+#[tokio::test]
+async fn browser_fallback_handles_a_native_pass_without_clearance() {
+    use rezka_client::{mirror::MirrorSet, session::cookie::SessionJar, transport::Transport};
+    use url::Url;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
+
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/title"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(challenge_html("id", "data", 1)))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/.within.website/x/cmd/anubis/api/pass-challenge"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "/title"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/title"))
+        .and(header(
+            "cookie",
+            "techaro.lol-anubis-auth=browser-clearance",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_string("provider-content"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![base.clone()]).unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        time::Duration::seconds(10),
+        0,
+    )
+    .unwrap()
+    .with_browser_fallback(Box::new(StaticBrowserFallback));
+
+    let response = transport
+        .get_first(base.join("/title").unwrap(), None)
+        .await
+        .unwrap();
+    assert_eq!(response.body, "provider-content");
+}
+
+#[tokio::test]
+async fn browser_fallback_handles_an_explicit_native_pass_rejection() {
+    use rezka_client::{mirror::MirrorSet, session::cookie::SessionJar, transport::Transport};
+    use url::Url;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
+
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/title"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(challenge_html("id", "data", 1)))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/.within.website/x/cmd/anubis/api/pass-challenge"))
+        .respond_with(ResponseTemplate::new(403))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/title"))
+        .and(header(
+            "cookie",
+            "techaro.lol-anubis-auth=browser-clearance",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_string("provider-content"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![base.clone()]).unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        time::Duration::seconds(10),
+        0,
+    )
+    .unwrap()
+    .with_browser_fallback(Box::new(StaticBrowserFallback));
+
+    let response = transport
+        .get_first(base.join("/title").unwrap(), None)
+        .await
+        .unwrap();
+    assert_eq!(response.body, "provider-content");
+}
+
+#[tokio::test]
+async fn repeated_native_clearance_challenge_dispatches_fallback_once_then_stops() {
+    use rezka_client::{mirror::MirrorSet, session::cookie::SessionJar, transport::Transport};
+    use url::Url;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    let challenge = challenge_html("id", "data", 1);
+    let original_calls = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("GET"))
+        .and(path("/title"))
+        .respond_with(RepeatedChallengeSequence {
+            calls: Arc::clone(&original_calls),
+            challenge,
+        })
+        .expect(3)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/.within.website/x/cmd/anubis/api/pass-challenge"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", "/title")
+                .insert_header("set-cookie", "techaro.lol-anubis-auth=native; Path=/"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let fallback_calls = Arc::new(AtomicUsize::new(0));
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![base.clone()]).unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        time::Duration::seconds(10),
+        0,
+    )
+    .unwrap()
+    .with_browser_fallback(Box::new(CountingBrowserFallback(fallback_calls.clone())));
+
+    let response = transport
+        .get_first(base.join("/title").unwrap(), None)
+        .await
+        .unwrap();
+    assert_eq!(response.body, "provider-content");
+    assert_eq!(fallback_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(original_calls.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn clearance_cookie_is_reused_across_two_searches_and_two_download_requests() {
+    use rezka_client::{mirror::MirrorSet, session::cookie::SessionJar, transport::Transport};
+    use url::Url;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
+
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/search-one"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(challenge_html("id", "data", 1)))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/.within.website/x/cmd/anubis/api/pass-challenge"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", "/search-one")
+                .insert_header(
+                    "set-cookie",
+                    "techaro.lol-anubis-auth=reused; Path=/; HttpOnly",
+                ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    for endpoint in [
+        "/search-one",
+        "/search-two",
+        "/download-one",
+        "/download-two",
+    ] {
+        Mock::given(method("GET"))
+            .and(path(endpoint))
+            .and(header("cookie", "techaro.lol-anubis-auth=reused"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("provider-content"))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![base.clone()]).unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        time::Duration::seconds(10),
+        0,
+    )
+    .unwrap();
+
+    for endpoint in [
+        "/search-one",
+        "/search-two",
+        "/download-one",
+        "/download-two",
+    ] {
+        let response = transport
+            .get_first(base.join(endpoint).unwrap(), None)
+            .await
+            .unwrap();
+        assert_eq!(response.body, "provider-content");
+    }
 }
 
 #[test]
@@ -390,4 +817,337 @@ async fn submits_pass_to_currently_selected_mirror_after_failover() {
 
     let restored = SessionJar::import(&transport.export_session().unwrap()).unwrap();
     assert!(restored.contains_cookie_for_url(&title, "anubis"));
+}
+
+struct TimeoutBrowserFallback;
+
+impl rezka_client::session::anubis::BrowserChallengeFallback for TimeoutBrowserFallback {
+    fn solve<'a>(
+        &'a mut self,
+        _challenge: &'a rezka_client::session::anubis::AnubisChallenge,
+        _origin: &'a url::Url,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<String>, rezka_client::RezkaError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async {
+            Err(rezka_client::RezkaError::AnubisTimeout {
+                context: rezka_client::redaction::sanitize_provider_text("browser timed out"),
+            })
+        })
+    }
+}
+
+struct FailedBrowserFallback;
+
+impl rezka_client::session::anubis::BrowserChallengeFallback for FailedBrowserFallback {
+    fn solve<'a>(
+        &'a mut self,
+        _challenge: &'a rezka_client::session::anubis::AnubisChallenge,
+        _origin: &'a url::Url,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<String>, rezka_client::RezkaError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async {
+            Err(rezka_client::RezkaError::ChallengeFailed {
+                context: rezka_client::redaction::sanitize_provider_text("browser failed"),
+            })
+        })
+    }
+}
+
+struct EmptyCookieBrowserFallback;
+
+impl rezka_client::session::anubis::BrowserChallengeFallback for EmptyCookieBrowserFallback {
+    fn solve<'a>(
+        &'a mut self,
+        _challenge: &'a rezka_client::session::anubis::AnubisChallenge,
+        _origin: &'a url::Url,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<String>, rezka_client::RezkaError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+}
+
+struct HangingBrowserFallback;
+
+impl rezka_client::session::anubis::BrowserChallengeFallback for HangingBrowserFallback {
+    fn solve<'a>(
+        &'a mut self,
+        _challenge: &'a rezka_client::session::anubis::AnubisChallenge,
+        _origin: &'a url::Url,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<String>, rezka_client::RezkaError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async {
+            std::future::pending::<()>().await;
+            Ok(Vec::new())
+        })
+    }
+}
+
+fn unsupported_challenge(algorithm: &str) -> String {
+    format!(
+        r#"<script id="anubis_challenge">{{"challenge":{{"id":"id","randomData":"data"}},"rules":{{"algorithm":"{algorithm}","difficulty":2}}}}</script>"#
+    )
+}
+
+#[tokio::test]
+async fn native_fast_sha256_path_does_not_invoke_browser_fallback() {
+    use rezka_client::{mirror::MirrorSet, session::cookie::SessionJar, transport::Transport};
+    use url::Url;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
+
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/title"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(challenge_html("id", "data", 1)))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/.within.website/x/cmd/anubis/api/pass-challenge"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", "/title")
+                .insert_header(
+                    "set-cookie",
+                    "techaro.lol-anubis-auth=native; Path=/; HttpOnly",
+                ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/title"))
+        .and(header("cookie", "techaro.lol-anubis-auth=native"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("provider-content"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let fallback_calls = Arc::new(AtomicUsize::new(0));
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![base.clone()]).unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        time::Duration::seconds(10),
+        0,
+    )
+    .unwrap()
+    .with_browser_fallback(Box::new(CountingBrowserFallback(fallback_calls.clone())));
+
+    let response = transport
+        .get_first(base.join("/title").unwrap(), None)
+        .await
+        .unwrap();
+    assert_eq!(response.body, "provider-content");
+    assert_eq!(fallback_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn browser_timeout_is_a_typed_anubis_timeout() {
+    use rezka_client::{
+        RezkaErrorCode, mirror::MirrorSet, session::cookie::SessionJar, transport::Transport,
+    };
+    use url::Url;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method, matchers::path};
+
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/title"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(unsupported_challenge("preact")))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![base.clone()]).unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        time::Duration::seconds(10),
+        0,
+    )
+    .unwrap()
+    .with_browser_fallback(Box::new(TimeoutBrowserFallback));
+
+    let error = transport
+        .get_first(base.join("/title").unwrap(), None)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), RezkaErrorCode::AnubisTimeout);
+}
+
+#[tokio::test]
+async fn browser_process_failure_is_a_typed_challenge_failure() {
+    use rezka_client::{
+        RezkaErrorCode, mirror::MirrorSet, session::cookie::SessionJar, transport::Transport,
+    };
+    use url::Url;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method, matchers::path};
+
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/title"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(unsupported_challenge("metarefresh")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![base.clone()]).unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        time::Duration::seconds(10),
+        0,
+    )
+    .unwrap()
+    .with_browser_fallback(Box::new(FailedBrowserFallback));
+
+    let error = transport
+        .get_first(base.join("/title").unwrap(), None)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), RezkaErrorCode::ChallengeFailed);
+}
+
+#[tokio::test]
+async fn browser_without_clearance_is_a_typed_rejection() {
+    use rezka_client::{
+        RezkaErrorCode, mirror::MirrorSet, session::cookie::SessionJar, transport::Transport,
+    };
+    use url::Url;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method, matchers::path};
+
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/title"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(unsupported_challenge("future-v99")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![base.clone()]).unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        time::Duration::seconds(10),
+        0,
+    )
+    .unwrap()
+    .with_browser_fallback(Box::new(EmptyCookieBrowserFallback));
+
+    let error = transport
+        .get_first(base.join("/title").unwrap(), None)
+        .await
+        .unwrap_err();
+    let rendered = format!("{error:?}: {error}");
+    assert_eq!(error.code(), RezkaErrorCode::AnubisRejected);
+    assert!(!rendered.contains("anubis_challenge"));
+    assert!(!rendered.contains("future-v99"));
+}
+
+#[tokio::test]
+async fn dropping_a_hanging_browser_fallback_cancels_promptly() {
+    use rezka_client::{mirror::MirrorSet, session::cookie::SessionJar, transport::Transport};
+    use url::Url;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method, matchers::path};
+
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/title"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(unsupported_challenge("preact")))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![base.clone()]).unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        time::Duration::seconds(10),
+        0,
+    )
+    .unwrap()
+    .with_browser_fallback(Box::new(HangingBrowserFallback));
+
+    let started = std::time::Instant::now();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(150),
+        transport.get_first(base.join("/title").unwrap(), None),
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+}
+
+#[tokio::test]
+async fn browser_fallback_preserves_unrelated_anonymous_cookies() {
+    use rezka_client::{mirror::MirrorSet, session::cookie::SessionJar, transport::Transport};
+    use url::Url;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/title"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("set-cookie", "provider_state=kept; Path=/; HttpOnly")
+                .set_body_string(unsupported_challenge("preact")),
+        )
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/title"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("provider-content"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut transport = Transport::new(
+        MirrorSet::new(vec![base.clone()]).unwrap(),
+        SessionJar::empty(),
+        "media-orchestrator-test".to_owned(),
+        time::Duration::seconds(10),
+        0,
+    )
+    .unwrap()
+    .with_browser_fallback(Box::new(StaticBrowserFallback));
+
+    let response = transport
+        .get_first(base.join("/title").unwrap(), None)
+        .await
+        .unwrap();
+    assert_eq!(response.body, "provider-content");
+    let restored = SessionJar::import(&transport.export_session().unwrap()).unwrap();
+    assert!(restored.contains_cookie_for_url(&base, "provider_state"));
+    assert!(restored.contains_cookie_for_url(&base, "techaro.lol-anubis-auth"));
 }

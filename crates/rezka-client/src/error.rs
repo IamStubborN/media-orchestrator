@@ -2,6 +2,10 @@
 pub enum RezkaErrorCode {
     ChallengeRequired,
     ChallengeFailed,
+    AnubisUnsupportedAlgorithm,
+    AnubisExcessiveDifficulty,
+    AnubisTimeout,
+    AnubisRejected,
     AuthenticationRequired,
     AuthenticationFailed,
     ProviderResponseInvalid,
@@ -13,6 +17,16 @@ pub enum RezkaErrorCode {
     RateLimited,
     Transport,
     Configuration,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum RezkaDiagnosticCategory {
+    RezkaReachable,
+    AnubisChallengeRequired,
+    AnubisChallengeFailed,
+    RezkaProviderRejected,
+    RezkaParserInvalid,
+    SessionStoreError,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -49,6 +63,22 @@ pub enum RezkaError {
     },
     #[error("challenge failed: {context}")]
     ChallengeFailed {
+        context: crate::redaction::SanitizedSnippet,
+    },
+    #[error("Anubis algorithm is not supported")]
+    AnubisUnsupportedAlgorithm {
+        context: crate::redaction::SanitizedSnippet,
+    },
+    #[error("Anubis proof difficulty is excessive")]
+    AnubisExcessiveDifficulty {
+        context: crate::redaction::SanitizedSnippet,
+    },
+    #[error("Anubis proof timed out or was cancelled")]
+    AnubisTimeout {
+        context: crate::redaction::SanitizedSnippet,
+    },
+    #[error("Anubis solution was rejected")]
+    AnubisRejected {
         context: crate::redaction::SanitizedSnippet,
     },
     #[error("authentication required: {context}")]
@@ -91,6 +121,10 @@ impl RezkaError {
         match self {
             Self::ChallengeRequired { .. } => RezkaErrorCode::ChallengeRequired,
             Self::ChallengeFailed { .. } => RezkaErrorCode::ChallengeFailed,
+            Self::AnubisUnsupportedAlgorithm { .. } => RezkaErrorCode::AnubisUnsupportedAlgorithm,
+            Self::AnubisExcessiveDifficulty { .. } => RezkaErrorCode::AnubisExcessiveDifficulty,
+            Self::AnubisTimeout { .. } => RezkaErrorCode::AnubisTimeout,
+            Self::AnubisRejected { .. } => RezkaErrorCode::AnubisRejected,
             Self::AuthenticationRequired { .. } => RezkaErrorCode::AuthenticationRequired,
             Self::AuthenticationFailed { .. } => RezkaErrorCode::AuthenticationFailed,
             Self::ProviderResponseInvalid { .. } => RezkaErrorCode::ProviderResponseInvalid,
@@ -102,6 +136,30 @@ impl RezkaError {
             Self::RateLimited { .. } => RezkaErrorCode::RateLimited,
             Self::Transport { .. } => RezkaErrorCode::Transport,
             Self::Configuration { .. } => RezkaErrorCode::Configuration,
+        }
+    }
+
+    #[must_use]
+    pub const fn diagnostic_category(&self) -> RezkaDiagnosticCategory {
+        match self {
+            Self::ChallengeRequired { .. } => RezkaDiagnosticCategory::AnubisChallengeRequired,
+            Self::ChallengeFailed { .. }
+            | Self::AnubisUnsupportedAlgorithm { .. }
+            | Self::AnubisExcessiveDifficulty { .. }
+            | Self::AnubisTimeout { .. }
+            | Self::AnubisRejected { .. } => RezkaDiagnosticCategory::AnubisChallengeFailed,
+            Self::AuthenticationRequired { .. }
+            | Self::AuthenticationFailed { .. }
+            | Self::TranslationUnavailable { .. }
+            | Self::EpisodeUnavailable { .. }
+            | Self::QualityUnavailable { .. }
+            | Self::RateLimited { .. }
+            | Self::TitleNotFound { .. } => RezkaDiagnosticCategory::RezkaProviderRejected,
+            Self::ProviderResponseInvalid { .. } | Self::Configuration { .. } => {
+                RezkaDiagnosticCategory::RezkaParserInvalid
+            }
+            Self::Transport { .. } => RezkaDiagnosticCategory::RezkaProviderRejected,
+            Self::StreamExpired { .. } => RezkaDiagnosticCategory::RezkaProviderRejected,
         }
     }
 }

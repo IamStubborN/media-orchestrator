@@ -65,22 +65,45 @@ The crate never reads Docker secrets or writes session files. A runner-side
 adapter encrypts and persists the exported cookie state. Sessions are anonymous:
 the client never posts account credentials.
 
-#### Rezka Session Contract
+#### Rezka Anonymous Session Contract
 
 Session establishment is a bounded protocol flow, not browser automation:
 
 1. Fetch the configured same-origin probe and classify it from explicit valid
    and invalid markers. A response containing both marker classes or neither is
    inconclusive and is rejected.
-2. Solve at most one detected Anubis challenge and probe again.
+2. The transport detects Anubis markers before any Rezka parser, solves at most
+   one supported `fast` challenge, submits the exact pass parameters, requires
+   `techaro.lol-anubis-auth`, and retries the original request once. Unsupported
+   algorithms and rejected native solutions may take one browser helper pass
+   when `chrome-headless-shell` is present, still followed by a single
+   original-request retry.
 3. Accept either an explicit valid marker or an explicit invalid marker. Invalid
-   is the expected anonymous state (login form present). Do not post a DLE login
-   form or any account credentials.
-4. Export the encrypted cookie snapshot after the probe succeeds.
+   is the expected anonymous state. No DLE login form, username, password,
+   Vaultwarden broker, or Telegram session refresh exists in this application.
+4. Export the encrypted cookie snapshot after the probe succeeds. The shared
+   store lock covers load, challenge handling, validation, and atomic save.
+
+The native fast solver is the default and the only mandatory session path. When
+the runner image contains pinned amd64 Stable `chrome-headless-shell`, a
+private helper (`media anubis-browser-challenge`) drives it over CDP for `preact`,
+`metarefresh`, unknown algorithms, or a rejected native pass. There is no
+operator toggle: the helper attaches whenever the binary is present and is
+never launched on the SHA-256 path. Service images do not contain Chromium.
+The adapter returns only `Set-Cookie` header strings into the in-memory jar.
+Challenge HTML, DOM, localStorage, screenshots, and payloads stay inside the
+helper process. Do not use FlareSolverr, user Chrome, or a persisted browser
+profile. Callers must not manually inject or copy browser cookies.
+
+Snapshots written before the anonymous-session contract are migrated once
+under that lock: only the legacy DLE `PHPSESSID` is removed before any provider
+request, while Anubis clearance and unrelated provider cookies are retained.
+The new snapshot format marker prevents future anonymous `PHPSESSID` values
+from being removed repeatedly.
 
 Cookies are attached only to the exact selected Rezka origin and are never
-exposed through the CLI, jobs, notifications, logs, or a browser-cookie import
-path.
+exposed through the CLI, jobs, notifications, logs, or a manual browser-cookie
+import path.
 
 ### `media-storage`
 

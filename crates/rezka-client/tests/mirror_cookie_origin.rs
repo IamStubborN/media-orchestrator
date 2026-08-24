@@ -4,6 +4,7 @@ use rezka_client::{
     mirror::MirrorSet,
     session::cookie::{SessionJar, SessionSnapshot},
 };
+use secrecy::SecretBox;
 use url::Url;
 
 #[test]
@@ -87,6 +88,64 @@ fn cookie_snapshot_round_trips_and_remains_redacted_in_debug() {
     assert!(restored.contains_cookie_for_url(&origin, "session_cookie"));
     assert!(restored.contains_cookie_for_url(&origin, "persistent_cookie"));
     assert!(!restored.contains_cookie_for_url(&origin, "expired_cookie"));
+}
+
+#[test]
+fn legacy_snapshot_migration_removes_only_dle_cookie_once() {
+    let origin = Url::parse("https://rezka.test/").unwrap();
+    let mut jar = SessionJar::empty();
+    jar.store_response_cookies(
+        [
+            "PHPSESSID=legacy-login; Path=/; HttpOnly",
+            "techaro.lol-anubis-auth=anonymous-clearance; Path=/; HttpOnly",
+            "provider_state=anonymous-state; Path=/; HttpOnly",
+        ]
+        .iter()
+        .copied(),
+        &origin,
+    );
+    let current = jar.export().unwrap();
+    let mut legacy_document = current
+        .with_secret_bytes(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).unwrap());
+    legacy_document
+        .as_object_mut()
+        .unwrap()
+        .remove("session_format");
+    let legacy = SessionSnapshot::from_secret_bytes(SecretBox::new(Box::new(
+        serde_json::to_vec(&legacy_document).unwrap(),
+    )));
+
+    let mut migrated = SessionJar::import(&legacy).unwrap();
+    assert!(migrated.remove_dle_authentication_cookie());
+    assert!(!migrated.contains_cookie_for_url(&origin, "PHPSESSID"));
+    assert!(migrated.contains_cookie_for_url(&origin, "techaro.lol-anubis-auth"));
+    assert!(migrated.contains_cookie_for_url(&origin, "provider_state"));
+    assert!(!migrated.remove_dle_authentication_cookie());
+
+    let restored = SessionJar::import(&migrated.export().unwrap()).unwrap();
+    assert!(!restored.contains_cookie_for_url(&origin, "PHPSESSID"));
+    assert!(restored.contains_cookie_for_url(&origin, "techaro.lol-anubis-auth"));
+    assert!(restored.contains_cookie_for_url(&origin, "provider_state"));
+}
+
+#[test]
+fn anubis_clearance_invalidation_preserves_other_provider_cookies() {
+    let origin = Url::parse("https://rezka.test/").unwrap();
+    let mut jar = SessionJar::empty();
+    jar.store_response_cookies(
+        [
+            "techaro.lol-anubis-auth=stale-clearance; Path=/; HttpOnly",
+            "provider_state=anonymous-state; Path=/; HttpOnly",
+        ]
+        .iter()
+        .copied(),
+        &origin,
+    );
+
+    assert!(jar.invalidate_anubis_clearance());
+    assert!(!jar.contains_cookie_for_url(&origin, "techaro.lol-anubis-auth"));
+    assert!(jar.contains_cookie_for_url(&origin, "provider_state"));
+    assert!(!jar.invalidate_anubis_clearance());
 }
 
 #[test]

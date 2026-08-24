@@ -17,7 +17,7 @@ mod tracking;
 mod trending;
 
 pub use actor::{NotifyScopeDto, ProviderDto};
-pub use error::{ApiError, ApiErrorCode};
+pub use error::{ApiError, ApiErrorCode, RezkaDiagnosticCategoryDto};
 pub use execution::{CheckpointValueDto, RunnerEventDto, RunnerEventRequest, RunnerEventResponse};
 pub use id::PublicId;
 pub use job::{
@@ -44,8 +44,7 @@ pub use search::{
     AlternativeSearchRequest, AmbiguousEpisodeDto, ContinueSearchRequest, EpisodeCoordinateDto,
     EpisodeCoordinateMappingDto, EpisodeMappingActionDto, ExecutionSelectionDto,
     MAX_SEARCH_RESULTS_PER_PAGE, MediaKindDto, ProwlarrRankingDto, ResolveEpisodeMappingRequest,
-    RezkaSessionRefreshRequest, RezkaTranslationDto, SearchPageDto, SearchResultDto,
-    SearchScopeDto, SeasonAvailabilityDto,
+    RezkaTranslationDto, SearchPageDto, SearchResultDto, SearchScopeDto, SeasonAvailabilityDto,
     SelectResultRequest, SeriesAvailabilityDto, SeriesGroupIdentityDto, SeriesGroupSourceDto,
     SeriesLifecycleStatusDto, StartSearchRequest, TrackingPromptDto,
 };

@@ -1,8 +1,7 @@
 use media_contract::{
     AlternativeSearchRequest, ContinueSearchRequest, EpisodeMappingActionDto,
     ExecutionSelectionDto, JobDto, ProviderDto, ResolveEpisodeMappingRequest,
-    RezkaSessionRefreshRequest, SearchPageDto,
-    SelectResultRequest, StartSearchRequest,
+    RezkaDiagnosticCategoryDto, SearchPageDto, SelectResultRequest, StartSearchRequest,
 };
 use media_core::{JobId, OperationKey, UserId};
 use serde_json::Value;
@@ -21,6 +20,10 @@ pub enum SearchError {
     Provider,
     #[error("media provider is temporarily unavailable")]
     ProviderUnavailable,
+    #[error("VPN rotation is required before another Rezka search")]
+    VpnRotationRequired,
+    #[error("Rezka diagnostic category: {0:?}")]
+    RezkaDiagnostic(RezkaDiagnosticCategoryDto),
     #[error("search infrastructure failed")]
     Infrastructure,
 }
@@ -76,15 +79,6 @@ pub trait SearchService: Send + Sync {
         _job_id: JobId,
         _request: AlternativeSearchRequest,
     ) -> Result<SearchPageDto, SearchError> {
-        Err(SearchError::NotFound)
-    }
-
-    async fn refresh_rezka_session(
-        &self,
-        _owner: UserId,
-        _operation: OperationKey,
-        _request: RezkaSessionRefreshRequest,
-    ) -> Result<JobDto, SearchError> {
         Err(SearchError::NotFound)
     }
 

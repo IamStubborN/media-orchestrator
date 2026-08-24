@@ -7,6 +7,10 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use media::config::{ConfigSource, RunnerConfig};
+use media_runner::{EncryptedRezkaSessionStore, RezkaSessionStoreConfig};
+use rezka_client::SessionSnapshot;
+use secrecy::SecretBox;
+use tempfile::TempDir;
 
 #[derive(Default)]
 struct FakeSource {
@@ -63,15 +67,6 @@ fn composition_constructs_typed_rezka_dependencies_without_network_calls() {
     source.set_env("MEDIA_REZKA_USER_AGENT", "composition-test-agent/1.0");
     source.set_env("MEDIA_REZKA_PROXY_URL", "http://rezka-proxy.internal:8888");
     source.set_secret("MEDIA_REZKA_COOKIE_KEY_FILE", encoded_key.as_bytes());
-    source.set_env(
-        "MEDIA_REZKA_CREDENTIAL_BROKER_URL",
-        "http://vaultwarden-broker-primary:8787",
-    );
-    source.set_secret("MEDIA_REZKA_CREDENTIAL_BROKER_TOKEN_FILE", b"broker-token");
-    source.set_env(
-        "MEDIA_REZKA_CREDENTIAL_BROKER_PRIVATE_HTTP_HOSTS",
-        "vaultwarden-broker-primary",
-    );
 
     let config = RunnerConfig::load_from(&source).unwrap();
     let prepared = media::composition::prepare_runner_session(&config).unwrap();
@@ -128,15 +123,6 @@ fn composition_reads_the_encrypted_session_before_building_the_client() {
     source.set_env("MEDIA_REZKA_SESSION_STORE_FILE", store_path.as_os_str());
     source.set_env("MEDIA_REZKA_USER_AGENT", "composition-test-agent/1.0");
     source.set_secret("MEDIA_REZKA_COOKIE_KEY_FILE", encoded_key.as_bytes());
-    source.set_env(
-        "MEDIA_REZKA_CREDENTIAL_BROKER_URL",
-        "http://vaultwarden-broker-primary:8787",
-    );
-    source.set_secret("MEDIA_REZKA_CREDENTIAL_BROKER_TOKEN_FILE", b"broker-token");
-    source.set_env(
-        "MEDIA_REZKA_CREDENTIAL_BROKER_PRIVATE_HTTP_HOSTS",
-        "vaultwarden-broker-primary",
-    );
 
     let config = RunnerConfig::load_from(&source).unwrap();
     assert!(matches!(
@@ -144,4 +130,51 @@ fn composition_reads_the_encrypted_session_before_building_the_client() {
         Err(media::composition::RunnerCompositionError::Store)
     ));
     std::fs::remove_file(store_path).unwrap();
+}
+
+#[test]
+fn malformed_cookie_snapshot_is_typed_session_store_error_and_retained() {
+    let directory = TempDir::new().unwrap();
+    let store_path = directory.path().join("rezka-session.bin");
+    let key_bytes = [8_u8; 32];
+    let store = EncryptedRezkaSessionStore::new(RezkaSessionStoreConfig {
+        path: store_path.clone(),
+        key: SecretBox::new(Box::new(key_bytes)),
+    })
+    .unwrap();
+    let malformed_snapshot = SessionSnapshot::from_secret_bytes(SecretBox::new(Box::new(
+        br#"{"session_format":2,"origin":{"scheme":"https","host":"rezka.invalid","port":443},"cookies":"not-a-cookie-array"}"#.to_vec(),
+    )));
+    store.save(&malformed_snapshot).unwrap();
+    let retained_envelope = std::fs::read(&store_path).unwrap();
+
+    let mut source = FakeSource::default();
+    source.set_env("MEDIA_SERVICE_URL", "https://media.internal.example");
+    source.set_secret("MEDIA_TOKEN_FILE", b"runner-token");
+    source.set_env("MEDIA_REZKA_MIRRORS", "https://rezka.invalid");
+    source.set_env(
+        "MEDIA_REZKA_SESSION_PROBE_URL",
+        "https://rezka.invalid/account/probe",
+    );
+    source.set_env(
+        "MEDIA_REZKA_SESSION_VALID_MARKERS_JSON",
+        r#"["account-menu"]"#,
+    );
+    source.set_env(
+        "MEDIA_REZKA_SESSION_INVALID_MARKERS_JSON",
+        r#"["login-form"]"#,
+    );
+    source.set_env("MEDIA_REZKA_SESSION_STORE_FILE", store_path.as_os_str());
+    source.set_env("MEDIA_REZKA_USER_AGENT", "composition-test-agent/1.0");
+    source.set_secret(
+        "MEDIA_REZKA_COOKIE_KEY_FILE",
+        STANDARD.encode(key_bytes).as_bytes(),
+    );
+
+    let config = RunnerConfig::load_from(&source).unwrap();
+    assert!(matches!(
+        media::composition::prepare_runner_session(&config),
+        Err(media::composition::RunnerCompositionError::SessionStore)
+    ));
+    assert_eq!(std::fs::read(&store_path).unwrap(), retained_envelope);
 }

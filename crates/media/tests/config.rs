@@ -83,15 +83,6 @@ fn valid_runner_source() -> FakeSource {
         "/runner/rezka/session.bin",
     );
     source.set_secret("MEDIA_REZKA_COOKIE_KEY_FILE", encoded_key.as_bytes());
-    source.set_env(
-        "MEDIA_REZKA_CREDENTIAL_BROKER_URL",
-        "http://vaultwarden-broker-primary:8787",
-    );
-    source.set_secret("MEDIA_REZKA_CREDENTIAL_BROKER_TOKEN_FILE", b"broker-token");
-    source.set_env(
-        "MEDIA_REZKA_CREDENTIAL_BROKER_PRIVATE_HTTP_HOSTS",
-        "vaultwarden-broker-primary",
-    );
     source
 }
 
@@ -509,18 +500,17 @@ fn runner_config_loads_rezka_secret_files_getters_defaults_and_redacts_debug() {
 
 #[test]
 fn runner_config_reads_the_cookie_key_only_from_the_configured_file() {
-    for name in ["MEDIA_REZKA_COOKIE_KEY_FILE"] {
-        let mut source = valid_runner_source();
-        source.set_env(name, "inline-secret-value");
+    let name = "MEDIA_REZKA_COOKIE_KEY_FILE";
+    let mut source = valid_runner_source();
+    source.set_env(name, "inline-secret-value");
 
-        assert_eq!(
-            RunnerConfig::load_from(&source).unwrap_err(),
-            ConfigError::UnreadableSecret {
-                name,
-                kind: io::ErrorKind::NotFound
-            }
-        );
-    }
+    assert_eq!(
+        RunnerConfig::load_from(&source).unwrap_err(),
+        ConfigError::UnreadableSecret {
+            name,
+            kind: io::ErrorKind::NotFound
+        }
+    );
 }
 
 #[test]

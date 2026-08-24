@@ -369,6 +369,27 @@ impl RunnerApi for HeartbeatFailingApi {
 /// and flips the shared cancellation flag.
 struct CancelAwareExecutor;
 
+struct VpnCancellingExecutor {
+    cleanups: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl JobExecutor for VpnCancellingExecutor {
+    async fn execute(
+        &self,
+        _: &LeaseDto,
+        control: &RunnerControl,
+    ) -> Result<ExecutionOutcome, media::runner::RunnerError> {
+        control.request_retryable_vpn_cancel();
+        Ok(ExecutionOutcome::Cancelled)
+    }
+
+    async fn cleanup_cancelled(&self, _: &LeaseDto) -> Result<(), media::runner::RunnerError> {
+        self.cleanups.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl JobExecutor for CancelAwareExecutor {
     async fn execute(
@@ -384,6 +405,42 @@ impl JobExecutor for CancelAwareExecutor {
         }
         Ok(ExecutionOutcome::Completed)
     }
+}
+
+#[tokio::test]
+async fn vpn_lease_cancellation_is_cleaned_up_and_reported_retryable() {
+    let api = Arc::new(FakeApi {
+        lease: Mutex::new(Some(lease())),
+        events: Mutex::default(),
+        heartbeats: AtomicUsize::new(0),
+    });
+    let executor = Arc::new(VpnCancellingExecutor {
+        cleanups: AtomicUsize::new(0),
+    });
+
+    assert!(
+        run_single_iteration(api.clone(), executor.clone(), Duration::from_secs(60))
+            .await
+            .unwrap()
+    );
+
+    assert_eq!(executor.cleanups.load(Ordering::SeqCst), 1);
+    let events = api.events.lock().unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RunnerEventDto::StageFailed {
+            retryable: true,
+            error_code,
+            ..
+        } if error_code == "source_transfer_transient"
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        RunnerEventDto::JobTransition {
+            state: JobStateDto::Cancelled,
+            ..
+        }
+    )));
 }
 
 struct LateCancelApi {

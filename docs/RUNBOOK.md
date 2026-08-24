@@ -70,23 +70,50 @@ blocked runner both have no active lease, but require different operator action.
 
 ## Rezka Session
 
-Rezka search and download use anonymous cookie jars owned by `rezka-client`.
-They do not use Chromium, Playwright, Obscura, or copied browser cookies.
-Session setup for those paths:
+Rezka sessions are anonymous cookie jars owned by `rezka-client`. The native
+SHA-256 solver is the normal path and does not launch a browser. Search and
+download stay anonymous: no Rezka username, Vaultwarden, Telegram approval,
+FlareSolverr, Obscura, Lightpanda, Playwright/npm, user Chrome, or copied
+browser cookies.
+
+The private runner uses a bounded Chromium fallback for `preact`,
+`metarefresh`, unknown algorithms, or a rejected native pass whenever
+checksum-pinned Chrome for Testing `chrome-headless-shell` is present in the
+runner image. Homelab hosts are amd64: the runner pins Stable
+`152.0.7977.54` `linux64` and does not ship an arm64 Beta build. The hidden
+`media anubis-browser-challenge` helper drives it over CDP, shares the Gluetun
+egress, and writes only `Set-Cookie` into the encrypted jar. Chromium is
+launched `--no-zygote --single-process` from a hidden exec wrapper that sets
+`PR_SET_PDEATHSIG=SIGKILL`, and the helper process group is SIGKILL'd on
+timeout or cancel so a killed helper cannot leave Chrome orphans. Compose
+raises the runner `/dev/shm` to 256m (Docker's default 64m is too small even
+with `--disable-dev-shm-usage`). There is no compose or environment toggle.
+Service images do not contain Chromium, so search stays on the native solver.
+
+Obscura and Lightpanda were evaluated and rejected for this fallback: Anubis
+ships an explicit Lightpanda block, and neither engine is Chromium. Anubis
+browser challenges (workers, HttpOnly clearance, meta-refresh) need a real
+Chromium cookie jar. `chrome-headless-shell` is already the smaller official
+Chromium, not a full desktop Chrome.
+
+Search and download establish a session automatically:
 
 1. The configured probe contains exactly one marker class: valid or invalid.
    Invalid (login form present) is the expected anonymous state.
 2. Anubis, when present, is solved at most once before the next probe.
-3. The encrypted cookie snapshot is saved after a conclusive probe.
+3. The encrypted cookie snapshot is saved after a conclusive probe. No account
+   credentials are sent.
 
-Authenticated refresh is a separate job. Hermes approves a one-time Vaultwarden
-request, then `media_rezka_session_refresh` queues a runner job. The runner
-resolves username/password from `vaultwarden-broker-primary` and performs DLE
-login. Static Rezka password files are not mounted into `media-service`.
+On the first load of a legacy snapshot, the application removes only the former
+DLE authentication `PHPSESSID` and atomically writes the anonymous-format
+snapshot. It preserves Anubis clearance and all unrelated cookies; do not reset
+the session volume to perform this migration.
 
 The deployed default probe is the Rezka root, with `logout` as the valid marker
 and `login` as the invalid marker. If the provider changes either marker, expect
-a sanitized `provider_response_invalid` result.
+a sanitized `provider_response_invalid` result. Inspect the runner error code
+and refresh the fixtures and parser together; do not add a login path or
+manual cookie-injection flow.
 
 ## Local Build
 
@@ -106,6 +133,15 @@ DOCKER_HOST=ssh://host.example.invalid \
   docker build --target runner \
   -t "media-orchestrator-runner:local-$revision" .
 ```
+
+The local tags are build handles only. Before a local deployment mutates the
+root `.env`, the guarded script resolves each built tag to its exact Docker
+image ID and persists `MEDIA_SERVICE_IMAGE` and, for a full rollout,
+`DOWNLOAD_RUNNER_IMAGE` as `sha256:<image-id>`. Compose and rollback therefore
+refer to the host-local immutable image objects rather than a retargetable tag.
+These bare image IDs are intentionally local-only and are not registry pull
+references; use the release-contract path below for portable `registry@sha256`
+references.
 
 The runner package layer is independent of the application binary, so ffmpeg,
 VAAPI packages, and the pinned checksum-verified `yt-dlp` executable remain
@@ -172,7 +208,8 @@ of the exact Docker build context into the service image and its local tag.
 The context digest applies `.dockerignore`, includes the Dockerfile and ignore
 file themselves, and includes tracked or untracked configuration and toolchain
 inputs that Docker can send. Deployment verifies those labels, resolves the
-built tag to an immutable image ID, and later checks the running service. Before
+built tag to an immutable image ID, persists that ID for local deployments, and
+later checks the running service. Before
 synchronizing Compose, it atomically checkpoints the current image references,
 immutable image IDs and digest labels together with the deployed MCP schema
 artifact, OCI revisions, exact Compose, and applied database migration, then runs
@@ -229,26 +266,46 @@ deployment lock for its complete operation.
 4. Checkpoint the old image IDs and digest labels, migration, exact deployed MCP
    schema, Compose and Hermes source snapshot, plus Hermes and notifier image
    references and IDs.
-5. Apply a final idle fence, stop the watcher, require lifecycle `ready` with no
-   active job, and stop the runner. Both remain quiesced until the rollout has
-   succeeded or the exact checkpoint has been restored.
-6. Activate the staged Hermes tree and synchronize Compose inside this protected
+5. Apply a final idle fence, authenticate through the still-running watcher to
+   set lifecycle `rotating`, then stop the watcher and runner. Recheck that no
+   job became active after the fence. Both remain quiesced until the rollout has
+   succeeded or the exact checkpoint has been restored; service-only deployment
+   leaves lifecycle `ready` and does not recreate this boundary.
+6. Activate the staged Hermes tree and atomically stage the candidate Compose
+   file and `media/gluetun-rezka-watcher/watch.sh` inside this protected
    transaction. Update only the two image lines in the private root `.env`.
 7. Run the new service image as a one-shot `media migrate` container. Stop the
    rollout if migration fails.
 8. Recreate `media-service` and wait for health.
-9. Recreate `download-runner` and require a new healthy generation or clean exit.
-10. Recreate
-    both profiles, and wait for both health checks.
-11. Verify lifecycle `ready`, watcher health, exact running image attestations,
-    live MCP `tools/list`, mounted Hermes and notifier source hashes, queue state,
-    and a bounded runner iteration window with no `Service` compatibility error.
+9. Recreate `gluetun-rezka` from the candidate Compose and wait for its health
+   check before creating the stopped `download-runner` and
+   `gluetun-rezka-watcher` containers. Never run Compose `down`, remove the
+   encrypted session volume, or recreate PostgreSQL, the main Gluetun, or
+   qBittorrent.
+10. Resume the new runner and watcher only after the dedicated VPN is healthy.
+11. Verify lifecycle `ready`, watcher health, exact running image IDs and
+    Compose refs, `REZKA_PROBE_IMAGE == DOWNLOAD_RUNNER_IMAGE`, preserved
+    encrypted-session volume, live MCP `tools/list`, mounted Hermes and
+    notifier source hashes, queue state, and a bounded runner iteration window
+    with no `Service` compatibility error.
 
 The bounded watcher-readiness gate remains inside the transaction. A timeout or
 post-resume verification failure re-quiesces watcher and runner before restoring
-the checkpoint or forward snapshot. The protected container set includes
-PostgreSQL, qBittorrent, and both `gluetun` and `gluetun-rezka`; their identities,
-start times, and health must remain unchanged.
+the checkpoint or forward snapshot. The full protected container set includes
+PostgreSQL, qBittorrent, and the main `gluetun`; their identities, start times,
+and health must remain unchanged. The dedicated `gluetun-rezka`, runner, and
+watcher are intentionally replaced as one generation. If a full deployment or
+rollback fails, its checkpoint/forward sources and images are restored but the
+old watcher is never resumed: lifecycle is fenced at `rotating`, watcher and
+runner stay stopped, and `media-service` is stopped as the final fail-closed
+step because an old binary may not enforce the lifecycle gate for direct Rezka
+searches. The encrypted session volume is verified unchanged and is never
+deleted or recreated; rerun the guarded `deploy-full` path to recreate the
+candidate runtime and resume normally.
+
+This safe-hold recovery is deliberately different from a successful rollback:
+it sacrifices availability rather than claiming that an old watcher/runtime is
+compatible with the anonymous-session contract.
 
 Never replace the runner merely to deploy documentation or service-only changes.
 For an active torrent job, qBittorrent can continue independently, but runner
@@ -275,9 +332,9 @@ through the narrow internal API.
 The service permits up to three attempts for the same job on one VPN session.
 It then returns `vpn_rotation_required` before issuing another lease. A different
 queued job requires rotation immediately. The watcher reads this durable decision,
-rotates Gluetun only when required, and otherwise restarts the one-attempt runner
-on the current session. The provider-specific stage limit remains 20 attempts for
-Rezka.
+rotates Gluetun only when required, and otherwise starts the stopped one-attempt
+runner on the current session. It never stops or restarts an active runner. The
+provider-specific stage limit remains 20 attempts for Rezka.
 
 ## Automatic Episode Downloads
 
@@ -331,15 +388,17 @@ IDs, start times, and healthy states throughout.
 
 Full rollback is explicit and transactional. Before mutation it captures the
 forward service and runner image IDs, migration version, MCP schema, Compose,
-Hermes sources, and exact Hermes/notifier image references. It migrates down by
-at most one version, restores both
-checkpointed images plus the exact Compose and Hermes source snapshot, then
-verifies live `tools/list`, container mounts, and runner compatibility. On
-failure, it automatically restores the forward full stack, migrates back to the
-captured forward version, recreates Hermes consumers, and re-verifies MCP.
-PostgreSQL, both Gluetun containers, and qBittorrent
-container identities and health must remain unchanged through either path. Do
-not roll back PostgreSQL migrations by deleting data.
+watcher script, Hermes sources, and exact Hermes/notifier image references. It
+migrates down by at most one version, restores both checkpointed images plus
+the exact Compose and watcher source snapshot, then recreates the dedicated
+VPN and stopped runner/watcher pair before bounded resume. On failure, it
+automatically restores the forward full stack, migrates back to the captured
+forward version, recreates Hermes consumers, and re-verifies MCP, then leaves
+the runtime in the same rotating safe hold without resuming the forward
+watcher/service. PostgreSQL,
+the main Gluetun, and qBittorrent container identities and health plus the
+encrypted session volume remain unchanged through either path. Do not roll
+back PostgreSQL migrations by deleting data.
 
 ## Logs
 

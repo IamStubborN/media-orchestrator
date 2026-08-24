@@ -56,6 +56,8 @@ pub struct SubtitleInspection {
 pub enum DiagnosticError {
     #[error("Rezka diagnostic session construction failed")]
     Session,
+    #[error("Rezka encrypted session snapshot could not be restored")]
+    SessionStore,
     #[error("Rezka session validation failed")]
     Authentication,
     #[error("Rezka title resolution failed")]
@@ -113,7 +115,22 @@ pub async fn inspect_playback(
     probe_streams: bool,
 ) -> Result<PlaybackInspection, DiagnosticError> {
     let mut prepared =
-        composition::prepare_runner_session(config).map_err(|_| DiagnosticError::Session)?;
+        composition::prepare_runner_session(config).map_err(|error| match error {
+            composition::RunnerCompositionError::SessionStore => DiagnosticError::SessionStore,
+            composition::RunnerCompositionError::Client
+            | composition::RunnerCompositionError::Probe
+            | composition::RunnerCompositionError::Store => DiagnosticError::Session,
+        })?;
+    let session_guard = prepared
+        .acquire_session_lock()
+        .await
+        .map_err(|_| DiagnosticError::Session)?;
+    prepared.reload_session().map_err(|error| match error {
+        composition::RunnerCompositionError::SessionStore => DiagnosticError::SessionStore,
+        composition::RunnerCompositionError::Client
+        | composition::RunnerCompositionError::Probe
+        | composition::RunnerCompositionError::Store => DiagnosticError::Session,
+    })?;
     prepared
         .client
         .validate_session(&prepared.probe)
@@ -174,6 +191,7 @@ pub async fn inspect_playback(
         .store
         .save(&snapshot)
         .map_err(|_| DiagnosticError::Persistence)?;
+    drop(session_guard);
 
     let mut stream_probes = Vec::new();
     if probe_streams {
