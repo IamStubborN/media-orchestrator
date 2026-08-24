@@ -1039,6 +1039,16 @@ impl ProviderEpisodeDiscovery {
             return Err(PortError::Conflict);
         };
         let now = OffsetDateTime::now_utc();
+        let mut last_scheduled_by_season = BTreeMap::new();
+        for episode in &schedule {
+            let Ok(snapshot) = EpisodeSnapshot::new(episode.season, episode.episode) else {
+                continue;
+            };
+            let last = last_scheduled_by_season
+                .entry(snapshot.season())
+                .or_insert(snapshot.episode());
+            *last = (*last).max(snapshot.episode());
+        }
         let mut episodes = schedule
             .into_iter()
             .filter(|episode| release_episode_has_aired(episode, now))
@@ -1054,6 +1064,7 @@ impl ProviderEpisodeDiscovery {
                 discovery
                     .with_poster_url(poster_url)
                     .with_release_identity(identity)
+                    .with_last_scheduled_by_season(last_scheduled_by_season)
             })
             .map_err(|_| PortError::Conflict)
     }

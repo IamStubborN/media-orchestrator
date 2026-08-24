@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
     PRIMARY_USER_ID, Actor, OperationKey, PortError, Provider, SourceChoiceAction,
@@ -139,6 +139,7 @@ pub struct EpisodeDiscovery {
     original_release_title: Option<String>,
     poster_url: Option<String>,
     release_identity: Option<crate::ReleaseIdentity>,
+    last_scheduled_by_season: BTreeMap<u32, u32>,
 }
 
 impl EpisodeDiscovery {
@@ -162,6 +163,7 @@ impl EpisodeDiscovery {
             original_release_title,
             poster_url: None,
             release_identity: None,
+            last_scheduled_by_season: BTreeMap::new(),
         })
     }
 
@@ -174,6 +176,15 @@ impl EpisodeDiscovery {
     #[must_use]
     pub fn with_release_identity(mut self, release_identity: crate::ReleaseIdentity) -> Self {
         self.release_identity = Some(release_identity);
+        self
+    }
+
+    #[must_use]
+    pub fn with_last_scheduled_by_season(
+        mut self,
+        last_scheduled_by_season: BTreeMap<u32, u32>,
+    ) -> Self {
+        self.last_scheduled_by_season = last_scheduled_by_season;
         self
     }
 
@@ -200,6 +211,18 @@ impl EpisodeDiscovery {
     #[must_use]
     pub const fn release_identity(&self) -> Option<crate::ReleaseIdentity> {
         self.release_identity
+    }
+
+    #[must_use]
+    pub fn last_scheduled_by_season(&self) -> &BTreeMap<u32, u32> {
+        &self.last_scheduled_by_season
+    }
+
+    #[must_use]
+    pub fn is_last_scheduled_episode(&self, episode: EpisodeSnapshot) -> bool {
+        self.last_scheduled_by_season
+            .get(&episode.season())
+            .is_some_and(|&last| last == episode.episode())
     }
 }
 
@@ -865,6 +888,7 @@ pub struct FutureEpisodeRecord {
     pub poster_url: Option<String>,
     pub rezka_count: u32,
     pub prowlarr_count: u32,
+    pub season_complete: bool,
 }
 
 #[async_trait::async_trait]
@@ -995,6 +1019,7 @@ pub struct TrackingRunResult {
 pub struct TrackingRuntime {
     store: Arc<dyn TrackingScheduleStore>,
     discovery: Arc<dyn EpisodeDiscoveryPort>,
+    availability: Option<Arc<dyn EpisodeAvailabilityPort>>,
     downloads: Option<Arc<dyn TrackedEpisodeDownloadPort>>,
     session: Option<Arc<dyn AnonymousSessionPort>>,
 }
@@ -1008,9 +1033,16 @@ impl TrackingRuntime {
         Self {
             store,
             discovery,
+            availability: None,
             downloads: None,
             session: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_availability(mut self, availability: Arc<dyn EpisodeAvailabilityPort>) -> Self {
+        self.availability = Some(availability);
+        self
     }
 
     #[must_use]
@@ -1038,7 +1070,7 @@ impl TrackingRuntime {
             .store
             .claim_due(now, claim_token, now + TRACKING_FAILURE_COOLDOWN, limit)
             .await?;
-        if due.iter().any(|tracking| tracking.download().is_some())
+        if !due.is_empty()
             && let Some(session) = self.session.as_deref()
         {
             let _ = session.prepare_anonymous_session().await;
@@ -1152,6 +1184,7 @@ impl TrackingRuntime {
                 .iter()
                 .map(|episode| episode.season())
                 .max();
+            let mut pending_availability = false;
             let mut source_error = false;
             let discovered_before = result.discovered;
             let queued_before = result.queued;
@@ -1178,9 +1211,77 @@ impl TrackingRuntime {
                 {
                     continue;
                 }
-                let actions = Vec::new();
-                let rezka_count = 0;
-                let prowlarr_count = 0;
+                let (actions, (rezka_count, prowlarr_count), season_complete) =
+                    if tracking.download().is_some() {
+                        (Vec::new(), (0, 0), false)
+                    } else {
+                        let Some(availability) = self.availability.as_deref() else {
+                            if self
+                                .store
+                                .record_pending_episode(tracking.id(), claim_token, episode)
+                                .await
+                                .is_err()
+                            {
+                                result.failed += 1;
+                                result.source_failures += 1;
+                                source_error = true;
+                                continue;
+                            }
+                            result.failed += 1;
+                            result.source_failures += 1;
+                            pending_availability = true;
+                            source_error = true;
+                            continue;
+                        };
+                        let availability = match availability
+                            .probe(EpisodeAvailabilityRequest::new(
+                                &tracking, &discovery, episode,
+                            ))
+                            .await
+                        {
+                            Ok(availability) => availability,
+                            Err(_) => {
+                                if self
+                                    .store
+                                    .record_pending_episode(tracking.id(), claim_token, episode)
+                                    .await
+                                    .is_err()
+                                {
+                                    result.failed += 1;
+                                    result.source_failures += 1;
+                                    source_error = true;
+                                    continue;
+                                }
+                                result.failed += 1;
+                                result.source_failures += 1;
+                                pending_availability = true;
+                                source_error = true;
+                                continue;
+                            }
+                        };
+                        let counts = (availability.rezka_count(), availability.prowlarr_count());
+                        let actions = availability.actions();
+                        if actions.is_empty() {
+                            if self
+                                .store
+                                .record_pending_episode(tracking.id(), claim_token, episode)
+                                .await
+                                .is_err()
+                            {
+                                result.failed += 1;
+                                result.source_failures += 1;
+                                source_error = true;
+                                continue;
+                            }
+                            pending_availability = true;
+                            continue;
+                        }
+                        (
+                            actions,
+                            counts,
+                            discovery.is_last_scheduled_episode(episode),
+                        )
+                    };
                 if tracking.download().is_some() {
                     let Some(downloads) = self.downloads.as_deref() else {
                         result.failed += 1;
@@ -1222,6 +1323,7 @@ impl TrackingRuntime {
                         poster_url: discovery.poster_url().map(str::to_owned),
                         rezka_count,
                         prowlarr_count,
+                        season_complete,
                     })
                     .await;
                 match recorded {
@@ -1236,6 +1338,8 @@ impl TrackingRuntime {
             }
             let next_check = if source_error {
                 time::OffsetDateTime::now_utc().max(now) + TRACKING_FAILURE_COOLDOWN
+            } else if pending_availability {
+                now + NOTIFY_TRACKING_INTERVAL
             } else {
                 default_next_check
             };
@@ -1245,6 +1349,8 @@ impl TrackingRuntime {
                 TrackingCheckStatus::EpisodeFound
             } else if source_error {
                 TrackingCheckStatus::SourceError
+            } else if pending_availability {
+                TrackingCheckStatus::AwaitingSource
             } else {
                 TrackingCheckStatus::NoNewEpisode
             };

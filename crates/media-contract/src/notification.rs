@@ -55,6 +55,12 @@ pub struct HermesSourceChoiceWebhook {
     pub rezka_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prowlarr_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub season_complete: bool,
+}
+
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

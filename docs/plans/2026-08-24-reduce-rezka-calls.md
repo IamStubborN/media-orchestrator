@@ -7,7 +7,11 @@ Repos: `media-orchestrator` (application) and `homelab` (watcher + Hermes skill/
 
 Cut background and duplicate Rezka HTTP without weakening Anubis handling, sticky VPN, or anonymous sessions. Do not log or persist cookies, JWTs, challenge HTML, or signed stream URLs. Native SHA-256 must still never launch Chromium.
 
-Idle calendar checks must stay on TVMaze. Rezka is for: user search, choice-set refresh, auto-download enqueue, watcher probe when the VPN IP is new, and `ensure_session` when clearance is missing/stale or the IP changed.
+Calendar remains the air-date source. Notify-only tracking still searches **both**
+Rezka and Prowlarr and must **not** tell the user a new episode (or movie) exists
+unless at least one provider can actually download it. Rezka HTTP is still
+reduced by session TTL, one warmup per pass, title cache, longer intervals, and
+watcher same-IP skip.
 
 ## Item map
 
@@ -16,7 +20,8 @@ Idle calendar checks must stay on TVMaze. Rezka is for: user search, choice-set 
 | 1 | Skip `ensure_session` probe when Anubis clearance exists, TTL is fresh, and VPN IP matches last validation | TTL 30 min |
 | 4 | Auto-download interval | 15 min → 30 min |
 | 7 | Notify-only interval | 1 h → 3 h |
-| 2 | Notify-only tracking does not search Rezka | calendar notify only |
+| 2 | Notify-only searches Rezka **and** Prowlarr; notify only if downloadable | availability.probe; empty actions stay pending |
+| 8 | Last aired episode of a tracked season also says the season is complete and can be downloaded | `season_complete` on source-choice |
 | 3 | Auto-download enqueue uses cached title by `provider_media_ref`, not catalog search | process TTL 30 min |
 | 5 | One `ensure_session` per tracking `run_once`, not per inner search | warmup at pass start |
 | 6 | Watcher skips Rezka probe when `public_ip` equals last successful ready `current_ip` | lifecycle GET |
@@ -35,16 +40,28 @@ Idle calendar checks must stay on TVMaze. Rezka is for: user search, choice-set 
 - VPN rotation must not reuse a stale skip: watcher/lifecycle IP change is the signal (item 6 + 1 together).
 - Tests in `rezka-client` session_flow and `media` search_flow: skip vs force-probe; never leak IP/cookies in errors.
 
-## 2 — Notify-only tracking skips Rezka
+## 2 — Notify only when downloadable (Rezka and Prowlarr)
 
-In `TrackingRuntime::run_once`, when `tracking.download().is_none()`:
+Revert “calendar-only notify”. In `TrackingRuntime::run_once`, when `download().is_none()`:
 
-- Still discover episodes from the calendar port.
-- **Do not** call `availability.probe` (that path catalog-searches Rezka and Prowlarr).
-- Persist discovered episodes with empty actions / zero provider counts (or omit counts). Notification copy may say a new episode exists without `rezka_count`.
-- `media_episode_choice_set_refresh` and explicit user search remain the Rezka/Prowlarr lookup.
-- Auto-download subscriptions (`download().is_some()`) unchanged except items 3–5.
-- Update `tracking_runtime` tests and Hermes `SKILL.md` / RUNBOOK: notify 3 h, no provider scrape until refresh.
+- Discover aired episodes from the calendar (TVMaze).
+- Call `availability.probe` for each new/pending episode (Rezka **and** Prowlarr in parallel, as today).
+- If `actions` is empty (neither provider `Available`): `record_pending_episode`, no source-choice notification.
+- If at least one provider is `Available`: `record_future_episode_with_counts` with real actions and counts.
+- User search and choice-set refresh unchanged.
+- Session warmup (item 5) also runs for notify-only passes, because they hit Rezka again.
+- Restore `with_availability` on the tracking runtime in composition.
+- Tracking is series-only; “фильм” means the same gate for any future movie-shaped notify: do not claim it exists unless a provider can download it. Interactive `media_search` already only returns provider hits.
+- SKILL/RUNBOOK: notify every 3 h; scrape Rezka+Prowlarr; notify only if downloadable.
+
+## 8 — Season finale copy
+
+When a notify-only episode is recorded as downloadable **and** it is the last episode of that season in the **full** TVMaze schedule (no later episode number in that season, including unaired rows), set `season_complete` on the source-choice notification.
+
+- Compute finale from the unfiltered schedule inside `release_episodes` / `EpisodeDiscovery` (aired list stays the notify candidates; finale map is `season → last scheduled episode`).
+- Optional boolean on `SourceChoiceNotification` / `HermesSourceChoiceWebhook` (`skip_serializing_if` false-or-absent). New Postgres check function must allow the key (strict jsonb allowlist today).
+- Hermes `render_source_choice`: keep `🆕 SxxEyy`; if `season_complete`, add a line that the whole season is out and can be downloaded (do not auto-start a season job; SKILL still requires explicit season download confirmation).
+- Tests: last scheduled episode + available → flag true; mid-season or later unaired episode in calendar → flag false; empty actions still no notify.
 
 ## 3 — Cache title by `provider_media_ref`
 
@@ -69,10 +86,10 @@ Update `tracking_runtime` time assertions and RUNBOOK/SKILL.md.
 ## 5 — One session warmup per tracking pass
 
 - Add a narrow port, e.g. `prepare_anonymous_session() -> Result<(), PortError>`, implemented by the existing Rezka search adapter (lock, reload, `ensure_session` once, save snapshot).
-- `TrackingRuntime::run_once` calls it **once** before the due loop when any claimed row is auto-download **or** when notify is still not probing Rezka, skip warmup for notify-only batches that will not touch Rezka.
-- If the pass includes auto-download rows, warmup once; inner `search_rezka` / enqueue reuse the jar and item 1 skip.
+- `TrackingRuntime::run_once` calls it **once** before the due loop when the batch is non-empty (notify-only and auto-download both talk to Rezka).
+- Inner `search_rezka` / enqueue reuse the jar and item 1 skip.
 - Do not hold the Rezka mutex across TVMaze calls.
-- Test: two auto-download enqueues in one `run_once` probe at most once when TTL/IP allow.
+- Test: two auto-download enqueues in one `run_once` probe at most once when TTL/IP allow. Notify-only batches that probe Rezka also warm once.
 
 ## 6 — Watcher skip probe on same IP
 
@@ -86,10 +103,12 @@ Update `tracking_runtime` time assertions and RUNBOOK/SKILL.md.
 ## Files (expected)
 
 - `crates/rezka-client/src/session/{mod.rs,cookie.rs}` + `tests/session_flow.rs`
-- `crates/media-core/src/tracking.rs` + `tests/tracking_runtime.rs`
+- `crates/media-core/src/{tracking.rs,notification.rs}` + `tests/tracking_runtime.rs`
+- `crates/media-contract/src/notification.rs` + contract tests
+- `crates/media-storage` new migration allowing `season_complete` on source-choice jsonb
 - `crates/media/src/{search.rs,composition.rs}` + `tests/search_flow.rs`
-- `docs/RUNBOOK.md`, `docs/ARCHITECTURE.md` (one short paragraph)
-- `homelab/media/gluetun-rezka-watcher/watch.sh` + `media/tests/validate-media-orchestrator-compose.sh`
+- `docs/RUNBOOK.md`, `docs/ARCHITECTURE.md`
+- `homelab/hermes/scripts/hermes_media_notifications.py` + `hermes/tests/test_media_notifications.py`
 - `homelab/hermes/shared/skills/media/SKILL.md`
 
 Do **not** touch unrelated Hermes Vaultwarden plugin diffs.

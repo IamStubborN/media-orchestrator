@@ -346,11 +346,11 @@ creates an episode job directly from the scheduler; Hermes and the LLM are not
 involved. Use `tracking enable-download` to configure an existing subscription.
 Use `tracking set-baseline` to correct the known-through episode without
 recreating a subscription, and `tracking check-now` to make it due for the next
-scheduler pass. Notification-only subscriptions run every 3 hours and record calendar
-episodes without scraping Rezka or Prowlarr; a choice-set refresh or explicit
-search looks up providers. Automatic-download subscriptions run every 30
-minutes. `tracking list --json` reports the last check result and the next
-scheduled check.
+scheduler pass. Notification-only subscriptions run every 3 hours, scrape
+Rezka and Prowlarr, and notify only when at least one provider can download
+the episode. Calendar-only candidates stay pending until a provider confirms
+them. Automatic-download subscriptions run every 30 minutes. `tracking list
+--json` reports the last check result and the next scheduled check.
 Never infer or switch the source or translation automatically.
 
 ## Stuck Runner Recovery

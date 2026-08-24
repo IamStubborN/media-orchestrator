@@ -1,6 +1,6 @@
 use secrecy::SecretString;
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -315,6 +315,9 @@ async fn notify_only_discovery_uses_calendar_even_with_a_rezka_translation_name(
         result.episodes(),
         vec![media_core::EpisodeSnapshot::new(1, 1).unwrap()].as_slice()
     );
+    assert_eq!(result.last_scheduled_by_season(), &BTreeMap::from([(1, 2)]));
+    assert!(!result.is_last_scheduled_episode(media_core::EpisodeSnapshot::new(1, 1).unwrap()));
+    assert!(result.is_last_scheduled_episode(media_core::EpisodeSnapshot::new(1, 2).unwrap()));
     assert!(provider.searches.lock().unwrap().is_empty());
 }
 

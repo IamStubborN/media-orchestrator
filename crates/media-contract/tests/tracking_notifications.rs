@@ -138,6 +138,7 @@ fn hermes_source_choice_webhook_has_three_stable_provider_actions() {
         choice_set_expires_at: None,
         rezka_count: None,
         prowlarr_count: None,
+        season_complete: false,
     };
 
     assert_eq!(
@@ -153,6 +154,39 @@ fn hermes_source_choice_webhook_has_three_stable_provider_actions() {
             "actions": ["all", "rezka", "prowlarr"],
             "poster_url": "https://static.tvmaze.com/poster.jpg"
         })
+    );
+}
+
+#[test]
+fn hermes_source_choice_webhook_omits_false_season_complete_and_emits_true() {
+    let tracking_id = PublicId::parse("00000000-0000-0000-0000-000000000555").unwrap();
+    let mut payload = HermesSourceChoiceWebhook {
+        event_type: "media.source-choice".to_owned(),
+        schema_version: 1,
+        card_key: "tracking:00000000-0000-0000-0000-000000000555:3:12".to_owned(),
+        tracking_id,
+        title: "Jobless Reincarnation".to_owned(),
+        season: 3,
+        episode: 12,
+        actions: vec![SourceChoiceActionDto::Rezka],
+        poster_url: None,
+        choice_set_id: None,
+        choice_set_expires_at: None,
+        rezka_count: None,
+        prowlarr_count: None,
+        season_complete: false,
+    };
+    assert!(
+        serde_json::to_value(&payload)
+            .unwrap()
+            .get("season_complete")
+            .is_none()
+    );
+
+    payload.season_complete = true;
+    assert_eq!(
+        serde_json::to_value(payload).unwrap()["season_complete"],
+        serde_json::json!(true)
     );
 }
 

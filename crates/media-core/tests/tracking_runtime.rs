@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     future::Future,
     sync::{
         Arc, Barrier, Mutex,
@@ -8,14 +9,15 @@ use std::{
 };
 
 use media_core::{
-    PRIMARY_USER_ID, AnonymousSessionPort, EpisodeDiscovery, EpisodeDiscoveryPort, EpisodeSnapshot,
-    NewTrackingCommand, NewTrackingSubscription, NotificationDelivery, NotificationDeliveryFailure,
-    NotificationDeliveryFence, NotificationDeliveryPermit, NotificationDispatcher,
-    NotificationEventType, NotificationId, NotificationOutboxPort, NotificationRecipient,
-    NotificationSink, NotificationSinkOutcome, OperationKey, PortError, Provider, ReleaseIdentity,
-    ReleaseSource, SourceChoiceAction, TrackedEpisodeDownloadPort, TrackingClaimToken,
-    TrackingDownload, TrackingId, TrackingRuntime, TrackingScheduleStore, TrackingScope,
-    TrackingSubscription,
+    PRIMARY_USER_ID, AnonymousSessionPort, EpisodeAvailability, EpisodeAvailabilityPort,
+    EpisodeAvailabilityRequest, EpisodeDiscovery, EpisodeDiscoveryPort, EpisodeSnapshot,
+    FutureEpisodeRecord, NewTrackingCommand, NewTrackingSubscription, NotificationDelivery,
+    NotificationDeliveryFailure, NotificationDeliveryFence, NotificationDeliveryPermit,
+    NotificationDispatcher, NotificationEventType, NotificationId, NotificationOutboxPort,
+    NotificationRecipient, NotificationSink, NotificationSinkOutcome, OperationKey, PortError,
+    Provider, ProviderAvailability, ReleaseIdentity, ReleaseSource, SourceChoiceAction,
+    TrackedEpisodeDownloadPort, TrackingClaimToken, TrackingDownload, TrackingId, TrackingRuntime,
+    TrackingScheduleStore, TrackingScope, TrackingSubscription,
 };
 
 #[test]
@@ -32,6 +34,7 @@ struct ScheduleStore {
     pending: Mutex<Vec<EpisodeSnapshot>>,
     finished: Mutex<Vec<(time::OffsetDateTime, media_core::TrackingCheckStatus)>>,
     release_metadata: Mutex<Vec<(media_core::ReleaseIdentity, String)>>,
+    season_complete: Mutex<Vec<(EpisodeSnapshot, bool)>>,
 }
 
 #[async_trait::async_trait]
@@ -62,18 +65,43 @@ impl TrackingScheduleStore for ScheduleStore {
 
     async fn record_future_episode(
         &self,
-        _: TrackingId,
-        _: TrackingClaimToken,
+        id: TrackingId,
+        claim_token: TrackingClaimToken,
         episode: EpisodeSnapshot,
-        _: time::OffsetDateTime,
+        next_check_at: time::OffsetDateTime,
         actions: Vec<SourceChoiceAction>,
-        _: Option<String>,
+        poster_url: Option<String>,
+    ) -> Result<bool, PortError> {
+        self.record_future_episode_with_counts(FutureEpisodeRecord {
+            id,
+            claim_token,
+            episode,
+            next_check_at,
+            actions,
+            poster_url,
+            rezka_count: 0,
+            prowlarr_count: 0,
+            season_complete: false,
+        })
+        .await
+    }
+
+    async fn record_future_episode_with_counts(
+        &self,
+        record: FutureEpisodeRecord,
     ) -> Result<bool, PortError> {
         self.pending
             .lock()
             .unwrap()
-            .retain(|candidate| *candidate != episode);
-        self.discovered.lock().unwrap().push((episode, actions));
+            .retain(|candidate| *candidate != record.episode);
+        self.discovered
+            .lock()
+            .unwrap()
+            .push((record.episode, record.actions.clone()));
+        self.season_complete
+            .lock()
+            .unwrap()
+            .push((record.episode, record.season_complete));
         Ok(true)
     }
 
@@ -116,6 +144,36 @@ impl TrackingScheduleStore for ScheduleStore {
     ) -> Result<(), PortError> {
         self.finished.lock().unwrap().push((next_check_at, status));
         Ok(())
+    }
+}
+
+struct Availability;
+
+#[async_trait::async_trait]
+impl EpisodeAvailabilityPort for Availability {
+    async fn probe(
+        &self,
+        _: EpisodeAvailabilityRequest<'_>,
+    ) -> Result<EpisodeAvailability, PortError> {
+        Ok(EpisodeAvailability::new(
+            ProviderAvailability::Available,
+            ProviderAvailability::Unavailable,
+        ))
+    }
+}
+
+struct UnavailableAvailability;
+
+#[async_trait::async_trait]
+impl EpisodeAvailabilityPort for UnavailableAvailability {
+    async fn probe(
+        &self,
+        _: EpisodeAvailabilityRequest<'_>,
+    ) -> Result<EpisodeAvailability, PortError> {
+        Ok(EpisodeAvailability::new(
+            ProviderAvailability::Unavailable,
+            ProviderAvailability::Unknown,
+        ))
     }
 }
 
@@ -245,6 +303,7 @@ fn release_failure_cooldown_starts_when_failure_is_observed() {
             pending: Mutex::new(Vec::new()),
             finished: Mutex::new(Vec::new()),
             release_metadata: Mutex::new(Vec::new()),
+            season_complete: Mutex::new(Vec::new()),
         });
         let started_at = time::OffsetDateTime::now_utc() - time::Duration::minutes(5);
         let failure_observed_at = time::OffsetDateTime::now_utc();
@@ -275,6 +334,7 @@ fn release_failure_counters_preserve_the_bounded_port_error_class() {
             pending: Mutex::new(Vec::new()),
             finished: Mutex::new(Vec::new()),
             release_metadata: Mutex::new(Vec::new()),
+            season_complete: Mutex::new(Vec::new()),
         });
         let result = TrackingRuntime::new(store, Arc::new(ConflictingDiscovery))
             .run_once(time::OffsetDateTime::now_utc(), 10)
@@ -330,6 +390,7 @@ fn scheduler_backfills_resolved_release_identity_and_poster_without_a_new_episod
             pending: Mutex::new(Vec::new()),
             finished: Mutex::new(Vec::new()),
             release_metadata: Mutex::new(Vec::new()),
+            season_complete: Mutex::new(Vec::new()),
         });
         let runtime = TrackingRuntime::new(
             store.clone(),
@@ -361,6 +422,7 @@ fn scheduler_does_not_persist_a_poster_without_resolved_release_identity() {
             pending: Mutex::new(Vec::new()),
             finished: Mutex::new(Vec::new()),
             release_metadata: Mutex::new(Vec::new()),
+            season_complete: Mutex::new(Vec::new()),
         });
         let runtime = TrackingRuntime::new(
             store.clone(),
@@ -639,7 +701,8 @@ fn discovery_write_failure_is_cooled_down_and_does_not_abort_the_batch() {
             claims: Mutex::new(Vec::new()),
         });
         let now = time::OffsetDateTime::now_utc();
-        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery));
+        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery))
+            .with_availability(Arc::new(Availability));
 
         let result = runtime.run_once(now, 10).await.unwrap();
 
@@ -676,8 +739,10 @@ fn scheduler_records_only_episodes_missing_from_the_known_set() {
             pending: Mutex::new(Vec::new()),
             finished: Mutex::new(Vec::new()),
             release_metadata: Mutex::new(Vec::new()),
+            season_complete: Mutex::new(Vec::new()),
         });
-        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery));
+        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery))
+            .with_availability(Arc::new(Availability));
 
         let result = runtime.run_once(now, 10).await.unwrap();
 
@@ -685,7 +750,10 @@ fn scheduler_records_only_episodes_missing_from_the_known_set() {
         assert_eq!(result.discovered, 1);
         assert_eq!(
             *store.discovered.lock().unwrap(),
-            vec![(EpisodeSnapshot::new(1, 5).unwrap(), Vec::new())]
+            vec![(
+                EpisodeSnapshot::new(1, 5).unwrap(),
+                vec![SourceChoiceAction::Rezka]
+            )]
         );
         assert_eq!(
             *store.finished.lock().unwrap(),
@@ -698,7 +766,7 @@ fn scheduler_records_only_episodes_missing_from_the_known_set() {
 }
 
 #[test]
-fn notify_only_records_calendar_episodes_without_provider_probe() {
+fn notify_only_records_downloadable_episodes_after_provider_probe() {
     block_on(async {
         let store = Arc::new(ScheduleStore {
             due: tracking(),
@@ -706,8 +774,10 @@ fn notify_only_records_calendar_episodes_without_provider_probe() {
             pending: Mutex::new(Vec::new()),
             finished: Mutex::new(Vec::new()),
             release_metadata: Mutex::new(Vec::new()),
+            season_complete: Mutex::new(Vec::new()),
         });
-        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery));
+        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery))
+            .with_availability(Arc::new(Availability));
 
         let result = runtime
             .run_once(time::OffsetDateTime::now_utc(), 10)
@@ -717,9 +787,141 @@ fn notify_only_records_calendar_episodes_without_provider_probe() {
         assert_eq!(result.discovered, 1);
         assert_eq!(
             *store.discovered.lock().unwrap(),
-            vec![(EpisodeSnapshot::new(1, 5).unwrap(), Vec::new())]
+            vec![(
+                EpisodeSnapshot::new(1, 5).unwrap(),
+                vec![SourceChoiceAction::Rezka]
+            )]
         );
         assert!(store.pending.lock().unwrap().is_empty());
+        assert_eq!(
+            *store.season_complete.lock().unwrap(),
+            vec![(EpisodeSnapshot::new(1, 5).unwrap(), false)]
+        );
+    });
+}
+
+#[test]
+fn calendar_candidate_stays_unrecorded_until_a_provider_confirms_it() {
+    block_on(async {
+        let store = Arc::new(ScheduleStore {
+            due: tracking(),
+            discovered: Mutex::new(Vec::new()),
+            pending: Mutex::new(Vec::new()),
+            finished: Mutex::new(Vec::new()),
+            release_metadata: Mutex::new(Vec::new()),
+            season_complete: Mutex::new(Vec::new()),
+        });
+        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery))
+            .with_availability(Arc::new(UnavailableAvailability));
+
+        let result = runtime
+            .run_once(time::OffsetDateTime::now_utc(), 10)
+            .await
+            .unwrap();
+
+        assert_eq!(result.discovered, 0);
+        assert!(store.discovered.lock().unwrap().is_empty());
+        assert_eq!(
+            *store.pending.lock().unwrap(),
+            vec![EpisodeSnapshot::new(1, 5).unwrap()]
+        );
+        assert!(store.season_complete.lock().unwrap().is_empty());
+    });
+}
+
+struct ScheduledFinaleDiscovery {
+    last_scheduled: BTreeMap<u32, u32>,
+}
+
+#[async_trait::async_trait]
+impl EpisodeDiscoveryPort for ScheduledFinaleDiscovery {
+    async fn available_episodes(
+        &self,
+        _: &TrackingSubscription,
+    ) -> Result<EpisodeDiscovery, PortError> {
+        EpisodeDiscovery::new(
+            vec![
+                EpisodeSnapshot::new(1, 1).unwrap(),
+                EpisodeSnapshot::new(1, 2).unwrap(),
+                EpisodeSnapshot::new(1, 3).unwrap(),
+                EpisodeSnapshot::new(1, 4).unwrap(),
+                EpisodeSnapshot::new(1, 5).unwrap(),
+            ],
+            "Ongoing Show".to_owned(),
+            Some("Original Show".to_owned()),
+        )
+        .map(|discovery| discovery.with_last_scheduled_by_season(self.last_scheduled.clone()))
+        .map_err(|_| PortError::Conflict)
+    }
+}
+
+#[test]
+fn last_scheduled_downloadable_episode_marks_the_season_complete() {
+    block_on(async {
+        let store = Arc::new(ScheduleStore {
+            due: tracking(),
+            discovered: Mutex::new(Vec::new()),
+            pending: Mutex::new(Vec::new()),
+            finished: Mutex::new(Vec::new()),
+            release_metadata: Mutex::new(Vec::new()),
+            season_complete: Mutex::new(Vec::new()),
+        });
+        let runtime = TrackingRuntime::new(
+            store.clone(),
+            Arc::new(ScheduledFinaleDiscovery {
+                last_scheduled: BTreeMap::from([(1, 5)]),
+            }),
+        )
+        .with_availability(Arc::new(Availability));
+
+        let result = runtime
+            .run_once(time::OffsetDateTime::now_utc(), 10)
+            .await
+            .unwrap();
+
+        assert_eq!(result.discovered, 1);
+        assert_eq!(
+            *store.discovered.lock().unwrap(),
+            vec![(
+                EpisodeSnapshot::new(1, 5).unwrap(),
+                vec![SourceChoiceAction::Rezka]
+            )]
+        );
+        assert_eq!(
+            *store.season_complete.lock().unwrap(),
+            vec![(EpisodeSnapshot::new(1, 5).unwrap(), true)]
+        );
+    });
+}
+
+#[test]
+fn mid_season_episode_is_not_season_complete_when_later_calendar_rows_exist() {
+    block_on(async {
+        let store = Arc::new(ScheduleStore {
+            due: tracking(),
+            discovered: Mutex::new(Vec::new()),
+            pending: Mutex::new(Vec::new()),
+            finished: Mutex::new(Vec::new()),
+            release_metadata: Mutex::new(Vec::new()),
+            season_complete: Mutex::new(Vec::new()),
+        });
+        let runtime = TrackingRuntime::new(
+            store.clone(),
+            Arc::new(ScheduledFinaleDiscovery {
+                last_scheduled: BTreeMap::from([(1, 10)]),
+            }),
+        )
+        .with_availability(Arc::new(Availability));
+
+        runtime
+            .run_once(time::OffsetDateTime::now_utc(), 10)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *store.season_complete.lock().unwrap(),
+            vec![(EpisodeSnapshot::new(1, 5).unwrap(), false)]
+        );
     });
 }
 
@@ -753,8 +955,10 @@ fn missing_episode_remains_eligible_after_a_later_episode_is_known() {
             pending: Mutex::new(vec![EpisodeSnapshot::new(1, 3).unwrap()]),
             finished: Mutex::new(Vec::new()),
             release_metadata: Mutex::new(Vec::new()),
+            season_complete: Mutex::new(Vec::new()),
         });
-        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery));
+        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery))
+            .with_availability(Arc::new(Availability));
 
         runtime
             .run_once(time::OffsetDateTime::now_utc(), 10)
@@ -806,6 +1010,7 @@ fn scheduler_does_not_backfill_seasons_older_than_the_tracked_season() {
             pending: Mutex::new(Vec::new()),
             finished: Mutex::new(Vec::new()),
             release_metadata: Mutex::new(Vec::new()),
+            season_complete: Mutex::new(Vec::new()),
         });
         let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery));
 
@@ -868,8 +1073,10 @@ fn scheduler_ignores_historical_gaps_but_rechecks_pending_future_episode() {
             pending: Mutex::new(vec![EpisodeSnapshot::new(9, 10).unwrap()]),
             finished: Mutex::new(Vec::new()),
             release_metadata: Mutex::new(Vec::new()),
+            season_complete: Mutex::new(Vec::new()),
         });
-        let runtime = TrackingRuntime::new(store.clone(), Arc::new(HistoricalGapDiscovery));
+        let runtime = TrackingRuntime::new(store.clone(), Arc::new(HistoricalGapDiscovery))
+            .with_availability(Arc::new(Availability));
 
         runtime
             .run_once(time::OffsetDateTime::now_utc(), 10)
@@ -1190,6 +1397,7 @@ fn scheduler_enqueues_only_new_episodes_from_the_selected_download_season() {
             pending: Mutex::new(Vec::new()),
             finished: Mutex::new(Vec::new()),
             release_metadata: Mutex::new(Vec::new()),
+            season_complete: Mutex::new(Vec::new()),
         });
         let downloads = Arc::new(Enqueuer::default());
         let now = time::OffsetDateTime::now_utc();
@@ -1336,7 +1544,7 @@ fn auto_download_pass_warms_the_anonymous_session_once() {
 }
 
 #[test]
-fn notify_only_pass_does_not_warm_the_anonymous_session() {
+fn notify_only_pass_warms_the_anonymous_session_once() {
     block_on(async {
         let store = Arc::new(ScheduleStore {
             due: tracking(),
@@ -1344,9 +1552,11 @@ fn notify_only_pass_does_not_warm_the_anonymous_session() {
             pending: Mutex::new(Vec::new()),
             finished: Mutex::new(Vec::new()),
             release_metadata: Mutex::new(Vec::new()),
+            season_complete: Mutex::new(Vec::new()),
         });
         let session = Arc::new(CountingSession::default());
         let runtime = TrackingRuntime::new(store, Arc::new(Discovery))
+            .with_availability(Arc::new(Availability))
             .with_anonymous_session(session.clone());
 
         runtime
@@ -1354,7 +1564,7 @@ fn notify_only_pass_does_not_warm_the_anonymous_session() {
             .await
             .unwrap();
 
-        assert_eq!(*session.warmups.lock().unwrap(), 0);
+        assert_eq!(*session.warmups.lock().unwrap(), 1);
     });
 }
 

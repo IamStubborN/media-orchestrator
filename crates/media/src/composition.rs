@@ -700,9 +700,11 @@ pub fn prepare_notification_dispatcher(
 pub fn prepare_tracking_scheduler(
     database: DatabaseConnection,
     discovery: Arc<dyn EpisodeDiscoveryPort>,
+    availability: Arc<dyn media_core::EpisodeAvailabilityPort>,
     downloads: Arc<dyn media_core::TrackedEpisodeDownloadPort>,
 ) -> TrackingRuntime {
     TrackingRuntime::new(Arc::new(SeaOrmTrackingStore::new(database)), discovery)
+        .with_availability(availability)
         .with_downloads(downloads)
 }
 
@@ -1165,6 +1167,10 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
                     Arc::new(crate::search::ProviderEpisodeDiscovery::with_release(
                         provider.clone(),
                         release_provider.clone(),
+                    )),
+                    Arc::new(crate::search::ProviderEpisodeAvailability::new(
+                        provider.clone(),
+                        persistence.clone(),
                     )),
                     downloads,
                 )

@@ -70,6 +70,7 @@ impl SeaOrmTrackingStore {
             poster_url,
             rezka_count: 0,
             prowlarr_count: 0,
+            season_complete: false,
         })
         .await
     }
@@ -87,6 +88,7 @@ impl SeaOrmTrackingStore {
             poster_url,
             rezka_count,
             prowlarr_count,
+            season_complete,
         } = record;
         let transaction = self
             .database
@@ -163,7 +165,8 @@ impl SeaOrmTrackingStore {
                     .map_err(|error| sea_orm::DbErr::Type(error.to_string()))?,
                 rezka_count,
                 prowlarr_count,
-            );
+            )
+            .with_season_complete(season_complete);
             let payload = source_choice_payload(&source_choice);
             let recipients = notification_recipients(owner, &scope)?;
             for recipient in recipients {
@@ -219,6 +222,9 @@ fn source_choice_payload(notification: &SourceChoiceNotification) -> serde_json:
     }
     if let Some(count) = notification.prowlarr_count() {
         payload["prowlarr_count"] = serde_json::Value::Number(count.into());
+    }
+    if notification.season_complete() {
+        payload["season_complete"] = serde_json::Value::Bool(true);
     }
     payload
 }
@@ -1355,12 +1361,18 @@ fn source_choice_from_payload(
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
     );
-    Ok(match choice_set {
+    let notification = match choice_set {
         Some((id, expires_at, rezka, prowlarr)) => {
             notification.with_choice_set(id, expires_at, rezka, prowlarr)
         }
         None => notification,
-    })
+    };
+    Ok(notification.with_season_complete(
+        payload
+            .get("season_complete")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    ))
 }
 
 fn media_notification_from_payload(

@@ -41,6 +41,7 @@ pub struct SourceChoiceNotification {
     choice_set_expires_at: Option<String>,
     rezka_count: Option<u32>,
     prowlarr_count: Option<u32>,
+    season_complete: bool,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
@@ -369,6 +370,7 @@ impl SourceChoiceNotification {
             choice_set_expires_at: None,
             rezka_count: None,
             prowlarr_count: None,
+            season_complete: false,
         })
     }
 
@@ -390,6 +392,12 @@ impl SourceChoiceNotification {
         self.choice_set_expires_at = Some(expires_at);
         self.rezka_count = Some(rezka_count);
         self.prowlarr_count = Some(prowlarr_count);
+        self
+    }
+
+    #[must_use]
+    pub fn with_season_complete(mut self, season_complete: bool) -> Self {
+        self.season_complete = season_complete;
         self
     }
 
@@ -446,6 +454,11 @@ impl SourceChoiceNotification {
     #[must_use]
     pub const fn prowlarr_count(&self) -> Option<u32> {
         self.prowlarr_count
+    }
+
+    #[must_use]
+    pub const fn season_complete(&self) -> bool {
+        self.season_complete
     }
 }
 

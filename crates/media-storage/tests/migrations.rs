@@ -1736,6 +1736,95 @@ async fn source_choice_posters_accept_only_bounded_https_urls_and_reverse_cleanl
 }
 
 #[tokio::test]
+async fn source_choice_season_complete_is_optional_boolean_and_reverse_cleanly() {
+    let test_db = TestDatabase::start().await;
+    let db = test_db.connection();
+    Migrator::up(db, Some(40)).await.unwrap();
+
+    execute(
+        db,
+        "INSERT INTO notification_outbox
+           (id, aggregate_type, aggregate_id, event_type, recipient, source_dedupe_key, payload)
+         VALUES
+           ('00000000-0000-0000-0000-000000000641', 'tracking',
+            '00000000-0000-0000-0000-000000000640', 'future-episode-found', 'primary',
+            decode(repeat('64', 32), 'hex'),
+            '{
+              \"event_type\":\"media.source-choice\",
+              \"schema_version\":1,
+              \"card_key\":\"tracking:00000000-0000-0000-0000-000000000640:3:12\",
+              \"tracking_id\":\"00000000-0000-0000-0000-000000000640\",
+              \"title\":\"Jobless Reincarnation\",
+              \"season\":3,
+              \"episode\":12,
+              \"actions\":[\"rezka\"]
+            }'::jsonb)",
+    )
+    .await
+    .unwrap();
+
+    Migrator::up(db, Some(1)).await.unwrap();
+
+    execute(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(payload, '{season_complete}', 'true'::jsonb)
+         WHERE id = '00000000-0000-0000-0000-000000000641'",
+    )
+    .await
+    .expect("source-choice payloads accept season_complete true");
+    execute(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(payload, '{season_complete}', 'false'::jsonb)
+         WHERE id = '00000000-0000-0000-0000-000000000641'",
+    )
+    .await
+    .expect("source-choice payloads accept season_complete false");
+
+    assert_rejected(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(payload, '{season_complete}', '1'::jsonb)
+         WHERE id = '00000000-0000-0000-0000-000000000641'",
+        "notification_payload_check",
+    )
+    .await;
+    assert_rejected(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(payload, '{unexpected}', 'true'::jsonb)
+         WHERE id = '00000000-0000-0000-0000-000000000641'",
+        "notification_payload_check",
+    )
+    .await;
+
+    execute(
+        db,
+        "UPDATE notification_outbox
+         SET payload = jsonb_set(payload, '{season_complete}', 'true'::jsonb)
+         WHERE id = '00000000-0000-0000-0000-000000000641'",
+    )
+    .await
+    .unwrap();
+
+    Migrator::down(db, Some(1)).await.unwrap();
+
+    let payload = query(
+        db,
+        "SELECT payload FROM notification_outbox
+         WHERE id = '00000000-0000-0000-0000-000000000641'",
+    )
+    .await
+    .pop()
+    .unwrap()
+    .try_get::<serde_json::Value>("", "payload")
+    .unwrap();
+    assert!(payload.get("season_complete").is_none());
+    assert_eq!(payload["actions"], serde_json::json!(["rezka"]));
+}
+
+#[tokio::test]
 async fn tracking_posters_are_constrained_and_reverse_cleanly() {
     let test_db = TestDatabase::start().await;
     let db = test_db.connection();
