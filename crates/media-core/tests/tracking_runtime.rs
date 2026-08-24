@@ -8,15 +8,14 @@ use std::{
 };
 
 use media_core::{
-    PRIMARY_USER_ID, EpisodeAvailability, EpisodeAvailabilityPort, EpisodeAvailabilityRequest,
-    EpisodeDiscovery, EpisodeDiscoveryPort, EpisodeSnapshot, NewTrackingCommand,
-    NewTrackingSubscription, NotificationDelivery, NotificationDeliveryFailure,
+    PRIMARY_USER_ID, AnonymousSessionPort, EpisodeDiscovery, EpisodeDiscoveryPort, EpisodeSnapshot,
+    NewTrackingCommand, NewTrackingSubscription, NotificationDelivery, NotificationDeliveryFailure,
     NotificationDeliveryFence, NotificationDeliveryPermit, NotificationDispatcher,
     NotificationEventType, NotificationId, NotificationOutboxPort, NotificationRecipient,
-    NotificationSink, NotificationSinkOutcome, OperationKey, PortError, Provider,
-    ProviderAvailability, ReleaseIdentity, ReleaseSource, SourceChoiceAction,
-    TrackedEpisodeDownloadPort, TrackingClaimToken, TrackingDownload, TrackingId, TrackingRuntime,
-    TrackingScheduleStore, TrackingScope, TrackingSubscription,
+    NotificationSink, NotificationSinkOutcome, OperationKey, PortError, Provider, ReleaseIdentity,
+    ReleaseSource, SourceChoiceAction, TrackedEpisodeDownloadPort, TrackingClaimToken,
+    TrackingDownload, TrackingId, TrackingRuntime, TrackingScheduleStore, TrackingScope,
+    TrackingSubscription,
 };
 
 #[test]
@@ -143,8 +142,6 @@ impl EpisodeDiscoveryPort for Discovery {
     }
 }
 
-struct Availability;
-
 struct MetadataDiscovery {
     resolved: bool,
 }
@@ -170,19 +167,6 @@ impl EpisodeDiscoveryPort for MetadataDiscovery {
         } else {
             discovery
         })
-    }
-}
-
-#[async_trait::async_trait]
-impl EpisodeAvailabilityPort for Availability {
-    async fn probe(
-        &self,
-        _: EpisodeAvailabilityRequest<'_>,
-    ) -> Result<EpisodeAvailability, PortError> {
-        Ok(EpisodeAvailability::new(
-            ProviderAvailability::Available,
-            ProviderAvailability::Unavailable,
-        ))
     }
 }
 
@@ -350,8 +334,7 @@ fn scheduler_backfills_resolved_release_identity_and_poster_without_a_new_episod
         let runtime = TrackingRuntime::new(
             store.clone(),
             Arc::new(MetadataDiscovery { resolved: true }),
-        )
-        .with_availability(Arc::new(Availability));
+        );
 
         let result = runtime
             .run_once(time::OffsetDateTime::now_utc(), 10)
@@ -382,8 +365,7 @@ fn scheduler_does_not_persist_a_poster_without_resolved_release_identity() {
         let runtime = TrackingRuntime::new(
             store.clone(),
             Arc::new(MetadataDiscovery { resolved: false }),
-        )
-        .with_availability(Arc::new(Availability));
+        );
 
         runtime
             .run_once(time::OffsetDateTime::now_utc(), 10)
@@ -657,8 +639,7 @@ fn discovery_write_failure_is_cooled_down_and_does_not_abort_the_batch() {
             claims: Mutex::new(Vec::new()),
         });
         let now = time::OffsetDateTime::now_utc();
-        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery))
-            .with_availability(Arc::new(Availability));
+        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery));
 
         let result = runtime.run_once(now, 10).await.unwrap();
 
@@ -678,7 +659,7 @@ fn discovery_write_failure_is_cooled_down_and_does_not_abort_the_batch() {
             finished[1],
             (
                 healthy.id(),
-                now + time::Duration::hours(1),
+                now + time::Duration::hours(3),
                 media_core::TrackingCheckStatus::EpisodeFound,
             )
         );
@@ -696,8 +677,7 @@ fn scheduler_records_only_episodes_missing_from_the_known_set() {
             finished: Mutex::new(Vec::new()),
             release_metadata: Mutex::new(Vec::new()),
         });
-        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery))
-            .with_availability(Arc::new(Availability));
+        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery));
 
         let result = runtime.run_once(now, 10).await.unwrap();
 
@@ -705,38 +685,20 @@ fn scheduler_records_only_episodes_missing_from_the_known_set() {
         assert_eq!(result.discovered, 1);
         assert_eq!(
             *store.discovered.lock().unwrap(),
-            vec![(
-                EpisodeSnapshot::new(1, 5).unwrap(),
-                vec![SourceChoiceAction::Rezka]
-            )]
+            vec![(EpisodeSnapshot::new(1, 5).unwrap(), Vec::new())]
         );
         assert_eq!(
             *store.finished.lock().unwrap(),
             vec![(
-                now + time::Duration::hours(1),
+                now + time::Duration::hours(3),
                 media_core::TrackingCheckStatus::EpisodeFound,
             )]
         );
     });
 }
 
-struct UnavailableAvailability;
-
-#[async_trait::async_trait]
-impl EpisodeAvailabilityPort for UnavailableAvailability {
-    async fn probe(
-        &self,
-        _: EpisodeAvailabilityRequest<'_>,
-    ) -> Result<EpisodeAvailability, PortError> {
-        Ok(EpisodeAvailability::new(
-            ProviderAvailability::Unavailable,
-            ProviderAvailability::Unknown,
-        ))
-    }
-}
-
 #[test]
-fn calendar_candidate_stays_unrecorded_until_a_provider_confirms_it() {
+fn notify_only_records_calendar_episodes_without_provider_probe() {
     block_on(async {
         let store = Arc::new(ScheduleStore {
             due: tracking(),
@@ -745,20 +707,19 @@ fn calendar_candidate_stays_unrecorded_until_a_provider_confirms_it() {
             finished: Mutex::new(Vec::new()),
             release_metadata: Mutex::new(Vec::new()),
         });
-        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery))
-            .with_availability(Arc::new(UnavailableAvailability));
+        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery));
 
         let result = runtime
             .run_once(time::OffsetDateTime::now_utc(), 10)
             .await
             .unwrap();
 
-        assert_eq!(result.discovered, 0);
-        assert!(store.discovered.lock().unwrap().is_empty());
+        assert_eq!(result.discovered, 1);
         assert_eq!(
-            *store.pending.lock().unwrap(),
-            vec![EpisodeSnapshot::new(1, 5).unwrap()]
+            *store.discovered.lock().unwrap(),
+            vec![(EpisodeSnapshot::new(1, 5).unwrap(), Vec::new())]
         );
+        assert!(store.pending.lock().unwrap().is_empty());
     });
 }
 
@@ -793,8 +754,7 @@ fn missing_episode_remains_eligible_after_a_later_episode_is_known() {
             finished: Mutex::new(Vec::new()),
             release_metadata: Mutex::new(Vec::new()),
         });
-        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery))
-            .with_availability(Arc::new(Availability));
+        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery));
 
         runtime
             .run_once(time::OffsetDateTime::now_utc(), 10)
@@ -847,8 +807,7 @@ fn scheduler_does_not_backfill_seasons_older_than_the_tracked_season() {
             finished: Mutex::new(Vec::new()),
             release_metadata: Mutex::new(Vec::new()),
         });
-        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery))
-            .with_availability(Arc::new(Availability));
+        let runtime = TrackingRuntime::new(store.clone(), Arc::new(Discovery));
 
         runtime
             .run_once(time::OffsetDateTime::now_utc(), 10)
@@ -910,8 +869,7 @@ fn scheduler_ignores_historical_gaps_but_rechecks_pending_future_episode() {
             finished: Mutex::new(Vec::new()),
             release_metadata: Mutex::new(Vec::new()),
         });
-        let runtime = TrackingRuntime::new(store.clone(), Arc::new(HistoricalGapDiscovery))
-            .with_availability(Arc::new(Availability));
+        let runtime = TrackingRuntime::new(store.clone(), Arc::new(HistoricalGapDiscovery));
 
         runtime
             .run_once(time::OffsetDateTime::now_utc(), 10)
@@ -1234,13 +1192,11 @@ fn scheduler_enqueues_only_new_episodes_from_the_selected_download_season() {
             release_metadata: Mutex::new(Vec::new()),
         });
         let downloads = Arc::new(Enqueuer::default());
+        let now = time::OffsetDateTime::now_utc();
         let runtime = TrackingRuntime::new(store.clone(), Arc::new(DownloadDiscovery))
             .with_downloads(downloads.clone());
 
-        let result = runtime
-            .run_once(time::OffsetDateTime::now_utc(), 10)
-            .await
-            .unwrap();
+        let result = runtime.run_once(now, 10).await.unwrap();
 
         assert_eq!(result.queued, 1);
         assert_eq!(result.discovered, 1);
@@ -1252,6 +1208,153 @@ fn scheduler_enqueues_only_new_episodes_from_the_selected_download_season() {
             *store.discovered.lock().unwrap(),
             vec![(EpisodeSnapshot::new(2, 8).unwrap(), Vec::new())]
         );
+        assert_eq!(
+            *store.finished.lock().unwrap(),
+            vec![(
+                now + time::Duration::minutes(30),
+                media_core::TrackingCheckStatus::DownloadQueued,
+            )]
+        );
+    });
+}
+
+#[derive(Default)]
+struct CountingSession {
+    warmups: Mutex<u32>,
+}
+
+#[async_trait::async_trait]
+impl AnonymousSessionPort for CountingSession {
+    async fn prepare_anonymous_session(&self) -> Result<(), PortError> {
+        *self.warmups.lock().unwrap() += 1;
+        Ok(())
+    }
+}
+
+struct MultiDueStore {
+    due: Vec<TrackingSubscription>,
+    discovered: Mutex<Vec<EpisodeSnapshot>>,
+    finished: Mutex<Vec<TrackingId>>,
+}
+
+#[async_trait::async_trait]
+impl TrackingScheduleStore for MultiDueStore {
+    async fn claim_due(
+        &self,
+        _: time::OffsetDateTime,
+        _: TrackingClaimToken,
+        _: time::OffsetDateTime,
+        _: u32,
+    ) -> Result<Vec<TrackingSubscription>, PortError> {
+        Ok(self.due.clone())
+    }
+
+    async fn set_release_metadata_if_missing(
+        &self,
+        _: TrackingId,
+        _: TrackingClaimToken,
+        _: ReleaseIdentity,
+        _: String,
+    ) -> Result<(), PortError> {
+        Ok(())
+    }
+
+    async fn record_future_episode(
+        &self,
+        _: TrackingId,
+        _: TrackingClaimToken,
+        episode: EpisodeSnapshot,
+        _: time::OffsetDateTime,
+        _: Vec<SourceChoiceAction>,
+        _: Option<String>,
+    ) -> Result<bool, PortError> {
+        self.discovered.lock().unwrap().push(episode);
+        Ok(true)
+    }
+
+    async fn pending_episodes(
+        &self,
+        _: TrackingId,
+        _: TrackingClaimToken,
+    ) -> Result<Vec<EpisodeSnapshot>, PortError> {
+        Ok(Vec::new())
+    }
+
+    async fn record_pending_episode(
+        &self,
+        _: TrackingId,
+        _: TrackingClaimToken,
+        _: EpisodeSnapshot,
+    ) -> Result<(), PortError> {
+        Ok(())
+    }
+
+    async fn reserve_episode_download(
+        &self,
+        _: TrackingId,
+        _: TrackingClaimToken,
+        _: EpisodeSnapshot,
+    ) -> Result<(), PortError> {
+        Ok(())
+    }
+
+    async fn finish_check(
+        &self,
+        id: TrackingId,
+        _: TrackingClaimToken,
+        _: time::OffsetDateTime,
+        _: media_core::TrackingCheckStatus,
+    ) -> Result<(), PortError> {
+        self.finished.lock().unwrap().push(id);
+        Ok(())
+    }
+}
+
+#[test]
+fn auto_download_pass_warms_the_anonymous_session_once() {
+    block_on(async {
+        let store = Arc::new(MultiDueStore {
+            due: vec![download_tracking(), download_tracking()],
+            discovered: Mutex::new(Vec::new()),
+            finished: Mutex::new(Vec::new()),
+        });
+        let downloads = Arc::new(Enqueuer::default());
+        let session = Arc::new(CountingSession::default());
+        let runtime = TrackingRuntime::new(store.clone(), Arc::new(DownloadDiscovery))
+            .with_downloads(downloads.clone())
+            .with_anonymous_session(session.clone());
+
+        let result = runtime
+            .run_once(time::OffsetDateTime::now_utc(), 10)
+            .await
+            .unwrap();
+
+        assert_eq!(result.queued, 2);
+        assert_eq!(*session.warmups.lock().unwrap(), 1);
+        assert_eq!(downloads.episodes.lock().unwrap().len(), 2);
+    });
+}
+
+#[test]
+fn notify_only_pass_does_not_warm_the_anonymous_session() {
+    block_on(async {
+        let store = Arc::new(ScheduleStore {
+            due: tracking(),
+            discovered: Mutex::new(Vec::new()),
+            pending: Mutex::new(Vec::new()),
+            finished: Mutex::new(Vec::new()),
+            release_metadata: Mutex::new(Vec::new()),
+        });
+        let session = Arc::new(CountingSession::default());
+        let runtime = TrackingRuntime::new(store, Arc::new(Discovery))
+            .with_anonymous_session(session.clone());
+
+        runtime
+            .run_once(time::OffsetDateTime::now_utc(), 10)
+            .await
+            .unwrap();
+
+        assert_eq!(*session.warmups.lock().unwrap(), 0);
     });
 }
 

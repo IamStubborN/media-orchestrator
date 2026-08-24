@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use media_api::{ChoiceSetSelection, SearchError, SearchService};
@@ -9,13 +13,13 @@ use media_contract::{
     SelectResultRequest, StartSearchRequest,
 };
 use media_core::{
-    EpisodeAvailability, EpisodeAvailabilityPort, EpisodeAvailabilityRequest, EpisodeDiscovery,
-    EpisodeDiscoveryPort, EpisodeMappingConfirmation, EpisodeSnapshot, IdentityStore, Job,
-    JobApplication, JobId, JobState, NeedsActionReason, NewJobCommand, NotifyScope, OperationKey,
-    PortError, Provider, ProviderAvailability, ReleaseIdentity, ReleaseMetadataPort,
-    ReleaseMetadataResult, ReleasePrecision, ReleaseQuery, ReleaseSource, RunnerLifecycleState,
-    RunnerLifecycleStore, ScheduledEpisode, TrackedEpisodeDownloadPort, TrackingSubscription,
-    UserId,
+    AnonymousSessionPort, EpisodeAvailability, EpisodeAvailabilityPort, EpisodeAvailabilityRequest,
+    EpisodeDiscovery, EpisodeDiscoveryPort, EpisodeMappingConfirmation, EpisodeSnapshot,
+    IdentityStore, Job, JobApplication, JobId, JobState, NeedsActionReason, NewJobCommand,
+    NotifyScope, OperationKey, PortError, Provider, ProviderAvailability, ReleaseIdentity,
+    ReleaseMetadataPort, ReleaseMetadataResult, ReleasePrecision, ReleaseQuery, ReleaseSource,
+    RunnerLifecycleState, RunnerLifecycleStore, ScheduledEpisode, TrackedEpisodeDownloadPort,
+    TrackingSubscription, UserId,
 };
 use sha2::{Digest as _, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -25,6 +29,7 @@ const SEARCH_TTL: time::Duration = time::Duration::hours(24);
 const REZKA_CATALOG_CONTINUATION_PREFIX: &str = "catalog:";
 const REZKA_SESSION_ATTEMPTS: usize = 3;
 const REZKA_SESSION_RETRY_DELAY: Duration = Duration::from_millis(500);
+const TITLE_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone)]
 pub struct ProviderPage {
@@ -257,9 +262,9 @@ impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
         &self,
         tracking: &TrackingSubscription,
     ) -> Result<EpisodeDiscovery, PortError> {
-        if tracking.translation() == "release-calendar" {
+        let Some(download) = tracking.download() else {
             return self.release_episodes(tracking).await;
-        }
+        };
 
         let page = self
             .provider
@@ -284,52 +289,13 @@ impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
             )
             .await
             .map_err(|_| PortError::Infrastructure)?;
-        let mut candidates = page
-            .results
-            .into_iter()
-            .filter(|result| match (&result.public, &result.private) {
-                (SearchResultDto::Rezka { title, .. }, PrivateResult::Rezka { title_id, .. }) => {
-                    tracking.download().map_or_else(
-                        || title.trim().eq_ignore_ascii_case(tracking.title().trim()),
-                        |download| download.provider_media_ref() == title_id.to_string(),
-                    )
-                }
-                _ => false,
-            })
-            .collect::<Vec<_>>();
-        let (result, pre_resolved_match) = if tracking.download().is_some() {
-            (candidates.pop(), None)
-        } else {
-            let mut resolved = Vec::new();
-            for candidate in candidates {
-                let SearchResultDto::Rezka {
-                    title,
-                    original_title,
-                    year,
-                    ..
-                } = &candidate.public
-                else {
-                    continue;
-                };
-                if let Some(release_match) = self
-                    .resolve_release_match(
-                        tracking,
-                        title,
-                        original_title.as_deref(),
-                        year.map(i32::from),
-                        false,
-                    )
-                    .await
-                {
-                    resolved.push((candidate, release_match));
-                }
-            }
-            if resolved.len() != 1 {
-                return Err(PortError::Conflict);
-            }
-            let (candidate, release_match) = resolved.pop().expect("length checked");
-            (Some(candidate), Some(release_match))
-        };
+        let result = page.results.into_iter().find(|result| {
+            matches!(
+                &result.private,
+                PrivateResult::Rezka { title_id, .. }
+                    if download.provider_media_ref() == title_id.to_string()
+            )
+        });
         let Some(ProviderResult {
             public:
                 SearchResultDto::Rezka {
@@ -349,27 +315,11 @@ impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
         else {
             return Err(PortError::Infrastructure);
         };
-        let translation_id = tracking.download().map_or_else(
-            || {
-                translations
-                    .iter()
-                    .find(|translation| {
-                        translation
-                            .name
-                            .trim()
-                            .eq_ignore_ascii_case(tracking.translation().trim())
-                    })
-                    .map(|translation| translation.id)
-                    .ok_or(PortError::Infrastructure)
-            },
-            |download| {
-                translations
-                    .iter()
-                    .any(|translation| translation.id == download.translation_id())
-                    .then_some(download.translation_id())
-                    .ok_or(PortError::Infrastructure)
-            },
-        )?;
+        let translation_id = translations
+            .iter()
+            .any(|translation| translation.id == download.translation_id())
+            .then_some(download.translation_id())
+            .ok_or(PortError::Infrastructure)?;
         let mut episodes = translation_episodes
             .get(&translation_id)
             .ok_or(PortError::Infrastructure)?
@@ -382,19 +332,15 @@ impl EpisodeDiscoveryPort for ProviderEpisodeDiscovery {
             .collect::<Vec<_>>();
         episodes.sort_unstable();
         episodes.dedup();
-        let release_match = match pre_resolved_match {
-            Some(release_match) => Some(release_match),
-            None => {
-                self.resolve_release_match(
-                    tracking,
-                    &title,
-                    original_title.as_deref(),
-                    year.map(i32::from),
-                    true,
-                )
-                .await
-            }
-        };
+        let release_match = self
+            .resolve_release_match(
+                tracking,
+                &title,
+                original_title.as_deref(),
+                year.map(i32::from),
+                true,
+            )
+            .await;
         let poster_url = release_match
             .as_ref()
             .and_then(|(_, poster_url)| poster_url.clone())
@@ -826,11 +772,17 @@ fn normalize_terminal_series_title(value: &str) -> String {
     }
 }
 
+struct CachedTitle {
+    result: ProviderResult,
+    stored_at: Instant,
+}
+
 pub struct TrackedEpisodeDownloader {
     provider: Arc<dyn SearchProvider>,
     persistence: Arc<dyn SearchPersistence>,
     jobs: Arc<JobApplication>,
     identity: Option<Arc<dyn IdentityStore>>,
+    titles: Mutex<HashMap<String, CachedTitle>>,
 }
 
 impl TrackedEpisodeDownloader {
@@ -845,6 +797,7 @@ impl TrackedEpisodeDownloader {
             persistence,
             jobs,
             identity: None,
+            titles: Mutex::new(HashMap::new()),
         }
     }
 
@@ -866,40 +819,51 @@ impl TrackedEpisodeDownloadPort for TrackedEpisodeDownloader {
         if episode.season() != download.season() {
             return Err(PortError::Conflict);
         }
-        let page = self
-            .provider
-            .search(
-                &StartSearchRequest {
-                    scope: media_contract::SearchScopeDto {
-                        platform: "system".to_owned(),
-                        chat_id: "tracking-download".to_owned(),
-                        thread_id: None,
+        let media_ref = download.provider_media_ref().to_owned();
+        let cached = self
+            .titles
+            .lock()
+            .unwrap()
+            .get(&media_ref)
+            .filter(|entry| entry.stored_at.elapsed() < TITLE_CACHE_TTL)
+            .map(|entry| entry.result.clone());
+        let result = if let Some(result) = cached {
+            result
+        } else {
+            let page = self
+                .provider
+                .search(
+                    &StartSearchRequest {
+                        scope: media_contract::SearchScopeDto {
+                            platform: "system".to_owned(),
+                            chat_id: "tracking-download".to_owned(),
+                            thread_id: None,
+                        },
+                        source: ProviderDto::Rezka,
+                        query: tracking.title().to_owned(),
+                        media_kind: Some(MediaKindDto::Series),
+                        season: None,
+                        series_group: tracking.release_identity().map(series_group_identity),
+                        preferred_qualities: Vec::new(),
+                        preferred_languages: Vec::new(),
+                        preferred_codecs: Vec::new(),
+                        preferred_release_groups: Vec::new(),
                     },
-                    source: ProviderDto::Rezka,
-                    query: tracking.title().to_owned(),
-                    media_kind: Some(MediaKindDto::Series),
-                    season: None,
-                    series_group: tracking.release_identity().map(series_group_identity),
-                    preferred_qualities: Vec::new(),
-                    preferred_languages: Vec::new(),
-                    preferred_codecs: Vec::new(),
-                    preferred_release_groups: Vec::new(),
-                },
-                None,
-            )
-            .await
-            .map_err(|_| PortError::Infrastructure)?;
-        let result = page
-            .results
-            .iter()
-            .find(|result| {
-                matches!(
-                    &result.private,
-                    PrivateResult::Rezka { title_id, .. }
-                        if download.provider_media_ref() == title_id.to_string()
+                    None,
                 )
-            })
-            .ok_or(PortError::Infrastructure)?;
+                .await
+                .map_err(|_| PortError::Infrastructure)?;
+            page.results
+                .into_iter()
+                .find(|result| {
+                    matches!(
+                        &result.private,
+                        PrivateResult::Rezka { title_id, .. }
+                            if media_ref == title_id.to_string()
+                    )
+                })
+                .ok_or(PortError::Infrastructure)?
+        };
         let request = SelectResultRequest {
             session_id: "tracking".to_owned(),
             result_id: result.public.result_id().to_owned(),
@@ -912,14 +876,27 @@ impl TrackedEpisodeDownloadPort for TrackedEpisodeDownloader {
                 thread_id: None,
             },
         };
-        let verified = self
+        let verified = match self
             .provider
             .verify_series_identity(
                 &result.public,
                 tracking.release_identity().map(series_group_identity),
             )
             .await
-            .map_err(|_| PortError::Infrastructure)?;
+        {
+            Ok(verified) => verified,
+            Err(_) => {
+                self.titles.lock().unwrap().remove(&media_ref);
+                return Err(PortError::Infrastructure);
+            }
+        };
+        self.titles.lock().unwrap().insert(
+            media_ref,
+            CachedTitle {
+                result: result.clone(),
+                stored_at: Instant::now(),
+            },
+        );
         let series_group =
             verified
                 .as_ref()
@@ -928,7 +905,7 @@ impl TrackedEpisodeDownloadPort for TrackedEpisodeDownloader {
                     source_id: identity.tmdb_id,
                 });
         let mut execution = execution(
-            result,
+            &result,
             &request,
             Some(MediaKindDto::Series),
             None,
@@ -1100,6 +1077,7 @@ pub struct ConcreteSearchProvider {
     prowlarr: Option<media_integrations::prowlarr::ProwlarrClient>,
     tmdb: Option<std::sync::Arc<media_integrations::tmdb::TmdbClient>>,
     tvmaze: Option<std::sync::Arc<media_integrations::tvmaze::TvmazeClient>>,
+    lifecycle: Option<Arc<dyn RunnerLifecycleStore>>,
 }
 
 impl ConcreteSearchProvider {
@@ -1113,6 +1091,7 @@ impl ConcreteSearchProvider {
             prowlarr,
             tmdb: None,
             tvmaze: None,
+            lifecycle: None,
         }
     }
 
@@ -1134,25 +1113,39 @@ impl ConcreteSearchProvider {
         self
     }
 
-    async fn search_rezka(
-        &self,
-        request: &StartSearchRequest,
-        continuation: Option<&str>,
-    ) -> Result<ProviderPage, SearchError> {
-        let state = self.rezka.as_ref().ok_or(SearchError::Provider)?;
-        let mut state = state.lock().await;
-        let prepared = &mut *state;
-        // The lock covers load, challenge solving, validation, and atomic save. It is acquired on a
-        // blocking worker so inter-process contention never stalls an async executor thread.
-        let _session_guard = prepared
-            .acquire_session_lock()
-            .await
-            .map_err(|_| SearchError::RezkaDiagnostic(Self::session_store_diagnostic()))?;
-        prepared
-            .reload_session()
-            .map_err(|_| SearchError::RezkaDiagnostic(Self::session_store_diagnostic()))?;
+    #[must_use]
+    pub fn with_lifecycle(mut self, lifecycle: Arc<dyn RunnerLifecycleStore>) -> Self {
+        self.lifecycle = Some(lifecycle);
+        self
+    }
+
+    async fn current_session_ip(&self) -> String {
+        let Some(lifecycle) = self.lifecycle.as_ref() else {
+            return String::new();
+        };
+        match lifecycle.get().await {
+            Ok(status)
+                if status.state == RunnerLifecycleState::Ready
+                    && status
+                        .current_ip
+                        .as_deref()
+                        .is_some_and(|ip| !ip.trim().is_empty()) =>
+            {
+                status.current_ip.unwrap_or_default()
+            }
+            _ => String::new(),
+        }
+    }
+
+    async fn refresh_anonymous_session(
+        prepared: &mut crate::composition::PreparedRunnerSession,
+        current_ip: &str,
+    ) -> Result<(), SearchError> {
         for attempt in 1..=REZKA_SESSION_ATTEMPTS {
-            let result = prepared.client.ensure_session(&prepared.probe).await;
+            let result = prepared
+                .client
+                .ensure_session(&prepared.probe, current_ip)
+                .await;
             match result {
                 Ok(_) => break,
                 Err(error)
@@ -1176,17 +1169,36 @@ impl ConcreteSearchProvider {
                 }
             }
         }
-        let snapshot = prepared
-            .client
-            .export_session()
-            .map_err(|error| {
-                tracing::warn!(stage = "session_export", error_code = ?error.code(), error = %error, "Rezka search failed");
-                Self::rezka_search_error(error)
-            })?;
+        let snapshot = prepared.client.export_session().map_err(|error| {
+            tracing::warn!(stage = "session_export", error_code = ?error.code(), error = %error, "Rezka search failed");
+            Self::rezka_search_error(error)
+        })?;
         prepared
             .store
             .save(&snapshot)
             .map_err(|_| SearchError::RezkaDiagnostic(Self::session_store_diagnostic()))?;
+        Ok(())
+    }
+
+    async fn search_rezka(
+        &self,
+        request: &StartSearchRequest,
+        continuation: Option<&str>,
+    ) -> Result<ProviderPage, SearchError> {
+        let current_ip = self.current_session_ip().await;
+        let state = self.rezka.as_ref().ok_or(SearchError::Provider)?;
+        let mut state = state.lock().await;
+        let prepared = &mut *state;
+        // The lock covers load, challenge solving, validation, and atomic save. It is acquired on a
+        // blocking worker so inter-process contention never stalls an async executor thread.
+        let _session_guard = prepared
+            .acquire_session_lock()
+            .await
+            .map_err(|_| SearchError::RezkaDiagnostic(Self::session_store_diagnostic()))?;
+        prepared
+            .reload_session()
+            .map_err(|_| SearchError::RezkaDiagnostic(Self::session_store_diagnostic()))?;
+        Self::refresh_anonymous_session(prepared, &current_ip).await?;
         let (offset, current_target) = continuation.map_or(Ok((0, None)), |value| {
             decode_rezka_catalog_continuation(value)
         })?;
@@ -1811,6 +1823,26 @@ impl SearchProvider for ConcreteSearchProvider {
             canonical_title: item.title,
             legacy_path_titles: vec![format!("rezka-series-tmdb-{}", item.tmdb_id)],
         }))
+    }
+}
+
+#[async_trait::async_trait]
+impl AnonymousSessionPort for ConcreteSearchProvider {
+    async fn prepare_anonymous_session(&self) -> Result<(), PortError> {
+        let current_ip = self.current_session_ip().await;
+        let state = self.rezka.as_ref().ok_or(PortError::Infrastructure)?;
+        let mut state = state.lock().await;
+        let prepared = &mut *state;
+        let _session_guard = prepared
+            .acquire_session_lock()
+            .await
+            .map_err(|_| PortError::Infrastructure)?;
+        prepared
+            .reload_session()
+            .map_err(|_| PortError::Infrastructure)?;
+        Self::refresh_anonymous_session(prepared, &current_ip)
+            .await
+            .map_err(|_| PortError::Infrastructure)
     }
 }
 

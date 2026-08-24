@@ -5,7 +5,10 @@ use std::{
     time::Duration,
 };
 use time::OffsetDateTime;
-use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{method, path},
+};
 
 use media::search::{
     ConcreteSearchProvider, DurableSearchService, ProviderEpisodeAvailability, ProviderPage,
@@ -20,15 +23,16 @@ use media_contract::{
     StartSearchRequest, TrackingPromptDto,
 };
 use media_core::{
-    PRIMARY_USER_ID, CanonicalEpisode, CanonicalEpisodeCoordinates, CanonicalMedia, CanonicalSeason,
-    EpisodeAvailabilityPort, EpisodeAvailabilityRequest, EpisodeDiscovery, EpisodeDiscoveryPort,
-    EpisodeId, EpisodeMappingConfirmation, EpisodeProviderMapping, ExternalNamespace,
-    IdentityStore, Job, JobApplication, JobId, JobStore, MediaExternalReference, NewJob,
-    NotifyScope, OperationKey, PortError, Provider, QueueStatus, ReleaseCandidate, ReleaseIdentity,
-    ReleaseLifecycle, ReleaseMetadataPort, ReleaseMetadataResult, ReleasePrecision, ReleaseQuery,
-    ReleaseQueryError, ReleaseSource, RunnerLifecycle, RunnerLifecycleState, RunnerLifecycleStore,
-    RunnerLifecycleUpdate, ScheduledEpisode, SourceChoiceAction, TrackedEpisodeDownloadPort,
-    TrackingDownload, TrackingId, TrackingScope, TrackingSubscription, UserId, SECONDARY_USER_ID,
+    PRIMARY_USER_ID, AnonymousSessionPort, CanonicalEpisode, CanonicalEpisodeCoordinates,
+    CanonicalMedia, CanonicalSeason, EpisodeAvailabilityPort, EpisodeAvailabilityRequest,
+    EpisodeDiscovery, EpisodeDiscoveryPort, EpisodeId, EpisodeMappingConfirmation,
+    EpisodeProviderMapping, ExternalNamespace, IdentityStore, Job, JobApplication, JobId, JobStore,
+    MediaExternalReference, NewJob, NotifyScope, OperationKey, PortError, Provider, QueueStatus,
+    ReleaseCandidate, ReleaseIdentity, ReleaseLifecycle, ReleaseMetadataPort,
+    ReleaseMetadataResult, ReleasePrecision, ReleaseQuery, ReleaseQueryError, ReleaseSource,
+    RunnerLifecycle, RunnerLifecycleState, RunnerLifecycleStore, RunnerLifecycleUpdate,
+    ScheduledEpisode, SourceChoiceAction, TrackedEpisodeDownloadPort, TrackingDownload, TrackingId,
+    TrackingScope, TrackingSubscription, UserId, SECONDARY_USER_ID,
 };
 
 #[derive(Default)]
@@ -130,7 +134,7 @@ impl ReleaseMetadataPort for ShowReleaseProvider {
         query: &ReleaseQuery,
     ) -> Result<ReleaseMetadataResult, ReleaseQueryError> {
         assert_eq!(query.title, "Show");
-        assert_eq!(query.year, Some(2026));
+        assert_eq!(query.year, None);
         let candidate = ReleaseCandidate {
             source_id: 88,
             title: "Show".to_owned(),
@@ -149,7 +153,14 @@ impl ReleaseMetadataPort for ShowReleaseProvider {
                 released_episodes: 2,
                 expected_episodes: None,
                 next_episode: None,
-                schedule: Vec::new(),
+                schedule: vec![ScheduledEpisode {
+                    source_id: 1,
+                    season: 1,
+                    episode: 1,
+                    title: "Pilot".to_owned(),
+                    air_at: Some("2020-01-01T00:00:00Z".to_owned()),
+                    precision: ReleasePrecision::DateTime,
+                }],
             })
         } else {
             Ok(ReleaseMetadataResult::ChoiceNeeded {
@@ -164,40 +175,8 @@ impl ReleaseMetadataPort for ShowReleaseProvider {
 async fn discover_show_with_release(
     matched: bool,
 ) -> Result<media_core::EpisodeDiscovery, PortError> {
-    let public = SearchResultDto::Rezka {
-        result_id: "rezka-show".to_owned(),
-        title: "Show".to_owned(),
-        original_title: None,
-        year: Some(2026),
-        media_kind: MediaKindDto::Series,
-        thumbnail_url: Some("https://rezka.test/show.jpg".to_owned()),
-        translations: vec![RezkaTranslationDto {
-            id: 37,
-            name: "Original".to_owned(),
-            premium: false,
-            director: false,
-            camrip: false,
-            has_ads: false,
-            seasons: vec![],
-        }],
-        availability: Some(SeriesAvailabilityDto {
-            lifecycle_status: media_contract::SeriesLifecycleStatusDto::Ongoing,
-            incomplete: true,
-            seasons: vec![SeasonAvailabilityDto {
-                season: 1,
-                episodes: vec![1, 2],
-            }],
-            tracking_prompt: None,
-        }),
-    };
     let provider = Arc::new(FakeProvider {
-        pages: Mutex::new(HashMap::from([(
-            ProviderDto::Rezka,
-            vec![ProviderPage {
-                results: vec![ProviderResult::rezka(public, "/show.html".to_owned(), 42)],
-                provider_continuation: None,
-            }],
-        )])),
+        pages: Mutex::new(HashMap::new()),
     });
     let discovery = media::search::ProviderEpisodeDiscovery::with_release(
         provider,
@@ -262,7 +241,14 @@ impl ReleaseMetadataPort for LaterSeasonReleaseProvider {
             released_episodes: 1,
             expected_episodes: None,
             next_episode: None,
-            schedule: Vec::new(),
+            schedule: vec![ScheduledEpisode {
+                source_id: 1,
+                season: 4,
+                episode: 1,
+                title: "Episode 1".to_owned(),
+                air_at: Some("2020-01-01T00:00:00Z".to_owned()),
+                precision: ReleasePrecision::DateTime,
+            }],
         })
     }
 }
@@ -271,42 +257,7 @@ impl ReleaseMetadataPort for LaterSeasonReleaseProvider {
 async fn manual_tracking_later_season_marker_does_not_bind_tvmaze_to_release_year() {
     let title = "Slow Horses: Season Four [TV-4]";
     let provider = Arc::new(FakeProvider {
-        pages: Mutex::new(HashMap::from([(
-            ProviderDto::Rezka,
-            vec![ProviderPage {
-                results: vec![ProviderResult::rezka(
-                    SearchResultDto::Rezka {
-                        result_id: "slow-horses-tv4".to_owned(),
-                        title: title.to_owned(),
-                        original_title: None,
-                        year: Some(2024),
-                        media_kind: MediaKindDto::Series,
-                        thumbnail_url: None,
-                        translations: vec![RezkaTranslationDto {
-                            id: 37,
-                            name: "Original".to_owned(),
-                            premium: false,
-                            director: false,
-                            camrip: false,
-                            has_ads: false,
-                            seasons: Vec::new(),
-                        }],
-                        availability: Some(SeriesAvailabilityDto {
-                            lifecycle_status: media_contract::SeriesLifecycleStatusDto::Ongoing,
-                            incomplete: true,
-                            seasons: vec![SeasonAvailabilityDto {
-                                season: 4,
-                                episodes: vec![1],
-                            }],
-                            tracking_prompt: None,
-                        }),
-                    },
-                    "/slow-horses-tv4.html".to_owned(),
-                    95480,
-                )],
-                provider_continuation: None,
-            }],
-        )])),
+        pages: Mutex::new(HashMap::new()),
     });
     let discovery = media::search::ProviderEpisodeDiscovery::with_release(
         provider,
@@ -331,184 +282,40 @@ async fn manual_tracking_later_season_marker_does_not_bind_tvmaze_to_release_yea
     );
 }
 
-#[derive(Default)]
-struct SameTitleReleaseProvider {
-    queries: Mutex<Vec<ReleaseQuery>>,
-}
-
-#[async_trait::async_trait]
-impl ReleaseMetadataPort for SameTitleReleaseProvider {
-    async fn query(
-        &self,
-        query: &ReleaseQuery,
-    ) -> Result<ReleaseMetadataResult, ReleaseQueryError> {
-        self.queries.lock().unwrap().push(query.clone());
-        let year = query.year.expect("candidate year");
-        let candidate = ReleaseCandidate {
-            source_id: u64::try_from(year).unwrap(),
-            title: query.title.clone(),
-            original_title: query.original_title.clone(),
-            year: Some(year),
-            poster_url: Some(format!("https://static.tvmaze.com/{year}.jpg")),
-            lifecycle: ReleaseLifecycle::Ongoing,
-        };
-        Ok(ReleaseMetadataResult::Matched {
-            source: "tvmaze".to_owned(),
-            fetched_at: "2026-08-10T00:00:00Z".to_owned(),
-            show: candidate,
-            precision: ReleasePrecision::Unknown,
-            lifecycle: ReleaseLifecycle::Ongoing,
-            released_episodes: 1,
-            expected_episodes: None,
-            next_episode: None,
-            schedule: Vec::new(),
-        })
-    }
-}
-
 #[tokio::test]
-async fn tracking_discovery_rejects_same_title_rezka_results_from_different_years() {
-    let result = |year: u16, title_id: u64| {
-        ProviderResult::rezka(
-            SearchResultDto::Rezka {
-                result_id: format!("rezka-show-{year}"),
-                title: "Show".to_owned(),
-                original_title: Some(format!("Original {year}")),
-                year: Some(year),
-                media_kind: MediaKindDto::Series,
-                thumbnail_url: Some(format!("https://rezka.test/{year}.jpg")),
-                translations: vec![RezkaTranslationDto {
-                    id: 37,
-                    name: "Original".to_owned(),
-                    premium: false,
-                    director: false,
-                    camrip: false,
-                    has_ads: false,
-                    seasons: vec![],
-                }],
-                availability: Some(SeriesAvailabilityDto {
-                    lifecycle_status: media_contract::SeriesLifecycleStatusDto::Ongoing,
-                    incomplete: true,
-                    seasons: vec![SeasonAvailabilityDto {
-                        season: 1,
-                        episodes: vec![1],
-                    }],
-                    tracking_prompt: None,
-                }),
-            },
-            format!("/show-{year}.html"),
-            title_id,
-        )
-    };
-    let provider = Arc::new(FakeProvider {
-        pages: Mutex::new(HashMap::from([(
-            ProviderDto::Rezka,
-            vec![ProviderPage {
-                results: vec![result(2024, 42), result(2026, 43)],
-                provider_continuation: None,
-            }],
-        )])),
-    });
+async fn notify_only_discovery_uses_calendar_even_with_a_rezka_translation_name() {
+    let provider = Arc::new(CountingProvider::with_pages(HashMap::from([(
+        ProviderDto::Rezka,
+        vec![ProviderPage {
+            results: vec![blades_result(42, "rezka:42")],
+            provider_continuation: None,
+        }],
+    )])));
     let discovery = media::search::ProviderEpisodeDiscovery::with_release(
-        provider,
-        Arc::new(SameTitleReleaseProvider::default()),
+        provider.clone(),
+        Arc::new(FakeReleaseProvider {
+            expected_source_id: None,
+            expected_title: "Sugar",
+        }),
     );
     let tracking = TrackingSubscription::rehydrate(
         TrackingId::new(),
         PRIMARY_USER_ID,
         Provider::Rezka,
-        "Show".to_owned(),
-        "Original".to_owned(),
+        "Sugar".to_owned(),
+        "Studio Dub".to_owned(),
         vec![media_core::EpisodeSnapshot::new(1, 1).unwrap()],
         TrackingScope::Personal,
         None,
     )
     .unwrap();
 
-    assert!(matches!(
-        discovery.available_episodes(&tracking).await,
-        Err(PortError::Conflict)
-    ));
-}
-
-#[tokio::test]
-async fn tracking_discovery_resolves_candidates_before_matching_persisted_identity() {
-    let result = |year: u16, title_id: u64| {
-        ProviderResult::rezka(
-            SearchResultDto::Rezka {
-                result_id: format!("rezka-show-{year}"),
-                title: "Show".to_owned(),
-                original_title: Some(format!("Original {year}")),
-                year: Some(year),
-                media_kind: MediaKindDto::Series,
-                thumbnail_url: Some(format!("https://rezka.test/{year}.jpg")),
-                translations: vec![RezkaTranslationDto {
-                    id: 37,
-                    name: "Original".to_owned(),
-                    premium: false,
-                    director: false,
-                    camrip: false,
-                    has_ads: false,
-                    seasons: vec![],
-                }],
-                availability: Some(SeriesAvailabilityDto {
-                    lifecycle_status: media_contract::SeriesLifecycleStatusDto::Ongoing,
-                    incomplete: true,
-                    seasons: vec![SeasonAvailabilityDto {
-                        season: 1,
-                        episodes: vec![1],
-                    }],
-                    tracking_prompt: None,
-                }),
-            },
-            format!("/show-{year}.html"),
-            title_id,
-        )
-    };
-    let provider = Arc::new(FakeProvider {
-        pages: Mutex::new(HashMap::from([(
-            ProviderDto::Rezka,
-            vec![
-                ProviderPage {
-                    results: vec![result(2024, 42), result(2026, 43)],
-                    provider_continuation: None,
-                },
-                ProviderPage {
-                    results: vec![result(2024, 42), result(2026, 43)],
-                    provider_continuation: None,
-                },
-            ],
-        )])),
-    });
-    let release = Arc::new(SameTitleReleaseProvider::default());
-    let discovery =
-        media::search::ProviderEpisodeDiscovery::with_release(provider, release.clone());
-    let expected_identity =
-        media_core::ReleaseIdentity::new(media_core::ReleaseSource::Tvmaze, 2026).unwrap();
-    let tracking = TrackingSubscription::rehydrate_with_identity(
-        TrackingId::new(),
-        PRIMARY_USER_ID,
-        Provider::Rezka,
-        "Show".to_owned(),
-        "Original".to_owned(),
-        vec![media_core::EpisodeSnapshot::new(1, 1).unwrap()],
-        TrackingScope::Personal,
-        Some(expected_identity),
-        None,
-    )
-    .unwrap();
-
-    for _ in 0..2 {
-        let result = discovery.available_episodes(&tracking).await.unwrap();
-        assert_eq!(result.release_identity(), Some(expected_identity));
-        assert_eq!(
-            result.poster_url(),
-            Some("https://static.tvmaze.com/2026.jpg")
-        );
-    }
-    let queries = release.queries.lock().unwrap();
-    assert_eq!(queries.len(), 4);
-    assert!(queries.iter().all(|query| query.source_id.is_none()));
+    let result = discovery.available_episodes(&tracking).await.unwrap();
+    assert_eq!(
+        result.episodes(),
+        vec![media_core::EpisodeSnapshot::new(1, 1).unwrap()].as_slice()
+    );
+    assert!(provider.searches.lock().unwrap().is_empty());
 }
 
 struct FakeReleaseProvider {
@@ -751,6 +558,247 @@ async fn tracked_episode_download_creates_one_exact_rezka_episode_execution_for_
         } if library_title == "Blades of the Guardians S2"
             && thumbnail_url == "https://image.tmdb.org/t/p/w780/blades.jpg"
     ));
+}
+
+struct CountingProvider {
+    pages: Mutex<HashMap<ProviderDto, Vec<ProviderPage>>>,
+    searches: Mutex<Vec<String>>,
+    verifies: Mutex<u32>,
+    verify_error: Mutex<bool>,
+}
+
+impl CountingProvider {
+    fn with_pages(pages: HashMap<ProviderDto, Vec<ProviderPage>>) -> Self {
+        Self {
+            pages: Mutex::new(pages),
+            searches: Mutex::new(Vec::new()),
+            verifies: Mutex::new(0),
+            verify_error: Mutex::new(false),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SearchProvider for CountingProvider {
+    async fn search(
+        &self,
+        request: &StartSearchRequest,
+        _: Option<&str>,
+    ) -> Result<ProviderPage, SearchError> {
+        self.searches.lock().unwrap().push(request.query.clone());
+        let mut pages = self.pages.lock().unwrap();
+        let pages = pages
+            .get_mut(&request.source)
+            .ok_or(SearchError::Provider)?;
+        if pages.is_empty() {
+            return Err(SearchError::Provider);
+        }
+        Ok(pages.remove(0))
+    }
+
+    async fn verify_series_identity(
+        &self,
+        _: &media_contract::SearchResultDto,
+        _: Option<SeriesGroupIdentityDto>,
+    ) -> Result<Option<VerifiedSeriesIdentity>, SearchError> {
+        *self.verifies.lock().unwrap() += 1;
+        if *self.verify_error.lock().unwrap() {
+            return Err(SearchError::InvalidRequest);
+        }
+        Ok(None)
+    }
+}
+
+fn blades_result(title_id: u64, result_id: &str) -> ProviderResult {
+    ProviderResult::rezka(
+        SearchResultDto::Rezka {
+            result_id: result_id.to_owned(),
+            title: "Blades of the Guardians S2".to_owned(),
+            original_title: None,
+            year: Some(2026),
+            media_kind: MediaKindDto::Series,
+            thumbnail_url: None,
+            translations: vec![RezkaTranslationDto {
+                id: 19,
+                name: "Studio Dub".to_owned(),
+                premium: false,
+                director: false,
+                camrip: false,
+                has_ads: false,
+                seasons: vec![],
+            }],
+            availability: Some(SeriesAvailabilityDto {
+                lifecycle_status: media_contract::SeriesLifecycleStatusDto::Ongoing,
+                incomplete: true,
+                seasons: vec![SeasonAvailabilityDto {
+                    season: 2,
+                    episodes: vec![7, 8, 9],
+                }],
+                tracking_prompt: None,
+            }),
+        },
+        "/show.html".to_owned(),
+        title_id,
+    )
+}
+
+#[tokio::test]
+async fn tracked_episode_download_reuses_cached_title_for_the_same_ref() {
+    let provider = Arc::new(CountingProvider::with_pages(HashMap::from([(
+        ProviderDto::Rezka,
+        vec![ProviderPage {
+            results: vec![blades_result(42, "rezka:42")],
+            provider_continuation: None,
+        }],
+    )])));
+    let persistence = Arc::new(MemorySearchPersistence::default());
+    let downloader = TrackedEpisodeDownloader::new(
+        provider.clone(),
+        persistence,
+        Arc::new(JobApplication::new(Arc::new(MemoryJobStore::default()))),
+    );
+    let tracking = TrackingSubscription::rehydrate(
+        TrackingId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        "Blades of the Guardians S2".to_owned(),
+        "Studio Dub".to_owned(),
+        vec![media_core::EpisodeSnapshot::new(2, 7).unwrap()],
+        TrackingScope::Personal,
+        Some(TrackingDownload::new("42".to_owned(), 19, 2).unwrap()),
+    )
+    .unwrap();
+
+    downloader
+        .enqueue_episode(&tracking, media_core::EpisodeSnapshot::new(2, 8).unwrap())
+        .await
+        .unwrap();
+    downloader
+        .enqueue_episode(&tracking, media_core::EpisodeSnapshot::new(2, 9).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *provider.searches.lock().unwrap(),
+        vec!["Blades of the Guardians S2"]
+    );
+    assert_eq!(*provider.verifies.lock().unwrap(), 2);
+}
+
+#[tokio::test]
+async fn tracked_episode_download_searches_again_for_a_different_ref() {
+    let provider = Arc::new(CountingProvider::with_pages(HashMap::from([(
+        ProviderDto::Rezka,
+        vec![
+            ProviderPage {
+                results: vec![blades_result(42, "rezka:42")],
+                provider_continuation: None,
+            },
+            ProviderPage {
+                results: vec![blades_result(99, "rezka:99")],
+                provider_continuation: None,
+            },
+        ],
+    )])));
+    let persistence = Arc::new(MemorySearchPersistence::default());
+    let downloader = TrackedEpisodeDownloader::new(
+        provider.clone(),
+        persistence,
+        Arc::new(JobApplication::new(Arc::new(MemoryJobStore::default()))),
+    );
+    let first = TrackingSubscription::rehydrate(
+        TrackingId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        "Blades of the Guardians S2".to_owned(),
+        "Studio Dub".to_owned(),
+        vec![media_core::EpisodeSnapshot::new(2, 7).unwrap()],
+        TrackingScope::Personal,
+        Some(TrackingDownload::new("42".to_owned(), 19, 2).unwrap()),
+    )
+    .unwrap();
+    let second = TrackingSubscription::rehydrate(
+        TrackingId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        "Other Show".to_owned(),
+        "Studio Dub".to_owned(),
+        vec![media_core::EpisodeSnapshot::new(2, 7).unwrap()],
+        TrackingScope::Personal,
+        Some(TrackingDownload::new("99".to_owned(), 19, 2).unwrap()),
+    )
+    .unwrap();
+
+    downloader
+        .enqueue_episode(&first, media_core::EpisodeSnapshot::new(2, 8).unwrap())
+        .await
+        .unwrap();
+    downloader
+        .enqueue_episode(&second, media_core::EpisodeSnapshot::new(2, 8).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *provider.searches.lock().unwrap(),
+        vec!["Blades of the Guardians S2", "Other Show"]
+    );
+}
+
+#[tokio::test]
+async fn tracked_episode_download_invalidates_cache_when_identity_verify_fails() {
+    let provider = Arc::new(CountingProvider::with_pages(HashMap::from([(
+        ProviderDto::Rezka,
+        vec![
+            ProviderPage {
+                results: vec![blades_result(42, "rezka:42")],
+                provider_continuation: None,
+            },
+            ProviderPage {
+                results: vec![blades_result(42, "rezka:42")],
+                provider_continuation: None,
+            },
+        ],
+    )])));
+    let persistence = Arc::new(MemorySearchPersistence::default());
+    let downloader = TrackedEpisodeDownloader::new(
+        provider.clone(),
+        persistence,
+        Arc::new(JobApplication::new(Arc::new(MemoryJobStore::default()))),
+    );
+    let tracking = TrackingSubscription::rehydrate(
+        TrackingId::new(),
+        PRIMARY_USER_ID,
+        Provider::Rezka,
+        "Blades of the Guardians S2".to_owned(),
+        "Studio Dub".to_owned(),
+        vec![media_core::EpisodeSnapshot::new(2, 7).unwrap()],
+        TrackingScope::Personal,
+        Some(TrackingDownload::new("42".to_owned(), 19, 2).unwrap()),
+    )
+    .unwrap();
+
+    downloader
+        .enqueue_episode(&tracking, media_core::EpisodeSnapshot::new(2, 8).unwrap())
+        .await
+        .unwrap();
+    *provider.verify_error.lock().unwrap() = true;
+    assert!(
+        downloader
+            .enqueue_episode(&tracking, media_core::EpisodeSnapshot::new(2, 9).unwrap())
+            .await
+            .is_err()
+    );
+    *provider.verify_error.lock().unwrap() = false;
+    downloader
+        .enqueue_episode(&tracking, media_core::EpisodeSnapshot::new(2, 9).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *provider.searches.lock().unwrap(),
+        vec!["Blades of the Guardians S2", "Blades of the Guardians S2"]
+    );
+    assert_eq!(*provider.verifies.lock().unwrap(), 3);
 }
 
 #[tokio::test]
@@ -1205,13 +1253,26 @@ struct FakeProvider {
 
 struct FakeLifecycleStore {
     state: Mutex<RunnerLifecycleState>,
+    current_ip: Mutex<Option<String>>,
 }
 
 impl FakeLifecycleStore {
     fn new(state: RunnerLifecycleState) -> Self {
         Self {
             state: Mutex::new(state),
+            current_ip: Mutex::new(None),
         }
+    }
+
+    fn ready_with_ip(ip: &str) -> Self {
+        Self {
+            state: Mutex::new(RunnerLifecycleState::Ready),
+            current_ip: Mutex::new(Some(ip.to_owned())),
+        }
+    }
+
+    fn set_ip(&self, ip: Option<String>) {
+        *self.current_ip.lock().unwrap() = ip;
     }
 }
 
@@ -1222,7 +1283,7 @@ impl RunnerLifecycleStore for FakeLifecycleStore {
             state: *self.state.lock().unwrap(),
             reason: None,
             previous_ip: None,
-            current_ip: None,
+            current_ip: self.current_ip.lock().unwrap().clone(),
             updated_at: time::OffsetDateTime::UNIX_EPOCH,
         })
     }
@@ -3041,4 +3102,114 @@ async fn rezka_requires_explicit_translation_and_available_episode_without_fallb
             ..
         } if episodes == vec![media_contract::EpisodeSnapshotDto { season: 1, episode: 2 }]
     ));
+}
+
+fn prepared_session(
+    base: &url::Url,
+    store_path: &std::path::Path,
+) -> media::composition::PreparedRunnerSession {
+    let client_config = rezka_client::RezkaClientConfig {
+        mirrors: rezka_client::MirrorSet::new(vec![base.clone()]).unwrap(),
+        user_agent: "media-orchestrator-test".to_owned(),
+        request_timeout: time::Duration::seconds(10),
+        max_retries: 0,
+        anubis_max_nonce: 100_000,
+        proxy_url: None,
+    };
+    let probe = rezka_client::SessionValidationProbe::new(
+        base.join("/account/probe").unwrap(),
+        vec!["logged-in".to_owned()],
+        vec!["logged-out".to_owned()],
+    )
+    .unwrap();
+    let store =
+        media_runner::EncryptedRezkaSessionStore::new(media_runner::RezkaSessionStoreConfig {
+            path: store_path.to_owned(),
+            key: secrecy::SecretBox::new(Box::new([9_u8; 32])),
+        })
+        .unwrap();
+    let client = rezka_client::RezkaClient::new(client_config.clone()).unwrap();
+    media::composition::PreparedRunnerSession::from_client(client, client_config, probe, store)
+}
+
+#[tokio::test]
+async fn anonymous_session_warmup_skips_probe_when_ttl_and_ip_match() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header(
+                    "set-cookie",
+                    "techaro.lol-anubis-auth=accepted; Path=/; HttpOnly",
+                )
+                .set_body_string("logged-out"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let directory = tempfile::TempDir::new().unwrap();
+    let store_path = directory.path().join("session.bin");
+    let prepared = prepared_session(&url::Url::parse(&server.uri()).unwrap(), &store_path);
+    let provider = ConcreteSearchProvider::new(Some(prepared), None)
+        .with_lifecycle(Arc::new(FakeLifecycleStore::ready_with_ip("203.0.113.10")));
+
+    provider.prepare_anonymous_session().await.unwrap();
+    provider.prepare_anonymous_session().await.unwrap();
+}
+
+#[tokio::test]
+async fn anonymous_session_warmup_probes_when_lifecycle_ip_changes() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header(
+                    "set-cookie",
+                    "techaro.lol-anubis-auth=accepted; Path=/; HttpOnly",
+                )
+                .set_body_string("logged-out"),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+    let directory = tempfile::TempDir::new().unwrap();
+    let store_path = directory.path().join("session.bin");
+    let prepared = prepared_session(&url::Url::parse(&server.uri()).unwrap(), &store_path);
+    let lifecycle = Arc::new(FakeLifecycleStore::ready_with_ip("203.0.113.10"));
+    let provider =
+        ConcreteSearchProvider::new(Some(prepared), None).with_lifecycle(lifecycle.clone());
+
+    provider.prepare_anonymous_session().await.unwrap();
+    lifecycle.set_ip(Some("198.51.100.20".to_owned()));
+    provider.prepare_anonymous_session().await.unwrap();
+}
+
+#[tokio::test]
+async fn anonymous_session_warmup_probes_when_lifecycle_is_not_ready() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header(
+                    "set-cookie",
+                    "techaro.lol-anubis-auth=accepted; Path=/; HttpOnly",
+                )
+                .set_body_string("logged-out"),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+    let directory = tempfile::TempDir::new().unwrap();
+    let store_path = directory.path().join("session.bin");
+    let prepared = prepared_session(&url::Url::parse(&server.uri()).unwrap(), &store_path);
+    let lifecycle = Arc::new(FakeLifecycleStore::ready_with_ip("203.0.113.10"));
+    let provider =
+        ConcreteSearchProvider::new(Some(prepared), None).with_lifecycle(lifecycle.clone());
+
+    provider.prepare_anonymous_session().await.unwrap();
+    *lifecycle.state.lock().unwrap() = RunnerLifecycleState::Rotating;
+    provider.prepare_anonymous_session().await.unwrap();
 }

@@ -43,7 +43,7 @@ async fn live_probe_rezka_session_contract() {
     .unwrap();
 
     let mut client = rezka_client::session::RezkaClient::new(config).unwrap();
-    let validation = client.ensure_session(&probe).await.unwrap();
+    let validation = client.ensure_session(&probe, "").await.unwrap();
 
     assert!(
         matches!(
@@ -114,7 +114,7 @@ async fn explicit_catalog_playback_live_probe() {
     .unwrap();
 
     let mut client = rezka_client::session::RezkaClient::new(config).unwrap();
-    let validation = client.ensure_session(&probe).await.unwrap();
+    let validation = client.ensure_session(&probe, "").await.unwrap();
     assert!(
         matches!(
             validation,

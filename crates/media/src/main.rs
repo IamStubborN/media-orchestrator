@@ -583,7 +583,7 @@ async fn run_rezka_probe(json: bool) -> Result<(), RunError> {
         emit_rezka_probe_category("SessionStoreError", json, false);
         return Err(RunError::Healthcheck);
     }
-    let result = prepared.client.ensure_session(&prepared.probe).await;
+    let result = prepared.client.ensure_session(&prepared.probe, "").await;
     match result {
         Ok(_) => {
             let snapshot = prepared

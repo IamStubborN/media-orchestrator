@@ -755,6 +755,10 @@ impl MediaJobExecutor {
         library_path_aliases: &[String],
         title: &str,
     ) -> Result<ExecutionOutcome, RunnerError> {
+        let current_ip = match &self.gluetun {
+            Some(client) => client.current_public_ip().await.unwrap_or_default(),
+            None => String::new(),
+        };
         let mut prepared = self.rezka.lock().await;
         let session_guard = prepared
             .acquire_session_lock()
@@ -770,7 +774,7 @@ impl MediaJobExecutor {
             ..
         } = &mut *prepared;
         client
-            .ensure_session(probe)
+            .ensure_session(probe, &current_ip)
             .await
             .map_err(map_rezka_error)?;
         let snapshot = client.export_session().map_err(map_rezka_error)?;

@@ -1,11 +1,13 @@
-use std::{collections::BTreeSet, fmt, io::Cursor};
+use std::{collections::BTreeSet, fmt, io::Cursor, net::IpAddr};
 
 use cookie_store::{CookieStore, RawCookie};
 use secrecy::{ExposeSecret, SecretBox};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::{RezkaError, redaction::sanitize_provider_text};
+use crate::{
+    RezkaError, redaction::sanitize_provider_text, session::validation::SessionValidation,
+};
 
 pub(crate) const MAX_SESSION_SNAPSHOT_BYTES: usize = 128 * 1024;
 const MAX_SET_COOKIE_HEADERS: usize = 64;
@@ -47,6 +49,9 @@ pub struct SessionJar {
     origin: Option<OriginBinding>,
     store: CookieStore,
     anonymous_migrated: bool,
+    validated_at: Option<i64>,
+    validated_ip: Option<String>,
+    last_validation: Option<StoredAnonymousState>,
 }
 
 impl fmt::Debug for SessionJar {
@@ -62,6 +67,9 @@ impl SessionJar {
             origin: None,
             store: CookieStore::default(),
             anonymous_migrated: true,
+            validated_at: None,
+            validated_ip: None,
+            last_validation: None,
         }
     }
 
@@ -84,13 +92,22 @@ impl SessionJar {
                 origin: Some(snapshot.origin),
                 store,
                 anonymous_migrated: snapshot.session_format >= CURRENT_SESSION_FORMAT,
+                validated_at: snapshot.validated_at,
+                validated_ip: sanitize_validated_ip(snapshot.validated_ip),
+                last_validation: snapshot.last_validation,
             })
         })
     }
 
     pub fn export(&self) -> Result<SessionSnapshot, RezkaError> {
         let origin = self.origin.clone().ok_or_else(invalid_snapshot)?;
-        let bytes = serialize_snapshot(&origin, &self.store)?;
+        let bytes = serialize_snapshot(
+            &origin,
+            &self.store,
+            self.validated_at,
+            self.validated_ip.as_deref(),
+            self.last_validation,
+        )?;
         if bytes.len() > MAX_SESSION_SNAPSHOT_BYTES {
             return Err(cookie_budget_exceeded());
         }
@@ -220,7 +237,15 @@ impl SessionJar {
             }
         }
         if candidate.iter_any().take(MAX_SESSION_COOKIES + 1).count() > MAX_SESSION_COOKIES
-            || serialize_snapshot(&candidate_origin, &candidate)?.len() > MAX_SESSION_SNAPSHOT_BYTES
+            || serialize_snapshot(
+                &candidate_origin,
+                &candidate,
+                self.validated_at,
+                self.validated_ip.as_deref(),
+                self.last_validation,
+            )?
+            .len()
+                > MAX_SESSION_SNAPSHOT_BYTES
         {
             return Err(cookie_budget_exceeded());
         }
@@ -252,7 +277,50 @@ impl SessionJar {
             origin: Some(OriginBinding::from_url(url)?),
             store: CookieStore::default(),
             anonymous_migrated: true,
+            validated_at: None,
+            validated_ip: None,
+            last_validation: None,
         })
+    }
+
+    #[must_use]
+    pub(crate) fn skippable_validation(
+        &self,
+        probe_url: &Url,
+        current_ip: &str,
+        now: i64,
+        ttl_secs: i64,
+    ) -> Option<SessionValidation> {
+        let current_ip = sanitize_public_ip(current_ip)?;
+        if !self.contains_cookie_for_url(probe_url, crate::session::anubis::CLEARANCE_COOKIE) {
+            return None;
+        }
+        if self.validated_ip.as_deref() != Some(current_ip) {
+            return None;
+        }
+        let validated_at = self.validated_at?;
+        if now.saturating_sub(validated_at) >= ttl_secs {
+            return None;
+        }
+        self.last_validation
+            .map(StoredAnonymousState::into_validation)
+    }
+
+    pub(crate) fn record_validation(
+        &mut self,
+        current_ip: &str,
+        now: i64,
+        status: SessionValidation,
+    ) {
+        let Some(current_ip) = sanitize_public_ip(current_ip) else {
+            return;
+        };
+        let Some(last_validation) = StoredAnonymousState::from_validation(status) else {
+            return;
+        };
+        self.validated_at = Some(now);
+        self.validated_ip = Some(current_ip.to_owned());
+        self.last_validation = Some(last_validation);
     }
 
     pub(crate) fn has_origin_binding(&self) -> bool {
@@ -285,6 +353,42 @@ struct SnapshotDocument {
     session_format: u8,
     origin: OriginBinding,
     cookies: serde_json::Value,
+    #[serde(default)]
+    validated_at: Option<i64>,
+    #[serde(default)]
+    validated_ip: Option<String>,
+    #[serde(default)]
+    last_validation: Option<StoredAnonymousState>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum StoredAnonymousState {
+    Valid,
+    Invalid,
+}
+
+impl StoredAnonymousState {
+    const fn from_validation(status: SessionValidation) -> Option<Self> {
+        match status {
+            SessionValidation::Valid => Some(Self::Valid),
+            SessionValidation::Invalid => Some(Self::Invalid),
+            SessionValidation::Inconclusive => None,
+        }
+    }
+
+    const fn into_validation(self) -> SessionValidation {
+        match self {
+            Self::Valid => SessionValidation::Valid,
+            Self::Invalid => SessionValidation::Invalid,
+        }
+    }
+}
+
+impl fmt::Debug for StoredAnonymousState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -334,7 +438,13 @@ fn invalid_snapshot() -> RezkaError {
     }
 }
 
-fn serialize_snapshot(origin: &OriginBinding, store: &CookieStore) -> Result<Vec<u8>, RezkaError> {
+fn serialize_snapshot(
+    origin: &OriginBinding,
+    store: &CookieStore,
+    validated_at: Option<i64>,
+    validated_ip: Option<&str>,
+    last_validation: Option<StoredAnonymousState>,
+) -> Result<Vec<u8>, RezkaError> {
     let mut cookie_bytes = Vec::new();
     cookie_store::serde::json::save_incl_expired_and_nonpersistent(store, &mut cookie_bytes)
         .map_err(|_| invalid_snapshot())?;
@@ -343,8 +453,24 @@ fn serialize_snapshot(origin: &OriginBinding, store: &CookieStore) -> Result<Vec
         session_format: CURRENT_SESSION_FORMAT,
         origin: origin.clone(),
         cookies,
+        validated_at,
+        validated_ip: validated_ip.map(str::to_owned),
+        last_validation,
     })
     .map_err(|_| invalid_snapshot())
+}
+
+fn sanitize_public_ip(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 64 {
+        return None;
+    }
+    value.parse::<IpAddr>().ok()?;
+    Some(value)
+}
+
+fn sanitize_validated_ip(value: Option<String>) -> Option<String> {
+    value.and_then(|ip| sanitize_public_ip(&ip).map(str::to_owned))
 }
 
 fn cookie_budget_exceeded() -> RezkaError {

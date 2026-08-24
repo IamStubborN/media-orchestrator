@@ -426,6 +426,26 @@ impl Transport {
         .map_err(|failure| failure.error)
     }
 
+    pub(crate) fn skippable_session_validation(
+        &self,
+        probe_url: &Url,
+        current_public_ip: &str,
+        now: i64,
+        ttl_secs: i64,
+    ) -> Option<crate::session::SessionValidation> {
+        self.jar
+            .skippable_validation(probe_url, current_public_ip, now, ttl_secs)
+    }
+
+    pub(crate) fn record_session_validation(
+        &mut self,
+        current_public_ip: &str,
+        now: i64,
+        status: crate::session::SessionValidation,
+    ) {
+        self.jar.record_validation(current_public_ip, now, status);
+    }
+
     pub fn export_session(&self) -> Result<SessionSnapshot, RezkaError> {
         if self.session_reset_by_failover {
             // A failover discarded the previous origin's jar and no later request re-established a

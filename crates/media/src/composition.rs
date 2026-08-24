@@ -342,6 +342,22 @@ pub struct PreparedRunnerSession {
 
 impl PreparedRunnerSession {
     #[must_use]
+    pub fn from_client(
+        client: rezka_client::RezkaClient,
+        client_config: rezka_client::RezkaClientConfig,
+        probe: rezka_client::SessionValidationProbe,
+        store: media_runner::EncryptedRezkaSessionStore,
+    ) -> Self {
+        Self {
+            client,
+            client_config,
+            browser_fallback: None,
+            probe,
+            store,
+        }
+    }
+
+    #[must_use]
     pub fn session_store_path(&self) -> std::path::PathBuf {
         self.store.path().to_owned()
     }
@@ -684,11 +700,9 @@ pub fn prepare_notification_dispatcher(
 pub fn prepare_tracking_scheduler(
     database: DatabaseConnection,
     discovery: Arc<dyn EpisodeDiscoveryPort>,
-    availability: Arc<dyn media_core::EpisodeAvailabilityPort>,
     downloads: Arc<dyn media_core::TrackedEpisodeDownloadPort>,
 ) -> TrackingRuntime {
     TrackingRuntime::new(Arc::new(SeaOrmTrackingStore::new(database)), discovery)
-        .with_availability(availability)
         .with_downloads(downloads)
 }
 
@@ -1133,7 +1147,8 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
         let provider = Arc::new(
             ConcreteSearchProvider::new(rezka, prowlarr)
                 .with_tmdb(search_tmdb)
-                .with_tvmaze(release_provider.clone()),
+                .with_tvmaze(release_provider.clone())
+                .with_lifecycle(lifecycle_store.clone()),
         );
         if rezka_tracking_enabled {
             let downloads = Arc::new(
@@ -1144,18 +1159,17 @@ pub async fn prepare_service(config: &ServerConfig) -> Result<PreparedService, S
                 )
                 .with_identity(identity.clone()),
             );
-            tracking_runtime = Some(prepare_tracking_scheduler(
-                database.clone(),
-                Arc::new(crate::search::ProviderEpisodeDiscovery::with_release(
-                    provider.clone(),
-                    release_provider.clone(),
-                )),
-                Arc::new(crate::search::ProviderEpisodeAvailability::new(
-                    provider.clone(),
-                    persistence.clone(),
-                )),
-                downloads,
-            ));
+            tracking_runtime = Some(
+                prepare_tracking_scheduler(
+                    database.clone(),
+                    Arc::new(crate::search::ProviderEpisodeDiscovery::with_release(
+                        provider.clone(),
+                        release_provider.clone(),
+                    )),
+                    downloads,
+                )
+                .with_anonymous_session(provider.clone()),
+            );
         }
         state = state.with_search(Arc::new(
             DurableSearchService::new(persistence, provider, jobs)

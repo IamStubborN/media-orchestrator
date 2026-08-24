@@ -13,8 +13,8 @@ pub fn episode_choice_set_id(id: TrackingId, season: u32, episode: u32) -> Strin
     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, value.as_bytes()).to_string()
 }
 
-const NOTIFY_TRACKING_INTERVAL: time::Duration = time::Duration::hours(1);
-const DOWNLOAD_TRACKING_INTERVAL: time::Duration = time::Duration::minutes(15);
+const NOTIFY_TRACKING_INTERVAL: time::Duration = time::Duration::hours(3);
+const DOWNLOAD_TRACKING_INTERVAL: time::Duration = time::Duration::minutes(30);
 const TRACKING_FAILURE_COOLDOWN: time::Duration = time::Duration::minutes(15);
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
@@ -976,6 +976,11 @@ pub trait TrackedEpisodeDownloadPort: Send + Sync {
     ) -> Result<(), PortError>;
 }
 
+#[async_trait::async_trait]
+pub trait AnonymousSessionPort: Send + Sync {
+    async fn prepare_anonymous_session(&self) -> Result<(), PortError>;
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct TrackingRunResult {
     pub checked: u32,
@@ -990,8 +995,8 @@ pub struct TrackingRunResult {
 pub struct TrackingRuntime {
     store: Arc<dyn TrackingScheduleStore>,
     discovery: Arc<dyn EpisodeDiscoveryPort>,
-    availability: Option<Arc<dyn EpisodeAvailabilityPort>>,
     downloads: Option<Arc<dyn TrackedEpisodeDownloadPort>>,
+    session: Option<Arc<dyn AnonymousSessionPort>>,
 }
 
 impl TrackingRuntime {
@@ -1003,20 +1008,20 @@ impl TrackingRuntime {
         Self {
             store,
             discovery,
-            availability: None,
             downloads: None,
+            session: None,
         }
-    }
-
-    #[must_use]
-    pub fn with_availability(mut self, availability: Arc<dyn EpisodeAvailabilityPort>) -> Self {
-        self.availability = Some(availability);
-        self
     }
 
     #[must_use]
     pub fn with_downloads(mut self, downloads: Arc<dyn TrackedEpisodeDownloadPort>) -> Self {
         self.downloads = Some(downloads);
+        self
+    }
+
+    #[must_use]
+    pub fn with_anonymous_session(mut self, session: Arc<dyn AnonymousSessionPort>) -> Self {
+        self.session = Some(session);
         self
     }
 
@@ -1033,6 +1038,11 @@ impl TrackingRuntime {
             .store
             .claim_due(now, claim_token, now + TRACKING_FAILURE_COOLDOWN, limit)
             .await?;
+        if due.iter().any(|tracking| tracking.download().is_some())
+            && let Some(session) = self.session.as_deref()
+        {
+            let _ = session.prepare_anonymous_session().await;
+        }
         let mut result = TrackingRunResult {
             checked: 0,
             discovered: 0,
@@ -1142,7 +1152,6 @@ impl TrackingRuntime {
                 .iter()
                 .map(|episode| episode.season())
                 .max();
-            let mut pending_availability = false;
             let mut source_error = false;
             let discovered_before = result.discovered;
             let queued_before = result.queued;
@@ -1169,72 +1178,9 @@ impl TrackingRuntime {
                 {
                     continue;
                 }
-                let (actions, (rezka_count, prowlarr_count)) = if tracking.download().is_some() {
-                    (Vec::new(), (0, 0))
-                } else {
-                    let Some(availability) = self.availability.as_deref() else {
-                        if self
-                            .store
-                            .record_pending_episode(tracking.id(), claim_token, episode)
-                            .await
-                            .is_err()
-                        {
-                            result.failed += 1;
-                            result.source_failures += 1;
-                            source_error = true;
-                            continue;
-                        }
-                        result.failed += 1;
-                        result.source_failures += 1;
-                        pending_availability = true;
-                        source_error = true;
-                        continue;
-                    };
-                    let availability = match availability
-                        .probe(EpisodeAvailabilityRequest::new(
-                            &tracking, &discovery, episode,
-                        ))
-                        .await
-                    {
-                        Ok(availability) => availability,
-                        Err(_) => {
-                            if self
-                                .store
-                                .record_pending_episode(tracking.id(), claim_token, episode)
-                                .await
-                                .is_err()
-                            {
-                                result.failed += 1;
-                                result.source_failures += 1;
-                                source_error = true;
-                                continue;
-                            }
-                            result.failed += 1;
-                            result.source_failures += 1;
-                            pending_availability = true;
-                            source_error = true;
-                            continue;
-                        }
-                    };
-                    let counts = (availability.rezka_count(), availability.prowlarr_count());
-                    let actions = availability.actions();
-                    if actions.is_empty() {
-                        if self
-                            .store
-                            .record_pending_episode(tracking.id(), claim_token, episode)
-                            .await
-                            .is_err()
-                        {
-                            result.failed += 1;
-                            result.source_failures += 1;
-                            source_error = true;
-                            continue;
-                        }
-                        pending_availability = true;
-                        continue;
-                    }
-                    (actions, counts)
-                };
+                let actions = Vec::new();
+                let rezka_count = 0;
+                let prowlarr_count = 0;
                 if tracking.download().is_some() {
                     let Some(downloads) = self.downloads.as_deref() else {
                         result.failed += 1;
@@ -1290,8 +1236,6 @@ impl TrackingRuntime {
             }
             let next_check = if source_error {
                 time::OffsetDateTime::now_utc().max(now) + TRACKING_FAILURE_COOLDOWN
-            } else if pending_availability {
-                now + NOTIFY_TRACKING_INTERVAL
             } else {
                 default_next_check
             };
@@ -1301,8 +1245,6 @@ impl TrackingRuntime {
                 TrackingCheckStatus::EpisodeFound
             } else if source_error {
                 TrackingCheckStatus::SourceError
-            } else if pending_availability {
-                TrackingCheckStatus::AwaitingSource
             } else {
                 TrackingCheckStatus::NoNewEpisode
             };

@@ -101,6 +101,13 @@ request, while Anubis clearance and unrelated provider cookies are retained.
 The new snapshot format marker prevents future anonymous `PHPSESSID` values
 from being removed repeatedly.
 
+After a successful probe the encrypted snapshot records the validation time and
+the public IP that passed. Later `ensure_session` calls skip the network probe
+for 30 minutes while Anubis clearance is present, that IP still matches, and the
+last anonymous classification was valid or invalid. A missing IP, IP change,
+expired TTL, missing clearance, or inconclusive classification forces a full
+probe. Native SHA-256 still never launches Chromium.
+
 Cookies are attached only to the exact selected Rezka origin and are never
 exposed through the CLI, jobs, notifications, logs, or a manual browser-cookie
 import path.

@@ -13,6 +13,8 @@ pub mod validation;
 pub use cookie::SessionJar;
 pub use validation::{ProbeResponse, SessionValidation, SessionValidationProbe};
 
+const SESSION_VALIDATION_TTL_SECS: i64 = 30 * 60;
+
 #[derive(Clone)]
 pub struct RezkaClientConfig {
     pub mirrors: MirrorSet,
@@ -51,10 +53,29 @@ impl RezkaClient {
     pub async fn ensure_session(
         &mut self,
         probe: &SessionValidationProbe,
+        current_public_ip: &str,
     ) -> Result<SessionValidation, RezkaError> {
+        if let Some(status) = self.skippable_session(probe, current_public_ip) {
+            return Ok(status);
+        }
         let response = self.fetch_probe(probe).await?;
+        let status = Self::ready_session(probe, &response)?;
+        self.transport
+            .record_session_validation(current_public_ip, unix_timestamp(), status);
+        Ok(status)
+    }
 
-        Self::ready_session(probe, &response)
+    fn skippable_session(
+        &self,
+        probe: &SessionValidationProbe,
+        current_public_ip: &str,
+    ) -> Option<SessionValidation> {
+        self.transport.skippable_session_validation(
+            &probe.url,
+            current_public_ip,
+            unix_timestamp(),
+            SESSION_VALIDATION_TTL_SECS,
+        )
     }
 
     pub async fn validate_session(
@@ -149,4 +170,8 @@ fn inconclusive_validation() -> RezkaError {
     RezkaError::ProviderResponseInvalid {
         context: sanitize_provider_text("session validation inconclusive"),
     }
+}
+
+fn unix_timestamp() -> i64 {
+    time::OffsetDateTime::now_utc().unix_timestamp()
 }

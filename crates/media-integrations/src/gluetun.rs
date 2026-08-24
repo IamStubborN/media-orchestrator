@@ -313,6 +313,10 @@ impl GluetunClient {
         }
     }
 
+    pub async fn current_public_ip(&self) -> Result<String, GluetunError> {
+        self.public_ip().await
+    }
+
     async fn public_ip(&self) -> Result<String, GluetunError> {
         let response = self.get("v1/publicip/ip").await?;
         let status = response.status();

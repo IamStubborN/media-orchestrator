@@ -4,13 +4,14 @@ use std::sync::{
 };
 
 use rezka_client::{
-    RezkaErrorCode,
+    RezkaErrorCode, SessionSnapshot,
     mirror::MirrorSet,
     session::{
         RezkaClient, RezkaClientConfig, SessionValidation, SessionValidationProbe,
         cookie::SessionJar,
     },
 };
+use secrecy::SecretBox;
 use time::Duration;
 use url::Url;
 use wiremock::{
@@ -83,7 +84,7 @@ async fn existing_clearance_accepted_after_ip_change_reuses_anonymous_jar() {
     let snapshot = jar.export().unwrap();
     let mut restored = RezkaClient::from_snapshot(config(base.clone()), &snapshot).unwrap();
 
-    let result = restored.ensure_session(&probe(&base)).await.unwrap();
+    let result = restored.ensure_session(&probe(&base), "").await.unwrap();
 
     assert_eq!(result, SessionValidation::Invalid);
 }
@@ -190,7 +191,7 @@ async fn expensive_proof_does_not_block_other_current_thread_tasks() {
     });
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-    let error = client.ensure_session(&probe).await.unwrap_err();
+    let error = client.ensure_session(&probe, "").await.unwrap_err();
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     heartbeat.abort();
     assert_eq!(error.code(), RezkaErrorCode::ChallengeFailed);
@@ -262,7 +263,7 @@ async fn anubis_then_anonymous_session_is_ready_without_login() {
     mount_login_never_called(&server).await;
 
     let mut client = RezkaClient::new(config(base.clone())).unwrap();
-    let result = client.ensure_session(&probe(&base)).await.unwrap();
+    let result = client.ensure_session(&probe(&base), "").await.unwrap();
 
     assert_eq!(result, SessionValidation::Invalid);
     assert_eq!(probe_calls.load(Ordering::SeqCst), 2);
@@ -314,7 +315,7 @@ async fn rejected_clearance_after_ip_change_is_selectively_replaced() {
     let mut client =
         RezkaClient::from_snapshot(config(base.clone()), &jar.export().unwrap()).unwrap();
 
-    let result = client.ensure_session(&probe(&base)).await.unwrap();
+    let result = client.ensure_session(&probe(&base), "").await.unwrap();
 
     assert_eq!(result, SessionValidation::Invalid);
     assert_eq!(probe_calls.load(Ordering::SeqCst), 2);
@@ -337,7 +338,7 @@ async fn anonymous_invalid_probe_is_accepted_without_login() {
     mount_login_never_called(&server).await;
 
     let mut client = RezkaClient::new(config(base.clone())).unwrap();
-    let result = client.ensure_session(&probe(&base)).await.unwrap();
+    let result = client.ensure_session(&probe(&base), "").await.unwrap();
 
     assert_eq!(result, SessionValidation::Invalid);
 }
@@ -385,7 +386,7 @@ async fn repeated_anubis_after_pass_returns_challenge_failed_without_login_or_lo
     mount_login_never_called(&server).await;
 
     let mut client = RezkaClient::new(config(base.clone())).unwrap();
-    let error = client.ensure_session(&probe(&base)).await.unwrap_err();
+    let error = client.ensure_session(&probe(&base), "").await.unwrap_err();
     assert_eq!(error.code(), rezka_client::RezkaErrorCode::AnubisRejected);
 }
 
@@ -522,7 +523,7 @@ async fn assert_inconclusive_never_posts_login(body: &'static str) {
     )
     .unwrap();
     let mut client = RezkaClient::new(config(base)).unwrap();
-    let error = client.ensure_session(&probe).await.unwrap_err();
+    let error = client.ensure_session(&probe, "").await.unwrap_err();
 
     assert_eq!(error.code(), RezkaErrorCode::ProviderResponseInvalid);
 }
@@ -549,7 +550,219 @@ async fn anubis_is_attempted_at_most_once() {
     mount_login_never_called(&server).await;
 
     let mut client = RezkaClient::new(config(base.clone())).unwrap();
-    let error = client.ensure_session(&probe(&base)).await.unwrap_err();
+    let error = client.ensure_session(&probe(&base), "").await.unwrap_err();
 
     assert_eq!(error.code(), RezkaErrorCode::AnubisRejected);
+}
+
+fn seeded_anonymous_client(base: &Url) -> RezkaClient {
+    let mut jar = SessionJar::empty();
+    jar.store_response_cookies(
+        [
+            "provider_state=anonymous; Path=/; HttpOnly",
+            "techaro.lol-anubis-auth=accepted; Path=/; HttpOnly",
+        ]
+        .iter()
+        .copied(),
+        base,
+    );
+    RezkaClient::from_snapshot(config(base.clone()), &jar.export().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn ensure_session_skips_probe_when_clearance_ttl_and_ip_match() {
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<input name=\"login_name\">"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    mount_login_never_called(&server).await;
+
+    let mut client = seeded_anonymous_client(&base);
+    let ip = "203.0.113.10";
+    let first = client.ensure_session(&probe(&base), ip).await.unwrap();
+    let second = client.ensure_session(&probe(&base), ip).await.unwrap();
+
+    assert_eq!(first, SessionValidation::Invalid);
+    assert_eq!(second, SessionValidation::Invalid);
+    let debug = format!("{:?}", client.export_session().unwrap());
+    assert_eq!(debug, "SessionSnapshot { bytes: [REDACTED] }");
+    assert!(!debug.contains(ip));
+    assert!(!debug.contains("login_name"));
+    assert!(!debug.contains("techaro.lol-anubis-auth"));
+}
+
+#[tokio::test]
+async fn ensure_session_probes_when_public_ip_changes() {
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<input name=\"login_name\">"))
+        .expect(2)
+        .mount(&server)
+        .await;
+    mount_login_never_called(&server).await;
+
+    let mut client = seeded_anonymous_client(&base);
+    client
+        .ensure_session(&probe(&base), "203.0.113.10")
+        .await
+        .unwrap();
+    let result = client
+        .ensure_session(&probe(&base), "198.51.100.20")
+        .await
+        .unwrap();
+    assert_eq!(result, SessionValidation::Invalid);
+}
+
+#[tokio::test]
+async fn ensure_session_probes_when_public_ip_is_unknown() {
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<input name=\"login_name\">"))
+        .expect(2)
+        .mount(&server)
+        .await;
+    mount_login_never_called(&server).await;
+
+    let mut client = seeded_anonymous_client(&base);
+    client
+        .ensure_session(&probe(&base), "203.0.113.10")
+        .await
+        .unwrap();
+    client.ensure_session(&probe(&base), "").await.unwrap();
+}
+
+#[tokio::test]
+async fn ensure_session_probes_when_validation_ttl_expires() {
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<input name=\"login_name\">"))
+        .expect(2)
+        .mount(&server)
+        .await;
+    mount_login_never_called(&server).await;
+
+    let mut client = seeded_anonymous_client(&base);
+    client
+        .ensure_session(&probe(&base), "203.0.113.10")
+        .await
+        .unwrap();
+    let snapshot = client.export_session().unwrap();
+    let mut document = snapshot
+        .with_secret_bytes(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).unwrap());
+    document["validated_at"] =
+        serde_json::json!(time::OffsetDateTime::now_utc().unix_timestamp() - (31 * 60));
+    let expired = SessionSnapshot::from_secret_bytes(SecretBox::new(Box::new(
+        serde_json::to_vec(&document).unwrap(),
+    )));
+    let mut restored = RezkaClient::from_snapshot(config(base.clone()), &expired).unwrap();
+    restored
+        .ensure_session(&probe(&base), "203.0.113.10")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn ensure_session_probes_when_clearance_is_missing() {
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<input name=\"login_name\">"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    mount_login_never_called(&server).await;
+
+    let mut jar = SessionJar::empty();
+    jar.store_response_cookies(
+        ["provider_state=anonymous; Path=/; HttpOnly"]
+            .iter()
+            .copied(),
+        &base,
+    );
+    let snapshot = jar.export().unwrap();
+    let mut document = snapshot
+        .with_secret_bytes(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).unwrap());
+    document["validated_at"] = serde_json::json!(time::OffsetDateTime::now_utc().unix_timestamp());
+    document["validated_ip"] = serde_json::json!("203.0.113.10");
+    document["last_validation"] = serde_json::json!("invalid");
+    let missing_clearance = SessionSnapshot::from_secret_bytes(SecretBox::new(Box::new(
+        serde_json::to_vec(&document).unwrap(),
+    )));
+    let mut client = RezkaClient::from_snapshot(config(base.clone()), &missing_clearance).unwrap();
+    let result = client
+        .ensure_session(&probe(&base), "203.0.113.10")
+        .await
+        .unwrap();
+    assert_eq!(result, SessionValidation::Invalid);
+}
+
+#[tokio::test]
+async fn ensure_session_probes_when_last_classification_is_missing() {
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<input name=\"login_name\">"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    mount_login_never_called(&server).await;
+
+    let mut jar = SessionJar::empty();
+    jar.store_response_cookies(
+        ["techaro.lol-anubis-auth=accepted; Path=/; HttpOnly"]
+            .iter()
+            .copied(),
+        &base,
+    );
+    let snapshot = jar.export().unwrap();
+    let mut document = snapshot
+        .with_secret_bytes(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).unwrap());
+    document["validated_at"] = serde_json::json!(time::OffsetDateTime::now_utc().unix_timestamp());
+    document["validated_ip"] = serde_json::json!("203.0.113.10");
+    let inconclusive = SessionSnapshot::from_secret_bytes(SecretBox::new(Box::new(
+        serde_json::to_vec(&document).unwrap(),
+    )));
+    let mut client = RezkaClient::from_snapshot(config(base.clone()), &inconclusive).unwrap();
+    let result = client
+        .ensure_session(&probe(&base), "203.0.113.10")
+        .await
+        .unwrap();
+    assert_eq!(result, SessionValidation::Invalid);
+    let leaked = format!("{result:?}");
+    assert!(!leaked.contains("203.0.113.10"));
+}
+
+#[tokio::test]
+async fn ensure_session_errors_do_not_leak_ip_or_cookies() {
+    let server = MockServer::start().await;
+    let base = Url::parse(&server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/account/probe"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("neutral account page"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut client = seeded_anonymous_client(&base);
+    let error = client
+        .ensure_session(&probe(&base), "203.0.113.10")
+        .await
+        .unwrap_err();
+    let rendered = error.to_string();
+    assert!(!rendered.contains("203.0.113.10"));
+    assert!(!rendered.contains("techaro.lol-anubis-auth"));
+    assert!(!rendered.contains("accepted"));
+    assert_eq!(error.code(), RezkaErrorCode::ProviderResponseInvalid);
 }
