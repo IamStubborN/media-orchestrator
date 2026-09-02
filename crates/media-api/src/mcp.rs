@@ -77,7 +77,7 @@ struct SearchInput {
     source: SearchSourceInput,
     media_kind: Option<SearchMediaKindInput>,
     #[schemars(
-        description = "Season number; required for series searches (Prowlarr rejects series searches without a season)"
+        description = "Season number (>=1) for Prowlarr series search. If unknown, omit it, search Rezka, and offer discovered seasons from availability.seasons; never guess 1."
     )]
     #[schemars(range(min = 1))]
     season: Option<u16>,
@@ -1156,7 +1156,7 @@ impl MediaAdminMcp {
 
     #[tool(
         name = "media_search",
-        description = "Search Rezka/Prowlarr or continue one provider page. Returns explicit results and never downloads.",
+        description = "Search Rezka/Prowlarr or continue one page. Never downloads. For a series without a named season, search Rezka only, discover seasons from availability.seasons, and offer those; pass season>=1 before Prowlarr or source=all.",
         output_schema = object_output_schema(),
         annotations(title = "Search media providers", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
     )]
@@ -1210,10 +1210,11 @@ impl MediaAdminMcp {
             source: SeriesGroupSourceDto::Tmdb,
             source_id,
         });
-        let providers: &[ProviderDto] = match input.source {
-            SearchSourceInput::All => &[ProviderDto::Rezka, ProviderDto::Prowlarr],
-            SearchSourceInput::Rezka => &[ProviderDto::Rezka],
-            SearchSourceInput::Prowlarr => &[ProviderDto::Prowlarr],
+        let providers: &[ProviderDto] = match (input.source, media_kind, input.season) {
+            (SearchSourceInput::All, Some(MediaKindDto::Series), None) => &[ProviderDto::Rezka],
+            (SearchSourceInput::All, _, _) => &[ProviderDto::Rezka, ProviderDto::Prowlarr],
+            (SearchSourceInput::Rezka, _, _) => &[ProviderDto::Rezka],
+            (SearchSourceInput::Prowlarr, _, _) => &[ProviderDto::Prowlarr],
         };
         let mut results = serde_json::Map::new();
         for provider in providers {
