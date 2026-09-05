@@ -181,6 +181,7 @@ fn page(source: ProviderDto, continuation: Option<&str>) -> SearchPageDto {
         results: vec![SearchResultDto::Prowlarr {
             result_id: "result-1".to_owned(),
             title: "Movie".to_owned(),
+            tmdb_id: None,
             thumbnail_url: None,
             website_url: None,
             indexer: None,

@@ -14,6 +14,7 @@ fn search_contract_is_versioned_paginated_and_safe() {
             .map(|index| SearchResultDto::Prowlarr {
                 result_id: format!("result-{index}"),
                 title: format!("Movie {index}"),
+                tmdb_id: None,
                 thumbnail_url: None,
                 website_url: None,
                 indexer: Some("Indexer".to_owned()),
@@ -232,8 +233,9 @@ fn runner_execution_payload_is_separate_from_public_search_results() {
         season: None,
         episode: None,
         library_title: Some("Example movie".to_owned()),
-        title: "Exact Release".to_owned(),
+        tmdb_id: None,
         thumbnail_url: None,
+        title: "Exact Release".to_owned(),
     };
     let value = serde_json::to_value(execution).unwrap();
     assert_eq!(value["source"], "prowlarr");

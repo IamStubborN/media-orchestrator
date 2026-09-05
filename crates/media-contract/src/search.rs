@@ -155,6 +155,8 @@ pub enum SearchResultDto {
     Prowlarr {
         result_id: String,
         title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tmdb_id: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         thumbnail_url: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -287,6 +289,8 @@ pub enum ExecutionSelectionDto {
         episode: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         library_title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tmdb_id: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thumbnail_url: Option<String>,
         title: String,

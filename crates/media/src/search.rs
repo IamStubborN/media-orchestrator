@@ -1558,7 +1558,7 @@ impl ConcreteSearchProvider {
                     SearchError::Provider
                 }
             })?;
-        let thumbnail_url = if let Some(tmdb) = &self.tmdb {
+        let tmdb_match = if let Some(tmdb) = &self.tmdb {
             let media_type = match request.media_kind {
                 Some(MediaKindDto::Series) => media_contract::TrendingMediaTypeDto::Tv,
                 _ => media_contract::TrendingMediaTypeDto::Movie,
@@ -1567,10 +1567,12 @@ impl ConcreteSearchProvider {
                 .await
                 .ok()
                 .flatten()
-                .and_then(|item| item.poster_url)
+                .filter(|item| item.tmdb_id > 0)
         } else {
             None
         };
+        let thumbnail_url = tmdb_match.as_ref().and_then(|item| item.poster_url.clone());
+        let matched_tmdb_id = tmdb_match.as_ref().map(|item| item.tmdb_id);
         let provider_continuation = page
             .continuation
             .as_ref()
@@ -1592,6 +1594,7 @@ impl ConcreteSearchProvider {
                 let public = SearchResultDto::Prowlarr {
                     result_id,
                     title: result.title.clone(),
+                    tmdb_id: matched_tmdb_id,
                     thumbnail_url: thumbnail_url.clone(),
                     website_url: result.website_url,
                     indexer: result.indexer,
@@ -2701,13 +2704,18 @@ impl DurableSearchService {
             }
             _ => None,
         };
-        let series_group =
-            verified
-                .as_ref()
-                .map(|identity| media_contract::SeriesGroupIdentityDto {
-                    source: media_contract::SeriesGroupSourceDto::Tmdb,
-                    source_id: identity.tmdb_id,
-                });
+        let series_group = verified
+            .as_ref()
+            .map(|identity| media_contract::SeriesGroupIdentityDto {
+                source: media_contract::SeriesGroupSourceDto::Tmdb,
+                source_id: identity.tmdb_id,
+            })
+            .or_else(|| {
+                session.request.series_group.filter(|group| {
+                    matches!(group.source, media_contract::SeriesGroupSourceDto::Tmdb)
+                        && group.source_id > 0
+                })
+            });
         let library_title_hint = verified
             .as_ref()
             .map_or(session.request.query.as_str(), |identity| {
@@ -3124,6 +3132,7 @@ fn execution(
         (
             SearchResultDto::Prowlarr {
                 title,
+                tmdb_id: result_tmdb_id,
                 thumbnail_url,
                 ..
             },
@@ -3162,6 +3171,15 @@ fn execution(
                 }
                 None => return Err(SearchError::Infrastructure),
             };
+            let tmdb_id = series_group
+                .and_then(|group| match group {
+                    media_contract::SeriesGroupIdentityDto {
+                        source: media_contract::SeriesGroupSourceDto::Tmdb,
+                        source_id,
+                    } if source_id > 0 => Some(source_id),
+                    _ => None,
+                })
+                .or_else(|| (*result_tmdb_id).filter(|id| *id > 0));
             Ok(ExecutionSelectionDto::Prowlarr {
                 source_identity: source_identity.clone(),
                 info_hash: info_hash.clone(),
@@ -3170,6 +3188,7 @@ fn execution(
                 season,
                 episode,
                 library_title: library_title_hint.map(str::to_owned),
+                tmdb_id,
                 thumbnail_url: thumbnail_url.clone(),
                 title: title.clone(),
             })

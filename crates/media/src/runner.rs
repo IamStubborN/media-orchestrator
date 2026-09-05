@@ -597,6 +597,8 @@ struct TorrentExecution<'a> {
     season: Option<u16>,
     episode: Option<u32>,
     title: &'a str,
+    library_title: Option<&'a str>,
+    tmdb_id: Option<u64>,
 }
 
 struct RezkaWorkRequest<'a> {
@@ -691,6 +693,8 @@ impl MediaJobExecutor {
                 season,
                 episode,
                 title,
+                library_title,
+                tmdb_id,
                 ..
             } => {
                 let request = TorrentExecution {
@@ -701,6 +705,8 @@ impl MediaJobExecutor {
                     season: *season,
                     episode: *episode,
                     title,
+                    library_title: library_title.as_deref(),
+                    tmdb_id: *tmdb_id,
                 };
                 self.execute_torrent(lease, control, request).await
             }
@@ -1262,6 +1268,26 @@ impl MediaJobExecutor {
                 items
             }
         };
+        if request.media_kind == media_contract::MediaKindDto::Series {
+            if let Some(tmdb_id) = request.tmdb_id.filter(|id| *id > 0) {
+                let display_title = request
+                    .library_title
+                    .map(str::trim)
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or(request.title);
+                let Some((first_video, _)) = work_items.first() else {
+                    return Ok(ExecutionOutcome::NeedsActionNoMatchingEpisodes);
+                };
+                ensure_plex_match(first_video, display_title, Some(tmdb_id))
+                    .await
+                    .map_err(|error| error.at_stage(0, "torrent_monitor", 1))?;
+            } else {
+                tracing::info!(
+                    job_id = %lease.job.id,
+                    "torrent series completed without tmdb identity; skipping .plexmatch"
+                );
+            }
+        }
         let mut aggregate = ExecutionOutcome::Completed;
         for (index, (final_video, coordinates)) in work_items.into_iter().enumerate() {
             let task_ordinal = u32::try_from(index + 1).map_err(|_| RunnerError::Execution)?;
@@ -1316,7 +1342,6 @@ impl MediaJobExecutor {
                 break;
             }
         }
-        let _ = request.title;
         Ok(aggregate)
     }
 }
@@ -2020,15 +2045,39 @@ fn plex_match_matches(
     }
 }
 
+fn plex_match_show_directory(final_video: &std::path::Path) -> Option<&std::path::Path> {
+    let parent = final_video.parent()?;
+    let season_like = parent
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(is_season_directory_name);
+    if season_like {
+        parent.parent()
+    } else {
+        Some(parent)
+    }
+}
+
+fn is_season_directory_name(name: &str) -> bool {
+    let name = name.trim();
+    if name.eq_ignore_ascii_case("Specials") {
+        return true;
+    }
+    let Some(rest) = name
+        .strip_prefix("Season ")
+        .or_else(|| name.strip_prefix("season "))
+    else {
+        return false;
+    };
+    !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 async fn ensure_plex_match(
     final_video: &std::path::Path,
     display_title: &str,
     tmdb_id: Option<u64>,
 ) -> Result<(), RunnerError> {
-    let show_directory = final_video
-        .parent()
-        .and_then(std::path::Path::parent)
-        .ok_or(RunnerError::Execution)?;
+    let show_directory = plex_match_show_directory(final_video).ok_or(RunnerError::Execution)?;
     tokio::fs::create_dir_all(show_directory)
         .await
         .map_err(|_| RunnerError::Execution)?;
@@ -2727,10 +2776,10 @@ mod tests {
     use super::{
         ExecutionOutcome, ProgressCheckpointGate, artifact_checkpoint, canonical_movie_name,
         combine_episode_outcome, ensure_plex_match, expected_source_duration_seconds,
-        highest_standard_variant, matching_episode_videos, parse_episode_coordinates,
-        plex_match_matches, resolve_existing_series_path_title, rezka_audio_language,
-        rezka_final_video_path, rezka_physical_title, safe_name, tmdb_display_title_from_path,
-        torrent_series_work_items,
+        highest_standard_variant, is_season_directory_name, matching_episode_videos,
+        parse_episode_coordinates, plex_match_matches, plex_match_show_directory,
+        resolve_existing_series_path_title, rezka_audio_language, rezka_final_video_path,
+        rezka_physical_title, safe_name, tmdb_display_title_from_path, torrent_series_work_items,
     };
 
     #[test]
@@ -2755,6 +2804,52 @@ mod tests {
             ),
             "rezka-90825",
         );
+    }
+
+    #[test]
+    fn torrent_pack_plexmatch_lands_in_content_folder_not_tv_root() {
+        let pack = Path::new(
+            "/mnt/internal/torrents/tv/Укрытие (Silo) Сезон 3/Укрытие - Silo S03 E01.mkv",
+        );
+        assert_eq!(
+            plex_match_show_directory(pack),
+            Some(Path::new(
+                "/mnt/internal/torrents/tv/Укрытие (Silo) Сезон 3"
+            )),
+        );
+        let nested = Path::new("/library/tv/Show {tmdb-1}/Season 03/Show - S03E01.mkv");
+        assert_eq!(
+            plex_match_show_directory(nested),
+            Some(Path::new("/library/tv/Show {tmdb-1}")),
+        );
+        assert!(is_season_directory_name("Season 03"));
+        assert!(is_season_directory_name("Specials"));
+        assert!(!is_season_directory_name("Укрытие (Silo) Сезон 3"));
+    }
+
+    #[tokio::test]
+    async fn torrent_flat_pack_writes_plexmatch_with_real_tmdb_id() {
+        let root = tempfile::tempdir().unwrap();
+        let pack = root.path().join("Укрытие (Silo) Сезон 3");
+        let video = pack.join("Укрытие - Silo S03 E01.mkv");
+        tokio::fs::create_dir_all(&pack).await.unwrap();
+        tokio::fs::write(&video, b"video").await.unwrap();
+
+        ensure_plex_match(&video, "Silo", Some(125505))
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::fs::read_to_string(pack.join(".plexmatch"))
+                .await
+                .unwrap(),
+            "# PlexMatch\nTitle: Silo\ntmdbid: 125505\n",
+        );
+    }
+
+    #[test]
+    fn plex_match_without_tmdb_still_requires_title_only_handoff() {
+        assert!(plex_match_matches(b"Title: Silo\n", "Silo", None));
+        assert!(!plex_match_matches(b"Title: Silo\n", "Silo", Some(125505)));
     }
 
     #[tokio::test]

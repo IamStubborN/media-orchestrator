@@ -2661,6 +2661,7 @@ async fn enrich_job_value(state: &ApiState, result_ref: &str, mut value: Value) 
             season,
             episode,
             library_title,
+            tmdb_id,
             thumbnail_url,
             title,
             ..
@@ -2669,6 +2670,9 @@ async fn enrich_job_value(state: &ApiState, result_ref: &str, mut value: Value) 
             object.insert("media_kind".to_owned(), serde_json::json!(media_kind));
             if let Some(library_title) = library_title {
                 object.insert("library_title".to_owned(), Value::String(library_title));
+            }
+            if let Some(tmdb_id) = tmdb_id {
+                object.insert("tmdb_id".to_owned(), serde_json::json!(tmdb_id));
             }
             insert_safe_poster(object, thumbnail_url);
             if let Some(season) = season {
