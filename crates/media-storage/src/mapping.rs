@@ -417,6 +417,7 @@ pub(crate) const fn needs_action_reason_value(value: NeedsActionReason) -> &'sta
     match value {
         NeedsActionReason::IdentityAmbiguous => "identity_ambiguous",
         NeedsActionReason::PlexMismatch => "plex_mismatch",
+        NeedsActionReason::NoMatchingEpisodes => "no_matching_episodes",
     }
 }
 
@@ -424,6 +425,7 @@ pub(crate) fn parse_needs_action_reason(value: &str) -> Result<NeedsActionReason
     match value {
         "identity_ambiguous" => Ok(NeedsActionReason::IdentityAmbiguous),
         "plex_mismatch" => Ok(NeedsActionReason::PlexMismatch),
+        "no_matching_episodes" => Ok(NeedsActionReason::NoMatchingEpisodes),
         _ => Err(MappingError::InvalidPersistedValue),
     }
 }

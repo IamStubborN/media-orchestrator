@@ -39,6 +39,7 @@ mod m20260809_000038_source_choice_sets;
 mod m20260810_000039_tracking_posters;
 mod m20260810_000040_tracking_claims;
 mod m20260824_000041_source_choice_season_complete;
+mod m20260905_000042_no_matching_episodes_reason;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseTransaction;
@@ -90,6 +91,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260810_000039_tracking_posters::Migration),
             Box::new(m20260810_000040_tracking_claims::Migration),
             Box::new(m20260824_000041_source_choice_season_complete::Migration),
+            Box::new(m20260905_000042_no_matching_episodes_reason::Migration),
         ]
     }
 }

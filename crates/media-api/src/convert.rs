@@ -318,6 +318,7 @@ const fn domain_needs_action_reason(value: NeedsActionReasonDto) -> NeedsActionR
     match value {
         NeedsActionReasonDto::IdentityAmbiguous => NeedsActionReason::IdentityAmbiguous,
         NeedsActionReasonDto::PlexMismatch => NeedsActionReason::PlexMismatch,
+        NeedsActionReasonDto::NoMatchingEpisodes => NeedsActionReason::NoMatchingEpisodes,
     }
 }
 
@@ -347,6 +348,7 @@ pub(crate) fn job(job: &Job) -> JobDto {
         needs_action_reason: job.needs_action_reason().map(|reason| match reason {
             NeedsActionReason::IdentityAmbiguous => NeedsActionReasonDto::IdentityAmbiguous,
             NeedsActionReason::PlexMismatch => NeedsActionReasonDto::PlexMismatch,
+            NeedsActionReason::NoMatchingEpisodes => NeedsActionReasonDto::NoMatchingEpisodes,
         }),
         notify_scope: match job.notify_scope() {
             NotifyScope::Initiator => NotifyScopeDto::Initiator,

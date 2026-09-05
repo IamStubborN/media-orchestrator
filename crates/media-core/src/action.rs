@@ -2,4 +2,5 @@
 pub enum NeedsActionReason {
     IdentityAmbiguous,
     PlexMismatch,
+    NoMatchingEpisodes,
 }

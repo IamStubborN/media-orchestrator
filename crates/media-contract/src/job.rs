@@ -30,6 +30,7 @@ pub enum JobStateDto {
 pub enum NeedsActionReasonDto {
     IdentityAmbiguous,
     PlexMismatch,
+    NoMatchingEpisodes,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -155,6 +156,10 @@ mod tests {
                 "identity_ambiguous",
             ),
             (NeedsActionReasonDto::PlexMismatch, "plex_mismatch"),
+            (
+                NeedsActionReasonDto::NoMatchingEpisodes,
+                "no_matching_episodes",
+            ),
         ];
         for (value, name) in reasons {
             let json = format!("\"{name}\"");

@@ -190,6 +190,7 @@ pub enum ExecutionOutcome {
     },
     PlexPending,
     NeedsActionPlexMismatch,
+    NeedsActionNoMatchingEpisodes,
     NeedsActionIdentityAmbiguous,
     Cancelled,
     Failed,
@@ -1221,7 +1222,11 @@ impl MediaJobExecutor {
         }
         videos.sort();
         if videos.is_empty() {
-            return Ok(ExecutionOutcome::NeedsActionPlexMismatch);
+            tracing::warn!(
+                job_id = %lease.job.id,
+                "torrent completed without video files; Plex was not contacted"
+            );
+            return Ok(ExecutionOutcome::NeedsActionNoMatchingEpisodes);
         }
         let expected_season = request.season.map(u32::from);
         let work_items = match request.media_kind {
@@ -1234,14 +1239,25 @@ impl MediaJobExecutor {
             }
             media_contract::MediaKindDto::Series => {
                 let Some(expected_season) = expected_season else {
-                    return Ok(ExecutionOutcome::NeedsActionPlexMismatch);
+                    tracing::warn!(
+                        job_id = %lease.job.id,
+                        "series torrent job missing season coordinate; Plex was not contacted"
+                    );
+                    return Ok(ExecutionOutcome::NeedsActionNoMatchingEpisodes);
                 };
+                let video_count = videos.len();
                 let items = torrent_series_work_items(videos, expected_season, request.episode)
                     .into_iter()
                     .map(|(path, coordinates)| (path, Some(coordinates)))
                     .collect::<Vec<_>>();
                 if items.is_empty() {
-                    return Ok(ExecutionOutcome::NeedsActionPlexMismatch);
+                    tracing::warn!(
+                        job_id = %lease.job.id,
+                        expected_season,
+                        video_count,
+                        "no torrent videos matched expected SxxExx coordinates; Plex was not contacted"
+                    );
+                    return Ok(ExecutionOutcome::NeedsActionNoMatchingEpisodes);
                 }
                 items
             }
@@ -2153,27 +2169,36 @@ fn parse_episode_coordinates(path: &std::path::Path) -> Option<(u32, u32)> {
         if bytes[start] != b'S' {
             continue;
         }
-        let season_start = start + 1;
-        let Some(e_offset) = bytes[season_start..].iter().position(|byte| *byte == b'E') else {
-            continue;
-        };
-        let episode_marker = season_start + e_offset;
-        if !(1..=3).contains(&e_offset) {
+        let mut cursor = start + 1;
+        let season_start = cursor;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_digit() && cursor - season_start < 3 {
+            cursor += 1;
+        }
+        let season_len = cursor - season_start;
+        if !(1..=3).contains(&season_len) {
             continue;
         }
-        let episode_start = episode_marker + 1;
-        let episode_len = bytes[episode_start..]
-            .iter()
-            .take_while(|byte| byte.is_ascii_digit())
-            .take(3)
-            .count();
+        while cursor < bytes.len() && matches!(bytes[cursor], b' ' | b'.' | b'_' | b'-') {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() || bytes[cursor] != b'E' {
+            continue;
+        }
+        cursor += 1;
+        let episode_start = cursor;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_digit() && cursor - episode_start < 3 {
+            cursor += 1;
+        }
+        let episode_len = cursor - episode_start;
         if episode_len == 0 {
             continue;
         }
-        let season = name[season_start..episode_marker].parse::<u32>().ok()?;
-        let episode = name[episode_start..episode_start + episode_len]
-            .parse::<u32>()
-            .ok()?;
+        let Ok(season) = name[season_start..season_start + season_len].parse::<u32>() else {
+            continue;
+        };
+        let Ok(episode) = name[episode_start..episode_start + episode_len].parse::<u32>() else {
+            continue;
+        };
         if episode > 0 {
             return Some((season, episode));
         }
@@ -2278,6 +2303,9 @@ fn combine_episode_outcome(
     match (aggregate, current) {
         (_, ExecutionOutcome::Cancelled) => ExecutionOutcome::Cancelled,
         (_, ExecutionOutcome::NeedsActionPlexMismatch) => ExecutionOutcome::NeedsActionPlexMismatch,
+        (_, ExecutionOutcome::NeedsActionNoMatchingEpisodes) => {
+            ExecutionOutcome::NeedsActionNoMatchingEpisodes
+        }
         (_, ExecutionOutcome::NeedsActionIdentityAmbiguous) => {
             ExecutionOutcome::NeedsActionIdentityAmbiguous
         }
@@ -2495,6 +2523,10 @@ pub async fn run_single_iteration(
                 Some(NeedsActionReasonDto::PlexMismatch),
             ),
         ],
+        ExecutionOutcome::NeedsActionNoMatchingEpisodes => vec![(
+            JobStateDto::NeedsAction,
+            Some(NeedsActionReasonDto::NoMatchingEpisodes),
+        )],
         ExecutionOutcome::NeedsActionIdentityAmbiguous => vec![(
             JobStateDto::NeedsAction,
             Some(NeedsActionReasonDto::IdentityAmbiguous),
@@ -2994,7 +3026,68 @@ mod tests {
             parse_episode_coordinates(Path::new("show s1e12.mp4")),
             Some((1, 12))
         );
+        assert_eq!(
+            parse_episode_coordinates(Path::new("S03E01.mkv")),
+            Some((3, 1))
+        );
+        assert_eq!(
+            parse_episode_coordinates(Path::new("S03 E01.mkv")),
+            Some((3, 1))
+        );
+        assert_eq!(
+            parse_episode_coordinates(Path::new("S03.E01.mkv")),
+            Some((3, 1))
+        );
+        assert_eq!(
+            parse_episode_coordinates(Path::new("S03_E01.mkv")),
+            Some((3, 1))
+        );
+        assert_eq!(
+            parse_episode_coordinates(Path::new("S03-E01.mkv")),
+            Some((3, 1))
+        );
+        assert_eq!(
+            parse_episode_coordinates(Path::new("Укрытие - Silo S03 E01 LostFilm.mkv")),
+            Some((3, 1))
+        );
+        // Contiguous multi-episode markers still resolve the first pair.
+        assert_eq!(
+            parse_episode_coordinates(Path::new("Show.S01E01E02.mkv")),
+            Some((1, 1))
+        );
+        assert_eq!(
+            parse_episode_coordinates(Path::new("Show.S01E01-E02.mkv")),
+            Some((1, 1))
+        );
         assert_eq!(parse_episode_coordinates(Path::new("Episode 04.mkv")), None);
+        // A bad digit slice must not abort later valid matches in the same name.
+        assert_eq!(
+            parse_episode_coordinates(Path::new("Trailer.SXE.Show.S02E05.mkv")),
+            Some((2, 5))
+        );
+    }
+
+    #[test]
+    fn spaced_season_pack_matches_expected_season() {
+        let matched = matching_episode_videos(
+            vec![
+                "Укрытие - Silo S03 E01 LostFilm.mkv".into(),
+                "Укрытие - Silo S03 E02 LostFilm.mkv".into(),
+                "Укрытие - Silo S02 E10 LostFilm.mkv".into(),
+                "sample.mkv".into(),
+            ],
+            3,
+        );
+        assert_eq!(
+            matched
+                .iter()
+                .map(|(path, coordinates)| (path.to_string_lossy().into_owned(), *coordinates))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Укрытие - Silo S03 E01 LostFilm.mkv".to_owned(), (3, 1)),
+                ("Укрытие - Silo S03 E02 LostFilm.mkv".to_owned(), (3, 2)),
+            ]
+        );
     }
 
     #[test]
