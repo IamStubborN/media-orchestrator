@@ -1269,24 +1269,43 @@ impl MediaJobExecutor {
             }
         };
         if request.media_kind == media_contract::MediaKindDto::Series {
-            if let Some(tmdb_id) = request.tmdb_id.filter(|id| *id > 0) {
-                let display_title = request
-                    .library_title
-                    .map(str::trim)
-                    .filter(|title| !title.is_empty())
-                    .unwrap_or(request.title);
-                let Some((first_video, _)) = work_items.first() else {
-                    return Ok(ExecutionOutcome::NeedsActionNoMatchingEpisodes);
-                };
-                ensure_plex_match(first_video, display_title, Some(tmdb_id))
-                    .await
-                    .map_err(|error| error.at_stage(0, "torrent_monitor", 1))?;
-            } else {
+            let display_title = request
+                .library_title
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .unwrap_or(request.title);
+            let Some((first_video, _)) = work_items.first() else {
+                return Ok(ExecutionOutcome::NeedsActionNoMatchingEpisodes);
+            };
+            // Prefer explicit job TMDB, then a TMDB id already present in the
+            // library path title (series_group / release_identity resolution).
+            // Never invent TMDB ids — fall back to title-only .plexmatch.
+            let path_tmdb = first_video
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str())
+                .and_then(tmdb_id_from_path_title)
+                .or_else(|| {
+                    first_video.ancestors().find_map(|ancestor| {
+                        ancestor
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .and_then(tmdb_id_from_path_title)
+                    })
+                });
+            let tmdb_id = request
+                .tmdb_id
+                .filter(|id| *id > 0)
+                .or(path_tmdb.filter(|id| *id > 0));
+            if tmdb_id.is_none() {
                 tracing::info!(
                     job_id = %lease.job.id,
-                    "torrent series completed without tmdb identity; skipping .plexmatch"
+                    "torrent series completed without tmdb identity; writing title-only .plexmatch"
                 );
             }
+            ensure_plex_match(first_video, display_title, tmdb_id)
+                .await
+                .map_err(|error| error.at_stage(0, "torrent_monitor", 1))?;
         }
         let mut aggregate = ExecutionOutcome::Completed;
         for (index, (final_video, coordinates)) in work_items.into_iter().enumerate() {
