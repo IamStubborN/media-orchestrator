@@ -39,6 +39,8 @@ pub struct ApiError {
     pub request_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<RezkaDiagnosticCategoryDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracking_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -52,6 +54,7 @@ mod tests {
             message: "Episode numbering needs confirmation".to_owned(),
             request_id: "req-123".to_owned(),
             diagnostic: None,
+            tracking_id: None,
         };
 
         let value = serde_json::to_value(&error).unwrap();
@@ -73,6 +76,7 @@ mod tests {
             message: "media provider diagnostic".to_owned(),
             request_id: "req-456".to_owned(),
             diagnostic: Some(RezkaDiagnosticCategoryDto::AnubisChallengeRequired),
+            tracking_id: None,
         };
 
         let value = serde_json::to_value(&error).unwrap();

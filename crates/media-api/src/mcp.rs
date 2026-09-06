@@ -643,19 +643,14 @@ struct TrackingListItemOutput {
     #[schemars(skip)]
     download: Option<TrackingDownloadOutput>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[schemars(skip)]
     pending_episodes: Vec<EpisodeOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(skip)]
     pending_since: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(skip)]
     pending_age_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(skip)]
     last_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(skip)]
     status_reason: Option<String>,
 }
 
@@ -2284,7 +2279,9 @@ fn tracking_error(error: TrackingApplicationError) -> ErrorData {
         {
             ErrorData::invalid_params(
                 "release-calendar tracking requires a positive TVmaze release_identity",
-                None,
+                Some(serde_json::json!({
+                    "code": "missing_release_identity",
+                })),
             )
         }
         TrackingApplicationError::InvalidInput(_) => {

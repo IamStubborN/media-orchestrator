@@ -909,11 +909,19 @@ impl TrackingSubscription {
                 }
             }
             TrackingCheckStatus::SourceError => Some(match self.check_last_error.as_deref() {
-                Some(ENQUEUE_FAILURE_CODE)
-                | Some(ENQUEUE_SEARCH_FAILURE_CODE)
-                | Some(ENQUEUE_VERIFY_FAILURE_CODE)
-                | Some(ENQUEUE_PERSIST_FAILURE_CODE)
-                | Some(ENQUEUE_JOB_FAILURE_CODE) => {
+                Some(ENQUEUE_SEARCH_FAILURE_CODE) => {
+                    "auto-download search failed; backing off retries".to_owned()
+                }
+                Some(ENQUEUE_VERIFY_FAILURE_CODE) => {
+                    "auto-download verify failed; backing off retries".to_owned()
+                }
+                Some(ENQUEUE_PERSIST_FAILURE_CODE) => {
+                    "auto-download persist failed; backing off retries".to_owned()
+                }
+                Some(ENQUEUE_JOB_FAILURE_CODE) => {
+                    "auto-download job create failed; backing off retries".to_owned()
+                }
+                Some(ENQUEUE_FAILURE_CODE) => {
                     "auto-download enqueue failed; backing off retries".to_owned()
                 }
                 Some(SOURCE_PROBE_FAILURE_CODE) => {
@@ -1647,19 +1655,32 @@ impl TrackingApplication {
             .require_user()
             .map_err(|_| TrackingApplicationError::Forbidden)?;
         let release_identity = command.release_identity;
+        let provider = command.provider;
+        let title = command.title.clone();
+        let translation = command.translation.clone();
+        let scope = command.scope;
         let value = NewTrackingSubscription::new(TrackingId::new(), owner, command)
             .map_err(TrackingApplicationError::InvalidInput)?;
         match self.store.add(operation, value).await {
             Ok(created) => Ok(created),
             Err(PortError::Conflict) => {
+                let listed = self.store.list_visible(owner).await.map_err(map_port_error)?;
                 if let Some(identity) = release_identity {
-                    let listed = self.store.list_visible(owner).await.map_err(map_port_error)?;
-                    if let Some(existing) = listed.into_iter().find(|candidate| {
+                    if let Some(existing) = listed.iter().find(|candidate| {
                         candidate.download().is_none()
                             && candidate.release_identity() == Some(identity)
                     }) {
-                        return Ok(existing);
+                        return Err(TrackingApplicationError::AlreadyExists(existing.id()));
                     }
+                }
+                if let Some(existing) = listed.into_iter().find(|candidate| {
+                    candidate.provider() == provider
+                        && candidate.title() == title
+                        && candidate.translation() == translation
+                        && candidate.scope() == scope
+                        && (scope != TrackingScope::Personal || candidate.owner_id() == owner)
+                }) {
+                    return Err(TrackingApplicationError::AlreadyExists(existing.id()));
                 }
                 Err(TrackingApplicationError::Conflict)
             }

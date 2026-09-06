@@ -455,6 +455,12 @@ async fn stateless_mcp_2026_lists_tools_without_initialize_or_session() {
             &tool["outputSchema"]["$defs"]["TrackingListItemOutput"]
         };
         assert!(item["properties"]["poster_url"].is_object());
+        if name == "media_tracking_list" {
+            assert!(item["properties"]["status_reason"].is_object());
+            assert!(item["properties"]["last_error"].is_object());
+            assert!(item["properties"]["pending_episodes"].is_object());
+            assert!(item["properties"]["pending_age_seconds"].is_object());
+        }
         if name == "media_jobs_list" {
             assert!(item["properties"]["library_title"].is_object());
             assert!(item["properties"]["translation"].is_object());
@@ -473,14 +479,14 @@ async fn stateless_mcp_2026_lists_tools_without_initialize_or_session() {
         std::fs::write(path, &serialized).unwrap();
     }
     assert!(
-        serialized.len() <= 31_000,
+        serialized.len() <= 34_000,
         "tool discovery schema grew unexpectedly: {} bytes",
         serialized.len()
     );
     for tool in body["result"]["tools"].as_array().unwrap() {
         let tool_size = serde_json::to_vec(tool).unwrap().len();
         assert!(
-            tool_size <= 2_100,
+            tool_size <= 2_600,
             "{} schema grew unexpectedly: {tool_size} bytes",
             tool["name"]
         );

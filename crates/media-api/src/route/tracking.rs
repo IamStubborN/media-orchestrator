@@ -245,11 +245,21 @@ fn application_error(error: TrackingApplicationError, request_id: &RequestId) ->
         TrackingApplicationError::Forbidden => {
             ApiError::forbidden(request_id, "operation is forbidden").into_response()
         }
+        TrackingApplicationError::InvalidInput(inner)
+            if matches!(
+                inner,
+                media_core::TrackingValidationError::MissingReleaseIdentity
+            ) =>
+        {
+            ApiError::missing_release_identity(request_id).into_response()
+        }
         TrackingApplicationError::InvalidInput(_) => {
             ApiError::invalid_request(request_id, "tracking request is invalid").into_response()
         }
         TrackingApplicationError::NotFound => ApiError::not_found(request_id).into_response(),
-        TrackingApplicationError::AlreadyExists(_) => ApiError::conflict(request_id).into_response(),
+        TrackingApplicationError::AlreadyExists(id) => {
+            ApiError::already_exists(request_id, id.to_string()).into_response()
+        }
         TrackingApplicationError::Conflict => ApiError::conflict(request_id).into_response(),
         TrackingApplicationError::Infrastructure => ApiError::internal(request_id).into_response(),
     }

@@ -251,29 +251,6 @@ const TRACKING_ROW_COLUMNS: &str = "id, owner_id, provider, title, translation, 
 
 const TRACKING_LIST_COLUMNS: &str = "id, owner_id, provider, title, translation, known_episodes, scope, poster_url, release_source, release_source_id, download_provider_media_ref, download_translation_id, download_season, last_checked_at, next_check_at, check_status, check_last_error, check_failure_count, COALESCE((    SELECT jsonb_agg(jsonb_build_object('season', candidate.season, 'episode', candidate.episode)                      ORDER BY candidate.season, candidate.episode)     FROM tracking_availability_candidates AS candidate     WHERE candidate.tracking_id = tracking_subscriptions.id), '[]'::jsonb) AS pending_episodes, (SELECT MIN(candidate.first_seen_at)  FROM tracking_availability_candidates AS candidate  WHERE candidate.tracking_id = tracking_subscriptions.id) AS pending_since";
 
-async fn find_active_notify_by_release_identity(
-    database: &sea_orm::DatabaseConnection,
-    owner_id: UserId,
-    release_identity: ReleaseIdentity,
-) -> Result<Option<TrackingSubscription>, PortError> {
-    let source_id =
-        i64::try_from(release_identity.source_id()).map_err(|_| PortError::Conflict)?;
-    let row = database
-        .query_one_raw(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            format!(
-                "SELECT {TRACKING_LIST_COLUMNS} FROM tracking_subscriptions                  WHERE deleted_at IS NULL                    AND download_provider_media_ref IS NULL                    AND owner_id = $1                    AND release_source = $2                    AND release_source_id = $3                  ORDER BY created_at ASC, id ASC                  LIMIT 1"
-            ),
-            [
-                owner_id.into_uuid().into(),
-                release_identity.source().as_str().to_owned().into(),
-                source_id.into(),
-            ],
-        ))
-        .await
-        .map_err(map_tracking_database_error)?;
-    row.as_ref().map(tracking_from_row).transpose()
-}
 
 #[async_trait::async_trait]
 impl TrackingStore for SeaOrmTrackingStore {
@@ -282,17 +259,6 @@ impl TrackingStore for SeaOrmTrackingStore {
         operation: OperationKey,
         value: NewTrackingSubscription,
     ) -> Result<TrackingSubscription, PortError> {
-        if value.download().is_none()
-            && let Some(release_identity) = value.release_identity()
-            && let Some(existing) = find_active_notify_by_release_identity(
-                &self.database,
-                value.owner_id(),
-                release_identity,
-            )
-            .await?
-        {
-            return Ok(existing);
-        }
         let known = episode_json(value.known_episodes());
         let release_source_id = value
             .release_identity()
@@ -319,18 +285,8 @@ impl TrackingStore for SeaOrmTrackingStore {
             Ok(row) => row.ok_or(PortError::Infrastructure)?,
             Err(error) => {
                 let mapped = map_tracking_database_error(error);
-                if mapped == PortError::Conflict
-                    && value.download().is_none()
-                    && let Some(release_identity) = value.release_identity()
-                    && let Some(existing) = find_active_notify_by_release_identity(
-                        &self.database,
-                        value.owner_id(),
-                        release_identity,
-                    )
-                    .await?
-                {
-                    return Ok(existing);
-                }
+                // Surface Conflict so TrackingApplication can map release-identity
+                // and title-unique duplicates to AlreadyExists(tracking_id).
                 return Err(mapped);
             }
         };

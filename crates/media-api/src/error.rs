@@ -34,6 +34,25 @@ impl ApiError {
                 message: message.to_owned(),
                 request_id: request_id.as_str().to_owned(),
                 diagnostic: None,
+                tracking_id: None,
+            },
+        }
+    }
+
+    fn with_message(
+        status: StatusCode,
+        code: ApiErrorCode,
+        message: impl Into<String>,
+        request_id: &RequestId,
+    ) -> Self {
+        Self {
+            status,
+            body: ErrorBody {
+                code,
+                message: message.into(),
+                request_id: request_id.as_str().to_owned(),
+                diagnostic: None,
+                tracking_id: None,
             },
         }
     }
@@ -221,6 +240,27 @@ impl ApiError {
             StatusCode::CONFLICT,
             ApiErrorCode::Conflict,
             "operation conflicts with current state",
+            request_id,
+        )
+    }
+
+    pub(crate) fn already_exists(request_id: &RequestId, tracking_id: impl Into<String>) -> Self {
+        let tracking_id = tracking_id.into();
+        let mut error = Self::with_message(
+            StatusCode::CONFLICT,
+            ApiErrorCode::Conflict,
+            "tracking subscription already exists",
+            request_id,
+        );
+        error.body.tracking_id = Some(tracking_id);
+        error
+    }
+
+    pub(crate) fn missing_release_identity(request_id: &RequestId) -> Self {
+        Self::with_message(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidRequest,
+            "release-calendar tracking requires a positive TVmaze release_identity",
             request_id,
         )
     }
