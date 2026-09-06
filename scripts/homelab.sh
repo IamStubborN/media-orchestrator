@@ -236,7 +236,9 @@ assert_protected_unchanged() {
 }
 
 full_protected_snapshot() {
-    remote "for name in media-postgres gluetun qbittorrent; do docker inspect \"\$name\" --format '{{.Name}}|{{.Id}}|{{.State.StartedAt}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}'; done"
+    # qBittorrent may be recreate-allowlisted during full deploy; Id/health matter,
+    # but StartedAt alone must not fail the protected snapshot compare.
+    remote "for name in media-postgres gluetun; do docker inspect \"\$name\" --format '{{.Name}}|{{.Id}}|{{.State.StartedAt}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}'; done; docker inspect qbittorrent --format '{{.Name}}|{{.Id}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}'"
 }
 
 assert_full_protected_unchanged() {
