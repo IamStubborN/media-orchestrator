@@ -1725,6 +1725,8 @@ wget -q -T "${LIFECYCLE_HTTP_TIMEOUT:-10}" -O /dev/null \
     "$MEDIA_SERVICE_URL/v1/runner/lifecycle"
 WATCHER
 }
+# set -u: must be defined before the first write_lifecycle_rotating call.
+media_stopped_for_quiescence=0
 write_lifecycle_rotating() {
     if test "$media_stopped_for_quiescence" = 1; then
         write_lifecycle_direct_rotating
