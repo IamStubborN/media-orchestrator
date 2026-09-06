@@ -821,6 +821,14 @@ media_stopped_for_quiescence=0
 fast_safe_hold_reached=0
 initial_watcher_state=$(docker inspect gluetun-rezka-watcher --format '{{.State.Status}}')
 initial_watcher_restart_policy=$(docker inspect gluetun-rezka-watcher --format '{{.HostConfig.RestartPolicy.Name}}')
+download_watcher_present=0
+initial_download_watcher_state=absent
+initial_download_watcher_restart_policy=no
+if docker inspect gluetun-watcher >/dev/null 2>&1; then
+    download_watcher_present=1
+    initial_download_watcher_state=$(docker inspect gluetun-watcher --format '{{.State.Status}}')
+    initial_download_watcher_restart_policy=$(docker inspect gluetun-watcher --format '{{.HostConfig.RestartPolicy.Name}}')
+fi
 initial_runner_state=$(docker inspect download-runner --format '{{.State.Status}}')
 initial_runner_restart_policy=$(docker inspect download-runner --format '{{.HostConfig.RestartPolicy.Name}}')
 initial_media_state=$(docker inspect media-service --format '{{.State.Status}}')
@@ -1257,6 +1265,17 @@ restore_media_runtime() {
     media_stopped_for_quiescence=0
 }
 runtime_restored=0
+restore_download_watcher() {
+    test "$download_watcher_present" = 1 || return 0
+    case $initial_download_watcher_restart_policy in
+        '' | no) docker update --restart=no gluetun-watcher >/dev/null ;;
+        *) docker update --restart="$initial_download_watcher_restart_policy" gluetun-watcher >/dev/null ;;
+    esac
+    if test "$initial_download_watcher_state" = running; then
+        current=$(docker inspect gluetun-watcher --format '{{.State.Status}}')
+        test "$current" = running || start_container gluetun-watcher
+    fi
+}
 restore_runtime() {
     test "$runtime_restored" = 0 || return 0
     runtime_restored=1
@@ -1272,6 +1291,7 @@ restore_runtime() {
             current_watcher_state=$(docker inspect gluetun-rezka-watcher --format '{{.State.Status}}')
             test "$current_watcher_state" = running || start_container gluetun-rezka-watcher
         fi
+        restore_download_watcher
         current_lifecycle_state=$(lifecycle_state)
         test "$current_lifecycle_state" = ready || write_lifecycle ready
     else
@@ -1281,6 +1301,7 @@ restore_runtime() {
             current_watcher_state=$(docker inspect gluetun-rezka-watcher --format '{{.State.Status}}')
             test "$current_watcher_state" = running || start_container gluetun-rezka-watcher
         fi
+        restore_download_watcher
     fi
 }
 restore_on_exit() {
@@ -1318,6 +1339,11 @@ if test "$lifecycle_target" = full; then
     fence_lifecycle=rotating
 fi
 docker stop gluetun-rezka-watcher >/dev/null
+if test "$download_watcher_present" = 1; then
+    docker update --restart=no gluetun-watcher >/dev/null
+    download_watcher_state=$(docker inspect gluetun-watcher --format '{{.State.Status}}')
+    test "$download_watcher_state" = running && docker stop gluetun-watcher >/dev/null
+fi
 if test "$lifecycle_target" = full; then
     # The watcher may finish an in-flight lifecycle reconciliation while
     # docker stop is waiting. Re-assert rotating only after the process is
@@ -1393,6 +1419,7 @@ esac
 hold_quiescence() {
     docker stop gluetun-rezka-watcher >/dev/null 2>&1 || true
     docker stop download-runner >/dev/null 2>&1 || true
+    docker stop gluetun-watcher >/dev/null 2>&1 || true
 }
 trap hold_quiescence EXIT HUP INT TERM
 start_container() {
@@ -1412,6 +1439,14 @@ while test "$attempts" -lt 30; do
     watcher_health=$(docker inspect gluetun-rezka-watcher --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}')
     lifecycle=$(docker exec media-postgres sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "select state from runner_lifecycle;"')
     if test "$watcher_health" = healthy && test "$lifecycle" = ready; then
+        if docker inspect gluetun-watcher >/dev/null 2>&1; then
+            download_state=$(docker inspect gluetun-watcher --format '{{.State.Status}}')
+            if test "$download_state" != running; then
+                # Restore unless-stopped (compose default) when we only know it was fenced.
+                docker update --restart=unless-stopped gluetun-watcher >/dev/null 2>&1 || true
+                start_container gluetun-watcher || true
+            fi
+        fi
         trap - EXIT HUP INT TERM
         exit 0
     fi
@@ -1425,7 +1460,7 @@ REMOTE
 }
 
 hold_runner_quiescence() {
-    remote "docker stop gluetun-rezka-watcher download-runner >/dev/null 2>&1 || true"
+    remote "docker stop gluetun-rezka-watcher download-runner gluetun-watcher >/dev/null 2>&1 || true"
 }
 
 restore_full_runtime_safe_hold() {
@@ -1986,7 +2021,7 @@ replace_full_runtime() {
     runner_image=$2
     expected_migration_version=${3:-}
     prepare_watcher_runtime
-    remote sh -s "$environment_file" "$remote_root" "$compose_project" "$service_image" "$runner_image" "$expected_migration_version" <<'REMOTE'
+    gluetun_rezka_recreate_mode=$(remote sh -s "$environment_file" "$remote_root" "$compose_project" "$service_image" "$runner_image" "$expected_migration_version" <<'REMOTE'
 set -eu
 environment_file=$1
 remote_root=$2
@@ -1996,6 +2031,12 @@ runner_image=$5
 expected_migration_version=$6
 test "$(docker inspect gluetun-rezka-watcher --format '{{.State.Status}}')" != running
 test "$(docker inspect download-runner --format '{{.State.Status}}')" != running
+if docker inspect gluetun-watcher >/dev/null 2>&1; then
+    test "$(docker inspect gluetun-watcher --format '{{.State.Status}}')" != running || {
+        echo "download gluetun-watcher is still running during full runtime replace" >&2
+        exit 1
+    }
+fi
 docker image inspect "$service_image" >/dev/null
 docker image inspect "$runner_image" >/dev/null
 umask 077
@@ -2004,6 +2045,47 @@ trap 'rm -f "$next"' EXIT HUP INT TERM
 sed "s#^MEDIA_SERVICE_IMAGE=.*#MEDIA_SERVICE_IMAGE=$service_image#; s#^DOWNLOAD_RUNNER_IMAGE=.*#DOWNLOAD_RUNNER_IMAGE=$runner_image#" \
     "$environment_file" >"$next"
 cd "$remote_root"
+
+gluetun_rezka_compose_digest() {
+    env_file=$1
+    json_file=$2
+    docker compose --project-name "$compose_project" --env-file "$env_file" \
+        config --format json >"$json_file"
+    python3 - "$json_file" <<'PY'
+import hashlib, json, pathlib, sys
+config = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+service = config["services"]["gluetun-rezka"]
+secrets = config.get("secrets") or {}
+digest = hashlib.sha256()
+payload = {
+    "image": service.get("image"),
+    "environment": service.get("environment"),
+    "secrets": service.get("secrets"),
+    "cap_add": service.get("cap_add"),
+    "devices": service.get("devices"),
+    "command": service.get("command"),
+    "entrypoint": service.get("entrypoint"),
+}
+digest.update(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
+digest.update(b"\0")
+for name in sorted(service.get("secrets") or []):
+    entry = secrets.get(name) or {}
+    path = entry.get("file")
+    digest.update(name.encode()); digest.update(b"\0")
+    if path:
+        digest.update(hashlib.sha256(pathlib.Path(path).read_bytes()).digest())
+    digest.update(b"\0")
+print(digest.hexdigest())
+PY
+}
+
+contract_json=$(mktemp)
+trap 'rm -f "$next" "$contract_json"' EXIT HUP INT TERM
+before=$(gluetun_rezka_compose_digest "$environment_file" "$contract_json")
+after=$(gluetun_rezka_compose_digest "$next" "$contract_json")
+rm -f "$contract_json"
+trap 'rm -f "$next"' EXIT HUP INT TERM
+
 docker compose --project-name "$compose_project" --env-file "$next" run --rm --no-deps media-service migrate
 if test -n "$expected_migration_version"; then
     actual=$(docker exec media-postgres sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "select version from seaql_migrations order by version desc limit 1;"')
@@ -2021,8 +2103,14 @@ while :; do
     test "$attempts" -lt 30 || { echo "media-service is not healthy: $state" >&2; exit 1; }
     sleep 5
 done
-docker compose --project-name "$compose_project" --env-file "$environment_file" \
-    up -d --no-deps --force-recreate gluetun-rezka
+rezka_mode=new
+if test "$before" = "$after"; then
+    echo "gluetun-rezka image/env/secrets unchanged; skipping force-recreate" >&2
+    rezka_mode=same
+else
+    docker compose --project-name "$compose_project" --env-file "$environment_file" \
+        up -d --no-deps --force-recreate gluetun-rezka
+fi
 attempts=0
 while :; do
     state=$(docker inspect gluetun-rezka --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}')
@@ -2033,9 +2121,19 @@ while :; do
 done
 docker compose --project-name "$compose_project" --env-file "$environment_file" \
     up --no-deps --force-recreate --no-start download-runner gluetun-rezka-watcher
+printf '%s\n' "$rezka_mode"
 REMOTE
+) || return 1
+    case $gluetun_rezka_recreate_mode in
+        new | same) ;;
+        *)
+            echo "full runtime replace returned invalid gluetun-rezka mode: $gluetun_rezka_recreate_mode" >&2
+            return 1
+            ;;
+    esac
     verify_service
 }
+
 
 replace_service_image() {
     service_image=$1
@@ -2123,6 +2221,97 @@ prepare_hermes_cli() {
     remote "set -eu; mkdir -p '$hermes_remote_root/artifacts'; install -m 0755 '$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next' '$hermes_remote_root/artifacts/media-$media_version-linux-amd64'; rm '$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next'; sed -i '/^HERMES_HOME_IMAGE=/d; /^MEDIA_CLI_SHA256=/d' '$hermes_remote_root/.env'; cd '$remote_root'; attempts=0; until docker compose --project-name '$compose_project' --env-file '$environment_file' pull media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary; do attempts=\$((attempts + 1)); test \"\$attempts\" -lt 5 || exit 1; sleep 5; done"
 }
 
+hermes_mount_inputs_digest() {
+    python3 - "$hermes_root" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+paths = [
+    "shared/skills/media/SKILL.md",
+    "shared/skills/media/MCP_SCHEMA.json",
+    "shared/plugins/telegram-home/__init__.py",
+    "shared/plugins/telegram-home/media_action_store.py",
+    "shared/plugins/telegram-home/media_callbacks.py",
+    "shared/plugins/telegram-home/media_panel.py",
+    "shared/plugins/telegram-home/media_search.py",
+    "shared/plugins/telegram-home/media_trending.py",
+    "shared/plugins/telegram-home/assets/media-menu.jpg",
+    "scripts/media-notifier",
+    "scripts/hermes_media_notifications.py",
+]
+digest = hashlib.sha256()
+for relative in paths:
+    path = root / relative
+    if not path.is_file():
+        raise SystemExit(f"Hermes mount input missing: {relative}")
+    digest.update(relative.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(hashlib.sha256(path.read_bytes()).digest())
+    digest.update(b"\0")
+print(digest.hexdigest())
+PY
+}
+
+hermes_consumers_unchanged() {
+    cli_sha=$1
+    schema_sha=$2
+    mounts_digest=$3
+    remote sh -s "$hermes_remote_root" "$remote_schema_file" "$cli_sha" "$schema_sha" "$mounts_digest" <<'REMOTE'
+set -eu
+hermes_root=$1
+schema_file=$2
+cli_sha=$3
+schema_sha=$4
+mounts_digest=$5
+media_version=0.1.0
+artifact=$hermes_root/artifacts/media-$media_version-linux-amd64
+test -x "$artifact" || exit 10
+live_cli=$(sha256sum "$artifact" | awk '{print $1}')
+test "$live_cli" = "$cli_sha" || exit 11
+test -s "$schema_file" || exit 12
+live_schema=$(sha256sum "$schema_file" | awk '{print $1}')
+test "$live_schema" = "$schema_sha" || exit 13
+live_mounts=$(python3 - "$hermes_root" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+paths = [
+    "shared/skills/media/SKILL.md",
+    "shared/skills/media/MCP_SCHEMA.json",
+    "shared/plugins/telegram-home/__init__.py",
+    "shared/plugins/telegram-home/media_action_store.py",
+    "shared/plugins/telegram-home/media_callbacks.py",
+    "shared/plugins/telegram-home/media_panel.py",
+    "shared/plugins/telegram-home/media_search.py",
+    "shared/plugins/telegram-home/media_trending.py",
+    "shared/plugins/telegram-home/assets/media-menu.jpg",
+    "scripts/media-notifier",
+    "scripts/hermes_media_notifications.py",
+]
+digest = hashlib.sha256()
+for relative in paths:
+    path = root / relative
+    if not path.is_file():
+        raise SystemExit(f"missing:{relative}")
+    digest.update(relative.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(hashlib.sha256(path.read_bytes()).digest())
+    digest.update(b"\0")
+print(digest.hexdigest())
+PY
+) || exit 14
+test "$live_mounts" = "$mounts_digest" || exit 15
+exit 0
+REMOTE
+}
+
+# Set by stage_hermes_cli: skip pull/recreate when CLI+schema+mounts unchanged.
+hermes_skip_recreate=0
+
 stage_hermes_cli() {
     service_image=$1
     docker_host=$2
@@ -2153,8 +2342,24 @@ stage_hermes_cli() {
         --exclude secrets/ \
         "$hermes_root/" "$host:$hermes_stage/source/"
     scp "$artifact" "$host:$hermes_stage/artifacts/media-$media_version-linux-amd64" >/dev/null
-    remote "set -eu; test \"\$(sha256sum '$hermes_stage/artifacts/media-$media_version-linux-amd64' | awk '{print \$1}')\" = '$artifact_sha256'; cd '$remote_root'; attempts=0; until docker compose --project-name '$compose_project' --env-file '$environment_file' pull media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary; do attempts=\$((attempts + 1)); test \"\$attempts\" -lt 5 || exit 1; sleep 5; done"
+    remote "set -eu; test \"\$(sha256sum '$hermes_stage/artifacts/media-$media_version-linux-amd64' | awk '{print \$1}')\" = '$artifact_sha256'"
+    schema_source=${MEDIA_RELEASE_DIR:+$MEDIA_RELEASE_DIR/MCP_SCHEMA.json}
+    if test -z "${MEDIA_RELEASE_DIR:-}" || ! test -s "${schema_source:-}"; then
+        schema_source=$hermes_root/shared/skills/media/MCP_SCHEMA.json
+    fi
+    test -s "$schema_source" || { echo "Hermes MCP schema missing for consumer skip check: $schema_source" >&2; exit 1; }
+    staged_schema_sha256=$(shasum -a 256 "$schema_source" | awk '{print $1}')
+    staged_mounts_digest=$(hermes_mount_inputs_digest)
+    hermes_skip_recreate=0
+    if hermes_consumers_unchanged "$artifact_sha256" "$staged_schema_sha256" "$staged_mounts_digest"; then
+        hermes_skip_recreate=1
+        echo "Hermes CLI/schema/mounts unchanged; skipping Hermes image pull" >&2
+    else
+        echo "Hermes CLI/schema/mounts changed; pulling Hermes consumer images" >&2
+        remote "set -eu; cd '$remote_root'; attempts=0; until docker compose --project-name '$compose_project' --env-file '$environment_file' pull media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary; do attempts=\$((attempts + 1)); test \"\$attempts\" -lt 5 || exit 1; sleep 5; done"
+    fi
 }
+
 
 activate_hermes_stage() {
     remote sh -s "$hermes_stage" "$hermes_remote_root" <<'REMOTE'
@@ -2262,6 +2467,20 @@ REMOTE
 
 replace_hermes_agents() {
     image_record=${1:-}
+    if test -z "$image_record" && test "${hermes_skip_recreate:-0}" = 1; then
+        echo "Hermes CLI/schema/mounts unchanged; skipping Hermes consumer recreate" >&2
+        remote sh -s <<'REMOTE'
+set -eu
+for name in media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary; do
+    state=$(docker inspect "$name" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}')
+    test "$state" = healthy || {
+        echo "$name is not healthy while skipping recreate: $state" >&2
+        exit 1
+    }
+done
+REMOTE
+        return 0
+    fi
     remote sh -s "$remote_root" "$environment_file" "$image_record" <<'REMOTE'
 set -eu
 remote_root=$1
@@ -2395,9 +2614,14 @@ verify_full_runtime_compatibility() {
     expected_service_ref=$6
     expected_runner_ref=$7
     expected_session_volume=$8
+    rezka_mode=${9:-new}
+    case $rezka_mode in
+        new | same) ;;
+        *) echo "invalid gluetun-rezka compatibility mode: $rezka_mode" >&2; return 1 ;;
+    esac
     remote sh -s "$previous_runner_id" "$previous_rezka_id" "$previous_watcher_id" \
         "$expected_service_image" "$expected_runner_image" "$expected_service_ref" \
-        "$expected_runner_ref" "$expected_session_volume" <<'REMOTE'
+        "$expected_runner_ref" "$expected_session_volume" "$rezka_mode" <<'REMOTE'
 set -eu
 previous_runner_id=$1
 previous_rezka_id=$2
@@ -2407,6 +2631,7 @@ expected_runner_image=$5
 expected_service_ref=$6
 expected_runner_ref=$7
 expected_session_volume=$8
+rezka_mode=$9
 for image in "$expected_service_image" "$expected_runner_image"; do
     printf '%s\n' "$image" | grep -Eq '^sha256:[0-9a-f]{64}$' || { echo "full runtime image ID is invalid" >&2; exit 1; }
 done
@@ -2425,7 +2650,11 @@ runner_id=$(docker inspect download-runner --format '{{.Id}}')
 rezka_id=$(docker inspect gluetun-rezka --format '{{.Id}}')
 watcher_id=$(docker inspect gluetun-rezka-watcher --format '{{.Id}}')
 test "$runner_id" != "$previous_runner_id" || { echo "download-runner was not recreated" >&2; exit 1; }
-test "$rezka_id" != "$previous_rezka_id" || { echo "gluetun-rezka was not recreated" >&2; exit 1; }
+case $rezka_mode in
+    new) test "$rezka_id" != "$previous_rezka_id" || { echo "gluetun-rezka was not recreated" >&2; exit 1; } ;;
+    same) test "$rezka_id" = "$previous_rezka_id" || { echo "gluetun-rezka was recreated despite unchanged contract" >&2; exit 1; } ;;
+    *) echo "invalid gluetun-rezka compatibility mode: $rezka_mode" >&2; exit 1 ;;
+esac
 test "$watcher_id" != "$previous_watcher_id" || { echo "gluetun-rezka-watcher was not recreated" >&2; exit 1; }
 test "$(docker inspect gluetun-rezka --format '{{.State.Health.Status}}')" = healthy || { echo "gluetun-rezka is not healthy" >&2; exit 1; }
 test "$(docker inspect gluetun-rezka-watcher --format '{{.State.Health.Status}}')" = healthy || { echo "gluetun-rezka-watcher is not healthy" >&2; exit 1; }
@@ -2445,6 +2674,23 @@ perform_service_deploy() {
     replace_service_image "$service_image" "$expected_migration_version" || return 1
     assert_db_migration_version "$expected_migration_version" || return 1
     sync_hermes_schema || return 1
+    # Service-only does not stage a new CLI artifact; decide recreate from live CLI + local schema/mounts.
+    if test -n "${hermes_root:-}" && test -d "$hermes_root"; then
+        live_cli_sha=$(remote "sha256sum '$hermes_remote_root/artifacts/media-0.1.0-linux-amd64' 2>/dev/null | awk '{print \$1}'" || true)
+        schema_source=$hermes_root/shared/skills/media/MCP_SCHEMA.json
+        if test -n "${MEDIA_RELEASE_DIR:-}" && test -s "$MEDIA_RELEASE_DIR/MCP_SCHEMA.json"; then
+            schema_source=$MEDIA_RELEASE_DIR/MCP_SCHEMA.json
+        fi
+        if test -n "$live_cli_sha" && test -s "$schema_source"; then
+            staged_schema_sha256=$(shasum -a 256 "$schema_source" | awk '{print $1}')
+            staged_mounts_digest=$(hermes_mount_inputs_digest)
+            if hermes_consumers_unchanged "$live_cli_sha" "$staged_schema_sha256" "$staged_mounts_digest"; then
+                hermes_skip_recreate=1
+            else
+                hermes_skip_recreate=0
+            fi
+        fi
+    fi
     replace_hermes_agents || return 1
     verify_live_mcp_schema || return 1
     if test "${MEDIA_DEPLOY_RELEASE:-0}" = 1; then
@@ -2612,7 +2858,8 @@ deploy_full() {
             exit 1
         fi
         verify_full_runtime_compatibility "$previous_runner_id" "$previous_rezka_id" "$previous_watcher_id" \
-            "$service_image_id" "$runner_image_id" "$target_service_ref" "$target_runner_ref" "$session_volume" || exit 1
+            "$service_image_id" "$runner_image_id" "$target_service_ref" "$target_runner_ref" "$session_volume" \
+            "${gluetun_rezka_recreate_mode:-new}" || exit 1
         verify_resumed_runtime_or_requiesce "$protected_before" assert_full_protected_unchanged || exit 1
     ); then
         echo "full deployment failed; restoring its exact checkpoint" >&2

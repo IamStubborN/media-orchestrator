@@ -417,9 +417,17 @@ assert(mounted_sources.include?("scripts/media-notifier") &&
 
 service_only_guard = homelab.split("assert_service_only_rollout() {", 2).fetch(1).split("sync_hermes_schema() {", 2).fetch(0)
 runner_digest_contract = docker_build.split("runner_build_digest() {", 2).fetch(1).split("case ${1:-}", 2).fetch(0)
-assert(runner_digest_contract.include?("docker_context_digest") &&
-       !runner_digest_contract.include?("git ls-files"),
-       "runner digest must derive from the exact Docker context instead of a partial path list")
+assert(!runner_digest_contract.strip.start_with?("docker_context_digest") &&
+       runner_digest_contract.include?("crates") &&
+       runner_digest_contract.include?("Dockerfile") &&
+       runner_digest_contract.include?("Cargo.lock") &&
+       runner_digest_contract.include?(".cargo") &&
+       !runner_digest_contract.include?("git ls-files") &&
+       runner_digest_contract.include?("crates/*/tests"),
+       "runner digest must hash runner-affecting inputs (Dockerfile/Cargo/crate src), not the full context or git ls-files")
+assert(runner_digest_contract.include?("Does not invalidate runner") &&
+       runner_digest_contract.include?("crates/*/tests"),
+       "runner digest must document that crate tests do not invalidate the runner")
 assert(dockerfile.include?("COPY . .") &&
        %w[Cargo.toml Cargo.lock .cargo config crates].none? { |path| dockerignore.lines.map(&:strip).include?(path) },
        "exact runner context must include Cargo, toolchain/config, and every runner/service source input")
@@ -458,13 +466,20 @@ assert(replace_service.include?("--project-name homelab") &&
 assert(replace_full_runtime.include?("gluetun-rezka") &&
        replace_full_runtime.include?("gluetun-rezka-watcher") &&
        replace_full_runtime.include?("--force-recreate gluetun-rezka") &&
+       replace_full_runtime.include?("skipping force-recreate") &&
+       replace_full_runtime.include?("gluetun_rezka_compose_digest") &&
+       replace_full_runtime.include?("gluetun-watcher") &&
        replace_full_runtime.include?("--force-recreate --no-start download-runner gluetun-rezka-watcher") &&
        replace_full_runtime.index("gluetun-rezka") < replace_full_runtime.index("--no-start download-runner"),
-       "full runtime replacement must wait for the dedicated VPN before creating stopped runner and watcher")
+       "full runtime replacement must optionally skip unchanged gluetun-rezka and wait for VPN before stopped runner/watcher")
 assert(replace_hermes.include?("--project-name homelab") &&
        replace_hermes.include?('cd "$remote_root"') &&
        !replace_hermes.include?('cd "$hermes_root"'),
        "Hermes recreate must use the root homelab Compose project")
+assert(homelab.include?("gluetun-watcher") &&
+       homelab.include?("download_watcher_present") &&
+       homelab.include?("restore_download_watcher"),
+       "media quiescence must fence and restore download gluetun-watcher around gluetun-rezka mutation")
 assert(homelab.include?("verify_live_mcp_schema") && homelab.include?("MCP_SCHEMA_SHA256"),
        "deployment rollback must preserve and verify the exact MCP schema")
 schema_bootstrap = homelab.split("preflight_deployed_mcp_schema() {", 2).fetch(1).split("ensure_deployed_mcp_schema() {", 2).fetch(0)
@@ -529,6 +544,10 @@ prepare_hermes = homelab.split("prepare_hermes_cli() {", 2).fetch(1).split("sync
 hermes_services = "media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary"
 assert(prepare_hermes.include?("docker compose --project-name '$compose_project' --env-file '$environment_file' pull #{hermes_services}"),
        "Hermes deployment must only pull the intended Hermes and notifier images")
+assert(prepare_hermes.include?("hermes_consumers_unchanged") &&
+       prepare_hermes.include?("skipping Hermes image pull") &&
+       replace_hermes.include?("skipping Hermes consumer recreate"),
+       "Hermes staging must skip pull/recreate when CLI, schema, and mount inputs are unchanged")
 
 host_lock = homelab.split("acquire_host_lock() {", 2).fetch(1).split("release_host_lock() {", 2).fetch(0)
 assert(host_lock.include?("flock -n") && host_lock.include?("media-orchestrator.deploy.lock"),
@@ -1327,8 +1346,10 @@ assert(full_compatibility.include?("previous_rezka_id") &&
        full_compatibility.include?("REZKA_PROBE_IMAGE") &&
        full_compatibility.include?("DOWNLOAD_RUNNER_IMAGE") &&
        full_compatibility.include?("session volume changed") &&
-       full_compatibility.include?("State.Health.Status"),
-       "full runtime compatibility must prove replacement IDs, watcher probe image, health, and session volume")
+       full_compatibility.include?("State.Health.Status") &&
+       full_compatibility.include?("rezka_mode") &&
+       full_compatibility.include?("unchanged contract"),
+       "full runtime compatibility must prove replacement IDs (or intentional gluetun-rezka skip), watcher probe image, health, and session volume")
 replace_images = homelab.split("replace_images() {", 2).fetch(1).split("replace_service_image() {", 2).fetch(0)
 resume_runner = homelab.split("resume_runner_watcher_and_wait_ready() {", 2).fetch(1).split("hold_runner_quiescence() {", 2).fetch(0)
 assert(replace_images.include?("docker compose") &&

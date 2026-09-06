@@ -102,10 +102,91 @@ source_version() {
 }
 
 runner_build_digest() {
-  # The runner target copies the complete Docker context and shares the builder,
-  # so every context input is runner-affecting.
-  docker_context_digest
+  # Narrow digest: inputs that change the runner image or the shared `media`
+  # binary it embeds. Service-facing crates still count because one binary feeds
+  # both targets — changing media-api/storage src invalidates this digest
+  # (honest). Crate tests, deny.toml, and other non-build noise do not.
+  # Invalidates runner (forces deploy-full / blocks deploy-local-service):
+  #   Dockerfile (runner stages, yt-dlp/chrome pins, runtime packages),
+  #   .dockerignore, Cargo workspace/lock/.cargo, every crate Cargo.toml+src.
+  # Does not invalidate runner (service-only OK if compose/watcher unchanged):
+  #   crates/*/tests, deny.toml, .env.example, .gitignore, config/, docs/
+  #   (docs already dockerignored; source-tree digest still covers full context).
+  python3 - "$root" <<'PY'
+import hashlib
+import os
+import pathlib
+import stat
+import sys
+
+root = pathlib.Path(sys.argv[1])
+digest = hashlib.sha256()
+
+def add_file(relative: str, path: pathlib.Path) -> None:
+    metadata = path.lstat()
+    mode = stat.S_IMODE(metadata.st_mode)
+    if stat.S_ISREG(metadata.st_mode):
+        kind = "file"
+        payload = hashlib.sha256(path.read_bytes()).digest()
+    elif stat.S_ISLNK(metadata.st_mode):
+        kind = "symlink"
+        payload = os.readlink(path).encode("utf-8")
+    else:
+        raise SystemExit(f"unsupported runner digest entry: {relative}")
+    digest.update(f"{kind} {mode:o} {relative}\0".encode("utf-8"))
+    digest.update(payload)
+    digest.update(b"\0")
+
+def add_tree(relative_dir: str) -> None:
+    base = root / relative_dir
+    if not base.exists():
+        return
+    entries = []
+    for current, directories, files in os.walk(base, topdown=True, followlinks=False):
+        current_path = pathlib.Path(current)
+        directories[:] = sorted(
+            name for name in directories if not (current_path / name).is_symlink()
+        )
+        for name in directories:
+            path = current_path / name
+            relative = path.relative_to(root).as_posix()
+            entries.append((relative, path, "dir"))
+        for name in files:
+            path = current_path / name
+            relative = path.relative_to(root).as_posix()
+            entries.append((relative, path, "file"))
+    for relative, path, kind in sorted(entries):
+        if kind == "dir":
+            metadata = path.lstat()
+            mode = stat.S_IMODE(metadata.st_mode)
+            digest.update(f"dir {mode:o} {relative}\0".encode("utf-8"))
+            digest.update(b"\0")
+        else:
+            add_file(relative, path)
+
+for relative in (".dockerignore", "Dockerfile", "Cargo.toml", "Cargo.lock"):
+    path = root / relative
+    if not path.exists():
+        raise SystemExit(f"runner digest input missing: {relative}")
+    add_file(relative, path)
+
+add_tree(".cargo")
+
+crates_root = root / "crates"
+if not crates_root.is_dir():
+    raise SystemExit("runner digest input missing: crates")
+for crate_dir in sorted(path for path in crates_root.iterdir() if path.is_dir()):
+    cargo = crate_dir / "Cargo.toml"
+    if cargo.is_file():
+        add_file(cargo.relative_to(root).as_posix(), cargo)
+    src = crate_dir / "src"
+    if src.exists():
+        add_tree(src.relative_to(root).as_posix())
+
+print(digest.hexdigest())
+PY
 }
+
 
 case ${1:-} in
   --print-source-tree-digest) docker_context_digest; exit ;;

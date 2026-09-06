@@ -203,19 +203,29 @@ runtime change fails closed with an explicit `deploy-full` instruction. An old
 image without the runner digest therefore requires one full rollout before
 service-only deployment is available.
 
-The build stamps the commit, visibly dirty Git version, and a source-tree digest
-of the exact Docker build context into the service image and its local tag.
-The context digest applies `.dockerignore`, includes the Dockerfile and ignore
-file themselves, and includes tracked or untracked configuration and toolchain
-inputs that Docker can send. Deployment verifies those labels, resolves the
+The build stamps the commit, visibly dirty Git version, a source-tree digest
+of the exact Docker build context, and a narrower runner-build digest into
+image labels and local tags. The context digest applies `.dockerignore`,
+includes the Dockerfile and ignore file themselves, and includes tracked or
+untracked configuration and toolchain inputs that Docker can send. The
+runner-build digest covers only runner-affecting inputs: Dockerfile (including
+yt-dlp/chrome pins and runner package stages), `.dockerignore`, Cargo
+workspace/lock/`.cargo`, and every crate `Cargo.toml` plus `src/` (the shared
+`media` binary). Crate tests, `deny.toml`, `.env.example`, and similar noise do
+**not** invalidate the runner digest, so service-side edits that leave those
+runner inputs unchanged can use `deploy-local-service` again. Because one
+binary feeds both images, changes under `crates/*/src` (including media-api and
+media-storage) still change the runner digest and require full. Deployment verifies those labels, resolves the
 built tag to an immutable image ID, persists that ID for local deployments, and
 later checks the running service. Before
 synchronizing Compose, it atomically checkpoints the current image references,
 immutable image IDs and digest labels together with the deployed MCP schema
 artifact, OCI revisions, exact Compose, and applied database migration, then runs
-migrations, and recreates only `media-service`. It refuses to run while a job is
+migrations, and recreates only `media-service`. Hermes/notifier consumers are
+force-recreated only when the CLI sha, MCP schema, or mounted Hermes skill/plugin
+inputs changed; otherwise pull×4 and recreate×4 are skipped. It refuses to run while a job is
 active. Immediately before mutation it fences idleness again, stops the watcher
-and runner, and keeps them quiesced through success or recovery. It does not
+and runner (and download `gluetun-watcher`), and keeps them quiesced through success or recovery. It does not
 build or recreate `download-runner`; bounded resume must retain the same runner
 and watcher container IDs and prove the existing runner can reach the new
 service. PostgreSQL, qBittorrent, and both VPN containers remain untouched. Use
@@ -279,7 +289,11 @@ deployment lock for its complete operation.
 8. Recreate `media-service` and wait for health.
 9. Recreate `gluetun-rezka` from the candidate Compose and wait for its health
    check before creating the stopped `download-runner` and
-   `gluetun-rezka-watcher` containers. Never run Compose `down`, remove the
+   `gluetun-rezka-watcher` containers. When the gluetun-rezka image/env/secrets
+   contract is unchanged, skip `--force-recreate` and keep the existing
+   container ID. Quiescence also stops download-stack `gluetun-watcher` for the
+   mutation window so a `gluetun-rezka` start cannot prefix-match and
+   force-recreate qBittorrent. Never run Compose `down`, remove the
    encrypted session volume, or recreate PostgreSQL, the main Gluetun, or
    qBittorrent.
 10. Resume the new runner and watcher only after the dedicated VPN is healthy.
