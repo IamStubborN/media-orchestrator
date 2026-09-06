@@ -1752,17 +1752,14 @@ impl SearchProvider for ConcreteSearchProvider {
                     .show_identity(source_id)
                     .await
                     .map_err(|_| SearchError::ProviderUnavailable)?;
+                // External-id resolution (tvdb/imdb) is authoritative for tvmaze↔tmdb.
+                // Do not require TVmaze English titles to equal TMDB localized /
+                // original titles when MEDIA_TMDB_LANGUAGE is non-English (e.g. ru).
                 let validates_candidate = |item: &media_contract::TrendingItemDto| {
                     selected_matches_tmdb(
                         &identity.aliases,
                         identity.year,
                         identity.later_season,
-                        &item.title,
-                        item.original_title.as_deref(),
-                        item.year,
-                    ) && titles_and_year_match(
-                        &show.title,
-                        show.year,
                         &item.title,
                         item.original_title.as_deref(),
                         item.year,
@@ -1945,21 +1942,6 @@ fn selected_matches_tmdb(
                     canonical_title_key(selected) == canonical_title_key(original)
                 })
         })
-}
-
-fn titles_and_year_match(
-    source_title: &str,
-    source_year: Option<u16>,
-    tmdb_title: &str,
-    tmdb_original_title: Option<&str>,
-    tmdb_year: Option<u16>,
-) -> bool {
-    source_year.is_some()
-        && source_year == tmdb_year
-        && (canonical_title_key(source_title) == canonical_title_key(tmdb_title)
-            || tmdb_original_title.is_some_and(|title| {
-                canonical_title_key(source_title) == canonical_title_key(title)
-            }))
 }
 
 fn union_availability(

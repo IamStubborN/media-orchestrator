@@ -2612,6 +2612,79 @@ async fn concrete_tmdb_auto_binding_accepts_tv4_later_release_year() {
 }
 
 #[tokio::test]
+async fn concrete_tvmaze_external_id_accepts_localized_tmdb_titles() {
+    // Regression: MEDIA_TMDB_LANGUAGE=ru returns Russian/Japanese TMDB names while
+    // TVmaze stays English. External id link must still verify (Slime / 82684).
+    let server = MockServer::start().await;
+    Mock::given(path("/shows/2994"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": 2994,
+            "name": "That Time I Got Reincarnated as a Slime",
+            "premiered": "2018-10-02",
+            "externals": {"thetvdb": 351287, "imdb": "tt9054448"}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(path("/3/find/351287"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "tv_results": [{
+                "id": 82684,
+                "name": "О моём перерождении в слизь",
+                "original_name": "転生したらスライムだった件",
+                "first_air_date": "2018-10-02"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let tmdb_config = media_integrations::tmdb::TmdbConfig::new(
+        format!("{}/3/", server.uri()).parse().unwrap(),
+        SecretString::from("test-key"),
+        "ru-RU",
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let tvmaze_config = media_integrations::tvmaze::TvmazeConfig::new(
+        format!("{}/", server.uri()).parse().unwrap(),
+        Duration::from_secs(2),
+        "media-test".to_owned(),
+        0,
+    )
+    .unwrap();
+    let provider = ConcreteSearchProvider::new(None, None)
+        .with_tmdb(Some(Arc::new(
+            media_integrations::tmdb::TmdbClient::new(tmdb_config).unwrap(),
+        )))
+        .with_tvmaze(Arc::new(
+            media_integrations::tvmaze::TvmazeClient::new(tvmaze_config).unwrap(),
+        ));
+
+    let selected = SearchResultDto::Rezka {
+        result_id: "slime-rezka".to_owned(),
+        title: "О моём перерождении в слизь / That Time I Got Reincarnated as a Slime".to_owned(),
+        original_title: Some("転生したらスライムだった件".to_owned()),
+        year: Some(2018),
+        media_kind: MediaKindDto::Series,
+        thumbnail_url: None,
+        translations: Vec::new(),
+        availability: None,
+    };
+    let verified = provider
+        .verify_series_identity(
+            &selected,
+            Some(SeriesGroupIdentityDto {
+                source: SeriesGroupSourceDto::Tvmaze,
+                source_id: 2994,
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(verified.tmdb_id, 82684);
+    assert_eq!(verified.canonical_title, "О моём перерождении в слизь");
+}
+
+#[tokio::test]
 async fn concrete_tvmaze_identity_uses_imdb_only_after_tvdb_candidate_fails_validation() {
     let server = MockServer::start().await;
     Mock::given(path("/shows/88"))
