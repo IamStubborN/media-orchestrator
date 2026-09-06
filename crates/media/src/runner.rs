@@ -2211,9 +2211,18 @@ fn is_video_path(path: &std::path::Path) -> bool {
         })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn parse_episode_coordinates(path: &std::path::Path) -> Option<(u32, u32)> {
-    let name = path.file_name()?.to_str()?.to_ascii_uppercase();
-    let bytes = name.as_bytes();
+    parse_episode_coordinates_with_season_hint(path, None)
+}
+
+fn parse_episode_coordinates_with_season_hint(
+    path: &std::path::Path,
+    season_hint: Option<u32>,
+) -> Option<(u32, u32)> {
+    let name = path.file_name()?.to_str()?;
+    let upper = name.to_ascii_uppercase();
+    let bytes = upper.as_bytes();
     for start in 0..bytes.len() {
         if bytes[start] != b'S' {
             continue;
@@ -2242,17 +2251,95 @@ fn parse_episode_coordinates(path: &std::path::Path) -> Option<(u32, u32)> {
         if episode_len == 0 {
             continue;
         }
-        let Ok(season) = name[season_start..season_start + season_len].parse::<u32>() else {
+        let Ok(season) = upper[season_start..season_start + season_len].parse::<u32>() else {
             continue;
         };
-        let Ok(episode) = name[episode_start..episode_start + episode_len].parse::<u32>() else {
+        let Ok(episode) = upper[episode_start..episode_start + episode_len].parse::<u32>() else {
             continue;
         };
         if episode > 0 {
             return Some((season, episode));
         }
     }
+    // NxNN / NxN (e.g. 3x01, 3x1) — require a digit before x and after.
+    for start in 0..bytes.len() {
+        if bytes[start] != b'X' {
+            continue;
+        }
+        if start == 0 || !bytes[start - 1].is_ascii_digit() {
+            continue;
+        }
+        let mut season_start = start - 1;
+        while season_start > 0 && bytes[season_start - 1].is_ascii_digit() {
+            season_start -= 1;
+        }
+        let season_len = start - season_start;
+        if !(1..=3).contains(&season_len) {
+            continue;
+        }
+        let mut cursor = start + 1;
+        let episode_start = cursor;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_digit() && cursor - episode_start < 3 {
+            cursor += 1;
+        }
+        let episode_len = cursor - episode_start;
+        if episode_len == 0 {
+            continue;
+        }
+        // Reject mid-token hits like "H264X01" by requiring a boundary before season.
+        if season_start > 0 && bytes[season_start - 1].is_ascii_alphanumeric() {
+            continue;
+        }
+        let Ok(season) = upper[season_start..season_start + season_len].parse::<u32>() else {
+            continue;
+        };
+        let Ok(episode) = upper[episode_start..episode_start + episode_len].parse::<u32>() else {
+            continue;
+        };
+        if season > 0 && episode > 0 {
+            return Some((season, episode));
+        }
+    }
+    // Russian "Серия 01" / "СЕРИЯ 1" — season from parent folder or request hint.
+    if let Some(episode) = parse_russian_series_episode(name) {
+        let season = season_hint
+            .or_else(|| season_from_parent_directory(path))
+            .filter(|season| *season > 0)?;
+        return Some((season, episode));
+    }
     None
+}
+
+fn parse_russian_series_episode(name: &str) -> Option<u32> {
+    let upper = name.to_uppercase();
+    let marker = "СЕРИЯ";
+    let idx = upper.find(marker)?;
+    let after = upper[idx + marker.len()..].trim_start();
+    let digits: String = after
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .take(3)
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    let episode: u32 = digits.parse().ok()?;
+    (episode > 0).then_some(episode)
+}
+
+fn season_from_parent_directory(path: &std::path::Path) -> Option<u32> {
+    let parent_name = path.parent()?.file_name()?.to_str()?.trim();
+    if parent_name.eq_ignore_ascii_case("Specials") {
+        return Some(0);
+    }
+    let rest = parent_name
+        .strip_prefix("Season ")
+        .or_else(|| parent_name.strip_prefix("season "))
+        .or_else(|| parent_name.strip_prefix("Сезон "))
+        .or_else(|| parent_name.strip_prefix("сезон "))?;
+    let digits: String = rest.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+    let season: u32 = digits.parse().ok()?;
+    (season > 0 || rest == "0").then_some(season)
 }
 
 fn matching_episode_videos(
@@ -2262,7 +2349,8 @@ fn matching_episode_videos(
     videos
         .into_iter()
         .filter_map(|path| {
-            let coordinates = parse_episode_coordinates(&path)?;
+            let coordinates =
+                parse_episode_coordinates_with_season_hint(&path, Some(expected_season))?;
             (coordinates.0 == expected_season).then_some((path, coordinates))
         })
         .collect()
@@ -2777,7 +2865,7 @@ mod tests {
         ExecutionOutcome, ProgressCheckpointGate, artifact_checkpoint, canonical_movie_name,
         combine_episode_outcome, ensure_plex_match, expected_source_duration_seconds,
         highest_standard_variant, is_season_directory_name, matching_episode_videos,
-        parse_episode_coordinates, plex_match_matches, plex_match_show_directory,
+        parse_episode_coordinates, parse_episode_coordinates_with_season_hint, plex_match_matches, plex_match_show_directory,
         resolve_existing_series_path_title, rezka_audio_language, rezka_final_video_path,
         rezka_physical_title, safe_name, tmdb_display_title_from_path, torrent_series_work_items,
     };
@@ -3159,6 +3247,32 @@ mod tests {
         assert_eq!(
             parse_episode_coordinates(Path::new("Trailer.SXE.Show.S02E05.mkv")),
             Some((2, 5))
+        );
+        assert_eq!(
+            parse_episode_coordinates(Path::new("Show.Name.3x01.1080p.mkv")),
+            Some((3, 1))
+        );
+        assert_eq!(
+            parse_episode_coordinates(Path::new("Show.Name.3x1.mkv")),
+            Some((3, 1))
+        );
+        assert_eq!(
+            parse_episode_coordinates_with_season_hint(
+                Path::new("Show/Season 03/Серия 01.mkv"),
+                None,
+            ),
+            Some((3, 1))
+        );
+        assert_eq!(
+            parse_episode_coordinates_with_season_hint(
+                Path::new("Серия 01.mkv"),
+                Some(2),
+            ),
+            Some((2, 1))
+        );
+        assert_eq!(
+            parse_episode_coordinates(Path::new("Серия 01.mkv")),
+            None
         );
     }
 
