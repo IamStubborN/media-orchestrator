@@ -943,7 +943,7 @@ fn missing_episode_remains_eligible_after_a_later_episode_is_known() {
                 scope: TrackingScope::Personal,
                 series_ongoing: true,
                 poster_url: None,
-                release_identity: None,
+                release_identity: Some(ReleaseIdentity::new(ReleaseSource::Tvmaze, 600).unwrap()),
                 download: None,
             },
         )
@@ -998,7 +998,7 @@ fn scheduler_does_not_backfill_seasons_older_than_the_tracked_season() {
                 scope: TrackingScope::Personal,
                 series_ongoing: true,
                 poster_url: None,
-                release_identity: None,
+                release_identity: Some(ReleaseIdentity::new(ReleaseSource::Tvmaze, 601).unwrap()),
                 download: None,
             },
         )
@@ -1061,7 +1061,7 @@ fn scheduler_ignores_historical_gaps_but_rechecks_pending_future_episode() {
                 scope: TrackingScope::Personal,
                 series_ongoing: true,
                 poster_url: None,
-                release_identity: None,
+                release_identity: Some(ReleaseIdentity::new(ReleaseSource::Tvmaze, 602).unwrap()),
                 download: None,
             },
         )
@@ -1260,7 +1260,7 @@ impl TrackedEpisodeDownloadPort for BlockedEnqueuer {
         &self,
         _: &TrackingSubscription,
         episode: EpisodeSnapshot,
-    ) -> Result<(), PortError> {
+    ) -> Result<(), &'static str> {
         self.reached.wait();
         self.resume.wait();
         self.episodes.lock().unwrap().push(episode);
@@ -1347,8 +1347,8 @@ impl TrackedEpisodeDownloadPort for FailingEnqueuer {
         &self,
         _: &TrackingSubscription,
         _: EpisodeSnapshot,
-    ) -> Result<(), PortError> {
-        Err(PortError::Infrastructure)
+    ) -> Result<(), &'static str> {
+        Err(media_core::ENQUEUE_FAILURE_CODE)
     }
 }
 
@@ -1421,7 +1421,7 @@ impl TrackedEpisodeDownloadPort for Enqueuer {
         &self,
         _: &TrackingSubscription,
         episode: EpisodeSnapshot,
-    ) -> Result<(), PortError> {
+    ) -> Result<(), &'static str> {
         self.episodes.lock().unwrap().push(episode);
         Ok(())
     }

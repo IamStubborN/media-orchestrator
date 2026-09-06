@@ -18,6 +18,10 @@ const DOWNLOAD_TRACKING_INTERVAL: time::Duration = time::Duration::minutes(30);
 const TRACKING_CLAIM_LEASE: time::Duration = time::Duration::minutes(15);
 
 pub const ENQUEUE_FAILURE_CODE: &str = "enqueue_failed";
+pub const ENQUEUE_SEARCH_FAILURE_CODE: &str = "enqueue_search_failed";
+pub const ENQUEUE_VERIFY_FAILURE_CODE: &str = "enqueue_verify_failed";
+pub const ENQUEUE_PERSIST_FAILURE_CODE: &str = "enqueue_persist_failed";
+pub const ENQUEUE_JOB_FAILURE_CODE: &str = "enqueue_job_failed";
 pub const SOURCE_PROBE_FAILURE_CODE: &str = "source_probe_failed";
 pub const SOURCE_UNAVAILABLE_CODE: &str = "source_unavailable";
 pub const RELEASE_INFRASTRUCTURE_FAILURE_CODE: &str = "release_infrastructure";
@@ -498,6 +502,8 @@ pub enum TrackingValidationError {
     UnsupportedDownloadProvider,
     #[error("only ongoing series can be tracked")]
     SeriesNotOngoing,
+    #[error("release-calendar tracking requires a positive TVmaze release_identity")]
+    MissingReleaseIdentity,
 }
 
 impl NewTrackingSubscription {
@@ -514,6 +520,14 @@ impl NewTrackingSubscription {
         validate_poster_url(command.poster_url.as_deref())?;
         if !command.series_ongoing {
             return Err(TrackingValidationError::SeriesNotOngoing);
+        }
+        if command.translation == "release-calendar"
+            && command
+                .release_identity
+                .as_ref()
+                .is_none_or(|identity| identity.source_id() == 0)
+        {
+            return Err(TrackingValidationError::MissingReleaseIdentity);
         }
         validate_download(
             command.provider,
@@ -895,7 +909,11 @@ impl TrackingSubscription {
                 }
             }
             TrackingCheckStatus::SourceError => Some(match self.check_last_error.as_deref() {
-                Some(ENQUEUE_FAILURE_CODE) => {
+                Some(ENQUEUE_FAILURE_CODE)
+                | Some(ENQUEUE_SEARCH_FAILURE_CODE)
+                | Some(ENQUEUE_VERIFY_FAILURE_CODE)
+                | Some(ENQUEUE_PERSIST_FAILURE_CODE)
+                | Some(ENQUEUE_JOB_FAILURE_CODE) => {
                     "auto-download enqueue failed; backing off retries".to_owned()
                 }
                 Some(SOURCE_PROBE_FAILURE_CODE) => {
@@ -1168,11 +1186,13 @@ pub trait EpisodeAvailabilityPort: Send + Sync {
 
 #[async_trait::async_trait]
 pub trait TrackedEpisodeDownloadPort: Send + Sync {
+    /// Returns Ok(()) on success, or Err with a stable enqueue failure code
+    /// (`enqueue_search_failed`, `enqueue_verify_failed`, …).
     async fn enqueue_episode(
         &self,
         tracking: &TrackingSubscription,
         episode: EpisodeSnapshot,
-    ) -> Result<(), PortError>;
+    ) -> Result<(), &'static str>;
 }
 
 #[async_trait::async_trait]
@@ -1506,7 +1526,7 @@ impl TrackingRuntime {
                         failure_code.get_or_insert(ENQUEUE_FAILURE_CODE);
                         continue;
                     }
-                    if downloads.enqueue_episode(&tracking, episode).await.is_err() {
+                    if let Err(code) = downloads.enqueue_episode(&tracking, episode).await {
                         let _ = self
                             .store
                             .release_episode_download(tracking.id(), claim_token, episode)
@@ -1514,7 +1534,7 @@ impl TrackingRuntime {
                         result.failed += 1;
                         result.source_failures += 1;
                         source_error = true;
-                        failure_code = Some(ENQUEUE_FAILURE_CODE);
+                        failure_code = Some(code);
                         continue;
                     }
                     result.queued += 1;
@@ -1601,6 +1621,8 @@ pub enum TrackingApplicationError {
     NotFound,
     #[error("operation conflicts with current state")]
     Conflict,
+    #[error("tracking subscription already exists")]
+    AlreadyExists(TrackingId),
     #[error("infrastructure operation failed")]
     Infrastructure,
 }
@@ -1624,12 +1646,25 @@ impl TrackingApplication {
         let owner = actor
             .require_user()
             .map_err(|_| TrackingApplicationError::Forbidden)?;
+        let release_identity = command.release_identity;
         let value = NewTrackingSubscription::new(TrackingId::new(), owner, command)
             .map_err(TrackingApplicationError::InvalidInput)?;
-        self.store
-            .add(operation, value)
-            .await
-            .map_err(map_port_error)
+        match self.store.add(operation, value).await {
+            Ok(created) => Ok(created),
+            Err(PortError::Conflict) => {
+                if let Some(identity) = release_identity {
+                    let listed = self.store.list_visible(owner).await.map_err(map_port_error)?;
+                    if let Some(existing) = listed.into_iter().find(|candidate| {
+                        candidate.download().is_none()
+                            && candidate.release_identity() == Some(identity)
+                    }) {
+                        return Ok(existing);
+                    }
+                }
+                Err(TrackingApplicationError::Conflict)
+            }
+            Err(error) => Err(map_port_error(error)),
+        }
     }
 
     pub async fn list(

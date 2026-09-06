@@ -264,3 +264,23 @@ fn create_with_same_tvmaze_id_returns_existing_subscription() {
         assert_eq!(app.list(&actor_primary()).await.unwrap().len(), 1);
     });
 }
+
+
+#[test]
+fn release_calendar_create_requires_positive_tvmaze_identity() {
+    let mut missing = command(TrackingScope::Personal);
+    missing.translation = "release-calendar".to_owned();
+    missing.release_identity = None;
+    assert_eq!(
+        NewTrackingSubscription::new(TrackingId::new(), PRIMARY_USER_ID, missing),
+        Err(TrackingValidationError::MissingReleaseIdentity)
+    );
+
+    let mut zero = command(TrackingScope::Personal);
+    zero.translation = "release-calendar".to_owned();
+    zero.release_identity = ReleaseIdentity::new(ReleaseSource::Tvmaze, 0).ok();
+    assert_eq!(
+        NewTrackingSubscription::new(TrackingId::new(), PRIMARY_USER_ID, zero),
+        Err(TrackingValidationError::MissingReleaseIdentity)
+    );
+}

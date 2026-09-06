@@ -70,7 +70,7 @@ pub use port::{
 };
 pub use release::*;
 pub use tracking::{
-    AnonymousSessionPort, ENQUEUE_FAILURE_CODE, EpisodeAvailability, EpisodeAvailabilityPort,
+    AnonymousSessionPort, ENQUEUE_FAILURE_CODE, ENQUEUE_SEARCH_FAILURE_CODE, ENQUEUE_VERIFY_FAILURE_CODE, ENQUEUE_PERSIST_FAILURE_CODE, ENQUEUE_JOB_FAILURE_CODE, EpisodeAvailability, EpisodeAvailabilityPort,
     EpisodeAvailabilityRequest, EpisodeDiscovery, EpisodeDiscoveryPort, EpisodeSnapshot,
     EpisodeSnapshotError, FutureEpisodeRecord, NewTrackingCommand, NewTrackingSubscription,
     ProviderAvailability, RELEASE_CONFLICT_FAILURE_CODE, RELEASE_INFRASTRUCTURE_FAILURE_CODE,
