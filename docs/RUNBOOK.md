@@ -158,7 +158,7 @@ mise run extract-linux-cli
 python3 scripts/export-release-contract.py \
   --service-image 'registry.example/media-service@sha256:<64-lowercase-hex>' \
   --runner-image 'registry.example/media-runner@sha256:<64-lowercase-hex>' \
-  --migration-version m20260810_000040_tracking_claims \
+  --migration-version m20260907_000043_tracking_release_identity_unique \
   --cli dist/media-linux-amd64 \
   --cli-checksum dist/media-linux-amd64.sha256 \
   --output /private/path/media-release
@@ -352,6 +352,12 @@ the episode. Calendar-only candidates stay pending until a provider confirms
 them. Automatic-download subscriptions run every 30 minutes. `tracking list
 --json` reports the last check result and the next scheduled check.
 Never infer or switch the source or translation automatically.
+
+Tracking intentionally does **not** backfill older seasons or historical gaps
+below the current known-through baseline. New discoveries only advance from the
+tracked season forward (and recheck pending future episodes). Use
+`tracking set-baseline` when the known-through point must move; there is no
+automatic historical catch-up flag.
 
 ## Stuck Runner Recovery
 

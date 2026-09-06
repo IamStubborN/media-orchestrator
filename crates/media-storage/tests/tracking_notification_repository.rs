@@ -80,7 +80,7 @@ fn new_tracking_with_poster(id: TrackingId) -> NewTrackingSubscription {
             scope: TrackingScope::Personal,
             series_ongoing: true,
             poster_url: Some("https://image.tmdb.org/t/p/w780/show.jpg".to_owned()),
-            release_identity: None,
+            release_identity: Some(ReleaseIdentity::new(ReleaseSource::Tvmaze, 88).unwrap()),
             download: None,
         },
     )
