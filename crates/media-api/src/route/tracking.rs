@@ -249,6 +249,7 @@ fn application_error(error: TrackingApplicationError, request_id: &RequestId) ->
             ApiError::invalid_request(request_id, "tracking request is invalid").into_response()
         }
         TrackingApplicationError::NotFound => ApiError::not_found(request_id).into_response(),
+        TrackingApplicationError::AlreadyExists(_) => ApiError::conflict(request_id).into_response(),
         TrackingApplicationError::Conflict => ApiError::conflict(request_id).into_response(),
         TrackingApplicationError::Infrastructure => ApiError::internal(request_id).into_response(),
     }

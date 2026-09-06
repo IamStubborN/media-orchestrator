@@ -2276,12 +2276,30 @@ fn tracking_error(error: TrackingApplicationError) -> ErrorData {
         TrackingApplicationError::Forbidden => {
             ErrorData::invalid_request("operation is forbidden", None)
         }
+        TrackingApplicationError::InvalidInput(inner)
+            if matches!(
+                inner,
+                media_core::TrackingValidationError::MissingReleaseIdentity
+            ) =>
+        {
+            ErrorData::invalid_params(
+                "release-calendar tracking requires a positive TVmaze release_identity",
+                None,
+            )
+        }
         TrackingApplicationError::InvalidInput(_) => {
             ErrorData::invalid_params("tracking request is invalid", None)
         }
         TrackingApplicationError::NotFound => {
             ErrorData::invalid_params("tracking subscription was not found", None)
         }
+        TrackingApplicationError::AlreadyExists(id) => ErrorData::invalid_request(
+            "tracking subscription already exists",
+            Some(serde_json::json!({
+                "code": "already_exists",
+                "tracking_id": id.to_string(),
+            })),
+        ),
         TrackingApplicationError::Conflict => {
             ErrorData::invalid_request("operation conflicts with current state", None)
         }
