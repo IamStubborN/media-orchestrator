@@ -210,10 +210,8 @@ impl JobStore for SeaOrmJobStore {
             }
             let current = row.try_get::<String>("", "state")?;
             let target = match current.as_str() {
-                "queued" => "cancelled",
-                "leased" | "running" | "blocked_storage" | "publishing" | "plex_pending"
-                => "cancel_requested",
-                "needs_action" => "cancelled",
+                "queued" | "blocked_storage" | "needs_action" => "cancelled",
+                "leased" | "running" | "publishing" | "plex_pending" => "cancel_requested",
                 "cancel_requested" | "cancelled" => current.as_str(),
                 "completed" | "partial" | "failed" => {
                     return Err(sea_orm::DbErr::Custom(

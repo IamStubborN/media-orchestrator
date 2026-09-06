@@ -349,7 +349,7 @@ impl JobState {
                         | Self::Failed
                 )
                 | (Self::CancelRequested, Self::Cancelled)
-                | (Self::BlockedStorage, Self::Queued | Self::CancelRequested)
+                | (Self::BlockedStorage, Self::Queued | Self::CancelRequested | Self::Cancelled)
                 | (
                     Self::Publishing,
                     Self::Queued | Self::CancelRequested | Self::PlexPending | Self::Failed
@@ -404,7 +404,7 @@ mod tests {
         JobState::Cancelled,
     ];
 
-    const ALLOWED: [(JobState, JobState); 29] = [
+    const ALLOWED: [(JobState, JobState); 30] = [
         (JobState::Queued, JobState::Leased),
         (JobState::Queued, JobState::Cancelled),
         (JobState::Leased, JobState::Running),
@@ -419,6 +419,7 @@ mod tests {
         (JobState::CancelRequested, JobState::Cancelled),
         (JobState::BlockedStorage, JobState::Queued),
         (JobState::BlockedStorage, JobState::CancelRequested),
+        (JobState::BlockedStorage, JobState::Cancelled),
         (JobState::Publishing, JobState::PlexPending),
         (JobState::Publishing, JobState::Queued),
         (JobState::Publishing, JobState::CancelRequested),
