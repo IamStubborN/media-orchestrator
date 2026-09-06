@@ -2685,7 +2685,78 @@ async fn concrete_tvmaze_external_id_accepts_localized_tmdb_titles() {
 }
 
 #[tokio::test]
-async fn concrete_tvmaze_identity_uses_imdb_only_after_tvdb_candidate_fails_validation() {
+async fn concrete_tvmaze_unique_external_id_accepts_without_title_year_filter() {
+    // Unique tvdb→TMDB link is authoritative even when Rezka title/year diverge.
+    let server = MockServer::start().await;
+    Mock::given(path("/shows/42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": 42,
+            "name": "English Title",
+            "premiered": "2020-01-01",
+            "externals": {"thetvdb": 999001, "imdb": "tt42"}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(path("/3/find/999001"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "tv_results": [{
+                "id": 777,
+                "name": "Совершенно другое имя",
+                "original_name": "Totally Different Name",
+                "first_air_date": "2019-05-01"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let tmdb_config = media_integrations::tmdb::TmdbConfig::new(
+        format!("{}/3/", server.uri()).parse().unwrap(),
+        SecretString::from("test-key"),
+        "ru-RU",
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let tvmaze_config = media_integrations::tvmaze::TvmazeConfig::new(
+        format!("{}/", server.uri()).parse().unwrap(),
+        Duration::from_secs(2),
+        "media-test".to_owned(),
+        0,
+    )
+    .unwrap();
+    let provider = ConcreteSearchProvider::new(None, None)
+        .with_tmdb(Some(Arc::new(
+            media_integrations::tmdb::TmdbClient::new(tmdb_config).unwrap(),
+        )))
+        .with_tvmaze(Arc::new(
+            media_integrations::tvmaze::TvmazeClient::new(tvmaze_config).unwrap(),
+        ));
+
+    let selected = SearchResultDto::Rezka {
+        result_id: "divergent".to_owned(),
+        title: "Rezka Local Nickname".to_owned(),
+        original_title: Some("Nickname".to_owned()),
+        year: Some(2021),
+        media_kind: MediaKindDto::Series,
+        thumbnail_url: None,
+        translations: Vec::new(),
+        availability: None,
+    };
+    let verified = provider
+        .verify_series_identity(
+            &selected,
+            Some(SeriesGroupIdentityDto {
+                source: SeriesGroupSourceDto::Tvmaze,
+                source_id: 42,
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(verified.tmdb_id, 777);
+    assert_eq!(verified.canonical_title, "Совершенно другое имя");
+}
+
+#[tokio::test]
+async fn concrete_tvmaze_identity_uses_imdb_only_after_tvdb_candidate_missing() {
     let server = MockServer::start().await;
     Mock::given(path("/shows/88"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -2698,11 +2769,7 @@ async fn concrete_tvmaze_identity_uses_imdb_only_after_tvdb_candidate_fails_vali
         .await;
     Mock::given(path("/3/find/123"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "tv_results": [{
-                "id": 111,
-                "name": "Unrelated Show",
-                "first_air_date": "2024-01-01"
-            }]
+            "tv_results": []
         })))
         .mount(&server)
         .await;

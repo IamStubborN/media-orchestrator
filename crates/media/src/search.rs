@@ -215,6 +215,29 @@ pub trait SearchProvider: Send + Sync {
             Ok(None)
         }
     }
+
+    /// Resolve series_group (TMDB or TVmaze→TMDB via external ids) without a
+    /// Rezka selection. Used by Prowlarr search/select and similar paths.
+    async fn resolve_series_group_tmdb(
+        &self,
+        series_group: Option<media_contract::SeriesGroupIdentityDto>,
+    ) -> Result<Option<VerifiedSeriesIdentity>, SearchError> {
+        match series_group {
+            Some(media_contract::SeriesGroupIdentityDto {
+                source: media_contract::SeriesGroupSourceDto::Tvmaze,
+                ..
+            }) => Err(SearchError::ProviderUnavailable),
+            Some(media_contract::SeriesGroupIdentityDto {
+                source: media_contract::SeriesGroupSourceDto::Tmdb,
+                source_id,
+            }) if source_id > 0 => Ok(Some(VerifiedSeriesIdentity {
+                tmdb_id: source_id,
+                canonical_title: String::new(),
+                legacy_path_titles: vec![format!("rezka-series-tmdb-{source_id}")],
+            })),
+            _ => Ok(None),
+        }
+    }
 }
 
 pub struct ProviderEpisodeDiscovery {
@@ -814,10 +837,25 @@ impl TrackedEpisodeDownloadPort for TrackedEpisodeDownloader {
         &self,
         tracking: &TrackingSubscription,
         episode: EpisodeSnapshot,
-    ) -> Result<(), PortError> {
-        let download = tracking.download().ok_or(PortError::Conflict)?;
+    ) -> Result<(), &'static str> {
+        let stage = |name: &'static str, code: &'static str| {
+            let sxxexx = format!("S{:02}E{:02}", episode.season(), episode.episode());
+            tracing::warn!(
+                tracking_id = %tracking.id(),
+                season = episode.season(),
+                episode = episode.episode(),
+                sxxexx = %sxxexx,
+                stage = name,
+                error_code = code,
+                "tracked episode enqueue failed"
+            );
+            code
+        };
+        let download = tracking.download().ok_or_else(|| {
+            stage("persist", media_core::ENQUEUE_PERSIST_FAILURE_CODE)
+        })?;
         if episode.season() != download.season() {
-            return Err(PortError::Conflict);
+            return Err(stage("persist", media_core::ENQUEUE_PERSIST_FAILURE_CODE));
         }
         let media_ref = download.provider_media_ref().to_owned();
         let cached = self
@@ -852,7 +890,7 @@ impl TrackedEpisodeDownloadPort for TrackedEpisodeDownloader {
                     None,
                 )
                 .await
-                .map_err(|_| PortError::Infrastructure)?;
+                .map_err(|_| stage("search", media_core::ENQUEUE_SEARCH_FAILURE_CODE))?;
             page.results
                 .into_iter()
                 .find(|result| {
@@ -862,7 +900,7 @@ impl TrackedEpisodeDownloadPort for TrackedEpisodeDownloader {
                             if media_ref == title_id.to_string()
                     )
                 })
-                .ok_or(PortError::Infrastructure)?
+                .ok_or_else(|| stage("search", media_core::ENQUEUE_SEARCH_FAILURE_CODE))?
         };
         let request = SelectResultRequest {
             session_id: "tracking".to_owned(),
@@ -887,7 +925,7 @@ impl TrackedEpisodeDownloadPort for TrackedEpisodeDownloader {
             Ok(verified) => verified,
             Err(_) => {
                 self.titles.lock().unwrap().remove(&media_ref);
-                return Err(PortError::Infrastructure);
+                return Err(stage("verify", media_core::ENQUEUE_VERIFY_FAILURE_CODE));
             }
         };
         self.titles.lock().unwrap().insert(
@@ -917,11 +955,11 @@ impl TrackedEpisodeDownloadPort for TrackedEpisodeDownloader {
                 .as_ref()
                 .map_or(&[][..], |identity| identity.legacy_path_titles.as_slice()),
         )
-        .map_err(|_| PortError::Infrastructure)?;
+        .map_err(|_| stage("persist", media_core::ENQUEUE_PERSIST_FAILURE_CODE))?;
         if let Some(identity) = self.identity.as_deref() {
             apply_persisted_episode_mappings(identity, &mut execution)
                 .await
-                .map_err(|_| PortError::Infrastructure)?;
+                .map_err(|_| stage("persist", media_core::ENQUEUE_PERSIST_FAILURE_CODE))?;
         }
         let result_ref = format!(
             "selection:tracking:{}:{}:{}",
@@ -932,7 +970,7 @@ impl TrackedEpisodeDownloadPort for TrackedEpisodeDownloader {
         self.persistence
             .insert_execution(result_ref.clone(), execution)
             .await
-            .map_err(|_| PortError::Infrastructure)?;
+            .map_err(|_| stage("persist", media_core::ENQUEUE_PERSIST_FAILURE_CODE))?;
         let operation: [u8; 32] = Sha256::digest(
             format!(
                 "tracking-download:v1:{}:{}:{}",
@@ -954,7 +992,7 @@ impl TrackedEpisodeDownloadPort for TrackedEpisodeDownloader {
                 },
             )
             .await
-            .map_err(|_| PortError::Infrastructure)?;
+            .map_err(|_| stage("job", media_core::ENQUEUE_JOB_FAILURE_CODE))?;
         Ok(())
     }
 }
@@ -1128,6 +1166,84 @@ impl ConcreteSearchProvider {
     pub fn with_lifecycle(mut self, lifecycle: Arc<dyn RunnerLifecycleStore>) -> Self {
         self.lifecycle = Some(lifecycle);
         self
+    }
+
+    /// Resolve a TVmaze show to a unique TMDB TV item via tvdb/imdb external ids.
+    /// Unique external-id hits are authoritative: do not re-filter by title/year.
+    /// Ambiguous (multiple) or missing links return Ok(None) / InvalidRequest paths
+    /// at the call site.
+    async fn resolve_tvmaze_to_tmdb(
+        &self,
+        source_id: u64,
+    ) -> Result<Option<media_contract::TrendingItemDto>, SearchError> {
+        let tmdb = self.tmdb.as_ref().ok_or(SearchError::ProviderUnavailable)?;
+        let tvmaze = self
+            .tvmaze
+            .as_ref()
+            .ok_or(SearchError::ProviderUnavailable)?;
+        let show = tvmaze
+            .show_identity(source_id)
+            .await
+            .map_err(|_| SearchError::ProviderUnavailable)?;
+        if let Some(tvdb_id) = show.tvdb_id {
+            let tvdb_candidate = tmdb
+                .find_tv_by_external_id(&tvdb_id.to_string(), "tvdb_id")
+                .await
+                .map_err(|_| SearchError::ProviderUnavailable)?;
+            if let Some(item) = tvdb_candidate {
+                return Ok(Some(item));
+            }
+        }
+        let Some(imdb_id) = show.imdb_id.as_deref() else {
+            return Ok(None);
+        };
+        tmdb.find_tv_by_external_id(imdb_id, "imdb_id")
+            .await
+            .map_err(|_| SearchError::ProviderUnavailable)
+    }
+
+    async fn resolve_series_group_tmdb_inner(
+        &self,
+        series_group: Option<media_contract::SeriesGroupIdentityDto>,
+    ) -> Result<Option<VerifiedSeriesIdentity>, SearchError> {
+        let Some(group) = series_group else {
+            return Ok(None);
+        };
+        match group {
+            media_contract::SeriesGroupIdentityDto {
+                source: media_contract::SeriesGroupSourceDto::Tmdb,
+                source_id,
+            } if source_id > 0 => {
+                let tmdb = self.tmdb.as_ref().ok_or(SearchError::ProviderUnavailable)?;
+                let details = tmdb
+                    .details(source_id, media_contract::TrendingMediaTypeDto::Tv)
+                    .await
+                    .map_err(|_| SearchError::ProviderUnavailable)?;
+                Ok(Some(VerifiedSeriesIdentity {
+                    tmdb_id: details.tmdb_id,
+                    canonical_title: details.title,
+                    legacy_path_titles: vec![format!("rezka-series-tmdb-{}", details.tmdb_id)],
+                }))
+            }
+            media_contract::SeriesGroupIdentityDto {
+                source: media_contract::SeriesGroupSourceDto::Tvmaze,
+                source_id,
+            } if source_id > 0 => {
+                let Some(item) = self.resolve_tvmaze_to_tmdb(source_id).await? else {
+                    return Err(SearchError::InvalidRequest);
+                };
+                Ok(Some(VerifiedSeriesIdentity {
+                    tmdb_id: item.tmdb_id,
+                    canonical_title: item.title.clone(),
+                    legacy_path_titles: vec![
+                        format!("tvmaze-{source_id}"),
+                        format!("rezka-series-tvmaze-{source_id}"),
+                        format!("rezka-series-tmdb-{}", item.tmdb_id),
+                    ],
+                }))
+            }
+            _ => Ok(None),
+        }
     }
 
     async fn current_session_ip(&self) -> String {
@@ -1558,7 +1674,17 @@ impl ConcreteSearchProvider {
                     SearchError::Provider
                 }
             })?;
-        let tmdb_match = if let Some(tmdb) = &self.tmdb {
+        let resolved_group = if request.media_kind == Some(MediaKindDto::Series) {
+            self.resolve_series_group_tmdb_inner(request.series_group)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        let tmdb_match = if resolved_group.is_some() {
+            None
+        } else if let Some(tmdb) = &self.tmdb {
             let media_type = match request.media_kind {
                 Some(MediaKindDto::Series) => media_contract::TrendingMediaTypeDto::Tv,
                 _ => media_contract::TrendingMediaTypeDto::Movie,
@@ -1572,7 +1698,10 @@ impl ConcreteSearchProvider {
             None
         };
         let thumbnail_url = tmdb_match.as_ref().and_then(|item| item.poster_url.clone());
-        let matched_tmdb_id = tmdb_match.as_ref().map(|item| item.tmdb_id);
+        let matched_tmdb_id = resolved_group
+            .as_ref()
+            .map(|identity| identity.tmdb_id)
+            .or_else(|| tmdb_match.as_ref().map(|item| item.tmdb_id));
         let provider_continuation = page
             .continuation
             .as_ref()
@@ -1744,55 +1873,10 @@ impl SearchProvider for ConcreteSearchProvider {
                 source: media_contract::SeriesGroupSourceDto::Tvmaze,
                 source_id,
             }) => {
-                let tvmaze = self
-                    .tvmaze
-                    .as_ref()
-                    .ok_or(SearchError::ProviderUnavailable)?;
-                let show = tvmaze
-                    .show_identity(source_id)
-                    .await
-                    .map_err(|_| SearchError::ProviderUnavailable)?;
-                // External-id resolution (tvdb/imdb) is authoritative for tvmaze↔tmdb.
-                // Do not require TVmaze English titles to equal TMDB localized /
-                // original titles when MEDIA_TMDB_LANGUAGE is non-English (e.g. ru).
-                let validates_candidate = |item: &media_contract::TrendingItemDto| {
-                    selected_matches_tmdb(
-                        &identity.aliases,
-                        identity.year,
-                        identity.later_season,
-                        &item.title,
-                        item.original_title.as_deref(),
-                        item.year,
-                    )
-                };
-                let item = if let Some(tvdb_id) = show.tvdb_id {
-                    let tvdb_candidate = tmdb
-                        .find_tv_by_external_id(&tvdb_id.to_string(), "tvdb_id")
-                        .await
-                        .map_err(|_| SearchError::ProviderUnavailable)?;
-                    match tvdb_candidate.filter(|item| validates_candidate(item)) {
-                        Some(item) => item,
-                        None => {
-                            let Some(imdb_id) = show.imdb_id.as_deref() else {
-                                return Err(SearchError::InvalidRequest);
-                            };
-                            tmdb.find_tv_by_external_id(imdb_id, "imdb_id")
-                                .await
-                                .map_err(|_| SearchError::ProviderUnavailable)?
-                                .filter(|item| validates_candidate(item))
-                                .ok_or(SearchError::InvalidRequest)?
-                        }
-                    }
-                } else {
-                    let Some(imdb_id) = show.imdb_id.as_deref() else {
-                        return Err(SearchError::InvalidRequest);
-                    };
-                    tmdb.find_tv_by_external_id(imdb_id, "imdb_id")
-                        .await
-                        .map_err(|_| SearchError::ProviderUnavailable)?
-                        .filter(|item| validates_candidate(item))
-                        .ok_or(SearchError::InvalidRequest)?
-                };
+                let item = self
+                    .resolve_tvmaze_to_tmdb(source_id)
+                    .await?
+                    .ok_or(SearchError::InvalidRequest)?;
                 return Ok(Some(VerifiedSeriesIdentity {
                     tmdb_id: item.tmdb_id,
                     canonical_title: item.title,
@@ -1834,6 +1918,13 @@ impl SearchProvider for ConcreteSearchProvider {
             canonical_title: item.title,
             legacy_path_titles: vec![format!("rezka-series-tmdb-{}", item.tmdb_id)],
         }))
+    }
+
+    async fn resolve_series_group_tmdb(
+        &self,
+        series_group: Option<media_contract::SeriesGroupIdentityDto>,
+    ) -> Result<Option<VerifiedSeriesIdentity>, SearchError> {
+        self.resolve_series_group_tmdb_inner(series_group).await
     }
 }
 
@@ -1927,6 +2018,13 @@ fn rezka_series_marker(value: &str) -> Option<u32> {
     season.parse().ok().filter(|season| *season > 0)
 }
 
+fn year_within_one(selected_year: Option<u16>, tmdb_year: Option<u16>) -> bool {
+    match (selected_year, tmdb_year) {
+        (Some(left), Some(right)) => left.abs_diff(right) <= 1,
+        _ => false,
+    }
+}
+
 fn selected_matches_tmdb(
     selected_aliases: &[String],
     selected_year: Option<u16>,
@@ -1935,7 +2033,7 @@ fn selected_matches_tmdb(
     tmdb_original_title: Option<&str>,
     tmdb_year: Option<u16>,
 ) -> bool {
-    (later_season || (selected_year.is_some() && selected_year == tmdb_year))
+    (later_season || year_within_one(selected_year, tmdb_year))
         && selected_aliases.iter().any(|selected| {
             canonical_title_key(selected) == canonical_title_key(tmdb_title)
                 || tmdb_original_title.is_some_and(|original| {
@@ -2682,6 +2780,14 @@ impl DurableSearchService {
             } => {
                 self.provider
                     .verify_series_identity(&result.public, session.request.series_group)
+                    .await?
+            }
+            SearchResultDto::Prowlarr { .. }
+                if session.request.media_kind == Some(MediaKindDto::Series) =>
+            {
+                // Prefer TVmaze→TMDB external-id resolution over query find alone.
+                self.provider
+                    .resolve_series_group_tmdb(session.request.series_group)
                     .await?
             }
             _ => None,
@@ -3578,6 +3684,30 @@ mod tests {
             "Шугар",
             Some("Sugar"),
             Some(2016),
+        ));
+        assert!(selected_matches_tmdb(
+            &identity.aliases,
+            identity.year,
+            false,
+            "Шугар",
+            Some("Sugar"),
+            Some(2025),
+        ));
+        assert!(selected_matches_tmdb(
+            &identity.aliases,
+            identity.year,
+            false,
+            "Шугар",
+            Some("Sugar"),
+            Some(2023),
+        ));
+        assert!(!selected_matches_tmdb(
+            &identity.aliases,
+            identity.year,
+            false,
+            "Шугар",
+            Some("Sugar"),
+            Some(2022),
         ));
         assert!(selected_matches_tmdb(
             &["Cafe\u{301}".to_owned()],
