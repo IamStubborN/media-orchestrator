@@ -1376,6 +1376,45 @@ fn failed_enqueue_releases_its_durable_reservation_for_a_new_configuration() {
     });
 }
 
+#[test]
+fn repeated_identical_enqueue_failures_increase_cooldown_beyond_fifteen_minutes() {
+    block_on(async {
+        let due = download_tracking().with_check_diagnostics(
+            Some(media_core::ENQUEUE_FAILURE_CODE.to_owned()),
+            3,
+        );
+        let store = Arc::new(ScheduleStore {
+            due,
+            discovered: Mutex::new(Vec::new()),
+            pending: Mutex::new(Vec::new()),
+            finished: Mutex::new(Vec::new()),
+            release_metadata: Mutex::new(Vec::new()),
+            season_complete: Mutex::new(Vec::new()),
+        });
+        let started_at = time::OffsetDateTime::now_utc();
+        let result = TrackingRuntime::new(store.clone(), Arc::new(DownloadDiscovery))
+            .with_downloads(Arc::new(FailingEnqueuer))
+            .run_once(started_at, 1)
+            .await
+            .unwrap();
+
+        assert_eq!(result.queued, 0);
+        assert_eq!(result.source_failures, 1);
+        let finished = store.finished.lock().unwrap();
+        assert_eq!(finished[0].1, media_core::TrackingCheckStatus::SourceError);
+        // previous identical failures=3 → next count 4 → 120 minutes
+        assert!(
+            finished[0].0 >= started_at + time::Duration::minutes(120),
+            "expected backoff of at least 120 minutes, got {:?}",
+            finished[0].0 - started_at
+        );
+        assert!(
+            finished[0].0 < started_at + time::Duration::minutes(121),
+            "cooldown drifted beyond the 120 minute step"
+        );
+    });
+}
+
 #[async_trait::async_trait]
 impl TrackedEpisodeDownloadPort for Enqueuer {
     async fn enqueue_episode(

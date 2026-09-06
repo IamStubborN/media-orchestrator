@@ -6,7 +6,8 @@ use std::{
 
 use media_core::{
     PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole, EpisodeSnapshot, NewTrackingCommand,
-    NewTrackingSubscription, OperationKey, PortError, Provider, TrackingApplication,
+    NewTrackingSubscription, OperationKey, PortError, Provider, ReleaseIdentity, ReleaseSource,
+    TrackingApplication,
     TrackingDownloadPatch, TrackingId, TrackingScope, TrackingState, TrackingStore,
     TrackingSubscription, TrackingValidationError, SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
 };
@@ -23,6 +24,18 @@ impl TrackingStore for FakeTrackingStore {
         _: OperationKey,
         value: NewTrackingSubscription,
     ) -> Result<media_core::TrackingSubscription, PortError> {
+        if value.download().is_none()
+            && let Some(identity) = value.release_identity()
+        {
+            let values = self.values.lock().unwrap();
+            if let Some(existing) = values.iter().find(|candidate| {
+                candidate.download().is_none()
+                    && candidate.owner_id() == value.owner_id()
+                    && candidate.release_identity() == Some(identity)
+            }) {
+                return Ok(existing.clone());
+            }
+        }
         let value = value.into_persisted();
         self.values.lock().unwrap().push(value.clone());
         Ok(value)
@@ -212,4 +225,42 @@ fn tracking_accepts_only_safe_https_posters() {
             Err(TrackingValidationError::InvalidPosterUrl)
         );
     }
+}
+
+#[test]
+fn create_with_same_tvmaze_id_returns_existing_subscription() {
+    block_on(async {
+        let store = Arc::new(FakeTrackingStore::default());
+        let app = TrackingApplication::new(store);
+        let mut first_command = command(TrackingScope::Personal);
+        first_command.title = "Show EN".to_owned();
+        first_command.translation = "release-calendar".to_owned();
+        first_command.release_identity =
+            Some(ReleaseIdentity::new(ReleaseSource::Tvmaze, 4242).unwrap());
+        let first = app
+            .add(
+                &actor_primary(),
+                OperationKey::from_bytes([9; 32]),
+                first_command,
+            )
+            .await
+            .unwrap();
+
+        let mut second_command = command(TrackingScope::Personal);
+        second_command.title = "Show RU".to_owned();
+        second_command.translation = "release-calendar".to_owned();
+        second_command.release_identity =
+            Some(ReleaseIdentity::new(ReleaseSource::Tvmaze, 4242).unwrap());
+        let second = app
+            .add(
+                &actor_primary(),
+                OperationKey::from_bytes([10; 32]),
+                second_command,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(first.id(), second.id());
+        assert_eq!(app.list(&actor_primary()).await.unwrap().len(), 1);
+    });
 }

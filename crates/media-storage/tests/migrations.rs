@@ -353,8 +353,8 @@ async fn a_failed_migration_explicitly_rolls_back_partial_schema() {
     );
     assert_eq!(
         names.last().map(String::as_str),
-        Some("m20260810_000040_tracking_claims"),
-        "fenced tracking claims must remain the latest schema change",
+        Some("m20260907_000043_tracking_release_identity_unique"),
+        "release-identity uniqueness diagnostics must remain the latest schema change",
     );
     for migration in migrations {
         assert_eq!(
@@ -680,9 +680,9 @@ async fn structured_notifications_migration_preserves_legacy_rows_and_enforces_v
     )
     .await;
 
-    // The latest migration adds one step; keep the historical assertion at
-    // the structured-notification boundary by rolling back one extra step.
-    Migrator::down(db, Some(17)).await.unwrap();
+    // Keep the historical assertion at the structured-notification boundary
+    // by rolling back through every later migration, including this one.
+    Migrator::down(db, Some(20)).await.unwrap();
 
     let retained_rows = query(
         db,
@@ -972,9 +972,9 @@ async fn detailed_notifications_migration_preserves_legacy_payloads_and_validate
     )
     .await;
 
-    // Include the detailed-notification migration in the rollback after the
-    // source-choice choice-set migration was added.
-    Migrator::down(db, Some(14)).await.unwrap();
+    // Include the detailed-notification migration in the rollback through
+    // every later migration, including release-identity uniqueness.
+    Migrator::down(db, Some(17)).await.unwrap();
 
     let normalized = query(
         db,

@@ -642,6 +642,21 @@ struct TrackingListItemOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(skip)]
     download: Option<TrackingDownloadOutput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(skip)]
+    pending_episodes: Vec<EpisodeOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pending_since: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pending_age_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    status_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -2386,6 +2401,13 @@ fn tracking_list_item(
             .into_iter()
             .collect();
     }
+    let awaiting = matches!(
+        value.check_status,
+        media_contract::TrackingCheckStatusDto::AwaitingSource
+            | media_contract::TrackingCheckStatusDto::SourceError
+            | media_contract::TrackingCheckStatusDto::ReleaseError
+    );
+    let show_pending = card || awaiting;
     TrackingListItemOutput {
         id: value.id.to_string(),
         title: value.title,
@@ -2417,6 +2439,22 @@ fn tracking_list_item(
                 })
             })
             .flatten(),
+        pending_episodes: if show_pending {
+            value
+                .pending_episodes
+                .into_iter()
+                .map(|item| EpisodeOutput {
+                    season: item.season,
+                    episode: item.episode,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
+        pending_since: show_pending.then_some(value.pending_since).flatten(),
+        pending_age_seconds: show_pending.then_some(value.pending_age_seconds).flatten(),
+        last_error: show_pending.then_some(value.last_error).flatten(),
+        status_reason: show_pending.then_some(value.status_reason).flatten(),
     }
 }
 

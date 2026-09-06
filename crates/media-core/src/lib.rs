@@ -70,11 +70,14 @@ pub use port::{
 };
 pub use release::*;
 pub use tracking::{
-    AnonymousSessionPort, EpisodeAvailability, EpisodeAvailabilityPort, EpisodeAvailabilityRequest,
-    EpisodeDiscovery, EpisodeDiscoveryPort, EpisodeSnapshot, EpisodeSnapshotError,
-    FutureEpisodeRecord, NewTrackingCommand, NewTrackingSubscription, ProviderAvailability,
-    TrackedEpisodeDownloadPort, TrackingApplication, TrackingApplicationError, TrackingCheckStatus,
+    AnonymousSessionPort, ENQUEUE_FAILURE_CODE, EpisodeAvailability, EpisodeAvailabilityPort,
+    EpisodeAvailabilityRequest, EpisodeDiscovery, EpisodeDiscoveryPort, EpisodeSnapshot,
+    EpisodeSnapshotError, FutureEpisodeRecord, NewTrackingCommand, NewTrackingSubscription,
+    ProviderAvailability, RELEASE_CONFLICT_FAILURE_CODE, RELEASE_INFRASTRUCTURE_FAILURE_CODE,
+    SOURCE_PROBE_FAILURE_CODE, SOURCE_UNAVAILABLE_CODE, TrackedEpisodeDownloadPort,
+    TrackingApplication, TrackingApplicationError, TrackingCheckOutcome, TrackingCheckStatus,
     TrackingDownload, TrackingDownloadPatch, TrackingRunResult, TrackingRuntime,
     TrackingScheduleStore, TrackingScope, TrackingState, TrackingStore, TrackingSubscription,
     TrackingValidationError, episode_choice_set_id, is_valid_tracking_poster_url,
+    next_check_failure_count, tracking_failure_cooldown,
 };

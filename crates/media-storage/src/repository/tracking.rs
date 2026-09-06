@@ -10,8 +10,9 @@ use media_core::{
     NotificationDeliveryPermit, NotificationEventType, NotificationId, NotificationOutboxPort,
     NotificationRecipient, OperationKey, PortError, Provider, ReleaseIdentity, ReleaseSource,
     SourceChoiceAction, SourceChoiceNotification, TrackingCheckStatus, TrackingClaimToken,
-    TrackingDownload, TrackingDownloadPatch, TrackingId, TrackingScheduleStore, TrackingScope,
-    TrackingStore, TrackingSubscription, UserId, SECONDARY_USER_ID, episode_choice_set_id,
+    TrackingCheckOutcome, TrackingDownload, TrackingDownloadPatch, TrackingId,
+    TrackingScheduleStore, TrackingScope, TrackingStore, TrackingSubscription, UserId,
+    SECONDARY_USER_ID, episode_choice_set_id,
     is_valid_tracking_poster_url,
 };
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
@@ -246,6 +247,34 @@ async fn lock_tracking_notification_fences(
     Ok(())
 }
 
+const TRACKING_ROW_COLUMNS: &str = "id, owner_id, provider, title, translation, known_episodes, scope, poster_url, release_source, release_source_id, download_provider_media_ref, download_translation_id, download_season, last_checked_at, next_check_at, check_status, check_last_error, check_failure_count";
+
+const TRACKING_LIST_COLUMNS: &str = "id, owner_id, provider, title, translation, known_episodes, scope, poster_url, release_source, release_source_id, download_provider_media_ref, download_translation_id, download_season, last_checked_at, next_check_at, check_status, check_last_error, check_failure_count, COALESCE((    SELECT jsonb_agg(jsonb_build_object('season', candidate.season, 'episode', candidate.episode)                      ORDER BY candidate.season, candidate.episode)     FROM tracking_availability_candidates AS candidate     WHERE candidate.tracking_id = tracking_subscriptions.id), '[]'::jsonb) AS pending_episodes, (SELECT MIN(candidate.first_seen_at)  FROM tracking_availability_candidates AS candidate  WHERE candidate.tracking_id = tracking_subscriptions.id) AS pending_since";
+
+async fn find_active_notify_by_release_identity(
+    database: &sea_orm::DatabaseConnection,
+    owner_id: UserId,
+    release_identity: ReleaseIdentity,
+) -> Result<Option<TrackingSubscription>, PortError> {
+    let source_id =
+        i64::try_from(release_identity.source_id()).map_err(|_| PortError::Conflict)?;
+    let row = database
+        .query_one_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            format!(
+                "SELECT {TRACKING_LIST_COLUMNS} FROM tracking_subscriptions                  WHERE deleted_at IS NULL                    AND download_provider_media_ref IS NULL                    AND owner_id = $1                    AND release_source = $2                    AND release_source_id = $3                  ORDER BY created_at ASC, id ASC                  LIMIT 1"
+            ),
+            [
+                owner_id.into_uuid().into(),
+                release_identity.source().as_str().to_owned().into(),
+                source_id.into(),
+            ],
+        ))
+        .await
+        .map_err(map_tracking_database_error)?;
+    row.as_ref().map(tracking_from_row).transpose()
+}
+
 #[async_trait::async_trait]
 impl TrackingStore for SeaOrmTrackingStore {
     async fn add(
@@ -253,14 +282,28 @@ impl TrackingStore for SeaOrmTrackingStore {
         operation: OperationKey,
         value: NewTrackingSubscription,
     ) -> Result<TrackingSubscription, PortError> {
+        if value.download().is_none()
+            && let Some(release_identity) = value.release_identity()
+            && let Some(existing) = find_active_notify_by_release_identity(
+                &self.database,
+                value.owner_id(),
+                release_identity,
+            )
+            .await?
+        {
+            return Ok(existing);
+        }
         let known = episode_json(value.known_episodes());
         let release_source_id = value
             .release_identity()
             .map(|identity| i64::try_from(identity.source_id()).map_err(|_| PortError::Conflict))
             .transpose()?;
-        let row = self.database.query_one_raw(Statement::from_sql_and_values(
+        let insert_sql = format!(
+            "INSERT INTO tracking_subscriptions (id, owner_id, provider, title, translation, known_episodes, scope, poster_url, release_source, release_source_id, download_provider_media_ref, download_translation_id, download_season, created_operation_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT (created_operation_key) DO UPDATE SET created_operation_key = EXCLUDED.created_operation_key RETURNING {TRACKING_ROW_COLUMNS}"
+        );
+        let row = match self.database.query_one_raw(Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
-            "INSERT INTO tracking_subscriptions (id, owner_id, provider, title, translation, known_episodes, scope, poster_url, release_source, release_source_id, download_provider_media_ref, download_translation_id, download_season, created_operation_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT (created_operation_key) DO UPDATE SET created_operation_key = EXCLUDED.created_operation_key RETURNING id, owner_id, provider, title, translation, known_episodes, scope, poster_url, release_source, release_source_id, download_provider_media_ref, download_translation_id, download_season, last_checked_at, next_check_at, check_status",
+            insert_sql,
             [
                 value.id().into_uuid().into(), value.owner_id().into_uuid().into(), provider_value(value.provider()).into(),
                 value.title().into(), value.translation().into(), known.into(), scope_value(value.scope()).into(),
@@ -272,14 +315,34 @@ impl TrackingStore for SeaOrmTrackingStore {
                 value.download().and_then(|download| i32::try_from(download.season()).ok()).into(),
                 operation.as_bytes().to_vec().into(),
             ],
-        )).await.map_err(map_tracking_database_error)?.ok_or(PortError::Infrastructure)?;
+        )).await {
+            Ok(row) => row.ok_or(PortError::Infrastructure)?,
+            Err(error) => {
+                let mapped = map_tracking_database_error(error);
+                if mapped == PortError::Conflict
+                    && value.download().is_none()
+                    && let Some(release_identity) = value.release_identity()
+                    && let Some(existing) = find_active_notify_by_release_identity(
+                        &self.database,
+                        value.owner_id(),
+                        release_identity,
+                    )
+                    .await?
+                {
+                    return Ok(existing);
+                }
+                return Err(mapped);
+            }
+        };
         tracking_from_row(&row)
     }
 
     async fn list_visible(&self, user: UserId) -> Result<Vec<TrackingSubscription>, PortError> {
         self.database.query_all_raw(Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
-            "SELECT id, owner_id, provider, title, translation, known_episodes, scope, poster_url, release_source, release_source_id, download_provider_media_ref, download_translation_id, download_season, last_checked_at, next_check_at, check_status FROM tracking_subscriptions WHERE deleted_at IS NULL AND (owner_id = $1 OR (scope = 'family' AND $1 IN ($2, $3))) ORDER BY created_at, id",
+            format!(
+                "SELECT {TRACKING_LIST_COLUMNS} FROM tracking_subscriptions                  WHERE deleted_at IS NULL AND (owner_id = $1 OR (scope = 'family' AND $1 IN ($2, $3)))                  ORDER BY created_at, id"
+            ),
             [user.into_uuid().into(), PRIMARY_USER_ID.into_uuid().into(), SECONDARY_USER_ID.into_uuid().into()],
         )).await.map_err(map_tracking_database_error)?.iter().map(tracking_from_row).collect()
     }
@@ -297,7 +360,7 @@ impl TrackingStore for SeaOrmTrackingStore {
         let replacement_claim_token = TrackingClaimToken::new();
         let row = self.database.query_one_raw(Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
-            "UPDATE tracking_subscriptions SET translation = $3, download_provider_media_ref = $4, download_translation_id = $5, download_season = $6, next_check_at = CASE WHEN check_claim_until > now() THEN next_check_at ELSE now() END, check_requested_at = CASE WHEN check_claim_until > now() THEN now() ELSE NULL END, check_claim_token = CASE WHEN check_claim_until > now() THEN $9 ELSE NULL END, check_claim_until = CASE WHEN check_claim_until > now() THEN check_claim_until ELSE NULL END, updated_at = now() WHERE id = $1 AND deleted_at IS NULL AND provider = 'rezka' AND (owner_id = $2 OR (scope = 'family' AND $2 IN ($7, $8))) RETURNING id, owner_id, provider, title, translation, known_episodes, scope, poster_url, release_source, release_source_id, download_provider_media_ref, download_translation_id, download_season, last_checked_at, next_check_at, check_status",
+            "UPDATE tracking_subscriptions SET translation = $3, download_provider_media_ref = $4, download_translation_id = $5, download_season = $6, next_check_at = CASE WHEN check_claim_until > now() THEN next_check_at ELSE now() END, check_requested_at = CASE WHEN check_claim_until > now() THEN now() ELSE NULL END, check_claim_token = CASE WHEN check_claim_until > now() THEN $9 ELSE NULL END, check_claim_until = CASE WHEN check_claim_until > now() THEN check_claim_until ELSE NULL END, updated_at = now() WHERE id = $1 AND deleted_at IS NULL AND provider = 'rezka' AND (owner_id = $2 OR (scope = 'family' AND $2 IN ($7, $8))) RETURNING id, owner_id, provider, title, translation, known_episodes, scope, poster_url, release_source, release_source_id, download_provider_media_ref, download_translation_id, download_season, last_checked_at, next_check_at, check_status, check_last_error, check_failure_count",
             [
                 id.into_uuid().into(), user.into_uuid().into(), patch.translation().into(),
                 download.provider_media_ref().into(), translation_id.into(), season.into(),
@@ -347,7 +410,7 @@ impl TrackingStore for SeaOrmTrackingStore {
                  RETURNING id, owner_id, provider, title, translation, known_episodes, scope, poster_url,
                            release_source, release_source_id,
                            download_provider_media_ref, download_translation_id, download_season,
-                           last_checked_at, next_check_at, check_status",
+                           last_checked_at, next_check_at, check_status, check_last_error, check_failure_count",
                 [
                     id.into_uuid().into(),
                     user.into_uuid().into(),
@@ -404,7 +467,7 @@ impl TrackingStore for SeaOrmTrackingStore {
              RETURNING id, owner_id, provider, title, translation, known_episodes, scope, poster_url,
                        release_source, release_source_id,
                        download_provider_media_ref, download_translation_id, download_season,
-                       last_checked_at, next_check_at, check_status",
+                       last_checked_at, next_check_at, check_status, check_last_error, check_failure_count",
                 [
                     id.into_uuid().into(),
                     user.into_uuid().into(),
@@ -431,7 +494,7 @@ impl TrackingStore for SeaOrmTrackingStore {
         let result = async {
             let row = transaction.query_one_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
-                "UPDATE tracking_subscriptions SET deleted_at = COALESCE(deleted_at, now()), remove_operation_key = COALESCE(remove_operation_key, $3), updated_at = now() WHERE id = $1 AND (remove_operation_key = $3 OR (deleted_at IS NULL AND (owner_id = $2 OR (scope = 'family' AND $2 IN ($4, $5))))) RETURNING id, owner_id, provider, title, translation, known_episodes, scope, poster_url, release_source, release_source_id, download_provider_media_ref, download_translation_id, download_season, last_checked_at, next_check_at, check_status",
+                "UPDATE tracking_subscriptions SET deleted_at = COALESCE(deleted_at, now()), remove_operation_key = COALESCE(remove_operation_key, $3), updated_at = now() WHERE id = $1 AND (remove_operation_key = $3 OR (deleted_at IS NULL AND (owner_id = $2 OR (scope = 'family' AND $2 IN ($4, $5))))) RETURNING id, owner_id, provider, title, translation, known_episodes, scope, poster_url, release_source, release_source_id, download_provider_media_ref, download_translation_id, download_season, last_checked_at, next_check_at, check_status, check_last_error, check_failure_count",
                 [id.into_uuid().into(), user.into_uuid().into(), operation.as_bytes().to_vec().into(), PRIMARY_USER_ID.into_uuid().into(), SECONDARY_USER_ID.into_uuid().into()],
             )).await?;
             let Some(row) = row else {
@@ -488,7 +551,7 @@ impl TrackingScheduleStore for SeaOrmTrackingStore {
                            tracking.poster_url, tracking.release_source, tracking.release_source_id, \
                            tracking.download_provider_media_ref, tracking.download_translation_id, \
                            tracking.download_season, tracking.last_checked_at, tracking.next_check_at, \
-                           tracking.check_status",
+                           tracking.check_status, tracking.check_last_error, tracking.check_failure_count",
                 [
                     now.into(),
                     i64::from(limit).into(),
@@ -741,6 +804,25 @@ impl TrackingScheduleStore for SeaOrmTrackingStore {
         next_check_at: time::OffsetDateTime,
         status: TrackingCheckStatus,
     ) -> Result<(), PortError> {
+        self.finish_check_outcome(
+            id,
+            claim_token,
+            TrackingCheckOutcome {
+                next_check_at,
+                status,
+                last_error: None,
+                failure_count: 0,
+            },
+        )
+        .await
+    }
+
+    async fn finish_check_outcome(
+        &self,
+        id: TrackingId,
+        claim_token: TrackingClaimToken,
+        outcome: TrackingCheckOutcome,
+    ) -> Result<(), PortError> {
         let changed = self
             .database
             .execute_raw(Statement::from_sql_and_values(
@@ -748,6 +830,8 @@ impl TrackingScheduleStore for SeaOrmTrackingStore {
                 "UPDATE tracking_subscriptions
                  SET next_check_at = CASE WHEN check_requested_at IS NULL THEN $3 ELSE now() END,
                      last_checked_at = now(), check_status = $4,
+                     check_last_error = $5,
+                     check_failure_count = $6,
                      check_claim_token = NULL, check_claim_until = NULL,
                      check_requested_at = NULL, updated_at = now() \
                  WHERE id = $1 AND deleted_at IS NULL AND check_claim_token = $2 \
@@ -755,8 +839,10 @@ impl TrackingScheduleStore for SeaOrmTrackingStore {
                 [
                     id.into_uuid().into(),
                     claim_token.into_uuid().into(),
-                    next_check_at.into(),
-                    tracking_check_status_value(status).into(),
+                    outcome.next_check_at.into(),
+                    tracking_check_status_value(outcome.status).into(),
+                    outcome.last_error.clone().into(),
+                    i32::try_from(outcome.failure_count).map_err(|_| PortError::Conflict)?.into(),
                 ],
             ))
             .await
@@ -1146,7 +1232,34 @@ fn tracking_from_row(row: &sea_orm::QueryResult) -> Result<TrackingSubscription,
         &row.try_get::<String>("", "check_status")
             .map_err(|_| PortError::Infrastructure)?,
     )?;
-    TrackingSubscription::rehydrate_with_check_identity_and_poster(
+    let check_last_error: Option<String> = row.try_get("", "check_last_error").unwrap_or(None);
+    let check_failure_count = row
+        .try_get::<i32>("", "check_failure_count")
+        .ok()
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(0);
+    let pending_episodes = match row.try_get::<serde_json::Value>("", "pending_episodes") {
+        Ok(value) => value
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        let season = item.get("season").and_then(serde_json::Value::as_u64)?;
+                        let episode = item.get("episode").and_then(serde_json::Value::as_u64)?;
+                        EpisodeSnapshot::new(
+                            u32::try_from(season).ok()?,
+                            u32::try_from(episode).ok()?,
+                        )
+                        .ok()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    let pending_since = row.try_get("", "pending_since").unwrap_or(None);
+    Ok(TrackingSubscription::rehydrate_with_check_identity_and_poster(
         TrackingId::from_uuid(
             row.try_get("", "id")
                 .map_err(|_| PortError::Infrastructure)?,
@@ -1176,7 +1289,9 @@ fn tracking_from_row(row: &sea_orm::QueryResult) -> Result<TrackingSubscription,
         next_check_at,
         check_status,
     )
-    .map_err(|_| PortError::Infrastructure)
+    .map_err(|_| PortError::Infrastructure)?
+    .with_check_diagnostics(check_last_error, check_failure_count)
+    .with_pending_diagnostics(pending_episodes, pending_since))
 }
 
 const fn tracking_check_status_value(status: TrackingCheckStatus) -> &'static str {

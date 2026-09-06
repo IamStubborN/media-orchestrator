@@ -15,7 +15,38 @@ pub fn episode_choice_set_id(id: TrackingId, season: u32, episode: u32) -> Strin
 
 const NOTIFY_TRACKING_INTERVAL: time::Duration = time::Duration::hours(3);
 const DOWNLOAD_TRACKING_INTERVAL: time::Duration = time::Duration::minutes(30);
-const TRACKING_FAILURE_COOLDOWN: time::Duration = time::Duration::minutes(15);
+const TRACKING_CLAIM_LEASE: time::Duration = time::Duration::minutes(15);
+
+pub const ENQUEUE_FAILURE_CODE: &str = "enqueue_failed";
+pub const SOURCE_PROBE_FAILURE_CODE: &str = "source_probe_failed";
+pub const SOURCE_UNAVAILABLE_CODE: &str = "source_unavailable";
+pub const RELEASE_INFRASTRUCTURE_FAILURE_CODE: &str = "release_infrastructure";
+pub const RELEASE_CONFLICT_FAILURE_CODE: &str = "release_conflict";
+
+/// Exponential cooldown for repeated identical tracking failures.
+///
+/// `failure_count` is 1-based after the current failure. Policy:
+/// 1 → 15m, 2 → 30m, 3 → 60m, 4 → 120m, 5+ → 240m (cap).
+#[must_use]
+pub fn tracking_failure_cooldown(failure_count: u32) -> time::Duration {
+    let exponent = failure_count.saturating_sub(1).min(4);
+    let minutes = 15u32.saturating_mul(1u32 << exponent).min(240);
+    time::Duration::minutes(i64::from(minutes))
+}
+
+/// Increments when the failure code repeats; otherwise restarts at 1.
+#[must_use]
+pub fn next_check_failure_count(
+    previous_count: u32,
+    previous_error: Option<&str>,
+    new_error: &str,
+) -> u32 {
+    if previous_error == Some(new_error) {
+        previous_count.saturating_add(1).max(1)
+    } else {
+        1
+    }
+}
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum TrackingScope {
@@ -38,6 +69,42 @@ pub enum TrackingCheckStatus {
     DownloadQueued,
     ReleaseError,
     SourceError,
+}
+
+/// Durable outcome written when a claimed tracking check finishes.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct TrackingCheckOutcome {
+    pub next_check_at: time::OffsetDateTime,
+    pub status: TrackingCheckStatus,
+    pub last_error: Option<String>,
+    pub failure_count: u32,
+}
+
+impl TrackingCheckOutcome {
+    #[must_use]
+    pub fn success(next_check_at: time::OffsetDateTime, status: TrackingCheckStatus) -> Self {
+        Self {
+            next_check_at,
+            status,
+            last_error: None,
+            failure_count: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn failure(
+        next_check_at: time::OffsetDateTime,
+        status: TrackingCheckStatus,
+        last_error: impl Into<String>,
+        failure_count: u32,
+    ) -> Self {
+        Self {
+            next_check_at,
+            status,
+            last_error: Some(last_error.into()),
+            failure_count,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -403,6 +470,10 @@ pub struct TrackingSubscription {
     last_checked_at: Option<time::OffsetDateTime>,
     next_check_at: time::OffsetDateTime,
     check_status: TrackingCheckStatus,
+    check_last_error: Option<String>,
+    check_failure_count: u32,
+    pending_episodes: Vec<EpisodeSnapshot>,
+    pending_since: Option<time::OffsetDateTime>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
@@ -480,6 +551,10 @@ impl NewTrackingSubscription {
             last_checked_at: None,
             next_check_at: now,
             check_status: TrackingCheckStatus::Never,
+            check_last_error: None,
+            check_failure_count: 0,
+            pending_episodes: Vec::new(),
+            pending_since: None,
         }
     }
 
@@ -702,7 +777,33 @@ impl TrackingSubscription {
             last_checked_at,
             next_check_at,
             check_status,
+            check_last_error: None,
+            check_failure_count: 0,
+            pending_episodes: Vec::new(),
+            pending_since: None,
         })
+    }
+
+    #[must_use]
+    pub fn with_check_diagnostics(
+        mut self,
+        check_last_error: Option<String>,
+        check_failure_count: u32,
+    ) -> Self {
+        self.check_last_error = check_last_error;
+        self.check_failure_count = check_failure_count;
+        self
+    }
+
+    #[must_use]
+    pub fn with_pending_diagnostics(
+        mut self,
+        pending_episodes: Vec<EpisodeSnapshot>,
+        pending_since: Option<time::OffsetDateTime>,
+    ) -> Self {
+        self.pending_episodes = pending_episodes;
+        self.pending_since = pending_since;
+        self
     }
 
     #[must_use]
@@ -756,6 +857,68 @@ impl TrackingSubscription {
     #[must_use]
     pub const fn check_status(&self) -> TrackingCheckStatus {
         self.check_status
+    }
+    #[must_use]
+    pub fn check_last_error(&self) -> Option<&str> {
+        self.check_last_error.as_deref()
+    }
+    #[must_use]
+    pub const fn check_failure_count(&self) -> u32 {
+        self.check_failure_count
+    }
+    #[must_use]
+    pub fn pending_episodes(&self) -> &[EpisodeSnapshot] {
+        &self.pending_episodes
+    }
+    #[must_use]
+    pub const fn pending_since(&self) -> Option<time::OffsetDateTime> {
+        self.pending_since
+    }
+
+    /// Human-readable reason for Hermes cards when status alone looks silent.
+    #[must_use]
+    pub fn status_reason(&self) -> Option<String> {
+        match self.check_status {
+            TrackingCheckStatus::AwaitingSource => {
+                let pending = self.pending_episodes.last().or_else(|| {
+                    self.known_episodes
+                        .iter()
+                        .max_by_key(|episode| (episode.season(), episode.episode()))
+                });
+                match pending {
+                    Some(episode) => Some(format!(
+                        "aired S{:02}E{:02}, waiting for Rezka/Prowlarr",
+                        episode.season(),
+                        episode.episode()
+                    )),
+                    None => Some("waiting for Rezka/Prowlarr".to_owned()),
+                }
+            }
+            TrackingCheckStatus::SourceError => Some(match self.check_last_error.as_deref() {
+                Some(ENQUEUE_FAILURE_CODE) => {
+                    "auto-download enqueue failed; backing off retries".to_owned()
+                }
+                Some(SOURCE_PROBE_FAILURE_CODE) => {
+                    "source probe failed while checking availability".to_owned()
+                }
+                Some(SOURCE_UNAVAILABLE_CODE) => {
+                    "download source is not available yet".to_owned()
+                }
+                Some(other) => format!("source error: {other}"),
+                None => "source error".to_owned(),
+            }),
+            TrackingCheckStatus::ReleaseError => Some(match self.check_last_error.as_deref() {
+                Some(RELEASE_CONFLICT_FAILURE_CODE) => {
+                    "release calendar conflict while discovering episodes".to_owned()
+                }
+                Some(RELEASE_INFRASTRUCTURE_FAILURE_CODE) => {
+                    "release calendar unavailable while discovering episodes".to_owned()
+                }
+                Some(other) => format!("release error: {other}"),
+                None => "release error".to_owned(),
+            }),
+            _ => None,
+        }
     }
 
     #[must_use]
@@ -966,6 +1129,18 @@ pub trait TrackingScheduleStore: Send + Sync {
         next_check_at: time::OffsetDateTime,
         status: TrackingCheckStatus,
     ) -> Result<(), PortError>;
+
+    /// Persist check status plus failure diagnostics used for enqueue backoff.
+    /// Default adapters keep the legacy `finish_check` behavior.
+    async fn finish_check_outcome(
+        &self,
+        id: TrackingId,
+        claim_token: TrackingClaimToken,
+        outcome: TrackingCheckOutcome,
+    ) -> Result<(), PortError> {
+        self.finish_check(id, claim_token, outcome.next_check_at, outcome.status)
+            .await
+    }
 }
 
 #[async_trait::async_trait]
@@ -1068,7 +1243,7 @@ impl TrackingRuntime {
         let claim_token = TrackingClaimToken::new();
         let due = self
             .store
-            .claim_due(now, claim_token, now + TRACKING_FAILURE_COOLDOWN, limit)
+            .claim_due(now, claim_token, now + TRACKING_CLAIM_LEASE, limit)
             .await?;
         if !due.is_empty()
             && let Some(session) = self.session.as_deref()
@@ -1112,13 +1287,27 @@ impl TrackingRuntime {
             let discovery = match self.discovery.available_episodes(&tracking).await {
                 Ok(available) => available,
                 Err(error) => {
+                    let error_code = match error {
+                        PortError::Conflict => RELEASE_CONFLICT_FAILURE_CODE,
+                        PortError::Infrastructure => RELEASE_INFRASTRUCTURE_FAILURE_CODE,
+                    };
+                    let failure_count = next_check_failure_count(
+                        tracking.check_failure_count(),
+                        tracking.check_last_error(),
+                        error_code,
+                    );
                     let _ = self
                         .store
-                        .finish_check(
+                        .finish_check_outcome(
                             tracking.id(),
                             claim_token,
-                            time::OffsetDateTime::now_utc().max(now) + TRACKING_FAILURE_COOLDOWN,
-                            TrackingCheckStatus::ReleaseError,
+                            TrackingCheckOutcome::failure(
+                                time::OffsetDateTime::now_utc().max(now)
+                                    + tracking_failure_cooldown(failure_count),
+                                TrackingCheckStatus::ReleaseError,
+                                error_code,
+                                failure_count,
+                            ),
                         )
                         .await;
                     result.failed += 1;
@@ -1161,14 +1350,23 @@ impl TrackingRuntime {
                 {
                     Ok(pending) => pending,
                     Err(_) => {
+                        let failure_count = next_check_failure_count(
+                            tracking.check_failure_count(),
+                            tracking.check_last_error(),
+                            SOURCE_PROBE_FAILURE_CODE,
+                        );
                         let _ = self
                             .store
-                            .finish_check(
+                            .finish_check_outcome(
                                 tracking.id(),
                                 claim_token,
-                                time::OffsetDateTime::now_utc().max(now)
-                                    + TRACKING_FAILURE_COOLDOWN,
-                                TrackingCheckStatus::SourceError,
+                                TrackingCheckOutcome::failure(
+                                    time::OffsetDateTime::now_utc().max(now)
+                                        + tracking_failure_cooldown(failure_count),
+                                    TrackingCheckStatus::SourceError,
+                                    SOURCE_PROBE_FAILURE_CODE,
+                                    failure_count,
+                                ),
                             )
                             .await;
                         result.failed += 1;
@@ -1186,6 +1384,7 @@ impl TrackingRuntime {
                 .max();
             let mut pending_availability = false;
             let mut source_error = false;
+            let mut failure_code: Option<&'static str> = None;
             let discovered_before = result.discovered;
             let queued_before = result.queued;
             for episode in discovery.episodes().iter().copied() {
@@ -1225,12 +1424,14 @@ impl TrackingRuntime {
                                 result.failed += 1;
                                 result.source_failures += 1;
                                 source_error = true;
+                                failure_code.get_or_insert(SOURCE_PROBE_FAILURE_CODE);
                                 continue;
                             }
                             result.failed += 1;
                             result.source_failures += 1;
                             pending_availability = true;
                             source_error = true;
+                            failure_code.get_or_insert(SOURCE_PROBE_FAILURE_CODE);
                             continue;
                         };
                         let availability = match availability
@@ -1250,12 +1451,14 @@ impl TrackingRuntime {
                                     result.failed += 1;
                                     result.source_failures += 1;
                                     source_error = true;
+                                    failure_code.get_or_insert(SOURCE_PROBE_FAILURE_CODE);
                                     continue;
                                 }
                                 result.failed += 1;
                                 result.source_failures += 1;
                                 pending_availability = true;
                                 source_error = true;
+                                failure_code.get_or_insert(SOURCE_PROBE_FAILURE_CODE);
                                 continue;
                             }
                         };
@@ -1271,6 +1474,7 @@ impl TrackingRuntime {
                                 result.failed += 1;
                                 result.source_failures += 1;
                                 source_error = true;
+                                failure_code.get_or_insert(SOURCE_PROBE_FAILURE_CODE);
                                 continue;
                             }
                             pending_availability = true;
@@ -1287,6 +1491,7 @@ impl TrackingRuntime {
                         result.failed += 1;
                         result.source_failures += 1;
                         source_error = true;
+                        failure_code.get_or_insert(SOURCE_UNAVAILABLE_CODE);
                         continue;
                     };
                     if self
@@ -1298,6 +1503,7 @@ impl TrackingRuntime {
                         result.failed += 1;
                         result.source_failures += 1;
                         source_error = true;
+                        failure_code.get_or_insert(ENQUEUE_FAILURE_CODE);
                         continue;
                     }
                     if downloads.enqueue_episode(&tracking, episode).await.is_err() {
@@ -1308,6 +1514,7 @@ impl TrackingRuntime {
                         result.failed += 1;
                         result.source_failures += 1;
                         source_error = true;
+                        failure_code = Some(ENQUEUE_FAILURE_CODE);
                         continue;
                     }
                     result.queued += 1;
@@ -1333,16 +1540,10 @@ impl TrackingRuntime {
                         result.failed += 1;
                         result.source_failures += 1;
                         source_error = true;
+                        failure_code.get_or_insert(SOURCE_PROBE_FAILURE_CODE);
                     }
                 }
             }
-            let next_check = if source_error {
-                time::OffsetDateTime::now_utc().max(now) + TRACKING_FAILURE_COOLDOWN
-            } else if pending_availability {
-                now + NOTIFY_TRACKING_INTERVAL
-            } else {
-                default_next_check
-            };
             let status = if result.queued > queued_before {
                 TrackingCheckStatus::DownloadQueued
             } else if result.discovered > discovered_before {
@@ -1354,9 +1555,31 @@ impl TrackingRuntime {
             } else {
                 TrackingCheckStatus::NoNewEpisode
             };
+            let outcome = if source_error {
+                let error_code = failure_code.unwrap_or(SOURCE_PROBE_FAILURE_CODE);
+                let failure_count = next_check_failure_count(
+                    tracking.check_failure_count(),
+                    tracking.check_last_error(),
+                    error_code,
+                );
+                TrackingCheckOutcome::failure(
+                    time::OffsetDateTime::now_utc().max(now)
+                        + tracking_failure_cooldown(failure_count),
+                    status,
+                    error_code,
+                    failure_count,
+                )
+            } else {
+                let next_check = if pending_availability {
+                    now + NOTIFY_TRACKING_INTERVAL
+                } else {
+                    default_next_check
+                };
+                TrackingCheckOutcome::success(next_check, status)
+            };
             if self
                 .store
-                .finish_check(tracking.id(), claim_token, next_check, status)
+                .finish_check_outcome(tracking.id(), claim_token, outcome)
                 .await
                 .is_err()
             {
@@ -1487,5 +1710,42 @@ const fn map_port_error(error: PortError) -> TrackingApplicationError {
     match error {
         PortError::Conflict => TrackingApplicationError::Conflict,
         PortError::Infrastructure => TrackingApplicationError::Infrastructure,
+    }
+}
+
+#[cfg(test)]
+mod failure_backoff_tests {
+    use super::{
+        ENQUEUE_FAILURE_CODE, next_check_failure_count, tracking_failure_cooldown,
+    };
+
+    #[test]
+    fn tracking_failure_cooldown_grows_then_caps() {
+        assert_eq!(tracking_failure_cooldown(1), time::Duration::minutes(15));
+        assert_eq!(tracking_failure_cooldown(2), time::Duration::minutes(30));
+        assert_eq!(tracking_failure_cooldown(3), time::Duration::minutes(60));
+        assert_eq!(tracking_failure_cooldown(4), time::Duration::minutes(120));
+        assert_eq!(tracking_failure_cooldown(5), time::Duration::minutes(240));
+        assert_eq!(tracking_failure_cooldown(20), time::Duration::minutes(240));
+    }
+
+    #[test]
+    fn identical_enqueue_failures_increment_while_new_codes_reset() {
+        assert_eq!(
+            next_check_failure_count(0, None, ENQUEUE_FAILURE_CODE),
+            1
+        );
+        assert_eq!(
+            next_check_failure_count(1, Some(ENQUEUE_FAILURE_CODE), ENQUEUE_FAILURE_CODE),
+            2
+        );
+        assert_eq!(
+            next_check_failure_count(4, Some(ENQUEUE_FAILURE_CODE), ENQUEUE_FAILURE_CODE),
+            5
+        );
+        assert_eq!(
+            next_check_failure_count(5, Some(ENQUEUE_FAILURE_CODE), "other"),
+            1
+        );
     }
 }

@@ -123,6 +123,38 @@ async fn tracking_release_identity_round_trips_through_repository() {
 }
 
 #[tokio::test]
+async fn create_with_same_tvmaze_id_returns_existing_notify_track() {
+    let test_db = TestDatabase::start_migrated().await;
+    let store = SeaOrmTrackingStore::new(test_db.connection().clone());
+    let first = store
+        .add(
+            operation_key(),
+            new_tracking_with_release_identity(TrackingId::new()),
+        )
+        .await
+        .unwrap();
+    let duplicate = NewTrackingSubscription::new(
+        TrackingId::new(),
+        PRIMARY_USER_ID,
+        NewTrackingCommand {
+            provider: Provider::Rezka,
+            title: "Lucky RU".to_owned(),
+            translation: "release-calendar".to_owned(),
+            known_episodes: vec![EpisodeSnapshot::new(1, 4).unwrap()],
+            scope: TrackingScope::Personal,
+            series_ongoing: true,
+            poster_url: None,
+            release_identity: Some(ReleaseIdentity::new(ReleaseSource::Tvmaze, 77).unwrap()),
+            download: None,
+        },
+    )
+    .unwrap();
+    let second = store.add(operation_key(), duplicate).await.unwrap();
+    assert_eq!(first.id(), second.id());
+    assert_eq!(store.list_visible(PRIMARY_USER_ID).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn due_tracking_is_claimed_atomically_with_a_failure_cooldown() {
     let test_db = TestDatabase::start_migrated().await;
     let store = SeaOrmTrackingStore::new(test_db.connection().clone());

@@ -220,6 +220,21 @@ pub(crate) fn tracking(value: &TrackingSubscription) -> TrackingDto {
                 translation_id: download.translation_id(),
                 season: download.season(),
             }),
+        pending_episodes: value
+            .pending_episodes()
+            .iter()
+            .map(|episode| EpisodeSnapshotDto {
+                season: episode.season(),
+                episode: episode.episode(),
+            })
+            .collect(),
+        pending_since: value.pending_since().map(|timestamp| timestamp.to_string()),
+        pending_age_seconds: value.pending_since().map(|pending_since| {
+            let now = time::OffsetDateTime::now_utc();
+            u64::try_from((now - pending_since).whole_seconds().max(0)).unwrap_or(0)
+        }),
+        last_error: value.check_last_error().map(str::to_owned),
+        status_reason: value.status_reason(),
     }
 }
 

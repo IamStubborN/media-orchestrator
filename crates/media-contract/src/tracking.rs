@@ -104,6 +104,16 @@ pub struct TrackingDto {
     pub release_identity: Option<TrackingReleaseIdentityDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download: Option<TrackingDownloadDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_episodes: Vec<EpisodeSnapshotDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_since: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_age_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -144,6 +154,36 @@ mod tests {
         assert_eq!(
             tracking.poster_url.as_deref(),
             Some("https://image.tmdb.org/t/p/w780/show.jpg")
+        );
+    }
+
+    #[test]
+    fn awaiting_source_fields_round_trip() {
+        let tracking: TrackingDto = serde_json::from_value(serde_json::json!({
+            "id": "018f3f86-7b4c-7b4f-9b6a-6d62f45bb111",
+            "provider": "rezka",
+            "title": "Show",
+            "translation": "release-calendar",
+            "known_episodes": [{"season": 2, "episode": 9}],
+            "scope": "personal",
+            "state": "active",
+            "check_status": "awaiting_source",
+            "last_checked_at": "2026-09-06T20:00:00Z",
+            "next_check_at": "2026-09-06T23:00:00Z",
+            "pending_episodes": [{"season": 2, "episode": 10}],
+            "pending_since": "2026-09-06T18:00:00Z",
+            "pending_age_seconds": 7200,
+            "last_error": null,
+            "status_reason": "aired S02E10, waiting for Rezka/Prowlarr"
+        }))
+        .unwrap();
+        assert_eq!(tracking.pending_episodes.len(), 1);
+        assert_eq!(tracking.pending_episodes[0].season, 2);
+        assert_eq!(tracking.pending_episodes[0].episode, 10);
+        assert_eq!(tracking.pending_age_seconds, Some(7200));
+        assert_eq!(
+            tracking.status_reason.as_deref(),
+            Some("aired S02E10, waiting for Rezka/Prowlarr")
         );
     }
 }
