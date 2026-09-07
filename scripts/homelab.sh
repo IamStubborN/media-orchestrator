@@ -512,7 +512,7 @@ verify_mounted_hermes_sources() {
 set -eu
 host_source=$1
 mounted_source=$2
-expected=$3
+expected=${3-}
 digest() {
     python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$1"
 }
@@ -539,7 +539,7 @@ REMOTE
 set -eu
 host_source=$1
 mounted_source=$2
-expected=$3
+expected=${3-}
 digest() {
     python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$1"
 }
@@ -2096,7 +2096,7 @@ after=$(gluetun_rezka_compose_digest "$next" "$contract_json")
 rm -f "$contract_json"
 trap 'rm -f "$next"' EXIT HUP INT TERM
 
-docker compose --project-name "$compose_project" --env-file "$next" run --rm --no-deps media-service migrate
+docker compose --project-name "$compose_project" --env-file "$next" run --rm --no-deps media-service migrate >&2
 if test -n "$expected_migration_version"; then
     actual=$(docker exec media-postgres sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "select version from seaql_migrations order by version desc limit 1;"')
     test "$actual" = "$expected_migration_version" || { echo "database migration differs from release manifest" >&2; exit 1; }
@@ -2134,6 +2134,8 @@ docker compose --project-name "$compose_project" --env-file "$environment_file" 
 printf '%s\n' "$rezka_mode"
 REMOTE
 ) || return 1
+    gluetun_rezka_recreate_mode=$(printf '%s
+' "$gluetun_rezka_recreate_mode" | awk 'NF { line=$0 } END { print line }')
     case $gluetun_rezka_recreate_mode in
         new | same) ;;
         *)
@@ -2166,7 +2168,7 @@ next=$(mktemp "${environment_file}.next.XXXXXX")
 trap 'rm -f "$next"' EXIT HUP INT TERM
 sed "s#^MEDIA_SERVICE_IMAGE=.*#MEDIA_SERVICE_IMAGE=$service_image#" "$environment_file" >"$next"
 cd "$remote_root"
-docker compose --project-name homelab --env-file "$next" run --rm --no-deps media-service migrate
+docker compose --project-name homelab --env-file "$next" run --rm --no-deps media-service migrate >&2
 if test -n "$expected_migration_version"; then
     actual=$(docker exec media-postgres sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "select version from seaql_migrations order by version desc limit 1;"')
     test "$actual" = "$expected_migration_version" || { echo "database migration differs from release manifest" >&2; exit 1; }
