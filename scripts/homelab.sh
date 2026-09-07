@@ -2068,7 +2068,17 @@ payload = {
 }
 digest.update(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
 digest.update(b"\0")
-for name in sorted(service.get("secrets") or []):
+def secret_name(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        name = value.get("source") or value.get("target")
+        if isinstance(name, str) and name:
+            return name
+    raise SystemExit(f"gluetun-rezka secret entry is invalid: {value!r}")
+
+names = sorted(secret_name(value) for value in (service.get("secrets") or []))
+for name in names:
     entry = secrets.get(name) or {}
     path = entry.get("file")
     digest.update(name.encode()); digest.update(b"\0")
