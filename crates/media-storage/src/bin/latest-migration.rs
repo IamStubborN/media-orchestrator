@@ -14,6 +14,22 @@ fn main() {
                 .last()
                 .expect("media-storage must register at least one migration")
         ),
+        Some("--with-predecessor") => {
+            assert!(
+                arguments.next().is_none(),
+                "unexpected latest-migration argument"
+            );
+            let latest = names
+                .last()
+                .expect("media-storage must register at least one migration");
+            let predecessor = names
+                .len()
+                .checked_sub(2)
+                .map(|index| names[index].as_str())
+                .expect("first migration has no predecessor");
+            println!("{latest}");
+            println!("{predecessor}");
+        }
         Some("--predecessor-of") => {
             let target = arguments
                 .next()

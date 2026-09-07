@@ -147,6 +147,28 @@ The runner package layer is independent of the application binary, so ffmpeg,
 VAAPI packages, and the pinned checksum-verified `yt-dlp` executable remain
 cached across normal Rust-only changes.
 
+Local image builds go through `./scripts/docker-build.sh`, which uses a single
+`docker buildx bake` (`docker-bake.hcl`) so `service` and `runner` share one
+BuildKit graph instead of two sequential `buildx build` calls. Service-only
+deploys still pass `MEDIA_BUILD_TARGETS=service`.
+
+Optional local BuildKit cache (warm rebuilds after prune or on a cold builder):
+
+```sh
+# default cache dir: <repo>/.cache/buildx
+MEDIA_BUILDKIT_CACHE=1 ./scripts/docker-build.sh
+
+# or pick a directory (implies cache on)
+MEDIA_BUILD_CACHE_DIR=/var/tmp/media-buildx-cache ./scripts/docker-build.sh
+```
+
+Expect modest wins from bake alone on a warm builder (one context upload /
+shared stages; often tens of seconds, not minutes). Local cache export helps
+most when the builder cache was wiped: Rust `chef`/`builder` layers can reload
+from disk instead of a full cold compile. Digest walks and migration meta are
+memoized once per `homelab.sh` process so attestation + tag + build do not
+re-hash the tree or re-run `cargo` for the same values.
+
 ### Export a release contract
 
 From a clean private checkout, export the immutable release metadata after the

@@ -153,6 +153,22 @@ end
 
 assert(docker_build.include?("MEDIA_BUILD_TARGETS") && docker_build.include?("service)"),
        "docker build must support a service-only target")
+assert(docker_build.include?("docker buildx bake") && docker_build.include?("docker-bake.hcl"),
+       "docker builds must use a single buildx bake for shared service/runner stages")
+assert(File.file?("docker-bake.hcl") &&
+       File.read("docker-bake.hcl").include?('target "service"') &&
+       File.read("docker-bake.hcl").include?('target "runner"') &&
+       File.read("docker-bake.hcl").include?('group "default"'),
+       "docker-bake.hcl must define service, runner, and default group")
+assert(docker_build.include?("MEDIA_BUILDKIT_CACHE") &&
+       docker_build.include?("MEDIA_BUILD_CACHE_DIR") &&
+       docker_build.include?("cache-from") &&
+       docker_build.include?("cache-to"),
+       "docker builds must support optional local BuildKit cache import/export")
+assert(homelab.include?("_cached_source_tree_digest") &&
+       homelab.include?("_cached_runner_build_digest") &&
+       homelab.include?("--with-predecessor"),
+       "local deploy must memoize digests and load migration meta in one cargo run")
 assert(docker_build.include?("MEDIA_SOURCE_TREE_DIGEST") &&
        docker_build.include?('OCI_SOURCE_TREE_DIGEST=$source_tree_digest'),
        "docker builds must stamp the exact source-tree digest")
@@ -259,11 +275,12 @@ Dir.mktmpdir("media-stage-contract") do |directory|
   root = File.join(directory, "hermes")
   bin = File.join(directory, "bin")
   release = File.join(directory, "release")
-  FileUtils.mkdir_p([File.join(root, "artifacts"), bin, release])
+  FileUtils.mkdir_p([File.join(root, "artifacts"), File.join(root, "shared/skills/media"), bin, release])
   cli = File.join(directory, "media")
   File.binwrite(cli, "local extraction\n")
   digest = Digest::SHA256.file(cli).hexdigest
   File.write(File.join(release, "media-linux-amd64.sha256"), "#{digest}  media-linux-amd64\n")
+  File.write(File.join(root, "shared/skills/media/MCP_SCHEMA.json"), %({"tools":[]}\n))
   marker = File.join(directory, "preflight-called")
   File.write(File.join(root, "scripts-preflight"), <<~'SH')
     #!/bin/sh
@@ -289,6 +306,8 @@ Dir.mktmpdir("media-stage-contract") do |directory|
   File.chmod(0o755, File.join(bin, "docker"))
   probe = <<~SH
     set -eu
+    hermes_mount_inputs_digest() { printf 'fixture-mounts\n'; }
+    hermes_consumers_unchanged() { return 1; }
     #{stage_function}
     remote() { :; }
     hermes_root=#{root.shellescape}
@@ -320,6 +339,8 @@ Dir.mktmpdir("media-stage-contract") do |directory|
 
   dispatch_probe = <<~SH
     set -eu
+    hermes_mount_inputs_digest() { printf 'fixture-mounts\n'; }
+    hermes_consumers_unchanged() { return 1; }
     #{stage_function}
     remote() { :; }
     with_host_lock() { "$@"; }
@@ -1249,6 +1270,7 @@ clobber_probe = <<~SH
   restart_policy_disabled=0
   start_container() { printf '%s\\n' "started:$1"; }
   restore_watcher_restart_policy() { :; }
+  restore_download_watcher() { :; }
   docker() {
     test "$1" = inspect || exit 2
     printf '%s\\n' exited

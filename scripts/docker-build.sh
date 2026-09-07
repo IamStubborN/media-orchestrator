@@ -225,32 +225,52 @@ case "$source" in
     ;;
 esac
 
-build() {
-  target=$1
-  image=$2
-  docker buildx build \
+# Optional local BuildKit cache (warm rebuilds). Enable with MEDIA_BUILDKIT_CACHE=1
+# or set MEDIA_BUILD_CACHE_DIR to a directory (implies cache on). Default dir:
+# <repo>/.cache/buildx
+cache_dir=${MEDIA_BUILD_CACHE_DIR:-}
+case ${MEDIA_BUILDKIT_CACHE:-0} in
+  1|true|TRUE|yes|YES)
+    if test -z "$cache_dir"; then
+      cache_dir=$root/.cache/buildx
+    fi
+    ;;
+esac
+cache_args=
+if test -n "$cache_dir"; then
+  mkdir -p "$cache_dir"
+  cache_args="--set=*.cache-from=type=local,src=$cache_dir --set=*.cache-to=type=local,dest=$cache_dir,mode=max"
+fi
+
+# Prefer a single buildx bake so service+runner share one planner/builder graph
+# instead of two sequential buildx build invocations (double context walk).
+bake() {
+  targets=$1
+  # shellcheck disable=SC2086
+  SERVICE_IMAGE=$service_image \
+  RUNNER_IMAGE=$runner_image \
+  OCI_CREATED=$created \
+  OCI_REVISION=$revision \
+  OCI_RUNNER_BUILD_DIGEST=$runner_build_digest \
+  OCI_SOURCE=$source \
+  OCI_SOURCE_TREE_DIGEST=$source_tree_digest \
+  OCI_VERSION=$version \
+  docker buildx bake \
     --load \
-    --target "$target" \
-    --tag "$image" \
-    --build-arg "OCI_CREATED=$created" \
-    --build-arg "OCI_REVISION=$revision" \
-    --build-arg "OCI_RUNNER_BUILD_DIGEST=$runner_build_digest" \
-    --build-arg "OCI_SOURCE=$source" \
-    --build-arg "OCI_SOURCE_TREE_DIGEST=$source_tree_digest" \
-    --build-arg "OCI_VERSION=$version" \
-    "$root"
+    --file "$root/docker-bake.hcl" \
+    $cache_args \
+    $targets
 }
 
 case ${MEDIA_BUILD_TARGETS:-all} in
   all)
-    build service "$service_image"
-    build runner "$runner_image"
+    bake default
     ;;
   service)
-    build service "$service_image"
+    bake service
     ;;
   runner)
-    build runner "$runner_image"
+    bake runner
     ;;
   *)
     echo "MEDIA_BUILD_TARGETS must be all, service, or runner" >&2

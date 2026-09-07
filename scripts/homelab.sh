@@ -83,24 +83,66 @@ pull_release_image() {
     remote "docker pull '$image' >/dev/null"
 }
 
+# Memoize build-input digests and migration meta once per process so a local
+# deploy does not re-walk the tree / re-run cargo for attestation + build + tag.
+_cached_source_tree_digest=
+_cached_source_version=
+_cached_runner_build_digest=
+_cached_latest_migration=
+_cached_latest_predecessor=
+
 source_tree_digest() {
-    "$root/scripts/docker-build.sh" --print-source-tree-digest
+    if test -n "$_cached_source_tree_digest"; then
+        printf '%s\n' "$_cached_source_tree_digest"
+        return 0
+    fi
+    _cached_source_tree_digest=$("$root/scripts/docker-build.sh" --print-source-tree-digest)
+    printf '%s\n' "$_cached_source_tree_digest"
 }
 
 source_version() {
-    "$root/scripts/docker-build.sh" --print-source-version
+    if test -n "$_cached_source_version"; then
+        printf '%s\n' "$_cached_source_version"
+        return 0
+    fi
+    _cached_source_version=$("$root/scripts/docker-build.sh" --print-source-version)
+    printf '%s\n' "$_cached_source_version"
 }
 
 runner_build_digest() {
-    "$root/scripts/docker-build.sh" --print-runner-build-digest
+    if test -n "$_cached_runner_build_digest"; then
+        printf '%s\n' "$_cached_runner_build_digest"
+        return 0
+    fi
+    _cached_runner_build_digest=$("$root/scripts/docker-build.sh" --print-runner-build-digest)
+    printf '%s\n' "$_cached_runner_build_digest"
+}
+
+_load_latest_migration_pair() {
+    if test -n "$_cached_latest_migration"; then
+        return 0
+    fi
+    pair=$(cd "$root" && cargo run --quiet --locked -p media-storage --bin latest-migration -- --with-predecessor)
+    _cached_latest_migration=$(printf '%s\n' "$pair" | sed -n '1p')
+    _cached_latest_predecessor=$(printf '%s\n' "$pair" | sed -n '2p')
+    test -n "$_cached_latest_migration" && test -n "$_cached_latest_predecessor" || {
+        echo "latest-migration --with-predecessor returned incomplete output" >&2
+        return 1
+    }
 }
 
 latest_migration_version() {
-    (cd "$root" && cargo run --quiet --locked -p media-storage --bin latest-migration)
+    _load_latest_migration_pair
+    printf '%s\n' "$_cached_latest_migration"
 }
 
 migration_predecessor() {
     target=$1
+    _load_latest_migration_pair
+    if test "$target" = "$_cached_latest_migration"; then
+        printf '%s\n' "$_cached_latest_predecessor"
+        return 0
+    fi
     (cd "$root" && cargo run --quiet --locked -p media-storage --bin latest-migration -- --predecessor-of "$target")
 }
 
@@ -2134,8 +2176,7 @@ docker compose --project-name "$compose_project" --env-file "$environment_file" 
 printf '%s\n' "$rezka_mode"
 REMOTE
 ) || return 1
-    gluetun_rezka_recreate_mode=$(printf '%s
-' "$gluetun_rezka_recreate_mode" | awk 'NF { line=$0 } END { print line }')
+    gluetun_rezka_recreate_mode=$(printf '%s\n' "$gluetun_rezka_recreate_mode" | awk 'NF { line=$0 } END { print line }')
     case $gluetun_rezka_recreate_mode in
         new | same) ;;
         *)
