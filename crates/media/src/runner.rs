@@ -2648,6 +2648,20 @@ pub async fn run_single_iteration(
             if job.state == JobStateDto::Failed && executor.retire(&lease).await.is_err() {
                 tracing::warn!("failed to mark terminal staging for retention");
             }
+            // Same-IP transient failures: brief backoff before EXIT_AFTER_JOB so
+            // the watcher does not immediately burn another sticky attempt.
+            if retryable
+                && media_core::classify_vpn_failure(error_code)
+                    == media_core::VpnFailureClass::RetrySameIp
+            {
+                let delay = Duration::from_secs(2);
+                tracing::info!(
+                    error_code,
+                    delay_secs = delay.as_secs(),
+                    "retrying same VPN IP after transient stream failure"
+                );
+                tokio::time::sleep(delay).await;
+            }
             return Ok(true);
         }
     };
@@ -2884,9 +2898,10 @@ mod tests {
         ExecutionOutcome, ProgressCheckpointGate, artifact_checkpoint, canonical_movie_name,
         combine_episode_outcome, ensure_plex_match, expected_source_duration_seconds,
         highest_standard_variant, is_season_directory_name, matching_episode_videos,
-        parse_episode_coordinates, parse_episode_coordinates_with_season_hint, plex_match_matches, plex_match_show_directory,
-        resolve_existing_series_path_title, rezka_audio_language, rezka_final_video_path,
-        rezka_physical_title, safe_name, tmdb_display_title_from_path, torrent_series_work_items,
+        parse_episode_coordinates, parse_episode_coordinates_with_season_hint, plex_match_matches,
+        plex_match_show_directory, resolve_existing_series_path_title, rezka_audio_language,
+        rezka_final_video_path, rezka_physical_title, safe_name, tmdb_display_title_from_path,
+        torrent_series_work_items,
     };
 
     #[test]
@@ -3283,16 +3298,10 @@ mod tests {
             Some((3, 1))
         );
         assert_eq!(
-            parse_episode_coordinates_with_season_hint(
-                Path::new("Серия 01.mkv"),
-                Some(2),
-            ),
+            parse_episode_coordinates_with_season_hint(Path::new("Серия 01.mkv"), Some(2),),
             Some((2, 1))
         );
-        assert_eq!(
-            parse_episode_coordinates(Path::new("Серия 01.mkv")),
-            None
-        );
+        assert_eq!(parse_episode_coordinates(Path::new("Серия 01.mkv")), None);
     }
 
     #[test]

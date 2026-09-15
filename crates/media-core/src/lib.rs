@@ -43,6 +43,7 @@ pub use job::{
 };
 pub use lifecycle::{
     MAX_STICKY_VPN_ATTEMPTS, RunnerLifecycle, RunnerLifecycleState, RunnerLifecycleUpdate,
+    VpnFailureClass, classify_vpn_failure,
 };
 pub use metrics::{MetricsSnapshot, MetricsSource};
 pub use notification::{

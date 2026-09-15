@@ -3,8 +3,9 @@ mod support;
 use std::sync::Arc;
 
 use media_core::{
-    PRIMARY_USER_ID, BootstrapClient, ClientId, ClientRole, ClientStore, CredentialDigest, JobId,
-    JobState, JobStore, LeaseStore, NewJob, NotifyScope, PortError, Provider, RUNNER_CLIENT_ID,
+    PRIMARY_USER_ID, BootstrapClient, ClientId, ClientRole, ClientStore, CredentialDigest, JobEvent,
+    JobEventId, JobId, JobState, JobStore, LeaseStore, NewJob, NotifyScope, PortError, Provider,
+    RUNNER_CLIENT_ID,
 };
 use media_storage::{SeaOrmClientStore, SeaOrmJobStore, SeaOrmLeaseStore};
 use sea_orm::{ConnectionTrait, Statement, TransactionTrait};
@@ -971,4 +972,145 @@ async fn repeated_heartbeat_operation_returns_its_original_expiry_after_a_later_
         .unwrap()
         .unwrap();
     assert_eq!(replayed, first);
+}
+
+async fn start_download_stage(leases: &SeaOrmLeaseStore, lease_id: media_core::LeaseId) {
+    for event in [
+        JobEvent::started(JobEventId::new()),
+        JobEvent::stage_started(JobEventId::new(), 0, "download".to_owned(), 0).unwrap(),
+    ] {
+        leases
+            .report_event(operation_key(), lease_id, RUNNER_CLIENT_ID, event)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn transient_stream_failure_does_not_burn_sticky_into_rotating() {
+    let (test_db, jobs, leases) = setup().await;
+    let job = jobs
+        .create(operation_key(), new_job("selection:transient-same-ip"))
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .expect("first lease");
+    start_download_stage(&leases, lease.lease_id()).await;
+    leases
+        .report_event(
+            operation_key(),
+            lease.lease_id(),
+            RUNNER_CLIENT_ID,
+            JobEvent::stage_failed(
+                JobEventId::new(),
+                0,
+                "download".to_owned(),
+                0,
+                true,
+                "source_transfer_transient".to_owned(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let row = query(
+        test_db.connection(),
+        "SELECT state, sticky_attempt_count, sticky_job_id, reason FROM runner_lifecycle",
+    )
+    .await
+    .pop()
+    .unwrap();
+    assert_eq!(row.try_get::<String>("", "state").unwrap(), "ready");
+    assert_eq!(row.try_get::<i32>("", "sticky_attempt_count").unwrap(), 0);
+    assert!(
+        row.try_get::<Option<uuid::Uuid>>("", "sticky_job_id")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        row.try_get::<Option<String>>("", "reason")
+            .unwrap()
+            .as_deref(),
+        Some("retry_same_ip:source_transfer_transient"),
+    );
+
+    // Same job can lease again without rotating.
+    let next = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .expect("transient failure must not require rotation");
+    assert_eq!(next.job().id(), job.id());
+}
+
+#[tokio::test]
+async fn rezka_reject_marks_lifecycle_rotating() {
+    let (test_db, jobs, leases) = setup().await;
+    jobs.create(operation_key(), new_job("selection:rotate-worthy"))
+        .await
+        .unwrap();
+    let lease = leases
+        .lease_next(
+            operation_key(),
+            RUNNER_CLIENT_ID,
+            time::Duration::seconds(60),
+        )
+        .await
+        .unwrap()
+        .expect("first lease");
+    start_download_stage(&leases, lease.lease_id()).await;
+    leases
+        .report_event(
+            operation_key(),
+            lease.lease_id(),
+            RUNNER_CLIENT_ID,
+            JobEvent::stage_failed(
+                JobEventId::new(),
+                0,
+                "download".to_owned(),
+                0,
+                true,
+                "rezka_provider_rejected".to_owned(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let row = query(
+        test_db.connection(),
+        "SELECT state, reason FROM runner_lifecycle",
+    )
+    .await
+    .pop()
+    .unwrap();
+    assert_eq!(row.try_get::<String>("", "state").unwrap(), "rotating");
+    assert_eq!(
+        row.try_get::<Option<String>>("", "reason")
+            .unwrap()
+            .as_deref(),
+        Some("rotate_worthy:rezka_provider_rejected"),
+    );
+    assert_eq!(
+        leases
+            .lease_next(
+                operation_key(),
+                RUNNER_CLIENT_ID,
+                time::Duration::seconds(60),
+            )
+            .await,
+        Err(PortError::Conflict),
+    );
 }

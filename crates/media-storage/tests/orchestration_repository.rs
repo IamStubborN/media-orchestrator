@@ -1393,7 +1393,8 @@ async fn detailed_notification_projects_retry_recovery_and_terminal_actions() {
     assert_eq!(recovering["progress"]["current_episode"], 7);
     assert_eq!(recovering["progress"]["connection_attempt"], 3);
     assert_eq!(recovering["progress"]["connection_attempt_limit"], 20);
-    assert_eq!(recovering["progress"]["vpn_rotation_pending"], true);
+    // Transient stream failures must not schedule VPN rotation.
+    assert_eq!(recovering["progress"]["vpn_rotation_pending"], false);
     assert_eq!(recovering["issue"]["code"], "source_recovering");
     assert_eq!(
         recovering["issue"]["message"],

@@ -4,7 +4,7 @@ use media_core::{
     MediaNotificationLibrary, MediaNotificationProcessing, MediaNotificationProcessingMode,
     MediaNotificationPublication, MediaNotificationResult, MediaNotificationSubtitles,
     MediaNotificationVideo, NotifyScope, OperationKey, PortError, Provider, StageFailureOutcome,
-    StageRef, SECONDARY_USER_ID, max_stage_attempts,
+    StageRef, SECONDARY_USER_ID, VpnFailureClass, classify_vpn_failure, max_stage_attempts,
 };
 use sea_orm::{
     ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, Statement, TransactionTrait,
@@ -691,12 +691,8 @@ async fn project_notification(
         recovery["vpn_rotation_pending"] = serde_json::json!(
             job.provider() == Provider::Rezka
                 && *retryable
-                && matches!(
-                    error_code.as_str(),
-                    "source_transfer_transient" | "stream_expired" | "execution_failed"
-                )
+                && classify_vpn_failure(error_code) == VpnFailureClass::RotateWorthy
                 && attempt < limit
-                && attempt % MAX_STICKY_VPN_ATTEMPTS == 0
         );
     }
     if state == "needs-action"
@@ -1304,6 +1300,9 @@ async fn apply_event(
                 reset_running_work(transaction, current.id()).await?;
                 transition_job(transaction, &current, JobState::Queued, None).await?;
                 release_lease(transaction, lease).await?;
+                if current.provider() == Provider::Rezka {
+                    apply_vpn_failure_to_lifecycle(transaction, error_code).await?;
+                }
             }
         }
         JobEventKind::JobTransition {
@@ -1614,6 +1613,50 @@ async fn finish_tasks(
             [job_id.into_uuid().into(), target.into()],
         ))
         .await?;
+    Ok(())
+}
+
+async fn apply_vpn_failure_to_lifecycle(
+    transaction: &sea_orm::DatabaseTransaction,
+    error_code: &str,
+) -> Result<(), sea_orm::DbErr> {
+    let class = classify_vpn_failure(error_code);
+    let reason = format!("{}:{}", class.as_wire(), error_code);
+    match class {
+        VpnFailureClass::RetrySameIp => {
+            // Undo the sticky burn from this lease so transient stream failures
+            // never push sticky_attempt_count into rotating.
+            transaction
+                .execute_raw(Statement::from_sql_and_values(
+                    DatabaseBackend::Postgres,
+                    concat!(
+                        "UPDATE runner_lifecycle SET ",
+                        "sticky_attempt_count = GREATEST(sticky_attempt_count - 1, 0), ",
+                        "sticky_job_id = CASE WHEN sticky_attempt_count <= 1 ",
+                        "THEN NULL ELSE sticky_job_id END, ",
+                        "reason = $1, updated_at = now() ",
+                        "WHERE singleton = true AND state = 'ready'"
+                    ),
+                    [reason.into()],
+                ))
+                .await?;
+        }
+        VpnFailureClass::RotateWorthy => {
+            // Clear geo / Anubis / provider-reject: gate new work and ask the
+            // watcher to rotate before the next lease.
+            transaction
+                .execute_raw(Statement::from_sql_and_values(
+                    DatabaseBackend::Postgres,
+                    concat!(
+                        "UPDATE runner_lifecycle SET state = 'rotating', reason = $1, ",
+                        "previous_ip = current_ip, updated_at = now() ",
+                        "WHERE singleton = true AND state = 'ready'"
+                    ),
+                    [reason.into()],
+                ))
+                .await?;
+        }
+    }
     Ok(())
 }
 
