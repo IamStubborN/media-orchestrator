@@ -18,7 +18,7 @@ schema_hash_file=$remote_schema_file.expected-sha256
 homelab_root=${HOMELAB_ROOT:-}
 
 usage() {
-    echo "usage: $0 status|verify|deploy|deploy-service|deploy-full|deploy-local-service|deploy-local-full|deploy-hermes|rollback|rollback-service|rollback-full" >&2
+    echo "usage: $0 status|verify|deploy|deploy-service|deploy-full|deploy-local-service|deploy-local-full|deploy-hermes|deploy-hermes-profiles|rollback|rollback-service|rollback-full" >&2
     exit 2
 }
 
@@ -2282,6 +2282,8 @@ import sys
 
 root = pathlib.Path(sys.argv[1])
 paths = [
+    "profiles/primary/config/config.yaml",
+    "profiles/secondary/config/config.yaml",
     "shared/skills/media/SKILL.md",
     "shared/skills/media/MCP_SCHEMA.json",
     "shared/plugins/telegram-home/__init__.py",
@@ -2333,6 +2335,8 @@ import sys
 
 root = pathlib.Path(sys.argv[1])
 paths = [
+    "profiles/primary/config/config.yaml",
+    "profiles/secondary/config/config.yaml",
     "shared/skills/media/SKILL.md",
     "shared/skills/media/MCP_SCHEMA.json",
     "shared/plugins/telegram-home/__init__.py",
@@ -2987,6 +2991,99 @@ deploy_hermes() {
     cleanup_hermes_stage
 }
 
+deploy_hermes_profiles() {
+    require_homelab_root
+    for profile in primary secondary; do
+        config=$hermes_root/profiles/$profile/config/config.yaml
+        test -s "$config" || { echo "Hermes profile config is missing: $config" >&2; exit 1; }
+    done
+    assert_no_active_job
+
+    profile_stage=$remote_root/media/.hermes-profile-configs.$$
+    remote "mkdir -p '$profile_stage/primary' '$profile_stage/secondary'"
+    if ! scp "$hermes_root/profiles/primary/config/config.yaml" "$host:$profile_stage/primary/config.yaml.next" >/dev/null ||
+        ! scp "$hermes_root/profiles/secondary/config/config.yaml" "$host:$profile_stage/secondary/config.yaml.next" >/dev/null; then
+        remote "rm -rf '$profile_stage'"
+        return 1
+    fi
+
+    remote sh -s "$profile_stage" "$remote_root" "$hermes_remote_root" "$environment_file" <<'REMOTE'
+set -eu
+stage=$1
+remote_root=$2
+hermes_root=$3
+environment_file=$4
+compose() {
+    docker compose --project-name homelab --env-file "$environment_file" "$@"
+}
+restore_profiles() {
+    for profile in primary secondary; do
+        target=$hermes_root/profiles/$profile/config/config.yaml
+        install -m 0644 "$stage/$profile/config.yaml.previous" "$target.next"
+        mv -f "$target.next" "$target"
+    done
+    cd "$remote_root"
+    compose up -d --no-deps --force-recreate hermes-primary hermes-secondary || {
+        echo "Hermes profile rollback could not recreate both agents" >&2
+        return 1
+    }
+}
+for profile in primary secondary; do
+    target=$hermes_root/profiles/$profile/config/config.yaml
+    test -s "$target" || { echo "remote Hermes profile config is missing: $target" >&2; exit 1; }
+    test -s "$stage/$profile/config.yaml.next" || { echo "staged Hermes profile config is missing: $profile" >&2; exit 1; }
+done
+for profile in primary secondary; do
+    target=$hermes_root/profiles/$profile/config/config.yaml
+    cp -p "$target" "$stage/$profile/config.yaml.previous"
+done
+for profile in primary secondary; do
+    target=$hermes_root/profiles/$profile/config/config.yaml
+    if ! install -m 0644 "$stage/$profile/config.yaml.next" "$target.next" || ! mv -f "$target.next" "$target"; then
+        restore_profiles || true
+        rm -rf "$stage"
+        exit 1
+    fi
+done
+cd "$remote_root"
+if ! compose up -d --no-deps --force-recreate hermes-primary hermes-secondary; then
+    restore_profiles || true
+    rm -rf "$stage"
+    exit 1
+fi
+for container in hermes-primary hermes-secondary; do
+    attempts=0
+    while :; do
+        state=$(docker inspect "$container" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null) || state=missing
+        test "$state" = healthy && break
+        attempts=$((attempts + 1))
+        if test "$attempts" -ge 30; then
+            echo "$container did not become healthy: $state" >&2
+            restore_profiles || true
+            rm -rf "$stage"
+            exit 1
+        fi
+        sleep 5
+    done
+done
+for profile in primary secondary; do
+    case $profile in
+        primary) container=hermes-primary ;;
+        secondary) container=hermes-secondary ;;
+    esac
+    expected=$(sha256sum "$hermes_root/profiles/$profile/config/config.yaml" | awk '{print $1}')
+    actual=$(docker exec "$container" python3 -c 'import hashlib; print(hashlib.sha256(open("/etc/hermes-home/config.yaml", "rb").read()).hexdigest())') || actual=unavailable
+    if test "$actual" != "$expected"; then
+        echo "$container is not using the deployed profile config" >&2
+        restore_profiles || true
+        rm -rf "$stage"
+        exit 1
+    fi
+done
+rm -rf "$stage"
+REMOTE
+}
+
 read_rollback_images() {
     previous=$(remote "cat '$rollback_file/images.env'")
     service_image_ref=$(printf '%s\n' "$previous" | sed -n 's/^MEDIA_SERVICE_IMAGE=//p')
@@ -3295,6 +3392,7 @@ case ${1:-} in
     deploy-local-service) with_host_lock deploy_local_service ;;
     deploy-local-full) with_host_lock deploy_local_full ;;
     deploy-hermes) with_host_lock deploy_release_hermes ;;
+    deploy-hermes-profiles) with_host_lock deploy_hermes_profiles ;;
     rollback | rollback-service) with_host_lock rollback_service ;;
     rollback-full) with_host_lock rollback_full ;;
     *) usage ;;

@@ -270,12 +270,21 @@ runs the forward image's migrations back to the captured forward version,
 restarts that image, and verifies the protected container snapshot before
 returning failure.
 
-Every invocation requires explicit `HOMELAB_ROOT` and `MEDIA_RELEASE_DIR`
-values. `HERMES_HOME_ROOT` defaults only to `$HOMELAB_ROOT/hermes`; set it for a
-different checkout root, or set `HERMES_CAPABILITY_CHECKER` for an explicit
-checker path. The MCP schema synchronized by the guarded deploy comes from
-`$MEDIA_RELEASE_DIR/MCP_SCHEMA.json`. A missing checker, bundle schema, or
-schema mismatch aborts before any image build or container operation.
+Release deploy invocations require explicit `HOMELAB_ROOT` and
+`MEDIA_RELEASE_DIR` values. `HERMES_HOME_ROOT` defaults only to
+`$HOMELAB_ROOT/hermes`; set it for a different checkout root, or set
+`HERMES_CAPABILITY_CHECKER` for an explicit checker path. The MCP schema
+synchronized by the guarded deploy comes from `$MEDIA_RELEASE_DIR/MCP_SCHEMA.json`.
+A missing checker, bundle schema, or schema mismatch aborts before any image
+build or container operation.
+
+For profile configuration changes such as a model switch, use
+`HOMELAB_ROOT=/path/to/home ./scripts/homelab.sh deploy-hermes-profiles`. This
+copies only the two profile YAML files, checks for active media jobs, recreates
+only `hermes-primary` and `hermes-secondary`, waits for health, and verifies the
+mounted files. It does not need a Media Service release bundle or compare Media
+Service attestations. On failure it restores the previous profile configs and
+recreates the two agents with those configs.
 
 The Hermes-only rollout stages the complete source tree and extracted CLI
 off-live, then checkpoints images, Compose, schema, and mounted sources before
