@@ -1,6 +1,6 @@
 # media-orchestrator
 
-Private Rust media orchestration for Hermes, Rezka, Prowlarr, qBittorrent, and Plex.
+Rust media orchestration for Hermes, Rezka, Prowlarr, qBittorrent, and Plex.
 
 Project documentation:
 
@@ -12,7 +12,7 @@ Project documentation:
 - `docs/superpowers/plans/2026-07-10-rust-domain-foundation.md`
   is the first executable implementation plan.
 
-This repository will contain:
+This repository includes:
 
 - The first-party Rust Rezka client.
 - `media-service`, `download-runner`, and the `media` CLI.

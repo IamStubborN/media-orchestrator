@@ -36,7 +36,7 @@ const APPLICATION_TABLES: [&str; 23] = [
 ];
 
 #[tokio::test]
-async fn migrations_apply_seed_fixed_users_and_reverse_cleanly() {
+async fn migrations_apply_seed_fixed_users_and_require_backup_for_identity_rollback() {
     let test_db = TestDatabase::start().await;
     let db = test_db.connection();
 
@@ -306,27 +306,20 @@ async fn migrations_apply_seed_fixed_users_and_reverse_cleanly() {
         );
     }
 
-    Migrator::down(db, None)
-        .await
-        .expect("all explicit migrations must reverse in dependency order");
+    let error = Migrator::down(db, Some(1)).await.unwrap_err();
+    assert!(error.to_string().contains("database backup"));
+    assert_eq!(
+        Migrator::get_applied_migrations(db).await.unwrap().len(),
+        44
+    );
+}
 
-    let remaining = query(
-        db,
-        "SELECT table_name
-         FROM information_schema.tables
-         WHERE table_schema = 'public'
-           AND table_name = ANY (ARRAY[
-             'users', 'api_clients', 'media', 'media_external_refs',
-             'seasons', 'episodes', 'episode_provider_mappings', 'jobs',
-             'job_tasks', 'job_stages', 'idempotency_records', 'job_leases'
-             , 'operation_receipts', 'job_events', 'outbox_events'
-             , 'tracking_subscriptions', 'tracking_discoveries',
-             'tracking_download_reservations', 'notification_outbox',
-             'runner_lifecycle'
-           ])",
-    )
-    .await;
-    assert!(remaining.is_empty(), "down must remove every owned table");
+#[tokio::test]
+async fn earlier_migrations_reverse_cleanly() {
+    let test_db = TestDatabase::start().await;
+    let db = test_db.connection();
+    Migrator::up(db, Some(43)).await.unwrap();
+    Migrator::down(db, None).await.unwrap();
     assert!(
         Migrator::get_applied_migrations(db)
             .await
@@ -353,8 +346,8 @@ async fn a_failed_migration_explicitly_rolls_back_partial_schema() {
     );
     assert_eq!(
         names.last().map(String::as_str),
-        Some("m20260907_000043_tracking_release_identity_unique"),
-        "release-identity uniqueness diagnostics must remain the latest schema change",
+        Some("m20260929_000044_neutral_user_names"),
+        "identity transition must remain the latest schema change",
     );
     for migration in migrations {
         assert_eq!(

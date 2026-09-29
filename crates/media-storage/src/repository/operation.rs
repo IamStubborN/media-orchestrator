@@ -307,7 +307,7 @@ fn invalid_snapshot() -> sea_orm::DbErr {
 #[cfg(test)]
 mod tests {
     use media_core::{
-        PRIMARY_USER_ID, Job, JobId, JobLease, JobState, LeaseId, NotifyScope, Provider,
+        Job, JobId, JobLease, JobState, LeaseId, NotifyScope, PRIMARY_USER_ID, Provider,
         RUNNER_CLIENT_ID,
     };
 

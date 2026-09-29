@@ -1,7 +1,7 @@
 mod support;
 
 use media_core::{
-    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, BootstrapClient, ClientRole, ClientStore, CredentialDigest,
+    BootstrapClient, ClientRole, ClientStore, CredentialDigest, PRIMARY_CLIENT_ID, PRIMARY_USER_ID,
     PortError, RUNNER_CLIENT_ID, SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
 };
 use media_storage::SeaOrmClientStore;
@@ -165,7 +165,11 @@ async fn digest_collisions_are_atomic_and_errors_never_reveal_credentials() {
     assert_eq!(format!("{error:?}"), "Conflict");
     assert_eq!(format!("{error}"), "persistence conflict");
     assert!(
-        store.find_by_digest(primary_digest).await.unwrap().is_some(),
+        store
+            .find_by_digest(primary_digest)
+            .await
+            .unwrap()
+            .is_some(),
         "a failed rotation must preserve the prior credential",
     );
 }

@@ -255,7 +255,12 @@ impl ServerConfig {
         Ok(Self {
             database_url: database.database_url,
             listen_addr,
-            primary_token: read_secret(source, PRIMARY_TOKEN, PRIMARY_TOKEN_FILE, SecretKind::Token)?,
+            primary_token: read_secret(
+                source,
+                PRIMARY_TOKEN,
+                PRIMARY_TOKEN_FILE,
+                SecretKind::Token,
+            )?,
             secondary_token: read_secret(
                 source,
                 SECONDARY_TOKEN,

@@ -11,7 +11,7 @@ use media_contract::{
     StartSearchRequest,
 };
 use media_core::{
-    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole, JobId, OperationKey, RUNNER_CLIENT_ID,
+    Actor, ClientRole, JobId, OperationKey, PRIMARY_CLIENT_ID, PRIMARY_USER_ID, RUNNER_CLIENT_ID,
     UserId,
 };
 use tower::ServiceExt as _;
@@ -169,7 +169,10 @@ async fn authenticated_owner_can_start_an_alternative_provider_search() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["source"], "prowlarr");
-    assert_eq!(service.owners.lock().unwrap().as_slice(), &[PRIMARY_USER_ID]);
+    assert_eq!(
+        service.owners.lock().unwrap().as_slice(),
+        &[PRIMARY_USER_ID]
+    );
 }
 
 fn page(source: ProviderDto, continuation: Option<&str>) -> SearchPageDto {

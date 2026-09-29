@@ -58,7 +58,7 @@ must not close it.
 Every workstream must track three independent states:
 
 - **Implemented:** the required code and configuration exist.
-- **Deployed:** the current implementation is running on `host.example.invalid`.
+- **Deployed:** the current implementation is running on `docker.example.invalid`.
 - **Live-verified:** the real user flow passed against Rezka, Prowlarr, qBittorrent, Vaultwarden, Telegram, storage, and Plex as applicable.
 
 Unit tests or a healthy container do not satisfy a live-verification gate.

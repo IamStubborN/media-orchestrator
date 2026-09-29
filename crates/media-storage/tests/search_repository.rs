@@ -1,7 +1,7 @@
 mod support;
 
 use media_core::{
-    PRIMARY_USER_ID, JobId, JobStore, NewJob, NotifyScope, Provider, SECONDARY_USER_ID,
+    JobId, JobStore, NewJob, NotifyScope, PRIMARY_USER_ID, Provider, SECONDARY_USER_ID,
 };
 use media_storage::{SeaOrmJobStore, SeaOrmSearchRepository, SearchSessionRecord};
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};

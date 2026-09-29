@@ -107,9 +107,9 @@
 ### Task 5: Hermes rendering compatibility
 
 **Files:**
-- Modify: `/home/operator/Projects/personal/hermes-home/scripts/media_notifier.py`
-- Modify: `/home/operator/Projects/personal/hermes-home/tests/test_media_notifier.py`
-- Modify: `/home/operator/Projects/personal/hermes-home/tests/test_media_telegram_plugin.py`
+- Modify: `/Users/operator/Projects/personal/hermes-home/scripts/media_notifier.py`
+- Modify: `/Users/operator/Projects/personal/hermes-home/tests/test_media_notifier.py`
+- Modify: `/Users/operator/Projects/personal/hermes-home/tests/test_media_telegram_plugin.py`
 
 **Interfaces:**
 - Consumes: `media.source-choice` payload action list

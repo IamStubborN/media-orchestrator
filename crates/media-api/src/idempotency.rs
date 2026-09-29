@@ -412,7 +412,7 @@ fn replay(stored: StoredHttpResponse, fallback_request_id: &RequestId) -> Option
 #[cfg(test)]
 mod tests {
     use axum::{body::Body, response::Response};
-    use media_core::{PRIMARY_CLIENT_ID, ClientId};
+    use media_core::{ClientId, PRIMARY_CLIENT_ID};
 
     use crate::RequestId;
 

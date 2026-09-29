@@ -324,9 +324,9 @@ mod tests {
         RunnerLifecycleApplication,
     };
     use crate::{
-        PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientId, ClientRole, Job, JobId, JobLease,
-        JobState, JobStore, JobValidationError, LIFECYCLE_CLIENT_ID, LeaseId, LeaseStore, NewJob,
-        NotifyScope, OperationKey, PortError, Provider, QueueStatus, RUNNER_CLIENT_ID,
+        Actor, ClientId, ClientRole, Job, JobId, JobLease, JobState, JobStore, JobValidationError,
+        LIFECYCLE_CLIENT_ID, LeaseId, LeaseStore, NewJob, NotifyScope, OperationKey,
+        PRIMARY_CLIENT_ID, PRIMARY_USER_ID, PortError, Provider, QueueStatus, RUNNER_CLIENT_ID,
         RunnerLifecycle, RunnerLifecycleState, RunnerLifecycleStore, RunnerLifecycleUpdate, UserId,
     };
 

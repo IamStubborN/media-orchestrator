@@ -1,6 +1,6 @@
 # Media Orchestrator Runbook
 
-This runbook covers the live deployment at `host.example.invalid`. It
+This runbook covers the live deployment at `docker.example.invalid`. It
 does not contain credentials, cookies, signed URLs, or Telegram tokens.
 
 ## Runtime Layout
@@ -37,7 +37,7 @@ mise run homelab-rollback
 Deploy and rollback refuse to replace runtime containers while a job is active.
 
 ```sh
-ssh host.example.invalid \
+ssh docker.example.invalid \
   "docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}' | \
    grep -E '^(media-service|download-runner|gluetun-rezka|gluetun-rezka-watcher|media-postgres|qbittorrent|prowlarr)'"
 ```
@@ -45,7 +45,7 @@ ssh host.example.invalid \
 Inspect lifecycle and recent jobs without reading secrets:
 
 ```sh
-ssh host.example.invalid \
+ssh docker.example.invalid \
   "docker exec media-postgres sh -lc 'psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -c \
   \"select state,previous_ip,current_ip,updated_at from runner_lifecycle; \
     select id,provider,state,attempt_count,updated_at from jobs order by created_at desc limit 10;\"'"
@@ -54,7 +54,7 @@ ssh host.example.invalid \
 Hermes-facing queue availability is available without direct database access:
 
 ```sh
-ssh host.example.invalid \
+ssh docker.example.invalid \
   'docker exec hermes-primary hermes-media queue status --json'
 ```
 
@@ -126,10 +126,10 @@ Build immutable images directly on the Docker host without GitHub Actions:
 
 ```sh
 revision=$(git rev-parse --short HEAD)
-DOCKER_HOST=ssh://host.example.invalid \
+DOCKER_HOST=ssh://docker.example.invalid \
   docker build --target service \
   -t "media-orchestrator-service:local-$revision" .
-DOCKER_HOST=ssh://host.example.invalid \
+DOCKER_HOST=ssh://docker.example.invalid \
   docker build --target runner \
   -t "media-orchestrator-runner:local-$revision" .
 ```
@@ -367,7 +367,7 @@ refuses to lease queued jobs. Recovery:
 4. Do not manually edit lifecycle rows.
 
 ```sh
-ssh host.example.invalid \
+ssh docker.example.invalid \
   'docker start gluetun-rezka-watcher >/dev/null'
 ```
 
@@ -456,9 +456,9 @@ back PostgreSQL migrations by deleting data.
 ## Logs
 
 ```sh
-ssh host.example.invalid 'docker logs --since 10m media-service'
-ssh host.example.invalid 'docker logs --since 10m download-runner'
-ssh host.example.invalid 'docker logs --since 10m gluetun-rezka-watcher'
+ssh docker.example.invalid 'docker logs --since 10m media-service'
+ssh docker.example.invalid 'docker logs --since 10m download-runner'
+ssh docker.example.invalid 'docker logs --since 10m gluetun-rezka-watcher'
 ```
 
 Logs may contain safe job IDs and static error codes. They must never contain

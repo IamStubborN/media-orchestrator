@@ -2,7 +2,7 @@
 set -eu
 
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-host=${MEDIA_HOMELAB_HOST:host.example.invalid}
+host=${MEDIA_HOMELAB_HOST:-docker.example.invalid}
 remote_root=${MEDIA_HOMELAB_ROOT:-/srv/homelab}
 # Included by $remote_root/compose.yml. Runtime operations use the root `homelab`
 # project; do not `cd media` or Compose will create a second project.

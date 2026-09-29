@@ -1,11 +1,11 @@
 mod support;
 
 use media_core::{
-    PRIMARY_USER_ID, EpisodeSnapshot, NewTrackingCommand, NewTrackingSubscription,
-    NotificationContent, NotificationEventType, NotificationId, NotificationRecipient,
-    OperationKey, Provider, ReleaseIdentity, ReleaseSource, SourceChoiceAction,
+    EpisodeSnapshot, NewTrackingCommand, NewTrackingSubscription, NotificationContent,
+    NotificationEventType, NotificationId, NotificationRecipient, OperationKey, PRIMARY_USER_ID,
+    Provider, ReleaseIdentity, ReleaseSource, SECONDARY_USER_ID, SourceChoiceAction,
     TrackingCheckStatus, TrackingClaimToken, TrackingDownload, TrackingDownloadPatch, TrackingId,
-    TrackingScheduleStore, TrackingScope, TrackingStore, SECONDARY_USER_ID,
+    TrackingScheduleStore, TrackingScope, TrackingStore,
 };
 use media_storage::{SeaOrmNotificationOutbox, SeaOrmTrackingStore};
 use sea_orm::ConnectionTrait;

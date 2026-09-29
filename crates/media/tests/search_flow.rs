@@ -23,16 +23,16 @@ use media_contract::{
     StartSearchRequest, TrackingPromptDto,
 };
 use media_core::{
-    PRIMARY_USER_ID, AnonymousSessionPort, CanonicalEpisode, CanonicalEpisodeCoordinates,
-    CanonicalMedia, CanonicalSeason, EpisodeAvailabilityPort, EpisodeAvailabilityRequest,
-    EpisodeDiscovery, EpisodeDiscoveryPort, EpisodeId, EpisodeMappingConfirmation,
-    EpisodeProviderMapping, ExternalNamespace, IdentityStore, Job, JobApplication, JobId, JobStore,
-    MediaExternalReference, NewJob, NotifyScope, OperationKey, PortError, Provider, QueueStatus,
+    AnonymousSessionPort, CanonicalEpisode, CanonicalEpisodeCoordinates, CanonicalMedia,
+    CanonicalSeason, EpisodeAvailabilityPort, EpisodeAvailabilityRequest, EpisodeDiscovery,
+    EpisodeDiscoveryPort, EpisodeId, EpisodeMappingConfirmation, EpisodeProviderMapping,
+    ExternalNamespace, IdentityStore, Job, JobApplication, JobId, JobStore, MediaExternalReference,
+    NewJob, NotifyScope, OperationKey, PRIMARY_USER_ID, PortError, Provider, QueueStatus,
     ReleaseCandidate, ReleaseIdentity, ReleaseLifecycle, ReleaseMetadataPort,
     ReleaseMetadataResult, ReleasePrecision, ReleaseQuery, ReleaseQueryError, ReleaseSource,
     RunnerLifecycle, RunnerLifecycleState, RunnerLifecycleStore, RunnerLifecycleUpdate,
-    ScheduledEpisode, SourceChoiceAction, TrackedEpisodeDownloadPort, TrackingDownload, TrackingId,
-    TrackingScope, TrackingSubscription, UserId, SECONDARY_USER_ID,
+    SECONDARY_USER_ID, ScheduledEpisode, SourceChoiceAction, TrackedEpisodeDownloadPort,
+    TrackingDownload, TrackingId, TrackingScope, TrackingSubscription, UserId,
 };
 
 #[derive(Default)]
@@ -3279,7 +3279,11 @@ async fn rezka_requires_explicit_translation_and_available_episode_without_fallb
     ] {
         assert_eq!(
             service
-                .select(PRIMARY_USER_ID, OperationKey::from_bytes([8; 32]), selection)
+                .select(
+                    PRIMARY_USER_ID,
+                    OperationKey::from_bytes([8; 32]),
+                    selection
+                )
                 .await
                 .unwrap_err(),
             SearchError::InvalidRequest

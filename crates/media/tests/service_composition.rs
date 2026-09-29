@@ -20,7 +20,7 @@ use media_api::{
     IdempotencyStore, Reservation, StoredHttpResponse,
 };
 use media_core::{
-    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, BootstrapClient, ClientRole, ClientStore, CredentialDigest,
+    BootstrapClient, ClientRole, ClientStore, CredentialDigest, PRIMARY_CLIENT_ID, PRIMARY_USER_ID,
     RUNNER_CLIENT_ID, SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
 };
 use media_storage::{Migrator, SeaOrmClientStore, SeaOrmIdempotencyRepository};

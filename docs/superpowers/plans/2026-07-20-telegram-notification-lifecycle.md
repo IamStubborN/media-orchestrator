@@ -250,7 +250,7 @@ Commit: `feat: deliver structured media notifications`
 
 ### Task 4: Deterministic Hermes Renderer And Card State
 
-**Files in `/home/operator/Projects/personal/hermes-home`:**
+**Files in `/Users/operator/Projects/personal/hermes-home`:**
 - Create: `scripts/hermes_media_notifications.py`
 - Modify: `scripts/patch_hermes_telegram.py`
 - Modify: `Dockerfile`
@@ -336,7 +336,7 @@ Commit: `feat: render media lifecycle cards in Telegram`
 
 ### Task 5: Skill Contract And Cross-Repository Verification
 
-**Files in `/home/operator/Projects/personal/hermes-home`:**
+**Files in `/Users/operator/Projects/personal/hermes-home`:**
 - Modify: `shared/skills/media/SKILL.md`
 - Modify: `tests/test_scaffold.py`
 

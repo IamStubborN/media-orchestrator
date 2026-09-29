@@ -851,9 +851,9 @@ impl TrackedEpisodeDownloadPort for TrackedEpisodeDownloader {
             );
             code
         };
-        let download = tracking.download().ok_or_else(|| {
-            stage("persist", media_core::ENQUEUE_PERSIST_FAILURE_CODE)
-        })?;
+        let download = tracking
+            .download()
+            .ok_or_else(|| stage("persist", media_core::ENQUEUE_PERSIST_FAILURE_CODE))?;
         if episode.season() != download.season() {
             return Err(stage("persist", media_core::ENQUEUE_PERSIST_FAILURE_CODE));
         }
@@ -2806,6 +2806,7 @@ impl DurableSearchService {
             });
         let library_title_hint = verified
             .as_ref()
+            .filter(|identity| !identity.canonical_title.trim().is_empty())
             .map_or(session.request.query.as_str(), |identity| {
                 identity.canonical_title.as_str()
             });

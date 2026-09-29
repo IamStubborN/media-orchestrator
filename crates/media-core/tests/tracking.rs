@@ -5,11 +5,10 @@ use std::{
 };
 
 use media_core::{
-    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole, EpisodeSnapshot, NewTrackingCommand,
-    NewTrackingSubscription, OperationKey, PortError, Provider, ReleaseIdentity, ReleaseSource,
-    TrackingApplication,
-    TrackingDownloadPatch, TrackingId, TrackingScope, TrackingState, TrackingStore,
-    TrackingSubscription, TrackingValidationError, SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
+    Actor, ClientRole, EpisodeSnapshot, NewTrackingCommand, NewTrackingSubscription, OperationKey,
+    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, PortError, Provider, ReleaseIdentity, ReleaseSource,
+    SECONDARY_CLIENT_ID, SECONDARY_USER_ID, TrackingApplication, TrackingDownloadPatch, TrackingId,
+    TrackingScope, TrackingState, TrackingStore, TrackingSubscription, TrackingValidationError,
 };
 
 #[derive(Default)]
@@ -264,7 +263,6 @@ fn create_with_same_tvmaze_id_returns_existing_subscription() {
         assert_eq!(app.list(&actor_primary()).await.unwrap().len(), 1);
     });
 }
-
 
 #[test]
 fn release_calendar_create_requires_positive_tvmaze_identity() {

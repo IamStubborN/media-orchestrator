@@ -76,7 +76,7 @@ mod tests {
     use std::str::FromStr;
 
     use super::{
-        PRIMARY_CLIENT_ID, PRIMARY_USER_ID, MediaId, RUNNER_CLIENT_ID, SECONDARY_CLIENT_ID,
+        MediaId, PRIMARY_CLIENT_ID, PRIMARY_USER_ID, RUNNER_CLIENT_ID, SECONDARY_CLIENT_ID,
         SECONDARY_USER_ID,
     };
 

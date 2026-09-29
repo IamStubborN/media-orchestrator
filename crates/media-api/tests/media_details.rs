@@ -8,7 +8,7 @@ use axum::{
 };
 use media_api::{MediaDetailsService, MediaDetailsServiceError, router};
 use media_contract::{MediaDetailsDto, SimilarPageDto, TrendingItemDto, TrendingMediaTypeDto};
-use media_core::{PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole};
+use media_core::{Actor, ClientRole, PRIMARY_CLIENT_ID, PRIMARY_USER_ID};
 use tower::ServiceExt;
 
 use support::{FakeClientStore, FakeReadiness, VALID_TOKEN, state};

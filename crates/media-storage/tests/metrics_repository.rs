@@ -3,7 +3,7 @@ mod support;
 use std::collections::HashMap;
 
 use media_core::{
-    PRIMARY_USER_ID, JobId, JobState, JobStore, MetricsSource, NewJob, NotifyScope, Provider,
+    JobId, JobState, JobStore, MetricsSource, NewJob, NotifyScope, PRIMARY_USER_ID, Provider,
     SECONDARY_USER_ID,
 };
 use media_storage::{SeaOrmJobStore, SeaOrmMetricsSource};

@@ -31,7 +31,7 @@
 Implementation spans two repositories because the wire contract and its deterministic renderer must change together:
 
 ```text
-/home/operator/Projects/personal/media-orchestrator
+/Users/operator/Projects/personal/media-orchestrator
   crates/media-runner/src/media.rs
     ffprobe result and final artifact report
   crates/media-runner/src/adapters.rs
@@ -56,7 +56,7 @@ Implementation spans two repositories because the wire contract and its determin
   crates/media/src/render.rs
     owner-scoped alternative-provider search
 
-/home/operator/Projects/personal/hermes-home
+/Users/operator/Projects/personal/hermes-home
   scripts/hermes_media_notifications.py
     strict parser and Russian card renderer
   scripts/media-notifier
@@ -915,7 +915,7 @@ git commit -m "feat: add alternative provider search action"
 
 ### Task 6: Deterministic Detailed Telegram Renderer And Five-Second Cards
 
-**Working directory:** `/home/operator/Projects/personal/hermes-home`
+**Working directory:** `/Users/operator/Projects/personal/hermes-home`
 
 **Files:**
 - Modify: `scripts/hermes_media_notifications.py`
@@ -1044,7 +1044,7 @@ git commit -m "feat: render detailed media lifecycle cards"
 
 ### Task 7: Inline Alternative Search, Native Choices, And Quiet Telegram
 
-**Working directory:** `/home/operator/Projects/personal/hermes-home`
+**Working directory:** `/Users/operator/Projects/personal/hermes-home`
 
 **Files:**
 - Modify: `shared/plugins/telegram-home/__init__.py`
@@ -1153,8 +1153,8 @@ git commit -m "feat: improve Telegram media actions"
 ### Task 8: Cross-Repository Verification, Safe Deployment, UI Evidence, And Cleanup
 
 **Working directories:**
-- `/home/operator/Projects/personal/media-orchestrator`
-- `/home/operator/Projects/personal/hermes-home`
+- `/Users/operator/Projects/personal/media-orchestrator`
+- `/Users/operator/Projects/personal/hermes-home`
 
 **Files:**
 - Modify: `docs/ACCEPTANCE.md`
@@ -1209,7 +1209,7 @@ Assert each lifecycle edits one Telegram message. Assert the completed payload c
 Run:
 
 ```bash
-ssh host.example.invalid \
+ssh docker.example.invalid \
   'docker exec hermes-primary hermes-media queue status --json'
 ```
 
@@ -1230,14 +1230,14 @@ Expected: migrations complete, health gates pass, and the deployment guard refus
 Run:
 
 ```bash
-ssh host.example.invalid \
+ssh docker.example.invalid \
   "docker ps --format '{{.Names}} {{.Status}}' | \
    grep -E '^(media-service|download-runner|gluetun-rezka|hermes-primary|hermes-secondary)'"
-ssh host.example.invalid \
+ssh docker.example.invalid \
   'docker exec hermes-primary hermes-media queue status --json'
-ssh host.example.invalid \
+ssh docker.example.invalid \
   'docker logs --since 10m media-service'
-ssh host.example.invalid \
+ssh docker.example.invalid \
   'docker logs --since 10m download-runner'
 ```
 
@@ -1274,12 +1274,12 @@ Find the only media file created after the recorded test start timestamp and com
 
 ```bash
 TEST_FILE="$(
-  ssh host.example.invalid \
+  ssh docker.example.invalid \
     "find /mnt/internal/torrents/tv -type f -newermt '${TEST_STARTED_AT}' \
      \( -name '*.mkv' -o -name '*.mp4' \) -print" |
   head -n 1
 )"
-ssh host.example.invalid \
+ssh docker.example.invalid \
   "ffprobe -v error -show_streams -show_format -of json '$TEST_FILE'"
 ```
 

@@ -44,7 +44,7 @@ The implementation is also a practical Rust project covering asynchronous networ
 Local path:
 
 ```text
-/home/operator/Projects/personal/media-orchestrator
+/Users/operator/Projects/personal/media-orchestrator
 ```
 
 Responsibilities:
@@ -65,7 +65,7 @@ It does not contain Hermes profiles, Telegram tokens, user memory, browser state
 Local path:
 
 ```text
-/home/operator/Projects/personal/hermes-home
+/Users/operator/Projects/personal/hermes-home
 ```
 
 Responsibilities:

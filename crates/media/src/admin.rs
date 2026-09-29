@@ -472,7 +472,8 @@ impl<T> Pipe for T {}
 mod tests {
     use media_api::MediaAdminService;
     use media_core::{
-        PRIMARY_CLIENT_ID, PRIMARY_USER_ID, Actor, ClientRole, SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
+        Actor, ClientRole, PRIMARY_CLIENT_ID, PRIMARY_USER_ID, SECONDARY_CLIENT_ID,
+        SECONDARY_USER_ID,
     };
 
     use super::MediaAdminAdapter;
@@ -488,7 +489,8 @@ mod tests {
             vec![root.clone()],
             root.join("quarantine"),
         );
-        let actor = Actor::new(PRIMARY_CLIENT_ID, Some(PRIMARY_USER_ID), ClientRole::Hermes).unwrap();
+        let actor =
+            Actor::new(PRIMARY_CLIENT_ID, Some(PRIMARY_USER_ID), ClientRole::Hermes).unwrap();
 
         let status = adapter.storage_status(&actor).await.unwrap();
 

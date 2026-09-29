@@ -349,7 +349,10 @@ impl JobState {
                         | Self::Failed
                 )
                 | (Self::CancelRequested, Self::Cancelled)
-                | (Self::BlockedStorage, Self::Queued | Self::CancelRequested | Self::Cancelled)
+                | (
+                    Self::BlockedStorage,
+                    Self::Queued | Self::CancelRequested | Self::Cancelled
+                )
                 | (
                     Self::Publishing,
                     Self::Queued | Self::CancelRequested | Self::PlexPending | Self::Failed
@@ -387,7 +390,7 @@ mod tests {
         Job, JobLease, JobState, JobValidationError, MAX_RESULT_REF_BYTES, NewJob, NotifyScope,
         Provider,
     };
-    use crate::{PRIMARY_USER_ID, JobId, LeaseId, NeedsActionReason, RUNNER_CLIENT_ID};
+    use crate::{JobId, LeaseId, NeedsActionReason, PRIMARY_USER_ID, RUNNER_CLIENT_ID};
 
     const STATES: [JobState; 12] = [
         JobState::Queued,

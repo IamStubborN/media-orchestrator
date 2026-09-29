@@ -9,13 +9,13 @@ use std::{
 };
 
 use media_core::{
-    PRIMARY_USER_ID, AnonymousSessionPort, EpisodeAvailability, EpisodeAvailabilityPort,
-    EpisodeAvailabilityRequest, EpisodeDiscovery, EpisodeDiscoveryPort, EpisodeSnapshot,
-    FutureEpisodeRecord, NewTrackingCommand, NewTrackingSubscription, NotificationDelivery,
-    NotificationDeliveryFailure, NotificationDeliveryFence, NotificationDeliveryPermit,
-    NotificationDispatcher, NotificationEventType, NotificationId, NotificationOutboxPort,
-    NotificationRecipient, NotificationSink, NotificationSinkOutcome, OperationKey, PortError,
-    Provider, ProviderAvailability, ReleaseIdentity, ReleaseSource, SourceChoiceAction,
+    AnonymousSessionPort, EpisodeAvailability, EpisodeAvailabilityPort, EpisodeAvailabilityRequest,
+    EpisodeDiscovery, EpisodeDiscoveryPort, EpisodeSnapshot, FutureEpisodeRecord,
+    NewTrackingCommand, NewTrackingSubscription, NotificationDelivery, NotificationDeliveryFailure,
+    NotificationDeliveryFence, NotificationDeliveryPermit, NotificationDispatcher,
+    NotificationEventType, NotificationId, NotificationOutboxPort, NotificationRecipient,
+    NotificationSink, NotificationSinkOutcome, OperationKey, PRIMARY_USER_ID, PortError, Provider,
+    ProviderAvailability, ReleaseIdentity, ReleaseSource, SourceChoiceAction,
     TrackedEpisodeDownloadPort, TrackingClaimToken, TrackingDownload, TrackingId, TrackingRuntime,
     TrackingScheduleStore, TrackingScope, TrackingSubscription,
 };
@@ -1379,10 +1379,8 @@ fn failed_enqueue_releases_its_durable_reservation_for_a_new_configuration() {
 #[test]
 fn repeated_identical_enqueue_failures_increase_cooldown_beyond_fifteen_minutes() {
     block_on(async {
-        let due = download_tracking().with_check_diagnostics(
-            Some(media_core::ENQUEUE_FAILURE_CODE.to_owned()),
-            3,
-        );
+        let due = download_tracking()
+            .with_check_diagnostics(Some(media_core::ENQUEUE_FAILURE_CODE.to_owned()), 3);
         let store = Arc::new(ScheduleStore {
             due,
             discovered: Mutex::new(Vec::new()),

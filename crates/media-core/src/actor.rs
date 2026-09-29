@@ -1,6 +1,6 @@
 use crate::{
-    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, ClientId, LIFECYCLE_CLIENT_ID, RUNNER_CLIENT_ID, UserId,
-    SECONDARY_CLIENT_ID, SECONDARY_USER_ID,
+    ClientId, LIFECYCLE_CLIENT_ID, PRIMARY_CLIENT_ID, PRIMARY_USER_ID, RUNNER_CLIENT_ID,
+    SECONDARY_CLIENT_ID, SECONDARY_USER_ID, UserId,
 };
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
@@ -204,7 +204,9 @@ mod tests {
     use super::{
         Actor, ActorError, BootstrapClient, BootstrapClientError, ClientRole, CredentialDigest,
     };
-    use crate::{PRIMARY_CLIENT_ID, PRIMARY_USER_ID, ClientId, RUNNER_CLIENT_ID, SECONDARY_USER_ID};
+    use crate::{
+        ClientId, PRIMARY_CLIENT_ID, PRIMARY_USER_ID, RUNNER_CLIENT_ID, SECONDARY_USER_ID,
+    };
 
     #[test]
     fn hermes_actor_requires_a_user() {
@@ -230,7 +232,8 @@ mod tests {
 
     #[test]
     fn hermes_actor_cannot_access_runner_operations() {
-        let actor = Actor::new(PRIMARY_CLIENT_ID, Some(PRIMARY_USER_ID), ClientRole::Hermes).unwrap();
+        let actor =
+            Actor::new(PRIMARY_CLIENT_ID, Some(PRIMARY_USER_ID), ClientRole::Hermes).unwrap();
 
         assert_eq!(
             actor.require_runner(),
@@ -240,7 +243,8 @@ mod tests {
 
     #[test]
     fn actor_exposes_validated_identity_through_read_only_accessors() {
-        let actor = Actor::new(PRIMARY_CLIENT_ID, Some(PRIMARY_USER_ID), ClientRole::Hermes).unwrap();
+        let actor =
+            Actor::new(PRIMARY_CLIENT_ID, Some(PRIMARY_USER_ID), ClientRole::Hermes).unwrap();
 
         assert_eq!(actor.client_id(), PRIMARY_CLIENT_ID);
         assert_eq!(actor.user_id(), Some(PRIMARY_USER_ID));

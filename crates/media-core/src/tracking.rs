@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
-    PRIMARY_USER_ID, Actor, OperationKey, PortError, Provider, SourceChoiceAction,
-    TrackingClaimToken, TrackingId, UserId, SECONDARY_USER_ID,
+    Actor, OperationKey, PRIMARY_USER_ID, PortError, Provider, SECONDARY_USER_ID,
+    SourceChoiceAction, TrackingClaimToken, TrackingId, UserId,
 };
 
 /// Stable opaque identifier for the provider choices discovered for one tracked
@@ -927,9 +927,7 @@ impl TrackingSubscription {
                 Some(SOURCE_PROBE_FAILURE_CODE) => {
                     "source probe failed while checking availability".to_owned()
                 }
-                Some(SOURCE_UNAVAILABLE_CODE) => {
-                    "download source is not available yet".to_owned()
-                }
+                Some(SOURCE_UNAVAILABLE_CODE) => "download source is not available yet".to_owned(),
                 Some(other) => format!("source error: {other}"),
                 None => "source error".to_owned(),
             }),
@@ -1664,7 +1662,11 @@ impl TrackingApplication {
         match self.store.add(operation, value).await {
             Ok(created) => Ok(created),
             Err(PortError::Conflict) => {
-                let listed = self.store.list_visible(owner).await.map_err(map_port_error)?;
+                let listed = self
+                    .store
+                    .list_visible(owner)
+                    .await
+                    .map_err(map_port_error)?;
                 if let Some(identity) = release_identity {
                     if let Some(existing) = listed.iter().find(|candidate| {
                         candidate.download().is_none()
@@ -1771,9 +1773,7 @@ const fn map_port_error(error: PortError) -> TrackingApplicationError {
 
 #[cfg(test)]
 mod failure_backoff_tests {
-    use super::{
-        ENQUEUE_FAILURE_CODE, next_check_failure_count, tracking_failure_cooldown,
-    };
+    use super::{ENQUEUE_FAILURE_CODE, next_check_failure_count, tracking_failure_cooldown};
 
     #[test]
     fn tracking_failure_cooldown_grows_then_caps() {
@@ -1787,10 +1787,7 @@ mod failure_backoff_tests {
 
     #[test]
     fn identical_enqueue_failures_increment_while_new_codes_reset() {
-        assert_eq!(
-            next_check_failure_count(0, None, ENQUEUE_FAILURE_CODE),
-            1
-        );
+        assert_eq!(next_check_failure_count(0, None, ENQUEUE_FAILURE_CODE), 1);
         assert_eq!(
             next_check_failure_count(1, Some(ENQUEUE_FAILURE_CODE), ENQUEUE_FAILURE_CODE),
             2

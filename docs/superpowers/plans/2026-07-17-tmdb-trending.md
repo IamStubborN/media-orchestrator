@@ -84,13 +84,13 @@
 ### Task 4: Hermes, homelab, deployment, and live verification
 
 **Files:**
-- Modify: `/home/operator/Projects/personal/hermes-home/scripts/hermes-media`
-- Modify: `/home/operator/Projects/personal/hermes-home/shared/skills/media/SKILL.md`
-- Modify: `/home/operator/Projects/personal/hermes-home/README.md`
-- Modify: `/home/operator/Projects/personal/hermes-home/tests/test_scaffold.py`
-- Modify: `/home/operator/Projects/personal/homelab/media/compose.media-orchestrator.yml`
-- Modify: `/home/operator/Projects/personal/homelab/.env.example`
-- Modify: `/home/operator/Projects/personal/homelab/media/tests/validate-media-orchestrator-compose.sh`
+- Modify: `/Users/operator/Projects/personal/hermes-home/scripts/hermes-media`
+- Modify: `/Users/operator/Projects/personal/hermes-home/shared/skills/media/SKILL.md`
+- Modify: `/Users/operator/Projects/personal/hermes-home/README.md`
+- Modify: `/Users/operator/Projects/personal/hermes-home/tests/test_scaffold.py`
+- Modify: `/Users/operator/Projects/personal/homelab/media/compose.media-orchestrator.yml`
+- Modify: `/Users/operator/Projects/personal/homelab/.env.example`
+- Modify: `/Users/operator/Projects/personal/homelab/media/tests/validate-media-orchestrator-compose.sh`
 
 **Interfaces:**
 - Produces: constrained `hermes-media trending` access for both profiles.

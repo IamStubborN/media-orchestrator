@@ -1,19 +1,18 @@
 use media_core::{
-    PRIMARY_USER_ID, EpisodeSnapshot, FutureEpisodeRecord, JobId, MediaNotification,
-    MediaNotificationAction, MediaNotificationAudio, MediaNotificationDeliveryKind,
-    MediaNotificationEpisode, MediaNotificationIssue, MediaNotificationKind,
-    MediaNotificationLibrary, MediaNotificationMedia, MediaNotificationNextStep,
-    MediaNotificationOrigin, MediaNotificationProcessing, MediaNotificationProcessingMode,
-    MediaNotificationProgress, MediaNotificationPublication, MediaNotificationResult,
-    MediaNotificationStage, MediaNotificationState, MediaNotificationSubtitles,
-    MediaNotificationVideo, NewTrackingSubscription, NotificationDelivery,
-    NotificationDeliveryPermit, NotificationEventType, NotificationId, NotificationOutboxPort,
-    NotificationRecipient, OperationKey, PortError, Provider, ReleaseIdentity, ReleaseSource,
-    SourceChoiceAction, SourceChoiceNotification, TrackingCheckStatus, TrackingClaimToken,
-    TrackingCheckOutcome, TrackingDownload, TrackingDownloadPatch, TrackingId,
+    EpisodeSnapshot, FutureEpisodeRecord, JobId, MediaNotification, MediaNotificationAction,
+    MediaNotificationAudio, MediaNotificationDeliveryKind, MediaNotificationEpisode,
+    MediaNotificationIssue, MediaNotificationKind, MediaNotificationLibrary,
+    MediaNotificationMedia, MediaNotificationNextStep, MediaNotificationOrigin,
+    MediaNotificationProcessing, MediaNotificationProcessingMode, MediaNotificationProgress,
+    MediaNotificationPublication, MediaNotificationResult, MediaNotificationStage,
+    MediaNotificationState, MediaNotificationSubtitles, MediaNotificationVideo,
+    NewTrackingSubscription, NotificationDelivery, NotificationDeliveryPermit,
+    NotificationEventType, NotificationId, NotificationOutboxPort, NotificationRecipient,
+    OperationKey, PRIMARY_USER_ID, PortError, Provider, ReleaseIdentity, ReleaseSource,
+    SECONDARY_USER_ID, SourceChoiceAction, SourceChoiceNotification, TrackingCheckOutcome,
+    TrackingCheckStatus, TrackingClaimToken, TrackingDownload, TrackingDownloadPatch, TrackingId,
     TrackingScheduleStore, TrackingScope, TrackingStore, TrackingSubscription, UserId,
-    SECONDARY_USER_ID, episode_choice_set_id,
-    is_valid_tracking_poster_url,
+    episode_choice_set_id, is_valid_tracking_poster_url,
 };
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
 
@@ -251,7 +250,6 @@ const TRACKING_ROW_COLUMNS: &str = "id, owner_id, provider, title, translation, 
 
 const TRACKING_LIST_COLUMNS: &str = "id, owner_id, provider, title, translation, known_episodes, scope, poster_url, release_source, release_source_id, download_provider_media_ref, download_translation_id, download_season, last_checked_at, next_check_at, check_status, check_last_error, check_failure_count, COALESCE((    SELECT jsonb_agg(jsonb_build_object('season', candidate.season, 'episode', candidate.episode)                      ORDER BY candidate.season, candidate.episode)     FROM tracking_availability_candidates AS candidate     WHERE candidate.tracking_id = tracking_subscriptions.id), '[]'::jsonb) AS pending_episodes, (SELECT MIN(candidate.first_seen_at)  FROM tracking_availability_candidates AS candidate  WHERE candidate.tracking_id = tracking_subscriptions.id) AS pending_since";
 
-
 #[async_trait::async_trait]
 impl TrackingStore for SeaOrmTrackingStore {
     async fn add(
@@ -267,21 +265,42 @@ impl TrackingStore for SeaOrmTrackingStore {
         let insert_sql = format!(
             "INSERT INTO tracking_subscriptions (id, owner_id, provider, title, translation, known_episodes, scope, poster_url, release_source, release_source_id, download_provider_media_ref, download_translation_id, download_season, created_operation_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT (created_operation_key) DO UPDATE SET created_operation_key = EXCLUDED.created_operation_key RETURNING {TRACKING_ROW_COLUMNS}"
         );
-        let row = match self.database.query_one_raw(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            insert_sql,
-            [
-                value.id().into_uuid().into(), value.owner_id().into_uuid().into(), provider_value(value.provider()).into(),
-                value.title().into(), value.translation().into(), known.into(), scope_value(value.scope()).into(),
-                value.poster_url().map(str::to_owned).into(),
-                value.release_identity().map(|identity| identity.source().as_str().to_owned()).into(),
-                release_source_id.into(),
-                value.download().map(|download| download.provider_media_ref().to_owned()).into(),
-                value.download().and_then(|download| i64::try_from(download.translation_id()).ok()).into(),
-                value.download().and_then(|download| i32::try_from(download.season()).ok()).into(),
-                operation.as_bytes().to_vec().into(),
-            ],
-        )).await {
+        let row = match self
+            .database
+            .query_one_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                insert_sql,
+                [
+                    value.id().into_uuid().into(),
+                    value.owner_id().into_uuid().into(),
+                    provider_value(value.provider()).into(),
+                    value.title().into(),
+                    value.translation().into(),
+                    known.into(),
+                    scope_value(value.scope()).into(),
+                    value.poster_url().map(str::to_owned).into(),
+                    value
+                        .release_identity()
+                        .map(|identity| identity.source().as_str().to_owned())
+                        .into(),
+                    release_source_id.into(),
+                    value
+                        .download()
+                        .map(|download| download.provider_media_ref().to_owned())
+                        .into(),
+                    value
+                        .download()
+                        .and_then(|download| i64::try_from(download.translation_id()).ok())
+                        .into(),
+                    value
+                        .download()
+                        .and_then(|download| i32::try_from(download.season()).ok())
+                        .into(),
+                    operation.as_bytes().to_vec().into(),
+                ],
+            ))
+            .await
+        {
             Ok(row) => row.ok_or(PortError::Infrastructure)?,
             Err(error) => {
                 let mapped = map_tracking_database_error(error);
@@ -798,7 +817,9 @@ impl TrackingScheduleStore for SeaOrmTrackingStore {
                     outcome.next_check_at.into(),
                     tracking_check_status_value(outcome.status).into(),
                     outcome.last_error.clone().into(),
-                    i32::try_from(outcome.failure_count).map_err(|_| PortError::Conflict)?.into(),
+                    i32::try_from(outcome.failure_count)
+                        .map_err(|_| PortError::Conflict)?
+                        .into(),
                 ],
             ))
             .await
@@ -1215,39 +1236,41 @@ fn tracking_from_row(row: &sea_orm::QueryResult) -> Result<TrackingSubscription,
         Err(_) => Vec::new(),
     };
     let pending_since = row.try_get("", "pending_since").unwrap_or(None);
-    Ok(TrackingSubscription::rehydrate_with_check_identity_and_poster(
-        TrackingId::from_uuid(
-            row.try_get("", "id")
+    Ok(
+        TrackingSubscription::rehydrate_with_check_identity_and_poster(
+            TrackingId::from_uuid(
+                row.try_get("", "id")
+                    .map_err(|_| PortError::Infrastructure)?,
+            ),
+            UserId::from_uuid(
+                row.try_get("", "owner_id")
+                    .map_err(|_| PortError::Infrastructure)?,
+            ),
+            parse_provider(
+                &row.try_get::<String>("", "provider")
+                    .map_err(|_| PortError::Infrastructure)?,
+            )?,
+            row.try_get("", "title")
                 .map_err(|_| PortError::Infrastructure)?,
-        ),
-        UserId::from_uuid(
-            row.try_get("", "owner_id")
+            row.try_get("", "translation")
                 .map_err(|_| PortError::Infrastructure)?,
-        ),
-        parse_provider(
-            &row.try_get::<String>("", "provider")
+            episodes,
+            parse_scope(
+                &row.try_get::<String>("", "scope")
+                    .map_err(|_| PortError::Infrastructure)?,
+            )?,
+            release_identity,
+            download,
+            row.try_get("", "poster_url")
                 .map_err(|_| PortError::Infrastructure)?,
-        )?,
-        row.try_get("", "title")
-            .map_err(|_| PortError::Infrastructure)?,
-        row.try_get("", "translation")
-            .map_err(|_| PortError::Infrastructure)?,
-        episodes,
-        parse_scope(
-            &row.try_get::<String>("", "scope")
-                .map_err(|_| PortError::Infrastructure)?,
-        )?,
-        release_identity,
-        download,
-        row.try_get("", "poster_url")
-            .map_err(|_| PortError::Infrastructure)?,
-        last_checked_at,
-        next_check_at,
-        check_status,
+            last_checked_at,
+            next_check_at,
+            check_status,
+        )
+        .map_err(|_| PortError::Infrastructure)?
+        .with_check_diagnostics(check_last_error, check_failure_count)
+        .with_pending_diagnostics(pending_episodes, pending_since),
     )
-    .map_err(|_| PortError::Infrastructure)?
-    .with_check_diagnostics(check_last_error, check_failure_count)
-    .with_pending_diagnostics(pending_episodes, pending_since))
 }
 
 const fn tracking_check_status_value(status: TrackingCheckStatus) -> &'static str {

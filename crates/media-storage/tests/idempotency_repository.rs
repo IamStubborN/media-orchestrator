@@ -1,7 +1,7 @@
 mod support;
 
 use media_core::{
-    PRIMARY_CLIENT_ID, PRIMARY_USER_ID, BootstrapClient, ClientRole, ClientStore, CredentialDigest,
+    BootstrapClient, ClientRole, ClientStore, CredentialDigest, PRIMARY_CLIENT_ID, PRIMARY_USER_ID,
     PortError,
 };
 use media_storage::{
