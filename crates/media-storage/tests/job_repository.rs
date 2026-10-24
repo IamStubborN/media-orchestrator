@@ -115,6 +115,25 @@ async fn queue_status_exposes_the_durable_runner_blocking_reason() {
 }
 
 #[tokio::test]
+async fn queue_status_hides_failure_reasons_of_a_ready_runner() {
+    let test_db = TestDatabase::start_migrated().await;
+    let store = SeaOrmJobStore::new(test_db.connection().clone());
+    test_db
+        .connection()
+        .execute_unprepared(
+            "UPDATE runner_lifecycle SET state = 'ready', \
+             reason = 'retry_same_ip:source_transfer_transient' WHERE singleton = true",
+        )
+        .await
+        .unwrap();
+
+    let status = store.queue_status().await.unwrap();
+
+    assert_eq!(status.runner_state, RunnerLifecycleState::Ready);
+    assert_eq!(status.blocked_reason, None);
+}
+
+#[tokio::test]
 async fn repeated_operation_key_returns_the_original_job_without_a_second_insert() {
     let test_db = TestDatabase::start_migrated().await;
     let first_store = SeaOrmJobStore::new(test_db.connection().clone());
