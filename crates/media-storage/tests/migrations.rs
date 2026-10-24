@@ -441,7 +441,8 @@ async fn structured_notifications_migration_preserves_legacy_rows_and_enforces_v
     .await
     .unwrap();
 
-    Migrator::up(db, None).await.unwrap();
+    // Stop before the irreversible identity rename so the rollback below can run.
+    Migrator::up(db, Some(20)).await.unwrap();
 
     let cycle = query(
         db,
@@ -753,7 +754,8 @@ async fn detailed_notifications_migration_preserves_legacy_payloads_and_validate
     .await
     .unwrap();
 
-    Migrator::up(db, None).await.unwrap();
+    // Stop before the irreversible identity rename so the rollback below can run.
+    Migrator::up(db, Some(17)).await.unwrap();
 
     execute(
         db,
