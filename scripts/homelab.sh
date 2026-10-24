@@ -2572,7 +2572,8 @@ for name in media-notifier-primary media-notifier-secondary hermes-primary herme
     }
 done
 REMOTE
-        return 0
+        ensure_hermes_plugins
+        return
     fi
     remote sh -s "$remote_root" "$environment_file" "$image_record" <<'REMOTE'
 set -eu
@@ -2605,6 +2606,42 @@ for name in media-notifier-primary media-notifier-secondary hermes-primary herme
         attempts=$((attempts + 1))
         test "$attempts" -lt 30 || {
             echo "$name is not healthy: $state" >&2
+            exit 1
+        }
+        sleep 5
+    done
+done
+REMOTE
+    ensure_hermes_plugins
+}
+
+# Plugins that live in the profile volumes instead of the read-only mounts.
+# They follow the Hermes plugin catalog, which pins each reviewed commit and
+# moves with Hermes itself; a catalog outage leaves the installed copy in place.
+ensure_hermes_plugins() {
+    remote sh -s <<'REMOTE'
+set -eu
+plugin=hermes-session-reset-policy
+digest() {
+    docker exec "$1" sh -c "sha256sum /opt/data/plugins/$plugin/__init__.py 2>/dev/null" | cut -c1-64
+}
+for name in hermes-primary hermes-secondary; do
+    before=$(digest "$name")
+    if test -z "$before"; then
+        docker exec "$name" hermes plugins install "$plugin" --no-enable --yes-deps >/dev/null 2>&1 ||
+            echo "warning: $name could not install $plugin from the catalog" >&2
+    else
+        docker exec "$name" hermes plugins update "$plugin" >/dev/null 2>&1 ||
+            echo "warning: $name could not update $plugin; keeping the installed copy" >&2
+    fi
+    test "$(digest "$name")" != "$before" || continue
+    echo "$plugin changed in $name; restarting it" >&2
+    docker restart "$name" >/dev/null
+    attempts=0
+    until test "$(docker inspect "$name" --format '{{.State.Health.Status}}')" = healthy; do
+        attempts=$((attempts + 1))
+        test "$attempts" -lt 30 || {
+            echo "$name is not healthy after the $plugin change" >&2
             exit 1
         }
         sleep 5
