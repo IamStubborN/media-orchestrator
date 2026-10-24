@@ -206,8 +206,13 @@ service image reference, and preserves the running runner only when its exact
 manifest reference and runner-build digest match. The explicit full rollout
 pulls and deploys both manifest references. Neither path builds local images.
 For an intentional source-checkout build instead, use
-`./scripts/homelab.sh deploy-local-service` or
-`./scripts/homelab.sh deploy-local-full`; these are separate operator commands.
+`mise run homelab-deploy-local` or `mise run homelab-deploy-local-full`; these
+are separate operator commands. Local deployments need no release bundle: they
+generate the MCP tools from the checkout and require them to match the Hermes
+`shared/skills/media/MCP_SCHEMA.json` and `config/media-capabilities.json`, so a
+tool change still goes through a release bundle. Keep the host settings
+(`MEDIA_HOMELAB_HOST`, `MEDIA_HOMELAB_ROOT`, `HERMES_HOME_REMOTE_ROOT`,
+`HOMELAB_ROOT`) in the ignored `.mise.local.toml`.
 Release commands copy the four validated candidate files into one private
 snapshot after acquiring the host lock and use only that snapshot through the
 operation, so a concurrent exporter replacement cannot mix bundle generations.

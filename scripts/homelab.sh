@@ -28,7 +28,37 @@ check_hermes_capabilities() {
         echo "Hermes capability checker not found: $checker" >&2
         exit 1
     }
+    if test "${MEDIA_DEPLOY_RELEASE:-0}" != 1 && test -z "${MEDIA_RELEASE_DIR:-}"; then
+        verify_local_contract
+        (cd "$hermes_root" && python3 "$checker" \
+            --schema "$hermes_root/shared/skills/media/MCP_SCHEMA.json" \
+            --capabilities "$root/config/media-capabilities.json")
+        return
+    fi
     (cd "$hermes_root" && python3 "$checker")
+}
+
+# A local source deployment has no release bundle, so the tools generated from
+# this checkout must match the schema Hermes already validated and documents.
+verify_local_contract() {
+    generated=$(mktemp)
+    if ! (cd "$root" && MCP_SCHEMA_SNAPSHOT=$generated cargo test --locked --quiet -p media-api --test mcp \
+        stateless_mcp_2026_lists_tools_without_initialize_or_session -- --exact >/dev/null); then
+        rm -f "$generated"
+        echo "could not generate the MCP schema from this checkout" >&2
+        exit 1
+    fi
+    python3 - "$generated" "$hermes_root/shared/skills/media/MCP_SCHEMA.json" "$root/config/media-capabilities.json" <<'PY' || { rm -f "$generated"; exit 1; }
+import json
+import sys
+
+generated, artifact, capabilities = (json.load(open(path, encoding="utf-8")) for path in sys.argv[1:4])
+if generated != artifact.get("tools"):
+    raise SystemExit("MCP tools differ from Hermes shared/skills/media/MCP_SCHEMA.json; deploy a release bundle")
+if [tool["name"] for tool in generated] != capabilities.get("tools"):
+    raise SystemExit("MCP tools differ from config/media-capabilities.json")
+PY
+    rm -f "$generated"
 }
 
 require_homelab_root() {
@@ -365,8 +395,10 @@ REMOTE
 }
 
 sync_hermes_schema() {
-    source=$MEDIA_RELEASE_DIR/MCP_SCHEMA.json
-    test -s "$source" || { echo "release bundle MCP schema is missing: $source" >&2; exit 1; }
+    source=${MEDIA_RELEASE_DIR:+$MEDIA_RELEASE_DIR/MCP_SCHEMA.json}
+    # Local deployments verified the Hermes artifact against this checkout.
+    source=${source:-$hermes_root/shared/skills/media/MCP_SCHEMA.json}
+    test -s "$source" || { echo "MCP schema is missing: $source" >&2; exit 1; }
     scp "$source" "$host:$remote_schema_file.next" >/dev/null
     remote "install -m 0644 '$remote_schema_file.next' '$remote_schema_file'; rm '$remote_schema_file.next' '$schema_hash_file' 2>/dev/null || true"
 }

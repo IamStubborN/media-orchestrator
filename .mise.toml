@@ -106,6 +106,12 @@ run = "./scripts/homelab.sh deploy-service"
 [tasks.homelab-deploy-full]
 run = "./scripts/homelab.sh deploy-full"
 
+[tasks.homelab-deploy-local]
+run = "./scripts/homelab.sh deploy-local-service"
+
+[tasks.homelab-deploy-local-full]
+run = "./scripts/homelab.sh deploy-local-full"
+
 [tasks.homelab-rollback]
 run = "./scripts/homelab.sh rollback-service"
 
