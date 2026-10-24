@@ -2549,39 +2549,15 @@ fi
 cd "$remote_root"
 compose_files="-f compose.yml"
 test -f compose.override.yml && compose_files="$compose_files -f compose.override.yml"
+# Hermes and the notifiers run tags that Watchtower follows, so a rollback
+# recreates them from compose instead of pinning recorded image IDs; the
+# record only has to exist.
 if test -n "$image_record"; then
     test -s "$image_record"
-    override=$(mktemp)
-    trap 'rm -f "$override"' EXIT HUP INT TERM
-    python3 - "$image_record" "$override" <<'PY'
-import json
-import re
-import sys
-
-values = {}
-with open(sys.argv[1], encoding="utf-8") as source:
-    for line in source:
-        key, separator, value = line.rstrip("\n").partition("=")
-        if separator:
-            values[key] = value
-# Hermes runs the upstream stable tag under Watchtower; pinning its image ID
-# here would stop Watchtower from following it, so only notifiers are pinned.
-services = {
-    "media-notifier-primary": values.get("NOTIFIER_PRIMARY_IMAGE_ID"),
-    "media-notifier-secondary": values.get("NOTIFIER_SECONDARY_IMAGE_ID"),
-}
-if any(not re.fullmatch(r"sha256:[0-9a-f]{64}", value or "") for value in services.values()):
-    raise SystemExit("notifier rollback image record is incomplete or invalid")
-with open(sys.argv[2], "w", encoding="utf-8") as destination:
-    json.dump({"services": {name: {"image": image} for name, image in services.items()}}, destination)
-PY
-    # shellcheck disable=SC2086
-    docker compose --project-name homelab --env-file "$environment_file" $compose_files -f "$override" \
-        up -d --no-deps --force-recreate media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary
-else
-    docker compose --project-name homelab --env-file "$environment_file" \
-        up -d --no-deps --force-recreate media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary
 fi
+# shellcheck disable=SC2086
+docker compose --project-name homelab --env-file "$environment_file" $compose_files \
+    up -d --no-deps --force-recreate media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary
 REMOTE
     remote sh -s <<'REMOTE'
 set -eu
