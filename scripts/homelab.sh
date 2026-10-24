@@ -2572,10 +2572,11 @@ for name in media-notifier-primary media-notifier-secondary hermes-primary herme
     }
 done
 REMOTE
-        ensure_hermes_plugins
         return
     fi
-    remote sh -s "$remote_root" "$environment_file" "$image_record" <<'REMOTE'
+    # Callers run this in `||` context where errexit is off, so every remote
+    # step returns its own failure.
+    remote sh -s "$remote_root" "$environment_file" "$image_record" <<'REMOTE' || return 1
 set -eu
 remote_root=$1
 environment_file=$2
@@ -2596,7 +2597,7 @@ fi
 docker compose --project-name homelab --env-file "$environment_file" $compose_files \
     up -d --no-deps --force-recreate media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary
 REMOTE
-    remote sh -s <<'REMOTE'
+    remote sh -s <<'REMOTE' || return 1
 set -eu
 for name in media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary; do
     attempts=0
@@ -2612,27 +2613,31 @@ for name in media-notifier-primary media-notifier-secondary hermes-primary herme
     done
 done
 REMOTE
-    ensure_hermes_plugins
 }
 
 # Plugins that live in the profile volumes instead of the read-only mounts.
 # They follow the Hermes plugin catalog, which pins each reviewed commit and
-# moves with Hermes itself; a catalog outage leaves the installed copy in place.
+# moves with Hermes itself. Forward deployments run this last, after the runner
+# resumed; rollbacks skip it because the volumes are not checkpointed. A catalog
+# outage keeps the installed copy and only warns.
 ensure_hermes_plugins() {
     remote sh -s <<'REMOTE'
 set -eu
 plugin=hermes-session-reset-policy
 digest() {
-    docker exec "$1" sh -c "sha256sum /opt/data/plugins/$plugin/__init__.py 2>/dev/null" | cut -c1-64
+    docker exec "$1" sh -c "cd /opt/data/plugins/$plugin 2>/dev/null && find . -path ./.git -prune -o -type f -print | LC_ALL=C sort | xargs sha256sum | sha256sum" | cut -c1-64
 }
 for name in hermes-primary hermes-secondary; do
     before=$(digest "$name")
     if test -z "$before"; then
-        docker exec "$name" hermes plugins install "$plugin" --no-enable --yes-deps >/dev/null 2>&1 ||
-            echo "warning: $name could not install $plugin from the catalog" >&2
+        action="install $plugin --no-enable --yes-deps"
     else
-        docker exec "$name" hermes plugins update "$plugin" >/dev/null 2>&1 ||
-            echo "warning: $name could not update $plugin; keeping the installed copy" >&2
+        action="update $plugin"
+    fi
+    # shellcheck disable=SC2086
+    if ! output=$(timeout 180 docker exec "$name" hermes plugins $action 2>&1 </dev/null); then
+        echo "warning: $name: hermes plugins $action failed; keeping the installed copy" >&2
+        printf '%s\n' "$output" | tail -n 3 >&2
     fi
     test "$(digest "$name")" != "$before" || continue
     echo "$plugin changed in $name; restarting it" >&2
@@ -2884,6 +2889,7 @@ deploy_service() {
         test "$recovery_failed" = 0 || echo "service deployment recovery also failed" >&2
         return 1
     fi
+    ensure_hermes_plugins
 }
 
 deploy_full() {
@@ -3003,6 +3009,7 @@ deploy_full() {
         return 1
     fi
     cleanup_hermes_stage
+    ensure_hermes_plugins
 }
 
 deploy_hermes() {
@@ -3038,6 +3045,7 @@ deploy_hermes() {
     fi
     assert_protected_unchanged "$protected_before"
     cleanup_hermes_stage
+    ensure_hermes_plugins
 }
 
 deploy_hermes_profiles() {
@@ -3426,13 +3434,16 @@ deploy_release_hermes() {
     MEDIA_DEPLOY_RELEASE=1 with_release_snapshot deploy_hermes
 }
 
+# A bundle left in the environment would switch local checks to bundle semantics.
 deploy_local_service() {
     require_homelab_root
+    unset MEDIA_RELEASE_DIR
     MEDIA_DEPLOY_RELEASE=0 deploy_service
 }
 
 deploy_local_full() {
     require_homelab_root
+    unset MEDIA_RELEASE_DIR
     MEDIA_DEPLOY_RELEASE=0 deploy_full
 }
 
