@@ -231,6 +231,7 @@ rsync -a --delete \
     --exclude .env \
     --exclude artifacts/ \
     --exclude secrets/ \
+    --exclude private-profiles/ \
     "$hermes_root/" "$generation/hermes-source/"
 for name in hermes-primary hermes-secondary media-notifier-primary media-notifier-secondary; do
     image_id=$(docker inspect "$name" --format '{{.Image}}')
@@ -2269,6 +2270,7 @@ prepare_hermes_cli() {
         --exclude .env \
         --exclude artifacts/ \
         --exclude secrets/ \
+        --exclude private-profiles/ \
         "$hermes_root/" "$host:$hermes_remote_root/"
     scp "$artifact" "$host:$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next" >/dev/null
     remote "set -eu; mkdir -p '$hermes_remote_root/artifacts'; install -m 0755 '$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next' '$hermes_remote_root/artifacts/media-$media_version-linux-amd64'; rm '$hermes_remote_root/artifacts/media-$media_version-linux-amd64.next'; sed -i '/^HERMES_HOME_IMAGE=/d; /^MEDIA_CLI_SHA256=/d' '$hermes_remote_root/.env'; cd '$remote_root'; attempts=0; until docker compose --project-name '$compose_project' --env-file '$environment_file' pull media-notifier-primary media-notifier-secondary hermes-primary hermes-secondary; do attempts=\$((attempts + 1)); test \"\$attempts\" -lt 5 || exit 1; sleep 5; done"
@@ -2397,6 +2399,7 @@ stage_hermes_cli() {
         --exclude .env \
         --exclude artifacts/ \
         --exclude secrets/ \
+        --exclude private-profiles/ \
         "$hermes_root/" "$host:$hermes_stage/source/"
     scp "$artifact" "$host:$hermes_stage/artifacts/media-$media_version-linux-amd64" >/dev/null
     remote "set -eu; test \"\$(sha256sum '$hermes_stage/artifacts/media-$media_version-linux-amd64' | awk '{print \$1}')\" = '$artifact_sha256'"
@@ -2431,6 +2434,7 @@ rsync -a --delete \
     --exclude .env \
     --exclude artifacts/ \
     --exclude secrets/ \
+    --exclude private-profiles/ \
     "$stage/source/" "$hermes_root/"
 mkdir -p "$hermes_root/artifacts"
 install -m 0755 "$stage/artifacts/media-0.1.0-linux-amd64" "$hermes_root/artifacts/media-0.1.0-linux-amd64.next"
@@ -3123,6 +3127,7 @@ rsync -a --delete \
     --exclude .env \
     --exclude artifacts/ \
     --exclude secrets/ \
+    --exclude private-profiles/ \
     "$hermes_root/" "$destination/hermes-source/"
 for name in hermes-primary hermes-secondary media-notifier-primary media-notifier-secondary; do
     image_id=$(docker inspect "$name" --format '{{.Image}}')
@@ -3171,6 +3176,7 @@ rsync -a --delete \
     --exclude .env \
     --exclude artifacts/ \
     --exclude secrets/ \
+    --exclude private-profiles/ \
     "$rollback_file/hermes-source/" "$hermes_root/"
 REMOTE
 }
@@ -3202,6 +3208,7 @@ rsync -a --delete \
     --exclude .env \
     --exclude artifacts/ \
     --exclude secrets/ \
+    --exclude private-profiles/ \
     "$forward_sources/hermes-source/" "$hermes_root/"
 REMOTE
 }
