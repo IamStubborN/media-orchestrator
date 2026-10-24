@@ -42,6 +42,7 @@ mod m20260824_000041_source_choice_season_complete;
 mod m20260905_000042_no_matching_episodes_reason;
 mod m20260907_000043_tracking_release_identity_unique;
 mod m20260929_000044_neutral_user_names;
+mod m20261024_000045_lifecycle_failure_reason;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseTransaction;
@@ -96,6 +97,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260905_000042_no_matching_episodes_reason::Migration),
             Box::new(m20260907_000043_tracking_release_identity_unique::Migration),
             Box::new(m20260929_000044_neutral_user_names::Migration),
+            Box::new(m20261024_000045_lifecycle_failure_reason::Migration),
         ]
     }
 }

@@ -306,6 +306,31 @@ async fn migrations_apply_seed_fixed_users_and_require_backup_for_identity_rollb
         );
     }
 
+    // Non-blocked lifecycle rows may carry the last VPN failure category.
+    execute(
+        db,
+        "UPDATE runner_lifecycle SET state = 'ready', reason = 'retry_same_ip:source_transfer_transient'",
+    )
+    .await
+    .unwrap();
+    assert_rejected(
+        db,
+        "UPDATE runner_lifecycle SET state = 'blocked', reason = ' '",
+        "runner_lifecycle_reason_check",
+    )
+    .await;
+    Migrator::down(db, Some(1)).await.unwrap();
+    let reason = query(db, "SELECT reason FROM runner_lifecycle")
+        .await
+        .pop()
+        .unwrap()
+        .try_get::<Option<String>>("", "reason")
+        .unwrap();
+    assert_eq!(
+        reason, None,
+        "rollback clears reasons the old constraint forbids"
+    );
+
     let error = Migrator::down(db, Some(1)).await.unwrap_err();
     assert!(error.to_string().contains("database backup"));
     assert_eq!(
@@ -345,9 +370,12 @@ async fn a_failed_migration_explicitly_rolls_back_partial_schema() {
         "search scope migration must follow blocked-storage notification support",
     );
     assert_eq!(
-        names.last().map(String::as_str),
-        Some("m20260929_000044_neutral_user_names"),
-        "identity transition must remain the latest schema change",
+        names[names.len() - 2..],
+        [
+            "m20260929_000044_neutral_user_names",
+            "m20261024_000045_lifecycle_failure_reason",
+        ],
+        "only the lifecycle failure reason migration follows the identity transition",
     );
     for migration in migrations {
         assert_eq!(

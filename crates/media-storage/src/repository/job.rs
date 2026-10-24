@@ -424,7 +424,8 @@ impl JobStore for SeaOrmJobStore {
                 DatabaseBackend::Postgres,
                 "SELECT (SELECT COUNT(*) FROM jobs WHERE state = 'queued')::bigint AS queued, \
                  EXISTS (SELECT 1 FROM job_leases WHERE expires_at > now()) AS active, \
-                 lifecycle.state AS runner_state, lifecycle.reason AS blocked_reason \
+                 lifecycle.state AS runner_state, \
+                 CASE WHEN lifecycle.state = 'blocked' THEN lifecycle.reason END AS blocked_reason \
                  FROM runner_lifecycle lifecycle WHERE lifecycle.singleton = true",
             ))
             .await

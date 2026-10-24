@@ -123,7 +123,7 @@ async fn tracking_release_identity_round_trips_through_repository() {
 }
 
 #[tokio::test]
-async fn create_with_same_tvmaze_id_returns_existing_notify_track() {
+async fn create_with_same_tvmaze_id_conflicts_with_existing_notify_track() {
     let test_db = TestDatabase::start_migrated().await;
     let store = SeaOrmTrackingStore::new(test_db.connection().clone());
     let first = store
@@ -149,9 +149,14 @@ async fn create_with_same_tvmaze_id_returns_existing_notify_track() {
         },
     )
     .unwrap();
-    let second = store.add(operation_key(), duplicate).await.unwrap();
-    assert_eq!(first.id(), second.id());
-    assert_eq!(store.list_visible(PRIMARY_USER_ID).await.unwrap().len(), 1);
+    // TrackingApplication maps this conflict to AlreadyExists(first.id()).
+    assert_eq!(
+        store.add(operation_key(), duplicate).await.unwrap_err(),
+        media_core::PortError::Conflict
+    );
+    let listed = store.list_visible(PRIMARY_USER_ID).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id(), first.id());
 }
 
 #[tokio::test]
