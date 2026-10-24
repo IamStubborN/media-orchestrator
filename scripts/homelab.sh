@@ -2564,14 +2564,14 @@ with open(sys.argv[1], encoding="utf-8") as source:
         key, separator, value = line.rstrip("\n").partition("=")
         if separator:
             values[key] = value
+# Hermes runs the upstream stable tag under Watchtower; pinning its image ID
+# here would stop Watchtower from following it, so only notifiers are pinned.
 services = {
-    "hermes-primary": values.get("HERMES_PRIMARY_IMAGE_ID"),
-    "hermes-secondary": values.get("HERMES_SECONDARY_IMAGE_ID"),
     "media-notifier-primary": values.get("NOTIFIER_PRIMARY_IMAGE_ID"),
     "media-notifier-secondary": values.get("NOTIFIER_SECONDARY_IMAGE_ID"),
 }
 if any(not re.fullmatch(r"sha256:[0-9a-f]{64}", value or "") for value in services.values()):
-    raise SystemExit("Hermes rollback image record is incomplete or invalid")
+    raise SystemExit("notifier rollback image record is incomplete or invalid")
 with open(sys.argv[2], "w", encoding="utf-8") as destination:
     json.dump({"services": {name: {"image": image} for name, image in services.items()}}, destination)
 PY
