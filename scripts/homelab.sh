@@ -547,8 +547,8 @@ verify_mounted_hermes_sources() {
             expected=$(shasum -a 256 "$hermes_root/$source" | awk '{print $1}')
         fi
         case $source in
-            shared/skills/*) mounted=/etc/hermes-home/skills/${source#shared/skills/} ;;
-            shared/plugins/*) mounted=/etc/hermes-home/shared-plugins/${source#shared/plugins/} ;;
+            shared/skills/*) mounted=/opt/data/skills/home/${source#shared/skills/} ;;
+            shared/plugins/*) mounted=/opt/data/plugins/${source#shared/plugins/} ;;
         esac
         remote sh -s "$hermes_remote_root/$source" "$mounted" "$expected" <<'REMOTE'
 set -eu
@@ -3072,7 +3072,7 @@ for profile in primary secondary; do
         secondary) container=hermes-secondary ;;
     esac
     expected=$(sha256sum "$hermes_root/profiles/$profile/config/config.yaml" | awk '{print $1}')
-    actual=$(docker exec "$container" python3 -c 'import hashlib; print(hashlib.sha256(open("/etc/hermes-home/config.yaml", "rb").read()).hexdigest())') || actual=unavailable
+    actual=$(docker exec "$container" python3 -c 'import hashlib; print(hashlib.sha256(open("/etc/hermes/config.yaml", "rb").read()).hexdigest())') || actual=unavailable
     if test "$actual" != "$expected"; then
         echo "$container is not using the deployed profile config" >&2
         restore_profiles || true
