@@ -127,12 +127,11 @@ fn process_exists(pid: i32) -> bool {
 fn wait_for_pid(path: &Path) -> i32 {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        if let Ok(contents) = std::fs::read_to_string(path) {
-            if let Ok(pid) = contents.trim().parse::<i32>() {
-                if pid > 1 {
-                    return pid;
-                }
-            }
+        if let Ok(contents) = std::fs::read_to_string(path)
+            && let Ok(pid) = contents.trim().parse::<i32>()
+            && pid > 1
+        {
+            return pid;
         }
         assert!(
             Instant::now() < deadline,
@@ -269,12 +268,11 @@ async fn dropping_a_sleeping_helper_cancels_the_process() {
                     panic!("helper exited before publishing pid: {result:?}");
                 }
                 _ = tokio::time::sleep(Duration::from_millis(20)) => {
-                    if let Ok(pid) = std::fs::read_to_string(pid_file.path()) {
-                        if let Ok(pid) = pid.trim().parse::<i32>() {
-                            if pid > 1 {
-                                break pid;
-                            }
-                        }
+                    if let Ok(pid) = std::fs::read_to_string(pid_file.path())
+                        && let Ok(pid) = pid.trim().parse::<i32>()
+                        && pid > 1
+                    {
+                        break pid;
                     }
                 }
             }

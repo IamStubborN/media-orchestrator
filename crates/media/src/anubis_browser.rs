@@ -321,8 +321,7 @@ async fn drive_chromium(request: ChallengeHelperRequest) -> Result<Vec<String>, 
         user_data,
     };
     let deadline = Instant::now() + request.timeout;
-    let result = drive_cdp(&mut session, &request, deadline).await;
-    result
+    drive_cdp(&mut session, &request, deadline).await
 }
 
 pub fn exec_chromium(args: Vec<String>) -> i32 {
@@ -552,16 +551,14 @@ fn cookie_to_set_cookie(cookie: &Value) -> Option<String> {
 async fn wait_devtools_port(user_data: &Path, deadline: Instant) -> Result<u16, HelperFailure> {
     let path = user_data.join("DevToolsActivePort");
     loop {
-        if let Ok(contents) = tokio::fs::read_to_string(&path).await {
-            if let Some(port) = contents
+        if let Ok(contents) = tokio::fs::read_to_string(&path).await
+            && let Some(port) = contents
                 .lines()
                 .next()
                 .and_then(|line| line.trim().parse().ok())
-            {
-                if port > 0 {
-                    return Ok(port);
-                }
-            }
+            && port > 0
+        {
+            return Ok(port);
         }
         if Instant::now() >= deadline {
             return Err(HelperFailure::Timeout);
@@ -578,16 +575,14 @@ async fn websocket_url(port: u16, deadline: Instant) -> Result<Url, HelperFailur
         .map_err(|_| HelperFailure::Process)?;
     let endpoint = format!("http://127.0.0.1:{port}/json/version");
     loop {
-        if let Ok(response) = client.get(&endpoint).send().await {
-            if let Ok(body) = response.json::<Value>().await {
-                if let Some(url) = body
-                    .get("webSocketDebuggerUrl")
-                    .and_then(Value::as_str)
-                    .and_then(|value| Url::parse(value).ok())
-                {
-                    return Ok(url);
-                }
-            }
+        if let Ok(response) = client.get(&endpoint).send().await
+            && let Ok(body) = response.json::<Value>().await
+            && let Some(url) = body
+                .get("webSocketDebuggerUrl")
+                .and_then(Value::as_str)
+                .and_then(|value| Url::parse(value).ok())
+        {
+            return Ok(url);
         }
         if Instant::now() >= deadline {
             return Err(HelperFailure::Timeout);

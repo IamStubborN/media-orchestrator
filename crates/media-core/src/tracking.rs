@@ -1667,13 +1667,13 @@ impl TrackingApplication {
                     .list_visible(owner)
                     .await
                     .map_err(map_port_error)?;
-                if let Some(identity) = release_identity {
-                    if let Some(existing) = listed.iter().find(|candidate| {
+                if let Some(identity) = release_identity
+                    && let Some(existing) = listed.iter().find(|candidate| {
                         candidate.download().is_none()
                             && candidate.release_identity() == Some(identity)
-                    }) {
-                        return Err(TrackingApplicationError::AlreadyExists(existing.id()));
-                    }
+                    })
+                {
+                    return Err(TrackingApplicationError::AlreadyExists(existing.id()));
                 }
                 if let Some(existing) = listed.into_iter().find(|candidate| {
                     candidate.provider() == provider

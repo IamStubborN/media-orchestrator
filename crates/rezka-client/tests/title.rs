@@ -453,7 +453,7 @@ fn duplicate_series_translation_entries_are_collapsed_by_identity() {
         <li class="b-translator__item" data-translator_id="7" data-ads="1">Studio (mobile)</li>
         <li class="b-translator__item" data-translator_id="8">Other Studio</li></ul>
         <script>sof.tv.initCDNSeriesEvents(56, 7, {}, {});</script></body></html>"#;
-    let title = parse(&duplicate_series, "/series/56-series.html").unwrap();
+    let title = parse(duplicate_series, "/series/56-series.html").unwrap();
 
     assert_eq!(title.translations().len(), 2);
     assert_eq!(title.translations()[0].id().get(), 7);
@@ -473,7 +473,7 @@ fn duplicate_series_translation_with_missing_name_is_ignored() {
         <li class="b-translator__item" data-translator_id="7"></li>
         <li class="b-translator__item" data-translator_id="8">Other Studio</li></ul>
         <script>sof.tv.initCDNSeriesEvents(56, 7, {}, {});</script></body></html>"#;
-    let title = parse(&duplicate_series, "/series/56-series.html").unwrap();
+    let title = parse(duplicate_series, "/series/56-series.html").unwrap();
 
     assert_eq!(title.translations().len(), 2);
     assert_eq!(title.translations()[0].id().get(), 7);
